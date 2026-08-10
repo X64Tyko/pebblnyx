@@ -1,0 +1,193 @@
+# Asset manifest for the overworld example.
+#
+# This is the single source of truth for content. No C file names a PNG, a pixel offset,
+# a sheet layout or a magic tile id -- everything reaches game code through the header
+# that tools/pnx_assets.py generates from this file.
+#
+# Build it with:
+#     ../../tools/pnx_assets.py assets.toml --preview
+
+[project]
+name = "overworld"
+resources = "resources"
+header = "src/c/assets_gen.h"
+# The appstore rejects bundles over 256KB of resources. The device's hard cap is 1MB,
+# but shipping is the constraint that actually binds.
+budget_bytes = 262144
+
+# ---------------------------------------------------------------------------- atlas
+
+[[atlas]]
+name = "tiles"
+sheet = "art/world.png"
+tile = 16
+# In TILE units, not pixels. A carve, not the whole sheet: five complete tilesets come to
+# 111% of the 256KB appstore budget, while a region of each is a fraction of it. Carving
+# is where the content budget is won -- see docs/MEASUREMENTS.md.
+region = [0, 0, 10, 6]
+max_tiles = 48
+out = "tiles.bin"
+# Picked by the pipeline for legibility rather than hardcoded: a flat tile for floor,
+# the most visually distant flat tile for wall, the busiest for accent. Replace with an
+# explicit `semantic` table once there is an artist -- the legend below and all game
+# code stay unchanged when that happens.
+autopick = ["floor", "wall", "accent"]
+# Composes each 16x16 tile from four deduplicated 8x8 quadrants. Left off here: the
+# pipeline picks by arithmetic and this 64-tile region is too small to benefit (1.19x
+# quadrant reuse against 1.96x on full sheets), and the runtime does not read the layout
+# yet. Set `metatiles = true` to force it, or "auto" to let the pipeline choose.
+metatiles = "auto"
+
+# --------------------------------------------------------------------------- sprites
+
+# Three 16x24 frames stacked vertically: a stand pose and two mid-strides. One direction
+# only -- other facings come from mirroring at draw time, which is how the real sheets
+# this was developed against were laid out too.
+[[sprite]]
+name = "hero"
+sheet = "art/hero.png"
+frames = [[0, 0, 16, 24], [0, 24, 16, 24], [0, 48, 16, 24]]
+out = "hero.bin"
+
+[sprite.anim]
+stand = 0
+step_a = 1
+step_b = 2
+
+[[sprite]]
+name = "npc"
+sheet = "art/npc.png"
+frames = [[0, 0, 16, 24]]
+out = "npc.bin"
+
+# ---------------------------------------------------------------------------- legend
+
+[legend."."]
+tile = "floor"
+flags = []
+
+[legend."#"]
+tile = "wall"
+flags = ["solid"]
+
+[legend."~"]
+tile = "accent"
+flags = []
+
+# A door: walkable, and triggers a transition when stepped on.
+[legend."D"]
+tile = "accent"
+flags = ["warp"]
+
+# ------------------------------------------------------------------------------ maps
+
+[[map]]
+name = "outdoor"
+out = "map_outdoor.bin"
+start = [15, 11]
+# Buildings are SOLID blocks with a door on the front face, not hollow rooms. A hollow
+# room on the overworld is a room you can never enter, and if the door sits inside it
+# the warp is unreachable -- which is exactly the bug that motivated the flood-fill
+# check in the pipeline.
+warps = [{ at = [15, 9], to = ["cave", 12, 13] }]
+rows = """
+################################
+#..............................#
+#..............................#
+#....~~~~..........~~~~........#
+#....~~~~..........~~~~........#
+#..............................#
+#..........########............#
+#..........########............#
+#..........########............#
+#..........####D###............#
+#..............................#
+#..............................#
+#......~~......................#
+#......~~..........####........#
+#..................####........#
+#..................####........#
+#..............................#
+#..............................#
+#....######....................#
+#....######....................#
+#....######....................#
+#..............................#
+#..............................#
+################################
+"""
+
+[[map]]
+name = "cave"
+atlas = "caveset"
+out = "map_cave.bin"
+start = [12, 13]
+# Destinations land one tile clear of the far door, so arriving does not immediately
+# re-trigger the return warp and bounce the player back.
+warps = [{ at = [12, 14], to = ["outdoor", 15, 10] }]
+rows = """
+########################
+#......................#
+#..####..........####..#
+#..####..........####..#
+#..####..........####..#
+#......................#
+#..........~~..........#
+#..........~~..........#
+#......................#
+#..####..........####..#
+#..####..........####..#
+#..####..........####..#
+#......................#
+#......................#
+#...........D..........#
+########################
+"""
+
+# ---------------------------------------------------------------------------- dialog
+
+# Text is content, so it lives here rather than as string literals in C. Each entry is
+# a list of pages; a page is one screenful.
+
+[dialog.npc_greeting]
+pages = [
+  "Careful in there.",
+  "The mines run deep, and the lamps went out weeks ago.",
+  "Take a torch if you find one.",
+]
+
+[dialog.npc_repeat]
+pages = ["Still here?"]
+
+# ---------------------------------------------------------------------------- scenes
+
+# A scene is the only load point the framework has, so it is the right unit to declare.
+# The pipeline checks every reference resolves and reports what each scene costs
+# resident, which is the number that sizes the arena -- total resource size only says
+# what ships.
+
+[scene.outdoor]
+map = "outdoor"
+atlases = ["tiles"]
+sprites = ["hero", "npc"]
+dialog = true
+
+[scene.cave]
+map = "cave"
+atlases = ["caveset"]
+sprites = ["hero"]
+
+
+[[atlas]]
+name = "caveset"
+sheet = "art/dungeon.png"
+tile = 16
+# In TILE units, not pixels.
+region = [0, 0, 10, 6]
+max_tiles = 128
+out = "caveset.bin"
+metatiles = "auto"
+# Roles the legend can name. Autopicked so the atlas is usable the moment it is
+# imported; replace with an explicit [atlas.semantic] table once you know which tiles
+# you want, and no map or game code changes.
+autopick = ["floor", "wall", "accent"]

@@ -1,0 +1,18 @@
+{
+  "name": "pnx-empty",
+  "author": "tyton",
+  "version": "1.0.0",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "pnx empty",
+    "uuid": "cf4b2994-1419-4678-b470-32b41b40ba5b",
+    "sdkVersion": "3",
+    "enableMultiJS": false,
+    "targetPlatforms": ["emery"],
+    "watchapp": { "watchface": false },
+    "messageKeys": [],
+    "resources": { "media": [] }
+  }
+}

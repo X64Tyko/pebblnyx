@@ -1,0 +1,24 @@
+# Normalise line endings on checkin, let each platform check out its own. Without this a
+# Windows contributor's CRLF ends up inside the ASCII map blocks in assets.toml, and the
+# pipeline's ragged-row check fails for a reason that has nothing to do with the map.
+* text=auto eol=lf
+
+# Binary, so git neither diffs nor mangles them
+*.png  binary
+*.bin  binary
+*.pbw  binary
+*.pbpack binary
+
+# Manifests and maps are text whose whitespace is significant -- the ASCII rows are the
+# map. Never let a filter touch them.
+*.toml text eol=lf
+assets.toml text eol=lf -whitespace
+
+# Generated; keep it out of diffs and language stats
+examples/*/src/c/assets_gen.h linguist-generated=true
+
+# GitHub language detection: this is a C framework with a Python toolchain, not a
+# Python project with some C in it.
+*.c linguist-language=C
+*.h linguist-language=C
+docs/** linguist-documentation=true
