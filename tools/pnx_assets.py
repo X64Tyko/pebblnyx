@@ -345,6 +345,49 @@ def finish_atlas(atlas, tile_flags, shared):
 
 # --------------------------------------------------------------------- palettes
 
+def shape_signature(buf):
+    """Colours numbered by first appearance, with transparent PINNED to 0.
+
+    Pinning is not cosmetic. Left free, two frames could match where one's transparent pixels
+    align with the other's opaque ones, and sharing a bitmap between them would render one
+    full of holes.
+    """
+    m = {TRANSPARENT: 0}
+    out = bytearray(len(buf))
+    for i, v in enumerate(buf):
+        if v not in m:
+            m[v] = len(m)
+        out[i] = m[v]
+    return bytes(out)
+
+
+def colour_order(frames):
+    """Opaque colours in order of first appearance across frames.
+
+    This is what makes a variant's palette positionally match the base's: identical shape
+    signatures mean identical first-appearance traversal, so the k-th colour of one recolour
+    corresponds to the k-th of another.
+    """
+    order, seen = [], set()
+    for f in frames:
+        for v in f:
+            if v != TRANSPARENT and v not in seen:
+                seen.add(v)
+                order.append(v)
+    return order
+
+
+class Ordered(tuple):
+    """A palette whose ENTRY ORDER is meaningful and must not be sorted or merged.
+
+    Ordinary palettes are sets: `palette_bytes` sorts them and `pack_unit_4bpp` derives each
+    colour's 4bpp index from that same sort, so the two agree. Palette-swapped sprites break
+    that, because two recolours sort into different orders and would pack to different index
+    data -- defeating the whole point of sharing one bitmap. An Ordered palette pins the
+    correspondence instead: index k means entry k, whatever the colour values happen to be.
+    """
+
+
 def merge_palettes(colour_sets, existing=None):
     """Greedy merge of per-unit colour sets into palettes of PALETTE_USABLE colours.
 
@@ -356,7 +399,9 @@ def merge_palettes(colour_sets, existing=None):
     `existing` lets a later atlas reuse or extend palettes an earlier one built, which is
     how sharing is discovered rather than declared.
     """
-    palettes = [set(p) for p in (existing or [])]
+    # Ordered palettes pass through untouched. Merging one would reorder it, which silently
+    # remaps every pixel of the sprite that depends on its positions.
+    palettes = [p if isinstance(p, Ordered) else set(p) for p in (existing or [])]
 
     # Largest first: a big set placed early leaves room for small ones to join it, where
     # the reverse strands them.
@@ -369,6 +414,8 @@ def merge_palettes(colour_sets, existing=None):
             assign[i] = None            # too wide for any palette; stored 6bpp
             continue
         for pi, p in enumerate(palettes):
+            if isinstance(p, Ordered):
+                continue
             if len(p | colours) <= PALETTE_USABLE:
                 palettes[pi] = p | colours
                 assign[i] = pi
@@ -381,8 +428,11 @@ def merge_palettes(colour_sets, existing=None):
 
 
 def palette_bytes(palette):
-    """16 entries, index 0 transparent, remainder sorted for deterministic builds."""
-    entries = [TRANSPARENT_INDEX] + sorted(palette)
+    """16 entries, index 0 transparent. Sets are sorted for deterministic builds; an Ordered
+    palette keeps the order it was given, because its positions are already referenced by
+    packed pixel data."""
+    entries = [TRANSPARENT_INDEX] + (list(palette) if isinstance(palette, Ordered)
+                                     else sorted(palette))
     if len(entries) > PALETTE_ENTRIES:
         raise BuildError(f"palette has {len(entries)} entries, max {PALETTE_ENTRIES}")
     return bytes(entries + [0] * (PALETTE_ENTRIES - len(entries)))
@@ -390,7 +440,8 @@ def palette_bytes(palette):
 
 def pack_unit_4bpp(pixels, palette):
     """Two pixels per byte, high nibble first."""
-    lut = {c: i + 1 for i, c in enumerate(sorted(palette))}
+    order = list(palette) if isinstance(palette, Ordered) else sorted(palette)
+    lut = {c: i + 1 for i, c in enumerate(order)}
     lut[0] = TRANSPARENT_INDEX
     out = bytearray()
     for i in range(0, len(pixels), 2):
@@ -555,12 +606,100 @@ def pack_sprite(root, spec):
         print(f"    NOTE {repaired} frame(s) exceeded {PALETTE_USABLE} colours and were "
               f"reduced -- edit the art to avoid this")
 
-    return {"name": name, "w": fw, "h": fh, "frames": fixed,
+    # Palette-swapped variants. The same art in different colours costs a palette rather
+    # than a second copy of every frame, which is the whole reason to declare them.
+    variants = []
+    for vpath in spec.get("variants", []):
+        vname = os.path.splitext(os.path.basename(vpath))[0]
+        vim = load_sheet(root, vpath)
+        vpx = vim.load()
+        if vim.size != im.size:
+            raise BuildError(f"sprite {name!r}: variant {vpath!r} is {vim.size[0]}x"
+                             f"{vim.size[1]} but the base sheet is {sheet_w}x{sheet_h} -- "
+                             f"variants must share the base's layout exactly")
+        vframes = []
+        for (x, y, w, h) in spec["frames"]:
+            buf = bytearray(w * h)
+            for j in range(h):
+                for i in range(w):
+                    buf[j * w + i] = to_gcolor8(vpx[x + i, y + j], key)
+            vframes.append(reduce_colours(bytes(buf))[0])
+
+        # The check that makes sharing safe: same shape, any colours.
+        for idx, (base_f, var_f) in enumerate(zip(fixed, vframes)):
+            if shape_signature(base_f) != shape_signature(var_f):
+                raise BuildError(
+                    f"sprite {name!r}: variant {vpath!r} frame {idx} is not a recolour of "
+                    f"the base -- its pixel layout differs. A variant may change any colour "
+                    f"but must not move, add or remove a pixel, and transparency must match. "
+                    f"Drop it from `variants` and declare it as its own sprite instead.")
+        variants.append({"name": vname, "path": vpath, "frames": vframes})
+
+    return {"name": name, "w": fw, "h": fh, "frames": fixed, "variants": variants,
             "out": spec["out"], "anim": spec.get("anim", {}), "repaired": repaired}
+
+
+def finish_sprite_with_variants(sprite, shared):
+    """One bitmap, one palette per variant.
+
+    Every frame packs against a single ORDERED palette rather than per-frame merged ones. It
+    has to be one palette: the pixel data is shared across variants, so the index of a colour
+    must mean the same thing in every frame and every recolour. And it has to be ordered,
+    because two recolours sort into different colour orders and would otherwise pack to
+    different indices -- which would defeat the sharing entirely.
+    """
+    name = sprite["name"]
+    frames = sprite["frames"]
+    base_order = colour_order(frames)
+
+    if len(base_order) > PALETTE_USABLE:
+        raise BuildError(
+            f"sprite {name!r}: its frames use {len(base_order)} colours together, over the "
+            f"{PALETTE_USABLE} a palette holds. A sprite with variants shares one palette "
+            f"across all frames, because the frames share one bitmap.")
+
+    def slot(pal):
+        """Append an ordered palette, reusing an identical one already present."""
+        for i, p in enumerate(shared):
+            if isinstance(p, Ordered) and tuple(p) == tuple(pal):
+                return i
+        shared.append(Ordered(pal))
+        return len(shared) - 1
+
+    base_slot = slot(base_order)
+    pixels = b"".join(pack_unit_4bpp(f, shared[base_slot]) for f in frames)
+    assign = [base_slot] * len(frames)
+
+    variant_slots = {}
+    for v in sprite["variants"]:
+        order = colour_order(v["frames"])
+        if len(order) != len(base_order):
+            raise BuildError(
+                f"sprite {name!r}: variant {v['path']!r} resolves to {len(order)} colours "
+                f"against the base's {len(base_order)}. Shapes match, so this means two "
+                f"colours in the base were flattened to one in the variant -- which cannot "
+                f"share a bitmap. Recolour without merging colours.")
+        variant_slots[v["name"]] = slot(order)
+
+    sprite["blob"] = blob_header(MAGIC_SPRITE, sprite["w"], sprite["h"],
+                                 len(frames)) + pad4(bytes(assign)) + pixels
+    sprite["palettes"] = [shared[base_slot]]
+    sprite["assign"] = assign
+    sprite["variant_slots"] = variant_slots
+
+    frame_bytes = sprite["w"] * sprite["h"] // 2 * len(frames)
+    saved = frame_bytes * len(sprite["variants"])
+    print(f"    {name}: 1 shared palette, {len(sprite['variants'])} variant(s) collapsed "
+          f"({saved:,} B saved, {len(variant_slots) * PALETTE_ENTRIES} B of palettes)")
+    return sprite
 
 
 def finish_sprite(sprite, shared):
     frames = sprite["frames"]
+
+    if sprite.get("variants"):
+        return finish_sprite_with_variants(sprite, shared)
+
     sets = [frozenset(c for c in f if c != TRANSPARENT) for f in frames]
 
     before = len(shared)
@@ -1192,6 +1331,16 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
               f"#define {n}_TILE_BYTES {a['tile_px'] * a['tile_px'] // 2}",
               f"#define {n}_TILE_COUNT {len(a['tiles'])}",
               f"#define {n}_PALETTE_COUNT {len(a['palettes'])}", ""]
+
+    swaps = [(s_["name"], s_["variant_slots"]) for s_ in sprites if s_.get("variant_slots")]
+    if swaps:
+        L += ["// Palette-swapped sprite variants. Same bitmap, different palette: assign one",
+              "// to PnxSpriteInstance.palette and the sprite draws recoloured.",
+              "// PNX_SPRITE_PALETTE_DEFAULT selects the base."]
+        for sname, slots in swaps:
+            for vname, slot in sorted(slots.items()):
+                L.append(f"#define SPRITE_{c_ident(sname)}_PALETTE_{c_ident(vname)} {slot}")
+        L.append("")
 
     L += [f"// Shared palette table. PNX_PALETTE_SLOTS must be at least this.",
           f"#define PNX_PALETTES_USED {palette_count}", ""]

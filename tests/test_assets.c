@@ -188,6 +188,31 @@ void test_assets(void) {
   for (int i = 0; i < npc.w * npc.h; i++) if (npc_px[i] == 0xAA) transparent++;
   A_CHECK(transparent > 0);
 
+  // --- palette-swapped variants share this exact bitmap
+  //
+  // Decoded through a variant palette, the SHAPE must be pixel-identical -- the same pixels
+  // transparent -- while the colours differ. That pairing is the whole test: had the pipeline
+  // packed the variant's palette in a different colour order, the shape would still come out
+  // right and the colours would be scrambled, so asserting on colour alone would miss the one
+  // failure that matters.
+  uint8_t ice_px[16 * 24];
+  memset(ice_px, 0xAA, sizeof(ice_px));
+  pnx_decode_4bpp(pnx_sprite_frame(&npc, 0), pnx_palette(SPRITE_NPC_PALETTE_NPC_ICE),
+                  ice_px, npc.w * npc.h);
+
+  int shape_same = 1, colour_diffs = 0;
+  for (int i = 0; i < npc.w * npc.h; i++) {
+    const int a_clear = (npc_px[i] == 0xAA), b_clear = (ice_px[i] == 0xAA);
+    if (a_clear != b_clear) shape_same = 0;
+    else if (!a_clear && npc_px[i] != ice_px[i]) colour_diffs++;
+  }
+  A_CHECK(shape_same);                    // identical silhouette, so the bitmap really is shared
+  A_CHECK(colour_diffs > 0);              // and it is genuinely recoloured, not a duplicate
+
+  // Index 0 must stay transparent in every palette, or shared pixels show holes.
+  A_CHECK_EQ(pnx_palette(SPRITE_NPC_PALETTE_NPC_ICE)->entries[0],
+             pnx_sprite_frame_palette(&npc, 0)->entries[0]);
+
   // --- maps
   PnxMap outdoor;
   A_CHECK(pnx_map_load(&outdoor, A_OUTDOOR, &atlas));

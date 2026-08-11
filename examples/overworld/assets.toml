@@ -61,6 +61,9 @@ name = "npc"
 sheet = "art/npc.png"
 frames = [[0, 0, 16, 24]]
 out = "npc.bin"
+# Palette swaps. Same art, recoloured: each variant costs a 16-byte palette instead of
+# another 192-byte copy of the frame. The pipeline checks they really are recolours.
+variants = ["art/npc_ice.png", "art/npc_rust.png"]
 
 # ---------------------------------------------------------------------------- legend
 

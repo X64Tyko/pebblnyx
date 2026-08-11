@@ -104,6 +104,8 @@ def manifest(root, **overrides):
     ''')
     for key in ("atlas", "legend", "maps"):
         body += textwrap.dedent(parts[key])
+    if "sprite" in parts:
+        body += textwrap.dedent(parts["sprite"])
 
     path = os.path.join(root, "m.toml")
     with open(path, "w") as f:
@@ -125,18 +127,41 @@ def run(root, **overrides):
         return str(e)
 
 
-def expect_ok(label, **overrides):
+def make_recolour(src, dst, move_a_pixel=False):
+    """A genuine recolour of `src`: every colour remapped, no pixel moved.
+
+    Built by inverting each channel, which is injective on 8-bit values and stays injective
+    after the 2-bit quantisation the pipeline applies -- an important property, since a remap
+    that merged two colours would change the shape and be rejected for the right reason but
+    make a confusing test.
+    """
+    img = Image.open(src).convert("RGBA")
+    w, h = img.size
+    sp = img.load()
+    out = Image.new("RGBA", (w, h))
+    op = out.load()
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = sp[x, y]
+            op[x, y] = (255 - r, 255 - g, 255 - b, a)
+    if move_a_pixel:
+        op[0, 0] = (0, 0, 0, 0)          # punch a hole: same colours, different shape
+    out.save(dst)
+
+
+def expect_ok(label, _extra=None, **overrides):
     global checks, failures
     checks += 1
     with tempfile.TemporaryDirectory() as root:
         make_sheet(os.path.join(root, "sheet.png"))
+        if _extra: _extra(root)
         err = run(root, **overrides)
     if err is not None:
         print(f"  FAIL {label}: expected success, got {err!r}")
         failures += 1
 
 
-def expect_fail(label, fragment, **overrides):
+def expect_fail(label, fragment, _extra=None, **overrides):
     """Asserts the build fails AND that the message names the actual problem.
 
     Checking the message matters as much as the failure: an error that says only
@@ -146,6 +171,7 @@ def expect_fail(label, fragment, **overrides):
     checks += 1
     with tempfile.TemporaryDirectory() as root:
         make_sheet(os.path.join(root, "sheet.png"))
+        if _extra: _extra(root)
         err = run(root, **overrides)
     if err is None:
         print(f"  FAIL {label}: expected failure, but the build SUCCEEDED")
@@ -476,6 +502,34 @@ def main():
         out = "tiles.bin"
         metatiles = 0.3
         autopick = ["floor", "wall", "accent"]
+    ''')
+
+    # Palette-swapped sprite variants. The feature only holds together if a variant that is
+    # not actually a recolour is refused -- otherwise one bitmap gets shared between two
+    # different shapes and the second renders wrong, silently.
+    import os as _os
+    def _good(root):
+        make_recolour(_os.path.join(root, "sheet.png"), _os.path.join(root, "var.png"))
+    def _bad(root):
+        make_recolour(_os.path.join(root, "sheet.png"), _os.path.join(root, "var.png"),
+                      move_a_pixel=True)
+
+    expect_ok("sprite variant, genuine recolour", _extra=_good, sprite='''
+        [[sprite]]
+        name = "guy"
+        sheet = "sheet.png"
+        frames = [[0, 0, 16, 16]]
+        out = "guy.bin"
+        variants = ["var.png"]
+    ''')
+    expect_fail("sprite variant with a moved pixel", "not a recolour",
+                _extra=_bad, sprite='''
+        [[sprite]]
+        name = "guy"
+        sheet = "sheet.png"
+        frames = [[0, 0, 16, 16]]
+        out = "guy.bin"
+        variants = ["var.png"]
     ''')
 
     print(f"\n{checks} checks, {failures} failures")
