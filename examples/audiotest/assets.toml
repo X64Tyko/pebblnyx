@@ -147,3 +147,15 @@ rows = [
 ]
 
 order = [0, 1, 2, 3]
+
+# ---------------------------------------------------------------------------- samples
+
+# Short effects only. One second of PCM is 16KB, so the pipeline caps samples at 1.5s and
+# says so rather than letting a bundle grow past the appstore limit. Anything sustained
+# belongs in [music.*], where it costs bytes instead of kilobytes.
+
+[sample.laser]
+file = "art/laser.wav"
+
+[sample.explosion]
+file = "art/explosion.wav"
