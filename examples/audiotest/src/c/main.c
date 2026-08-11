@@ -76,9 +76,12 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
     a->ticks++;
   }
 
-  // Fire effects unattended every ~1.4s, alternating, so the test stresses the mixer
-  // without anyone holding a button.
-  if (a->ready && now >= a->next_auto_ms) {
+  // Effects fire unattended only during the density and all-four patterns. Patterns 0 and
+  // 1 are controls -- 0 is a single sustained voice with no row events, 1 is one note per
+  // row -- and spraying effects over them defeats the whole point: an artefact heard
+  // during a control has to be attributable to the control, not to a laser.
+  const bool stress = (pnx_music_pattern() >= 2);
+  if (a->ready && stress && now >= a->next_auto_ms) {
     static bool alternate;
     alternate = !alternate;
     if (alternate && a->laser) {
@@ -88,6 +91,10 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
       pnx_audio_play_pri(a->boom, a->boom_len, PNX_AUDIO_NO_LOOP, a->boom_hz,
                          200, 5, NULL);
     }
+    a->next_auto_ms = now + 1400;
+  } else if (!stress) {
+    // Do not let the timer accumulate while suppressed, or the first stress pattern gets
+    // a burst of everything that was owed.
     a->next_auto_ms = now + 1400;
   }
 
@@ -127,9 +134,10 @@ static void draw_text(void *ctx) {
   pnx_platform_text_draw(a->hud, PNX_TEXT_SMALL, 0xFF, 6, 56, 190, 20);
   pnx_platform_text_draw(a->hud2, PNX_TEXT_SMALL, 0xFF, 6, 76, 190, 20);
   pnx_platform_text_draw(a->hud3, PNX_TEXT_SMALL, 0xFF, 6, 96, 190, 20);
-  pnx_platform_text_draw("0 sustain  1 chromatic\n2 density  3 all four\n\n"
+  pnx_platform_text_draw("0 one tone   1 chromatic\n2 density    3 all four\n"
+                        "effects auto-fire in 2,3\n\n"
                         "SELECT laser  DOWN boom\nUP music on/off",
-                        PNX_TEXT_SMALL, 0xFF, 6, 124, 190, 90);
+                        PNX_TEXT_SMALL, 0xFF, 6, 118, 190, 100);
 }
 
 int main(void) {
