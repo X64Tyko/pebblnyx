@@ -67,7 +67,7 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
     } else if (ev.button == PNX_BUTTON_DOWN) {
       // Cycles the lead. Now that gaps are known to reach 140-305ms, the useful range is
       // above that, not below it.
-      static const uint16_t leads[] = { 400, 250, 600, 1000, 150 };
+      static const uint16_t leads[] = { 80, 40, 150, 250, 20 };
       a->lead_index = (uint8_t)((a->lead_index + 1) % 5);
       pnx_audio_set_lead(leads[a->lead_index]);
     } else if (ev.button == PNX_BUTTON_UP) {
@@ -155,12 +155,18 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
 
 // Runs after the framebuffer is released. Both the audio feed and the text draw live here
 // because both talk to the system, and the capture window is the wrong place for either.
-static void post_frame(void *ctx) {
+// Driven by the audio timer, not the frame loop: every few milliseconds rather than every
+// 37ms, so the buffer stays full on a small lead.
+static void audio_tick(void *ctx) {
   App *a = (App *)ctx;
-
   const uint32_t now = pnx_platform_now_ms();
   if (a->seq_on) pnx_music_update(now);
   pnx_audio_update(now);
+}
+
+static void post_frame(void *ctx) {
+  App *a = (App *)ctx;
+
 
   pnx_platform_text_draw("pnx audio test", PNX_TEXT_MEDIUM, 0xFF, 6, 20, 190, 26);
   pnx_platform_text_draw(a->hud, PNX_TEXT_SMALL, 0xFF, 6, 56, 190, 20);
@@ -204,6 +210,7 @@ int main(void) {
           (unsigned)a.scene.used, (unsigned)a.scene.capacity);
 
   pnx_platform_set_post_frame_fn(post_frame);
+  pnx_platform_set_audio_timer(audio_tick, &a, 10);
   pnx_platform_run(frame, &a);
 
   pnx_audio_shutdown();

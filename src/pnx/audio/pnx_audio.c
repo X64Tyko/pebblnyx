@@ -19,12 +19,11 @@
 // invisible to the deficit statistic, which compares aggregate bytes written against
 // elapsed time and so cannot see a buffer that empties and refills.
 //
-// 400ms clears the worst observed gap with room over. The cost is latency: a sound effect
-// starts up to 400ms after it is triggered, which for footsteps and menu blips is too much
-// and is why this wants revisiting with a shorter feed interval rather than a deeper
-// buffer. It is the correct trade for continuity today.
+// With audio on its own timer rather than the render loop, feeds arrive every few
+// milliseconds and 80ms of lead is ample -- which also means an effect is heard within
+// 80ms of being triggered instead of 400ms.
 #ifndef PNX_AUDIO_LEAD_MS
-#define PNX_AUDIO_LEAD_MS 400
+#define PNX_AUDIO_LEAD_MS 80
 #endif
 
 // Scratch samples per feed. One frame at 16 kHz needs ~600, so this covers a frame plus

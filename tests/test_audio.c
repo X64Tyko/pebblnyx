@@ -73,11 +73,17 @@ void test_audio(void) {
   AU_CHECK(pnx_audio_init(PNX_AUDIO_16KHZ_16BIT, 80));
   pnx_audio_play(tone, 64, 0, 16000, 255);
 
-  // 37ms frames, the device's real pace, for two seconds.
-  for (uint32_t t = 0; t <= 2000; t += 37) pnx_audio_update(t);
+  // 10ms cadence, matching the audio timer the platform now runs. Audio is deliberately
+  // NOT fed from the render loop: that is capped at 26.8fps, so feeds arrived 37ms apart at
+  // best and 140ms apart in practice on device, which forced a lead so deep that effects
+  // were audibly late.
+  for (uint32_t t = 0; t <= 2000; t += 10) pnx_audio_update(t);
   const PnxAudioStats *st = pnx_audio_stats();
   AU_CHECK_EQ(st->worst_deficit, 0);      // never fell behind playback
   AU_CHECK(st->feeds > 40);
+
+  // The gap between feeds is the number that decides continuity, not the aggregate rate.
+  AU_CHECK(st->worst_gap_ms <= 10);
 
   // Written must be ahead of consumed by roughly the configured lead, not miles beyond:
   // over-feeding would mean unbounded latency on every sound effect.
@@ -85,13 +91,23 @@ void test_audio(void) {
   AU_CHECK(st->written > consumed);
   AU_CHECK(st->written < consumed + 32000u / 2u);   // under half a second ahead
 
+  // A cadence slower than the lead starves the stream, which is the whole reason audio
+  // moved off the render loop. Asserted so the reason cannot be quietly lost: feeding every
+  // 37ms against an 80ms lead is fine, but the render loop measured 140ms on device.
+  pnx_audio_shutdown();
+  AU_CHECK(pnx_audio_init(PNX_AUDIO_16KHZ_16BIT, 80));
+  pnx_audio_play(tone, 64, 0, 16000, 255);
+  for (uint32_t t = 0; t <= 2000; t += 200) pnx_audio_update(t);
+  AU_CHECK(pnx_audio_stats()->worst_deficit > 0);   // 200ms cadence cannot hold an 80ms lead
+  AU_CHECK(pnx_audio_stats()->worst_gap_ms >= 200);
+
   // --- a late frame must be survivable: the app is throttled to ~0.4fps when covered
   pnx_audio_shutdown();
   AU_CHECK(pnx_audio_init(PNX_AUDIO_16KHZ_16BIT, 80));
   pnx_audio_update(0);
-  pnx_audio_update(37);
-  // ...then nothing for 100ms, inside the 120ms lead.
-  pnx_audio_update(137);
+  pnx_audio_update(10);
+  // ...then nothing for 60ms, inside the 80ms lead.
+  pnx_audio_update(70);
   AU_CHECK_EQ(pnx_audio_stats()->worst_deficit, 0);
 
   // A 2-second stall is beyond any lead; the deficit must be REPORTED rather than hidden,

@@ -115,6 +115,27 @@ void pnx_platform_audio_close(void) {
 
 bool pnx_platform_audio_is_open(void) { return s_audio_open; }
 
+static AppTimer *s_audio_timer;
+static PnxTickFn s_audio_fn;
+static void *s_audio_ctx;
+static uint16_t s_audio_interval = 10;
+
+static void audio_tick(void *unused) {
+  s_audio_timer = NULL;
+  if (s_audio_fn) s_audio_fn(s_audio_ctx);
+  // Re-armed after the work, not before, so a slow feed cannot queue timers behind itself.
+  s_audio_timer = app_timer_register(s_audio_interval, audio_tick, NULL);
+}
+
+void pnx_platform_set_audio_timer(PnxTickFn fn, void *ctx, uint16_t interval_ms) {
+  s_audio_fn = fn;
+  s_audio_ctx = ctx;
+  s_audio_interval = interval_ms ? interval_ms : 1;
+  if (!s_audio_timer && fn) {
+    s_audio_timer = app_timer_register(s_audio_interval, audio_tick, NULL);
+  }
+}
+
 PnxAudioState pnx_platform_audio_state(void) {
   if (!s_audio_open) return PNX_AUDIO_IDLE;
   switch (speaker_get_status()) {
@@ -298,6 +319,8 @@ void pnx_platform_run(PnxFrameFn frame, void *ctx) {
   window_stack_push(s_window, true);
   app_event_loop();
 
+  if (s_audio_timer) { app_timer_cancel(s_audio_timer); s_audio_timer = NULL; }
+  s_audio_fn = NULL;
   app_focus_service_unsubscribe();
   touch_service_unsubscribe();
   window_destroy(s_window);

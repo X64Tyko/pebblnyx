@@ -98,6 +98,18 @@ typedef enum {
 
 PnxAudioState pnx_platform_audio_state(void);
 
+// Runs `fn` every `interval_ms`, independently of rendering.
+//
+// Audio was being fed once per rendered frame, which ties it to a display capped at
+// 26.8fps: feeds arrive ~37ms apart at best and measured 140ms apart in practice, forcing
+// a 400ms lead to stay continuous -- and 400ms of lead is 400ms before an effect is heard.
+//
+// The render cap is a property of the display, not of the speaker. A timer feeding every
+// few milliseconds keeps the buffer full with a fraction of the lead, which fixes the
+// stutter and the latency together.
+typedef void (*PnxTickFn)(void *ctx);
+void pnx_platform_set_audio_timer(PnxTickFn fn, void *ctx, uint16_t interval_ms);
+
 // Bytes per second for a format, so the mixer can size a frame's worth of samples.
 static inline uint32_t pnx_audio_byte_rate(PnxAudioFormat f) {
   const uint32_t rate = (f == PNX_AUDIO_16KHZ_16BIT || f == PNX_AUDIO_16KHZ_8BIT)

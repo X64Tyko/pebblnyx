@@ -198,6 +198,12 @@ size_t pnx_platform_audio_write(const void *data, size_t bytes) {
 void pnx_platform_audio_close(void) { s_audio_open = false; }
 bool pnx_platform_audio_is_open(void) { return s_audio_open; }
 
+// No timers on the host: tests drive pnx_audio_update directly, which is more controllable
+// than a real clock and is the point of the host platform.
+void pnx_platform_set_audio_timer(PnxTickFn fn, void *ctx, uint16_t interval_ms) {
+  (void)fn; (void)ctx; (void)interval_ms;
+}
+
 PnxAudioState pnx_platform_audio_state(void) {
   return s_audio_open ? PNX_AUDIO_PLAYING : PNX_AUDIO_IDLE;
 }
