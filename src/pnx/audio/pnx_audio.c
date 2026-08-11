@@ -130,7 +130,11 @@ static int16_t s_acc[PNX_AUDIO_CHUNK];
 // instrument volumes -- which is how trackers have always done it. Four channels at
 // PNX_MUSIC_CHANNELS is the design point, so dividing by four lets four full-scale voices
 // sum without clipping and leaves room for an effect on top.
-#define MIX_HEADROOM_SHIFT 2   // divide by 4
+// Divide by two, not four. Four gave four channels perfect headroom but left a SINGLE
+// voice at 20% of full scale -- quiet, and coarsely quantised when the output is 8-bit.
+// Halving instead means one voice sits near 40% and four channels clamp only on
+// coincident peaks, which is the trade trackers make: loud, with occasional limiting.
+#define MIX_HEADROOM_SHIFT 1
 
 // Bytes mixed but not yet accepted by the device.
 //
@@ -230,8 +234,12 @@ uint8_t pnx_audio_play_pri(const int8_t *pcm, uint32_t samples, uint32_t loop_st
   v->pcm = pcm;
   v->samples = samples;
   v->loop_start = loop_start < samples ? loop_start : PNX_AUDIO_NO_LOOP;
-  // Resampling is just the phase increment: 16.16 ratio of source to output rate.
-  v->step = (uint32_t)(((uint64_t)sample_hz << 16) / output_rate());
+  // 16.16 ratio of source to output rate, without a 64-bit divide -- that pulled in
+  // __udivmoddi4 at 754 bytes, which the size report shows as "(unattributed)".
+  // Shifting 16 in two stages keeps every intermediate inside uint32 for any sample rate
+  // a short effect will use.
+  v->step = ((sample_hz << 8) / output_rate()) << 8;
+  if (v->step == 0) v->step = 1;
   v->volume = volume;
   v->priority = priority;
   v->active = true;
@@ -307,7 +315,11 @@ static void mix(int8_t *out, uint32_t count) {
       const uint32_t index = o->phase >> 16;
       if (index >= o->samples) {
         if (o->loop_start == PNX_AUDIO_NO_LOOP) { o->active = false; break; }
-        o->phase = o->loop_start << 16;
+        // Subtract the loop length rather than assigning the loop point, so the
+        // fractional phase survives the wrap. Assigning discarded the overshoot every
+        // cycle, which quantised the period to a whole number of samples: a 440Hz note
+        // came out at 432Hz, 32 cents flat, and the error grew with pitch.
+        o->phase -= (o->samples - o->loop_start) << 16;
         continue;
       }
 
@@ -443,6 +455,9 @@ void pnx_audio_update(uint32_t now_ms) {
 
   mix(s_scratch, samples);
   s_stats.feeds++;
+  if (samples < s_stats.feed_min || s_stats.feed_min == 0)
+    s_stats.feed_min = (uint16_t)samples;
+  if (samples > s_stats.feed_max) s_stats.feed_max = (uint16_t)samples;
 
   if (s_16bit) {
     static uint8_t wide[PNX_AUDIO_CHUNK * 2];

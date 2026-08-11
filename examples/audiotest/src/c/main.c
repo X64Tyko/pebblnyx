@@ -29,7 +29,7 @@ typedef struct {
   uint32_t next_auto_ms;
   char hud[48];
   char hud2[48];
-  char hud3[32];
+  char hud3[48];
 } App;
 
 static const uint32_t RESOURCES[] = PNX_ASSET_RESOURCE_TABLE;
@@ -102,8 +102,9 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
   pnx_format(a->hud, sizeof(a->hud), "voices %u def %u cap %u",
              au->active_voices, (unsigned)au->worst_deficit,
              (unsigned)au->capacity);
-  pnx_format(a->hud3, sizeof(a->hud3), "pattern %u row %2u",
-             pnx_music_pattern(), pnx_music_row());
+  pnx_format(a->hud3, sizeof(a->hud3), "pat %u row %2u  feed %u-%u",
+             pnx_music_pattern(), pnx_music_row(),
+             au->feed_min, au->feed_max);
   pnx_format(a->hud2, sizeof(a->hud2), "%u.%ufps  work %uus  %s",
              fs ? (unsigned)(fs->fps_x10 / 10) : 0,
              fs ? (unsigned)(fs->fps_x10 % 10) : 0,

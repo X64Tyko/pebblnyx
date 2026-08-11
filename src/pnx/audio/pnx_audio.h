@@ -69,6 +69,9 @@ typedef struct {
   uint32_t capacity;       // bytes accepted before the first short write -- the device's
                            // buffer depth, which it offers no way to query
   uint32_t carried;        // bytes currently held over from a short write
+  uint16_t feed_min;       // smallest and largest bytes mixed in one call. A pulse at the
+  uint16_t feed_max;       // frame rate (~27Hz) sounds like a thrum, and an uneven feed
+                           // is the mechanism that would cause one.
   uint8_t active_voices;
 } PnxAudioStats;
 
