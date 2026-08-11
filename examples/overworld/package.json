@@ -63,6 +63,16 @@
         },
         {
           "type": "raw",
+          "name": "OVERWORLD",
+          "file": "music_overworld.bin"
+        },
+        {
+          "type": "raw",
+          "name": "BLIP",
+          "file": "sfx_blip.bin"
+        },
+        {
+          "type": "raw",
           "name": "SCENES",
           "file": "scenes.bin"
         }

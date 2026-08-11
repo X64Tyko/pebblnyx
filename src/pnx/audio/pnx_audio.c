@@ -23,6 +23,12 @@
 #define PNX_AUDIO_CHUNK 1024
 #endif
 
+// One cycle per waveform, generated once at init. 64 samples is enough for the harmonics
+// this speaker can reproduce and keeps the tables in cache.
+#define CYCLE 64
+
+typedef enum { ENV_ATTACK = 0, ENV_DECAY, ENV_SUSTAIN, ENV_RELEASE, ENV_OFF } EnvStage;
+
 typedef struct {
   const int8_t *pcm;
   uint32_t samples;
@@ -30,8 +36,48 @@ typedef struct {
   uint32_t phase;          // 16.16 index into pcm
   uint32_t step;           // 16.16 advance per output sample
   uint8_t volume;          // 0..255
+  uint8_t priority;
   bool active;
+
+  // Envelope. Level is 16.16 so the per-sample increment does not quantise to zero on a
+  // slow attack; a per-block envelope would zipper audibly at 16 kHz.
+  PnxEnvelope env;
+  EnvStage stage;
+  int32_t level;
+  int32_t rate;
 } Voice;
+
+static int8_t s_wavetable[PNX_WAVE_COUNT][CYCLE];
+
+// Equal temperament, one octave tabulated and shifted. Values are Hz x 100 for C4..B4 so
+// the arithmetic stays integral.
+static const uint16_t NOTE_CENTIHZ[12] = {
+  26163, 27718, 29366, 31113, 32963, 34923,
+  36999, 39200, 41530, 44000, 46616, 49388,
+};
+
+uint32_t pnx_note_hz(uint8_t midi_note) {
+  const int octave = (int)(midi_note / 12) - 5;      // 60 -> octave 0 (C4)
+  uint32_t hz = NOTE_CENTIHZ[midi_note % 12] / 100u;
+  if (octave > 0) hz <<= octave;
+  else if (octave < 0) hz >>= -octave;
+  return hz ? hz : 1u;
+}
+
+static void build_wavetable(void) {
+  uint32_t rng = 0x2545F491u;
+  for (int i = 0; i < CYCLE; i++) {
+    s_wavetable[PNX_WAVE_SQUARE][i] = (int8_t)(i < CYCLE / 2 ? 100 : -100);
+    s_wavetable[PNX_WAVE_SAW][i] = (int8_t)((i * 200 / CYCLE) - 100);
+    s_wavetable[PNX_WAVE_TRIANGLE][i] = (int8_t)(i < CYCLE / 2
+        ? (i * 400 / CYCLE) - 100
+        : 100 - ((i - CYCLE / 2) * 400 / CYCLE));
+    // xorshift, so the noise table is identical on every run and in every build --
+    // reproducible audio matters for the same reason reproducible simulation does.
+    rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+    s_wavetable[PNX_WAVE_NOISE][i] = (int8_t)((rng >> 8) & 0xFF) / 2;
+  }
+}
 
 static Voice s_voices[PNX_AUDIO_VOICES];
 static int8_t s_scratch[PNX_AUDIO_CHUNK];
@@ -51,6 +97,7 @@ bool pnx_audio_init(PnxAudioFormat format, uint8_t volume) {
   }
   memset(s_voices, 0, sizeof(s_voices));
   memset(&s_stats, 0, sizeof(s_stats));
+  build_wavetable();
   s_format = format;
   s_byte_rate = pnx_audio_byte_rate(format);
   s_16bit = (format == PNX_AUDIO_16KHZ_16BIT || format == PNX_AUDIO_8KHZ_16BIT);
@@ -74,24 +121,75 @@ uint8_t pnx_audio_play(const int8_t *pcm, uint32_t samples, uint32_t loop_start,
                        uint32_t sample_hz, uint8_t volume) {
   if (!s_on || !pcm || samples == 0 || sample_hz == 0) return PNX_AUDIO_NO_VOICE;
 
-  int free_slot = -1, quietest = 0;
-  for (int i = 0; i < PNX_AUDIO_VOICES; i++) {
-    if (!s_voices[i].active) { free_slot = i; break; }
-    if (s_voices[i].volume < s_voices[quietest].volume) quietest = i;
-  }
-  // Steal the quietest rather than the oldest: losing a fading effect is less audible
-  // than losing whatever just started, which is usually the important one.
-  const int slot = free_slot >= 0 ? free_slot : quietest;
+  return pnx_audio_play_pri(pcm, samples, loop_start, sample_hz, volume, 0, NULL);
+}
 
-  s_voices[slot] = (Voice){
-    .pcm = pcm, .samples = samples,
-    .loop_start = loop_start < samples ? loop_start : PNX_AUDIO_NO_LOOP,
-    .phase = 0,
-    // Resampling is just the phase increment: 16.16 ratio of source to output rate.
-    .step = (uint32_t)(((uint64_t)sample_hz << 16) / output_rate()),
-    .volume = volume, .active = true,
-  };
+// Chooses a voice, honouring priority. A sound never displaces something more important
+// than itself, which is what stops a footstep silencing the melody.
+static int claim_voice(uint8_t priority) {
+  int weakest = -1;
+  for (int i = 0; i < PNX_AUDIO_VOICES; i++) {
+    if (!s_voices[i].active) return i;
+    if (s_voices[i].priority > priority) continue;
+    // Among candidates, take the quietest: losing a fading effect is less audible than
+    // losing whatever just started.
+    if (weakest < 0 || s_voices[i].volume < s_voices[weakest].volume) weakest = i;
+  }
+  return weakest;
+}
+
+static void env_begin(Voice *v, const PnxEnvelope *env) {
+  if (!env || (env->attack_ms == 0 && env->decay_ms == 0 && env->release_ms == 0)) {
+    v->stage = ENV_OFF;             // no envelope: full level, hard stop
+    v->level = 1 << 16;
+    v->rate = 0;
+    return;
+  }
+  v->env = *env;
+  v->stage = ENV_ATTACK;
+  v->level = 0;
+  const uint32_t rate = output_rate();
+  v->rate = env->attack_ms ? (int32_t)((1 << 16) / ((env->attack_ms * rate) / 1000 + 1))
+                           : (1 << 16);
+}
+
+uint8_t pnx_audio_play_pri(const int8_t *pcm, uint32_t samples, uint32_t loop_start,
+                           uint32_t sample_hz, uint8_t volume, uint8_t priority,
+                           const PnxEnvelope *env) {
+  if (!s_on || !pcm || samples == 0 || sample_hz == 0) return PNX_AUDIO_NO_VOICE;
+
+  const int slot = claim_voice(priority);
+  if (slot < 0) return PNX_AUDIO_NO_VOICE;   // everything playing is more important
+
+  Voice *v = &s_voices[slot];
+  memset(v, 0, sizeof(*v));
+  v->pcm = pcm;
+  v->samples = samples;
+  v->loop_start = loop_start < samples ? loop_start : PNX_AUDIO_NO_LOOP;
+  // Resampling is just the phase increment: 16.16 ratio of source to output rate.
+  v->step = (uint32_t)(((uint64_t)sample_hz << 16) / output_rate());
+  v->volume = volume;
+  v->priority = priority;
+  v->active = true;
+  env_begin(v, env);
   return (uint8_t)slot;
+}
+
+uint8_t pnx_audio_note(PnxWaveform wave, uint8_t midi_note, uint8_t volume,
+                       const PnxEnvelope *env, uint8_t priority) {
+  if (wave >= PNX_WAVE_COUNT) return PNX_AUDIO_NO_VOICE;
+  // A one-cycle table played at note_hz * CYCLE advances exactly note_hz cycles/second.
+  return pnx_audio_play_pri(s_wavetable[wave], CYCLE, 0,
+                            pnx_note_hz(midi_note) * CYCLE, volume, priority, env);
+}
+
+void pnx_audio_release(uint8_t voice) {
+  if (voice >= PNX_AUDIO_VOICES || !s_voices[voice].active) return;
+  Voice *v = &s_voices[voice];
+  if (v->stage == ENV_OFF) { v->active = false; return; }
+  v->stage = ENV_RELEASE;
+  const uint32_t rate = output_rate();
+  v->rate = -(int32_t)(v->level / ((v->env.release_ms * rate) / 1000 + 1));
 }
 
 void pnx_audio_stop(uint8_t voice) {
@@ -125,7 +223,42 @@ static void mix(int8_t *out, uint32_t count) {
         o->phase = o->loop_start << 16;
         continue;
       }
-      const int32_t s = ((int32_t)o->pcm[index] * o->volume) >> 8;
+      // Envelope advance. One add and a stage test per sample, which at 600 samples x
+      // 8 voices is nothing against ~30 ms of idle CPU.
+      if (o->stage != ENV_OFF) {
+        o->level += o->rate;
+        const uint32_t sr = output_rate();
+        switch (o->stage) {
+          case ENV_ATTACK:
+            if (o->level >= (1 << 16)) {
+              o->level = 1 << 16;
+              o->stage = ENV_DECAY;
+              const int32_t target = (int32_t)o->env.sustain << 8;
+              o->rate = o->env.decay_ms
+                  ? -(int32_t)(((1 << 16) - target) / ((o->env.decay_ms * sr) / 1000 + 1))
+                  : 0;
+              if (!o->env.decay_ms) { o->level = target; o->stage = ENV_SUSTAIN; }
+            }
+            break;
+          case ENV_DECAY:
+            if (o->level <= ((int32_t)o->env.sustain << 8)) {
+              o->level = (int32_t)o->env.sustain << 8;
+              o->rate = 0;
+              o->stage = ENV_SUSTAIN;
+            }
+            break;
+          case ENV_RELEASE:
+            if (o->level <= 0) { o->level = 0; o->active = false; }
+            break;
+          default: break;
+        }
+        if (!o->active) break;
+      }
+
+      const int32_t enveloped = (o->stage == ENV_OFF)
+          ? (int32_t)o->pcm[index]
+          : (((int32_t)o->pcm[index] * (o->level >> 8)) >> 8);
+      const int32_t s = (enveloped * o->volume) >> 8;
       const int32_t acc = out[n] + s;
       out[n] = (int8_t)(acc < -128 ? -128 : (acc > 127 ? 127 : acc));
       o->phase += o->step;

@@ -30,6 +30,37 @@
 #define PNX_AUDIO_NO_LOOP 0xFFFFFFFFu
 #define PNX_AUDIO_NO_VOICE 0xFF
 
+// ------------------------------------------------------------------- instruments
+//
+// An instrument is one cycle of a waveform, generated into the arena at init and looped.
+// This costs **nothing in the 256KB resource budget**, which matters more here than
+// anywhere: audio is the one category with no measured ceiling and ~70KB left after art.
+// A recorded sample would sound better and could eat the remainder on its own.
+//
+// Pitch falls out of the existing resampling: playing an L-sample cycle at
+// `note_hz * L` advances exactly note_hz cycles per second. No new mixing code.
+
+typedef enum {
+  PNX_WAVE_SQUARE = 0,   // hollow, cuts through a mix; the default lead
+  PNX_WAVE_SAW,          // bright, buzzy; bass and strings
+  PNX_WAVE_TRIANGLE,     // soft, flute-like
+  PNX_WAVE_NOISE,        // percussion
+  PNX_WAVE_COUNT
+} PnxWaveform;
+
+// Milliseconds, except `sustain` which is a 0..255 level. A note with no release clicks
+// off, which is the single most audible difference between "a tone" and "an instrument".
+typedef struct {
+  uint16_t attack_ms;
+  uint16_t decay_ms;
+  uint8_t sustain;
+  uint16_t release_ms;
+} PnxEnvelope;
+
+// MIDI note numbers: 60 is middle C. Frequency is looked up rather than computed, since
+// there is no FPU and a 12-entry table plus an octave shift is exact enough.
+uint32_t pnx_note_hz(uint8_t midi_note);
+
 typedef struct {
   uint32_t written;        // bytes handed to the stream since init
   uint32_t worst_deficit;  // worst shortfall against the consume rate, in bytes
@@ -52,6 +83,20 @@ void pnx_audio_update(uint32_t now_ms);
 // phase-step calculation, so a sample can be pitched by lying about it.
 uint8_t pnx_audio_play(const int8_t *pcm, uint32_t samples, uint32_t loop_start,
                        uint32_t sample_hz, uint8_t volume);
+
+// Plays a note on a generated instrument. `priority` decides what may be stolen: a
+// higher-priority sound never loses its voice to a lower one, which is what stops a
+// footstep silencing the melody.
+uint8_t pnx_audio_note(PnxWaveform wave, uint8_t midi_note, uint8_t volume,
+                       const PnxEnvelope *env, uint8_t priority);
+
+// Begins the release phase rather than cutting the voice, so a held note ends musically.
+void pnx_audio_release(uint8_t voice);
+
+// Full form: a PCM sample with priority and an optional envelope.
+uint8_t pnx_audio_play_pri(const int8_t *pcm, uint32_t samples, uint32_t loop_start,
+                           uint32_t sample_hz, uint8_t volume, uint8_t priority,
+                           const PnxEnvelope *env);
 
 void pnx_audio_stop(uint8_t voice);
 void pnx_audio_stop_all(void);

@@ -614,3 +614,29 @@ is the compile-time module selection working as specified, not merely as intende
 
 The log ring is the largest single static allocation in an otherwise empty app — about a
 third of its footprint — which is why `PNX_LOG_LINES` and `PNX_LOG_LINE_LEN` are tunable.
+
+## Audio costs (M4)
+
+| | Bytes | |
+|---|---|---|
+| Song: 16 rows x 4 channels, 2 instruments, 112bpm | **160** | a row is 2 bytes per channel |
+| Sample: 120ms blip at 16kHz 8-bit | **1,936** | 12x a whole song pattern |
+| One second of PCM | **16,000** | |
+
+**This ratio is the entire argument for a sequencer.** With roughly 70KB left after art,
+four seconds of recorded audio would consume the whole remaining content budget, while a
+song is a few hundred bytes. So music is sequenced from generated waveforms -- which cost
+nothing in resources at all -- and PCM is reserved for short effects.
+
+The pipeline enforces that rather than advising it: samples over **1.5 s** are a build
+error naming the cost, because the alternative is discovering it as a bundle that will not
+ship.
+
+Instruments are one cycle of a waveform generated at init and looped. Pitch needs no new
+code -- an L-sample cycle played at `note_hz * L` advances exactly `note_hz` cycles per
+second, which the mixer's existing resampling already does.
+
+**No fill-level query exists**, so underrun is inferred from bytes written against elapsed
+time, and feeding is lead-based at 120 ms. Verified in host tests across a simulated 37 ms
+frame cadence: zero deficit, and a stall inside the lead produces none while a stall beyond
+it is reported rather than hidden.

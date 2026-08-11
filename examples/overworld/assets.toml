@@ -191,3 +191,61 @@ metatiles = "auto"
 # imported; replace with an explicit [atlas.semantic] table once you know which tiles
 # you want, and no map or game code changes.
 autopick = ["floor", "wall", "accent"]
+
+# ----------------------------------------------------------------------------- music
+
+# Instruments are generated waveforms, so a song costs only its notes -- a few hundred
+# bytes, against the tens of kilobytes a recorded loop would need. That ratio is the whole
+# reason the sequencer exists rather than streaming audio files.
+
+[music.overworld]
+tempo = 112
+channels = 4
+
+[[music.overworld.instrument]]
+wave = "triangle"     # 0: lead
+attack = 5
+decay = 90
+sustain = 170
+release = 140
+
+[[music.overworld.instrument]]
+wave = "square"       # 1: bass
+attack = 2
+decay = 40
+sustain = 200
+release = 60
+
+# Notes are named, not numbered: C4 tells you where it sits, 60 does not. '.' holds the
+# previous note, '-' releases it. Four cells per row, one per channel.
+[[music.overworld.pattern]]
+rows = [
+  "A3:0 .    .    E2:1",
+  ".    .    .    .   ",
+  "C4:0 .    .    .   ",
+  ".    .    .    -   ",
+  "E4:0 .    .    A2:1",
+  ".    .    .    .   ",
+  "C4:0 .    .    .   ",
+  ".    .    .    -   ",
+  "B3:0 .    .    G2:1",
+  ".    .    .    .   ",
+  "G3:0 .    .    .   ",
+  ".    .    .    -   ",
+  "A3:0 .    .    E2:1",
+  ".    .    .    .   ",
+  "-    .    .    .   ",
+  ".    .    .    -   ",
+]
+
+order = [0, 0]
+
+# ---------------------------------------------------------------------------- samples
+
+# Short effects only. One second of PCM is 16KB and roughly 70KB remains after art, so the
+# pipeline caps samples at 1.5s and says so rather than letting a bundle grow past the
+# appstore limit. Anything sustained belongs in [music.*], where it costs bytes not
+# kilobytes.
+
+[sample.blip]
+file = "art/blip.wav"

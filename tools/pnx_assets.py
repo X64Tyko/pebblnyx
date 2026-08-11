@@ -22,6 +22,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sys
 import tomllib
 
@@ -50,6 +51,8 @@ MAGIC_MAP = b"PM"
 MAGIC_DIALOG = b"PD"
 MAGIC_PALETTES = b"PP"
 MAGIC_SCENES = b"PC"
+MAGIC_MUSIC = b"PN"
+MAGIC_SAMPLE = b"PW"
 
 HEADER_BYTES = 8
 
@@ -753,6 +756,212 @@ def pack_dialog(dialogs):
     return {"names": names, "index": index, "blob": blob}
 
 
+# -------------------------------------------------------------------------- samples
+
+# One second of 16 kHz 8-bit PCM is 16,000 bytes. With ~70KB left after art, four seconds
+# of recorded audio would consume the entire remaining content budget -- so samples are
+# for short effects and nothing else. The cap is enforced rather than advised, because
+# the failure is otherwise discovered as a bundle that will not ship.
+SAMPLE_MAX_MS = 1500
+SAMPLE_RATE = 16000
+
+
+def pack_samples(root, specs):
+    """Import small PCM effects: raw signed 8-bit mono, or a WAV we can read directly.
+
+    Deliberately not a general audio importer. Long-form audio -- music beds, voice --
+    does not fit this platform's budget at any quality, so the sequencer covers music and
+    this covers footsteps and menu blips.
+    """
+    out = []
+    for name in sorted(specs):
+        spec = specs[name]
+        path = os.path.join(root, spec["file"])
+        if not os.path.exists(path):
+            raise BuildError(f"sample {name!r}: missing file {path}")
+
+        with open(path, "rb") as f:
+            data = f.read()
+
+        if data[:4] == b"RIFF":
+            pcm, rate, bits, channels = parse_wav(data, name)
+        else:
+            pcm, rate = data, int(spec.get("rate", SAMPLE_RATE))
+            bits, channels = 8, 1
+
+        if channels != 1:
+            raise BuildError(f"sample {name!r}: {channels} channels -- mono only, the "
+                             f"device has one speaker")
+        if bits == 16:
+            # Down to 8-bit signed: the mixer accumulates in 8-bit and the speaker cannot
+            # resolve more, so keeping 16 would double the cost for nothing.
+            pcm = bytes(((int.from_bytes(pcm[i:i+2], "little", signed=True) >> 8) & 0xFF)
+                        for i in range(0, len(pcm) - 1, 2))
+        elif bits != 8:
+            raise BuildError(f"sample {name!r}: {bits}-bit is not supported (8 or 16)")
+
+        ms = len(pcm) * 1000 // max(rate, 1)
+        if ms > SAMPLE_MAX_MS:
+            raise BuildError(
+                f"sample {name!r}: {ms}ms is longer than the {SAMPLE_MAX_MS}ms cap "
+                f"({len(pcm):,} bytes). One second costs 16KB and roughly 70KB remains "
+                f"after art -- use the sequencer for anything sustained.")
+
+        loop = int(spec.get("loop_start", 0xFFFFFFFF))
+        body = (rate.to_bytes(4, "little") + loop.to_bytes(4, "little") + pcm)
+        blob = blob_header(MAGIC_SAMPLE, 0, 0, 0, 0) + body
+        print(f"  sample {name}: {ms}ms, {rate}Hz, {len(pcm):,} bytes"
+              + (f", loops at {loop}" if loop != 0xFFFFFFFF else ""))
+        out.append({"name": name, "blob": blob, "out": f"sfx_{name}.bin", "ms": ms})
+    return out
+
+
+def parse_wav(data, name):
+    """Enough WAV to read what an effects editor exports. Not a general parser."""
+    if data[8:12] != b"WAVE":
+        raise BuildError(f"sample {name!r}: RIFF file is not WAVE")
+    pos, rate, bits, channels, pcm = 12, 0, 0, 0, None
+    while pos + 8 <= len(data):
+        cid = data[pos:pos + 4]
+        size = int.from_bytes(data[pos + 4:pos + 8], "little")
+        body = data[pos + 8:pos + 8 + size]
+        if cid == b"fmt ":
+            fmt = int.from_bytes(body[0:2], "little")
+            if fmt != 1:
+                raise BuildError(f"sample {name!r}: only uncompressed PCM WAV is "
+                                 f"supported (format {fmt})")
+            channels = int.from_bytes(body[2:4], "little")
+            rate = int.from_bytes(body[4:8], "little")
+            bits = int.from_bytes(body[14:16], "little")
+        elif cid == b"data":
+            pcm = body
+        pos += 8 + size + (size & 1)
+    if pcm is None:
+        raise BuildError(f"sample {name!r}: WAV has no data chunk")
+    # 8-bit WAV is UNSIGNED by spec; the mixer wants signed.
+    if bits == 8:
+        pcm = bytes((b - 128) & 0xFF for b in pcm)
+    return pcm, rate, bits, channels
+
+
+# ---------------------------------------------------------------------------- music
+
+WAVEFORMS = ["square", "saw", "triangle", "noise"]
+SEMITONES = {"c": 0, "c#": 1, "db": 1, "d": 2, "d#": 3, "eb": 3, "e": 4, "f": 5,
+             "f#": 6, "gb": 6, "g": 7, "g#": 8, "ab": 8, "a": 9, "a#": 10, "bb": 10,
+             "b": 11}
+
+MUSIC_NO_NOTE = 0
+MUSIC_NOTE_OFF = 1
+
+
+def parse_note(token, where):
+    """'C4' -> MIDI 60. '.' holds, '-' releases.
+
+    Note names rather than numbers, because a manifest is read by people. MIDI 60 tells
+    you nothing; C4 tells you where it sits.
+    """
+    token = token.strip()
+    if token in (".", "", "..."):
+        return MUSIC_NO_NOTE
+    if token in ("-", "off"):
+        return MUSIC_NOTE_OFF
+
+    m = re.fullmatch(r"([A-Ga-g][#b]?)(-?\d)", token)
+    if not m:
+        raise BuildError(f"{where}: {token!r} is not a note (expected e.g. C4, F#3, "
+                         f"'.' to hold, '-' to release)")
+    semi = SEMITONES[m.group(1).lower()]
+    midi = (int(m.group(2)) + 1) * 12 + semi
+    if not 2 <= midi <= 127:
+        raise BuildError(f"{where}: {token!r} is outside the playable range")
+    return midi
+
+
+def pack_music_names(man):
+    """Song names only, for the id ordering, without recompiling them."""
+    return [{"name": n} for n in sorted(man.get("music", {}))]
+
+
+def pack_music(specs):
+    """Compile [music.*] into pattern blobs.
+
+    A row is two bytes per channel -- note and instrument -- so a 16-row four-channel
+    pattern is 128 bytes. A whole song is a few hundred, against the tens of kilobytes a
+    recorded loop would cost. That ratio is why the sequencer exists at all.
+    """
+    songs = []
+    for name in sorted(specs):
+        spec = specs[name]
+        channels = int(spec.get("channels", 4))
+        if channels != 4:
+            raise BuildError(f"music {name!r}: the sequencer has exactly 4 channels")
+
+        instruments = spec.get("instrument", [])
+        if not instruments:
+            raise BuildError(f"music {name!r}: no instruments defined")
+        if len(instruments) > 255:
+            raise BuildError(f"music {name!r}: too many instruments")
+
+        inst_bytes = bytearray()
+        for i, ins in enumerate(instruments):
+            wave = ins.get("wave", "square")
+            if wave not in WAVEFORMS:
+                raise BuildError(f"music {name!r}: instrument {i} has unknown waveform "
+                                 f"{wave!r} (known: {', '.join(WAVEFORMS)})")
+            inst_bytes += bytes([WAVEFORMS.index(wave)])
+            inst_bytes += int(ins.get("attack", 5)).to_bytes(2, "little")
+            inst_bytes += int(ins.get("decay", 50)).to_bytes(2, "little")
+            inst_bytes += bytes([int(ins.get("sustain", 180)) & 0xFF])
+            inst_bytes += int(ins.get("release", 100)).to_bytes(2, "little")
+
+        patterns = spec.get("pattern", [])
+        if not patterns:
+            raise BuildError(f"music {name!r}: no patterns defined")
+
+        rows_per = None
+        pattern_bytes = bytearray()
+        for pi, pat in enumerate(patterns):
+            rows = pat.get("rows", [])
+            if rows_per is None:
+                rows_per = len(rows)
+            elif len(rows) != rows_per:
+                raise BuildError(f"music {name!r}: pattern {pi} has {len(rows)} rows, "
+                                 f"pattern 0 has {rows_per} -- all must match")
+            for ri, row in enumerate(rows):
+                where = f"music {name!r} pattern {pi} row {ri}"
+                cells = row.split()
+                if len(cells) != channels:
+                    raise BuildError(f"{where}: {len(cells)} cells for {channels} "
+                                     f"channels")
+                for cell in cells:
+                    if ":" in cell:
+                        note_tok, inst_tok = cell.split(":", 1)
+                        inst = int(inst_tok)
+                    else:
+                        note_tok, inst = cell, 0
+                    if inst >= len(instruments):
+                        raise BuildError(f"{where}: instrument {inst} does not exist")
+                    pattern_bytes += bytes([parse_note(note_tok, where), inst])
+
+        order = spec.get("order", list(range(len(patterns))))
+        for o in order:
+            if o >= len(patterns):
+                raise BuildError(f"music {name!r}: order references pattern {o}, but "
+                                 f"only {len(patterns)} exist")
+
+        tempo = int(spec.get("tempo", 120))
+        body = (tempo.to_bytes(2, "little") + bytes([channels, 0])
+                + bytes(inst_bytes) + pad4(bytes(order)) + bytes(pattern_bytes))
+
+        blob = blob_header(MAGIC_MUSIC, len(patterns), len(order), rows_per,
+                           len(instruments)) + body
+        print(f"  music {name}: {len(patterns)} patterns x {rows_per} rows, "
+              f"{len(instruments)} instruments, {tempo}bpm, {len(blob)} bytes")
+        songs.append({"name": name, "blob": blob, "out": f"music_{name}.bin"})
+    return songs
+
+
 # --------------------------------------------------------------------------- scenes
 
 def build_scenes(man, asset_index, maps=()):
@@ -867,7 +1076,7 @@ def write_blob(path, blob):
 
 
 def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0,
-                    scenes=None):
+                    scenes=None, songs=None, samples=None):
     L = [
         "// GENERATED by tools/pnx_assets.py -- do not edit.",
         "//",
@@ -885,6 +1094,8 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
               + [("SPRITE", s["name"]) for s in sprites]
               + [("MAP", m["name"]) for m in maps]
               + ([("DIALOG", "dialog")] if dialog else [])
+              + [("MUSIC", sg["name"]) for sg in (songs or [])]
+              + [("SAMPLE", sm["name"]) for sm in (samples or [])]
               + ([("SCENES", "scenes")] if scenes else []))
 
     L += ["// Stable asset handles. Index into the runtime registry.",
@@ -1095,7 +1306,11 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
                + [f"PNX_ASSET_ATLAS_{c_ident(a['name'])}" for a in atlases]
                + [f"PNX_ASSET_SPRITE_{c_ident(sp['name'])}" for sp in sprites]
                + [f"PNX_ASSET_MAP_{c_ident(m['name'])}" for m in maps]
-               + (["PNX_ASSET_DIALOG_DIALOG"] if dialog_specs else []))
+               + (["PNX_ASSET_DIALOG_DIALOG"] if dialog_specs else [])
+               + [f"PNX_ASSET_MUSIC_{c_ident(sg['name'])}" for sg in
+                  pack_music_names(man)]
+               + [f"PNX_ASSET_SAMPLE_{c_ident(n)}" for n in
+                  sorted(man.get("sample", {}))])
     asset_index = {h: i for i, h in enumerate(ordered)}
 
     for m in maps:
@@ -1116,6 +1331,8 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
           f"every asset -- set PNX_PALETTE_SLOTS >= {len(shared)}")
 
     dialog = pack_dialog(dialog_specs) if dialog_specs else None
+    songs = pack_music(man.get("music", {})) if man.get("music") else []
+    samples = pack_samples(root, man.get("sample", {})) if man.get("sample") else []
 
     # Order here defines the PnxAssetId enum and the resource table, so it must match
     # generate_header's. Both walk atlases, sprites, maps, dialog in that order.
@@ -1142,6 +1359,18 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
                         write_blob(os.path.join(out_dir, out), dialog["blob"])))
         blobs.append(("dialog", out))
 
+    # After dialog, matching the id order in `ordered` -- package.json's media list and
+    # the generated enum have to agree or every asset id shifts.
+    for sg in songs:
+        entries.append(("music", sg["name"],
+                        write_blob(os.path.join(out_dir, sg["out"]), sg["blob"])))
+        blobs.append((sg["name"], sg["out"]))
+
+    for sm in samples:
+        entries.append(("sample", sm["name"],
+                        write_blob(os.path.join(out_dir, sm["out"]), sm["blob"])))
+        blobs.append((sm["name"], sm["out"]))
+
     scenes = build_scenes(man, asset_index, maps)
     if scenes:
         scene_out = project.get("scenes_out", "scenes.bin")
@@ -1152,7 +1381,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
         asset_index["PNX_ASSET_SCENES_SCENES"] = len(ordered) - 1
 
     generate_header(header_path, atlases, sprites, maps, dialog, roles_by_atlas,
-                    len(shared), scenes)
+                    len(shared), scenes, songs, samples)
     print(f"\nheader: {header_path}")
 
     if package:

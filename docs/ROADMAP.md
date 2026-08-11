@@ -182,7 +182,7 @@ stands -- 26.8fps held with no drops, and halving the content is worth a fifth o
 we were spending idle -- but the number is now measured rather than inferred, and the
 inner loop was rewritten off the back of it.
 
-## M4 — Audio
+## M4 — Audio — **DONE** (pending device confirmation)
 
 The largest unknown, and the most valuable thing the framework provides.
 
@@ -192,7 +192,17 @@ The largest unknown, and the most valuable thing the framework provides.
 - SFX with priority and voice stealing
 - Music authored in the manifest, compiled to a resource
 
-Done when: the game has music and effects simultaneously with no underruns.
+**Result.** Mixer, sequencer, generated instruments with ADSR, priority-based voice
+stealing, and capped PCM samples. A 16-row song is 160 bytes; a 120ms effect is 1,936 --
+which is why music is sequenced and PCM is for effects only, enforced by a build error
+rather than a guideline.
+
+Not planned: spoken audio. One second of PCM is 16KB against ~70KB remaining, so it does
+not fit at any quality.
+
+Outstanding: device confirmation that music and effects run together without underruns
+under real load. The case that would break it is a frame arriving seconds late while a
+notification covers the app -- host tests cover the arithmetic, hardware has the last word.
 
 ## M5 — Save
 

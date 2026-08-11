@@ -12,7 +12,7 @@ SRC      = test_core.c test_assets.c test_gfx.c test_audio.c \
            ../src/pnx/core/pnx_arena.c ../src/pnx/core/pnx_fmt.c ../src/pnx/core/pnx_diag.c \
            ../src/pnx/assets/pnx_assets.c \
            ../src/pnx/gfx/pnx_gfx.c ../src/pnx/gfx/pnx_tilemap.c \
-           ../src/pnx/gfx/pnx_sprite.c ../src/pnx/audio/pnx_audio.c \
+           ../src/pnx/gfx/pnx_sprite.c ../src/pnx/audio/pnx_audio.c ../src/pnx/audio/pnx_music.c \
            ../src/pnx/platform/pnx_platform_host.c
 OUT      = build/test_core
 
