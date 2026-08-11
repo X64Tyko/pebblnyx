@@ -18,10 +18,11 @@ budget_bytes = 262144
 # pitch errors at the extremes. The original is Nintendo's composition; this is not it.
 
 [music.theme]
-# Deliberately slow. At 132bpm a row is 113ms, so a 16-row pattern lasted 1.8s and the
-# whole suite was over in seven seconds -- far too fast to judge whether a held note is
-# clean. At 50bpm a row is 300ms, so a note sustained over 8 rows lasts 2.4s.
-tempo = 50
+# Restored to tempo now that the stream is clean. It ran at 50bpm while the mixer was being
+# diagnosed, because a row of 300ms is long enough to hear whether a held note is steady --
+# at 132bpm a row is 113ms and a 16-row pattern is over in 1.8s, too fast to judge. That
+# was a diagnostic setting, not a musical one: the piece is a fanfare and wants the pace.
+tempo = 132
 channels = 4
 
 # A row at 132bpm is 113ms, so every stage has to fit inside that. A release longer than a
