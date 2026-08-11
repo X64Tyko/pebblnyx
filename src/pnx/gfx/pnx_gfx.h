@@ -41,11 +41,16 @@ void pnx_camera_center(PnxCamera *c, int32_t wx, int32_t wy,
 
 void pnx_gfx_clear(PnxTarget *t, uint8_t colour);
 
+// Flip bits for pnx_blit_4bpp. X is 1 so an old `true` still means a horizontal flip.
+#define PNX_FLIP_NONE 0
+#define PNX_FLIP_X    1
+#define PNX_FLIP_Y    2
+
 // Blits a 4bpp image at a screen position. `mirror` flips horizontally, which is how a
 // character faces left with no extra art -- the measured sprite sheets contain a walk
 // cycle in one direction only.
 void pnx_blit_4bpp(PnxTarget *t, const uint8_t *src, const PnxPalette *palette,
-                   int32_t x, int32_t y, int16_t w, int16_t h, bool mirror);
+                   int32_t x, int32_t y, int16_t w, int16_t h, uint8_t flip);
 
 // Draws one metatiled tile: four 8x8 quadrants composed into a 16x16.
 //

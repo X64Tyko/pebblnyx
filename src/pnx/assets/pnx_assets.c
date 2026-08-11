@@ -296,7 +296,9 @@ bool pnx_map_load(PnxMap *out, uint16_t asset_id, const PnxAtlas *atlas) {
   if (payload < 4) return false;
   const uint16_t overrides = (uint16_t)(data[0] | (data[1] << 8));
 
-  const size_t cells = (size_t)w * h;
+  // Two bytes per cell: u16 entries carrying tile index, flips and a reserved palette
+  // field. The blob version guards a stale .bin against this reader.
+  const size_t cells = (size_t)w * h * 2u;
   const size_t expected = 4 + cells + (size_t)overrides * 3
                           + (size_t)warps * sizeof(PnxWarp);
   if (w == 0 || h == 0 || payload != expected) {

@@ -19,7 +19,12 @@ OUT      = build/test_core
 .PHONY: all test test-c test-assets clean
 all: test
 
-$(OUT): $(SRC) $(wildcard ../src/pnx/core/*.h) $(wildcard ../src/pnx/platform/*.h)
+# Every header under src/, not a hand-listed subset. The list used to name only core and
+# platform, so editing pnx_assets.h left a stale binary that segfaulted on blobs the new
+# reader had already been taught to parse -- a failure that looks like a code bug and is not.
+HDRS = $(shell find ../src -name '*.h')
+
+$(OUT): $(SRC) $(HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(SRC) -o $(OUT)
 

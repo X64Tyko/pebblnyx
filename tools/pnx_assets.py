@@ -44,7 +44,7 @@ FLAG_NAMES = {"solid": FLAG_SOLID, "warp": FLAG_WARP}
 # Blob format versions. A mismatch between a stale .bin and a newer runtime is exactly
 # the kind of failure that presents as garbage pixels rather than an error, so every
 # blob is tagged and the runtime checks.
-BLOB_VERSION = 4
+BLOB_VERSION = 5
 MAGIC_ATLAS = b"PA"
 MAGIC_SPRITE = b"PS"
 MAGIC_MAP = b"PM"
@@ -133,7 +133,17 @@ def pack_atlas(root, spec):
             f"atlas {name!r}: region {rx},{ry} {rw}x{rh} tiles of {T}px runs past the "
             f"sheet ({sheet_w}x{sheet_h}px). Region is in TILE units, not pixels.")
 
-    unique, seen, empty = [], {}, 0
+    def flip_x(b):
+        return b"".join(bytes(reversed(b[j * T:(j + 1) * T])) for j in range(T))
+
+    def flip_y(b):
+        return b"".join(bytes(b[(T - 1 - j) * T:(T - j) * T]) for j in range(T))
+
+    # Mirror-aware dedup. A tile that is the horizontal, vertical or 180-degree mirror of
+    # one already kept does not need its own copy -- the map entry carries two flip bits
+    # and the blitter reads the source backwards. Symmetric art is common enough that this
+    # is the cheapest tile saving available: two bits against 128 bytes at 4bpp 16x16.
+    unique, seen, empty, mirrored = [], {}, 0, 0
     for ty in range(ry, ry + rh):
         for tx in range(rx, rx + rw):
             buf = bytearray(T * T)
@@ -144,9 +154,22 @@ def pack_atlas(root, spec):
             if not any(key):
                 empty += 1
                 continue
-            if key not in seen and len(unique) < max_tiles:
-                seen[key] = len(unique)
-                unique.append(key)
+            if key in seen:
+                if seen[key][1]:
+                    mirrored += 1
+                continue
+            if len(unique) >= max_tiles:
+                continue
+            idx = len(unique)
+            unique.append(key)
+            # The true orientation is registered first so it always wins a later exact
+            # match; mirrors only claim keys nothing else has taken.
+            seen[key] = (idx, 0)
+            for variant, bits in ((flip_x(key), 1),
+                                  (flip_y(key), 2),
+                                  (flip_x(flip_y(key)), 3)):
+                if variant not in seen:
+                    seen[variant] = (idx, bits)
 
     if not unique:
         raise BuildError(f"atlas {name!r}: region contains no non-empty tiles")
@@ -163,6 +186,10 @@ def pack_atlas(root, spec):
         fixed.append(t2)
 
     print(f"  atlas {name}: {rw*rh} considered, {empty} empty, {len(fixed)} unique")
+    if mirrored:
+        saved = mirrored * (T * T // 2)
+        print(f"    {mirrored} tile(s) matched a mirror of another and were dropped "
+              f"({saved} bytes saved)")
     if repaired:
         print(f"    NOTE {repaired} tile(s) exceeded {PALETTE_USABLE} colours and were "
               f"reduced -- edit the art to avoid this")
@@ -566,8 +593,8 @@ def compile_map(spec, legend, roles, map_names):
     if w > 255 or h > 255:
         raise BuildError(f"map {name!r}: {w}x{h} exceeds the u8 dimension limit")
 
-    tiles = bytearray(w * h)
-    flags = bytearray(w * h)
+    tiles = bytearray(w * h * 2)   # u16 per cell
+    flags = bytearray(w * h)   # one byte per cell; tiles are u16, see below
     for y, row in enumerate(rows):
         for x, ch in enumerate(row):
             if ch not in legend:
@@ -580,7 +607,13 @@ def compile_map(spec, legend, roles, map_names):
                     f"atlas does not define. That atlas provides: "
                     f"{', '.join(sorted(roles)) or '(no roles -- give it an autopick or '
                                                    '[atlas.semantic] table)'}")
-            tiles[y * w + x] = roles[role]
+            # u16 little-endian: 10 bits of index, then PNX_MAP_FLIP_X / _Y, then four
+            # reserved bits for a per-cell palette. Roles resolve to unmirrored tiles, so
+            # the flip bits are zero today -- the format carries them so a tile picker can
+            # place a mirrored tile without the atlas needing a second copy.
+            entry = roles[role] & 0x03FF
+            tiles[(y * w + x) * 2] = entry & 0xFF
+            tiles[(y * w + x) * 2 + 1] = entry >> 8
             flags[y * w + x] = flag
 
     sx, sy = spec["start"]
@@ -668,7 +701,8 @@ def finish_map(m, tile_defaults, atlas_asset):
     for y in range(h):
         for x in range(w):
             i = y * w + x
-            tile = m["tiles"][i]
+            tile = m["tiles"][i * 2] | (m["tiles"][i * 2 + 1] << 8)
+            tile &= 0x03FF
             if m["flags"][i] != tile_defaults.get(tile, 0):
                 overrides += bytes([x, y, m["flags"][i]])
                 count += 1
@@ -682,7 +716,7 @@ def finish_map(m, tile_defaults, atlas_asset):
             + b"".join(bytes(x) for x in m["warps"]))
     m["blob"] = blob_header(MAGIC_MAP, w, h, len(m["warps"]), atlas_asset) + body
 
-    saved = w * h - len(overrides)
+    saved = w * h - len(overrides)   # flag plane would be 1 byte/cell
     print(f"  map {m['name']}: {count} flag overrides "
           f"({saved} bytes saved over a per-cell plane)")
     return m

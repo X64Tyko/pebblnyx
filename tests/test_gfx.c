@@ -67,9 +67,37 @@ void test_gfx(void) {
 
   // --- mirroring swaps which half is opaque
   pnx_gfx_clear(t, 0x40);
-  pnx_blit_4bpp(t, HALF, &pal, 10, 10, 4, 4, true);
+  pnx_blit_4bpp(t, HALF, &pal, 10, 10, 4, 4, PNX_FLIP_X);
   G_CHECK_EQ(pixel_at(t, 10, 10), 0x40);
   G_CHECK_EQ(pixel_at(t, 13, 10), 0xFF);
+
+  // --- flip Y reads rows from the other end. Checked against a source whose top and
+  // bottom halves differ, because HALF is identical on every row and would pass either way.
+  static const uint8_t TOPBAR[8] = { 0x11, 0x11, 0x11, 0x11, 0x00, 0x00, 0x00, 0x00 };
+  pnx_gfx_clear(t, 0x40);
+  pnx_blit_4bpp(t, TOPBAR, &pal, 10, 10, 4, 4, PNX_FLIP_NONE);
+  G_CHECK_EQ(pixel_at(t, 10, 10), 0xFF);      // row 0 opaque
+  G_CHECK_EQ(pixel_at(t, 10, 13), 0x40);      // row 3 transparent
+
+  pnx_gfx_clear(t, 0x40);
+  pnx_blit_4bpp(t, TOPBAR, &pal, 10, 10, 4, 4, PNX_FLIP_Y);
+  G_CHECK_EQ(pixel_at(t, 10, 10), 0x40);      // now row 3's content
+  G_CHECK_EQ(pixel_at(t, 10, 13), 0xFF);
+
+  // Clipped at the top edge, which is where flip Y is easy to get wrong: the vertical clip
+  // skips destination rows, and the source row has to be counted from the far end AFTER
+  // that skip, not before. At y = -2 the two visible rows read source rows 1 and 0 when
+  // flipped -- both opaque -- and rows 2 and 3 when not, both transparent. Asserting the
+  // pair distinguishes a correct implementation from one that ignores the clip.
+  pnx_gfx_clear(t, 0x40);
+  pnx_blit_4bpp(t, TOPBAR, &pal, 10, -2, 4, 4, PNX_FLIP_Y);
+  G_CHECK_EQ(pixel_at(t, 10, 0), 0xFF);
+  G_CHECK_EQ(pixel_at(t, 10, 1), 0xFF);
+
+  pnx_gfx_clear(t, 0x40);
+  pnx_blit_4bpp(t, TOPBAR, &pal, 10, -2, 4, 4, PNX_FLIP_NONE);
+  G_CHECK_EQ(pixel_at(t, 10, 0), 0x40);
+  G_CHECK_EQ(pixel_at(t, 10, 1), 0x40);
 
   // --- clipping off every edge must draw nothing outside the target and not crash
   pnx_gfx_clear(t, 0x40);

@@ -123,7 +123,7 @@ void pnx_blit_metatile_with(PnxTarget *t, const PnxAtlas *atlas, uint8_t tile,
 }
 
 void pnx_blit_4bpp(PnxTarget *t, const uint8_t *src, const PnxPalette *palette,
-                   int32_t x, int32_t y, int16_t w, int16_t h, bool mirror) {
+                   int32_t x, int32_t y, int16_t w, int16_t h, uint8_t flip) {
   if (!src || !palette) return;
 
   const int16_t th = pnx_target_height(t);
@@ -145,13 +145,16 @@ void pnx_blit_4bpp(PnxTarget *t, const uint8_t *src, const PnxPalette *palette,
     if (x + i1 > row.max_x + 1) i1 = row.max_x + 1 - x;
     if (i1 <= i0) continue;
 
-    const uint8_t *line = src + j * stride;
+    // Flip Y is free: read the source row from the other end. No second span writer, no
+    // per-pixel cost -- only this index changes.
+    const int32_t sj = (flip & PNX_FLIP_Y) ? (h - 1 - j) : j;
+    const uint8_t *line = src + sj * stride;
     const uint8_t *pal = palette->entries;
     uint8_t *dst = row.data + x;
 
     // Two paths rather than a `mirror ?` per pixel. The forward one is the shared
     // span; mirrored cannot use it because destination and source walk opposite ways.
-    if (!mirror) {
+    if (!(flip & PNX_FLIP_X)) {
       span_4bpp(row.data, x, line, pal, w, row.min_x, row.max_x);
     } else {
       // Mirrored: destination walks forward while the source walks back, so the pairing

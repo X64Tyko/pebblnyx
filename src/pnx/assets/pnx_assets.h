@@ -30,7 +30,7 @@
 
 // Every blob carries this, so a stale .bin against a newer runtime is a clean error
 // rather than garbage pixels. Bumped whenever a format changes.
-#define PNX_BLOB_VERSION 4
+#define PNX_BLOB_VERSION 5
 #define PNX_BLOB_HEADER_BYTES 8
 
 // ------------------------------------------------------------------- palettes
@@ -216,12 +216,32 @@ static inline const PnxPalette *pnx_sprite_frame_palette(const PnxSprite *s,
 void pnx_decode_4bpp(const uint8_t *src, const PnxPalette *palette,
                      uint8_t *dst, uint16_t pixels);
 
-static inline uint8_t pnx_map_tile(const PnxMap *m, int32_t x, int32_t y) {
-  return m->tiles[(uint32_t)y * m->w + (uint32_t)x];
+// Map cells are u16, not u8. Ten bits of tile index (1024, up from 255), two flip bits, and
+// four reserved for a per-cell palette index into a future per-map palette table. Doubling
+// the map costs ~1.2KB across the example maps, against 128 bytes for every tile a mirrored
+// pair no longer needs its own copy of.
+#define PNX_MAP_INDEX_MASK 0x03FF
+#define PNX_MAP_FLIP_X     0x0400
+#define PNX_MAP_FLIP_Y     0x0800
+#define PNX_MAP_PALETTE_SHIFT 12
+
+static inline uint16_t pnx_map_entry(const PnxMap *m, int32_t x, int32_t y) {
+  const uint32_t i = ((uint32_t)y * m->w + (uint32_t)x) * 2u;
+  return (uint16_t)(m->tiles[i] | ((uint16_t)m->tiles[i + 1] << 8));
+}
+
+static inline uint16_t pnx_map_tile(const PnxMap *m, int32_t x, int32_t y) {
+  return pnx_map_entry(m, x, y) & PNX_MAP_INDEX_MASK;
+}
+
+// PNX_FLIP_X / PNX_FLIP_Y, ready to hand to pnx_blit_4bpp.
+static inline uint8_t pnx_map_flip(const PnxMap *m, int32_t x, int32_t y) {
+  const uint16_t e = pnx_map_entry(m, x, y);
+  return (uint8_t)(((e & PNX_MAP_FLIP_X) ? 1u : 0u) | ((e & PNX_MAP_FLIP_Y) ? 2u : 0u));
 }
 
 static inline uint8_t pnx_map_flags(const PnxMap *m, int32_t x, int32_t y) {
-  const uint8_t tile = m->tiles[(uint32_t)y * m->w + (uint32_t)x];
+  const uint16_t tile = pnx_map_tile(m, x, y);
   uint8_t flags = tile < m->tile_count ? m->tile_flags[tile] : 0;
 
   // Linear, because overrides are rare by construction: the pipeline picks each tile's
