@@ -268,6 +268,56 @@ in the handler; only visual feedback is frame-quantised. Graded results (perfect
   extend that.** The wider intermediate protects the *product* mid-calculation; the
   result still has to fit. `300 * 200` silently returns −5,536.
 
+## Tile encoding: 16x16 with metatiles, measured against the alternatives
+
+Re-measured after mirror-aware dedup landed, because that change moved the numbers the
+original metatile decision rested on. Five full sheets, mirrors collapsed in every column,
+so the comparison is fair:
+
+| Sheet | Unique 16x16 | Unique 8x8 | Quadrant reuse |
+|---|---|---|---|
+| world | 439 | 1,306 | 1.34x |
+| dungeon | 403 | 1,243 | 1.30x |
+| exterior | 441 | 1,359 | 1.30x |
+| interior | 443 | 1,327 | 1.34x |
+| ship | 367 | 1,050 | 1.40x |
+| **pooled** | **2,093** | **6,285** | **1.33x** |
+
+**Quadrant reuse is 1.33x, not 1.96x.** The earlier figure predates mirror-aware dedup, and
+the two optimisations overlap: a quadrant that is another's mirror was already being
+collapsed before metatiling saw it. Introducing mirror dedup therefore *reduced* what
+metatiling adds -- worth knowing generally, since stacked size optimisations are rarely
+additive.
+
+### Total cost, atlas plus map
+
+Map cells are u16, so a native 8x8 grid needs four times the cells for the same world area.
+`world.png` at three map sizes:
+
+| Map cells | Flat 16x16 | Metatiled | Native 8x8 |
+|---|---|---|---|
+| 768 (32x24) | 57,728 | **46,840** | 47,936 |
+| 3,000 | 62,192 | **51,304** | 65,792 |
+| 12,000 | 80,192 | **69,304** | 137,792 |
+
+**Metatiled 16x16 wins at every scale, and native 8x8 collapses as maps grow.** Four times the
+cells beats any atlas saving the smaller grid can offer -- at 12,000 cells native 8x8 costs
+twice the metatiled encoding. Tile size is already a per-atlas manifest setting, so `tile = 8`
+remains available; it is simply the wrong default for map-heavy content, which an RPG is.
+
+Sprites are unaffected either way: sprite frames carry their own dimensions and are not tied
+to the tile grid. The hero is 16x24.
+
+### What this changed
+
+Metatiles save **14-19%** on full sheets, against a threshold of 25% -- so auto-selection
+could never fire. The threshold was calibrated on 1.96x reuse and is now **0.12**. The 35%
+render cost it buys is affordable: 14.5% of the frame becomes 19.7%, and resources are the
+binding constraint while frame time is not.
+
+On the small carved regions the examples use, reuse is 1.04-1.12x and metatiles still lose --
+correctly declined. The pipeline reports the verdict and the margin on every build.
+
 ## Asset pipeline (M2)
 
 The probe's content through the new pipeline, `examples/overworld`:
@@ -486,6 +536,7 @@ full tilesets (2,175 tiles, 8,700 quadrant slots):
 |---|---|---|---|
 | flat 16x16 @ 4bpp | 2,175 | — | 279,088 B |
 | **metatiles, u16 indices** | 4,436 | 1.96x | **162,215 B (1.72x)** |
+| metatiles, *after* mirror dedup | 6,285 | **1.33x** | see below |
 
 117KB, 45% of the content budget. The palette constraint -- a quadrant must fit its
 tile's palette -- costs almost nothing (4,308 unique without it), because tiles sharing

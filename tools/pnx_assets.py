@@ -66,7 +66,14 @@ TRANSPARENT_INDEX = 0
 
 # Metatiling trades render time for space, so auto-selection needs a threshold rather
 # than "any saving at all". See docs/MEASUREMENTS.md for the device numbers behind it.
-METATILE_MIN_SAVING = 0.25
+#
+# Lowered from 0.25 after measuring the five real sheets WITH mirror-aware dedup: quadrant
+# reuse is 1.30-1.40x, not the 1.96x measured before mirrors existed, because the two
+# optimisations overlap -- a mirrored quadrant pair was already being collapsed. Metatiles
+# now save 14-19% on full sheets, so a 25% gate meant they could never fire. 12% keeps the
+# gate meaningful while letting a real saving through, and the render cost it buys is
+# affordable: 35% more frame time takes us from 14.5% of the budget to 19.7%.
+METATILE_MIN_SAVING = 0.12
 
 DEPTH_4BPP = 4
 DEPTH_6BPP = 6
@@ -204,7 +211,8 @@ def pack_atlas(root, spec):
 def build_metatiles(tiles, pal_of, T, quiet=False):
     """Split each tile into 8x8 quadrants and deduplicate the bank.
 
-    Measured on five real tilesets: 8,700 quadrant slots collapse to 4,436 unique, 1.96x,
+    Measured on five real tilesets: 8,700 quadrant slots collapse to 4,436 unique, 1.96x
+    BEFORE mirror-aware dedup; 1.33x after it, since the two overlap,
     for a total saving of 1.72x against flat tiles. The palette constraint -- a quadrant
     must fit the palette of the tile it belongs to -- costs almost nothing, because tiles
     that share quadrants tend to share palettes anyway (4,308 unique without it).
@@ -261,7 +269,8 @@ def finish_atlas(atlas, tile_flags, shared):
     flags = bytes(tile_flags.get(i, 0) for i in range(len(tiles)))
 
     # Decide by arithmetic, not by the flag alone. Metatile reuse scales with the size
-    # and repetitiveness of a tileset: 1.96x across five full sheets, but only 1.19x on a
+    # and repetitiveness of a tileset: 1.33x across five full sheets with mirrors, but
+    # only 1.04-1.12x on a
     # 64-tile hand-picked region, where the 9-byte definitions can outweigh the saving.
     want = atlas.get("metatiles")
     if want in (None, "auto"):
@@ -273,7 +282,8 @@ def finish_atlas(atlas, tile_flags, shared):
         # Metatiles are NOT free at runtime: measured on device they cost ~35% more
         # frame time (5,100 -> 6,900 us), because each tile row becomes two clipped
         # spans instead of one. So a saving has to be worth that, not merely positive.
-        # 8.6% for 35% render was a bad trade; 42% is not.
+        # 8.6% for 35% render was a bad trade; 14-19% on a real sheet is not, because
+        # resources are the binding constraint here and frame time is not.
         want = saving >= METATILE_MIN_SAVING
         verdict = "chosen" if want else "skipped"
         print(f"    metatiles {verdict}: {meta_size:,} B vs {flat_size:,} B flat "
