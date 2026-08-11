@@ -320,11 +320,34 @@ which makes the index pattern a signature independent of the colours themselves.
 | shape only | 1,430 | 183,040 |
 | **shape + mirrors** | **1,359** | **173,952 (-1.5%)** |
 
-**1.5%, and nearer 1.3% net** once each swap's own palette is counted. The technique is how
-NES and SNES art was built, because palette swapping was a hardware necessity there. These are
-commercial asset packs where every tile was drawn individually, so shapes almost never recur
-across recolours. It would pay on art authored with deliberate swaps -- a content decision,
-not a pipeline one.
+**1.5%, and nearer 1.3% net** once each swap's own palette is counted -- as a *size optimisation
+applied to arbitrary art*. That is the wrong frame to judge it in, and this measurement should
+not be read as a verdict on the feature.
+
+**It is an import affordance, not a compressor.** These are commercial asset packs where every
+tile was drawn individually, so shapes almost never recur. Art authored knowing the pipeline
+collapses recolours looks completely different: export a sheet and its variants, and the second
+one costs a palette instead of a bitmap. The measurement describes the input, not the ceiling.
+
+The economics on *deliberate* variants are large and worth stating, because they are what the
+feature is for:
+
+| | Cost now | With shape dedup |
+|---|---|---|
+| Recoloured 16x16 tile | 128 B | ~0 B + a shared palette |
+| Recoloured sprite (3 frames, 16x24) | 576 B | ~16-32 B |
+| Recoloured 48-tile tileset | 6,144 B | tens of bytes |
+
+**Sprites are the cheap half and the runtime already supports them.** `frame_palette[]` is per
+frame and `PnxSpriteInstance.palette` is per instance, so a palette-swapped enemy already
+renders correctly -- that decision shipped. What never shipped is the authoring side:
+`finish_sprite` performs no frame dedup at all, not even exact, so two recoloured sheets store
+both sets of pixels. Closing that is **pipeline-only work with no engine change**, unlike the
+tile side which still needs the reserved palette bits wired and a per-map palette table.
+
+Two requirements for it to deliver, both learned above: report the saving on every build, since
+a feature whose value depends on artists knowing it exists has to teach itself; and apply the
+colour floor, so an accidental shape collision is not silently merged and reported as intent.
 
 **The match is a colour-to-colour bijection, not an offset.** Each distinct source colour takes
 the next index on first appearance, so two colours can never collapse into one and an arbitrary
