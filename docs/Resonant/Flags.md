@@ -31,6 +31,7 @@ packs to 256-byte chunks, so this is about legibility rather than space.
 | 8 | `opr_escaped` | 07 | **nothing** |
 | 9 | `gear_check` | 05B | 05B |
 | 10 | `mural_seen` | opt B | **nothing** |
+| 11 | `vendor_found` | opt C | shop availability |
 
 ## Write-only flags
 

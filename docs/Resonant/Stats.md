@@ -44,7 +44,8 @@ goes, so choose them for clarity.** Art is where it goes.
 
 **Precision deserves scrutiny.** It makes a stat out of the timing window, which risks
 making the skill expression buyable. The cap of one frame is deliberate -- it should feel
-like forgiveness, never like automation. **Open:** whether it should exist at all.
+like forgiveness, never like automation. **Deferred (post-slice):** whether it should exist at all. Simplest is to leave Precision
+out of the slice entirely and decide once Additions have been played.
 
 ## Formulas
 
@@ -82,7 +83,6 @@ Both must be winnable; see `Slice.md`.
 
 ## Open questions
 
-- Is Instability a real fail state or only pressure? `Combat.md` flags the same thing.
-- Does Precision earn its place?
+- Instability's fail state and Precision are both deferred; see `README.md`.
 - Enemy stats are not tabulated yet and should live in the manifest, so the pipeline can
   validate them and the editor can show them.

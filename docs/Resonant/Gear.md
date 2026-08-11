@@ -47,7 +47,7 @@ display it and this device does not have one.
 Type-1 plating + 40 scrap + intact servo -> Type-3 plating
 ```
 
-**Open:** whether the forge is a place or a portable tool. A place gives Crystal Peaks a
+**Deferred (post-slice):** whether the forge is a place or a portable tool. A place gives Crystal Peaks a
 reason to be a hub; a tool suits a game played in ninety-second sessions on a wrist. Leaning
 portable, and giving up the hub.
 

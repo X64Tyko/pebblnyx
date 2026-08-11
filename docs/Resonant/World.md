@@ -14,7 +14,7 @@ Rules, as the slice establishes them:
 - Constructs can detect Resonance and classify by it -- GRD reads Van positive, Mage negative.
 - Resonance is *stored* in Nodes and Vessels are the mobile form.
 
-**Open, and load-bearing for the full game:** what the Nodes were *for*. The facility
+**Deferred (post-slice), and load-bearing for the full game:** what the Nodes were *for*. The facility
 contained them; the client wants them. Neither reason is stated, and the slice is stronger
 for withholding it. But the answer should exist now, because it determines whether the client
 is a villain or a rival.
@@ -43,6 +43,10 @@ Sector 4 of a research installation. Two zones in the slice:
 - **Outer Ruins** -- rusted, breached, drones scavenging. Atlas `ATLAS_OUTER_RUINS`.
 - **Inner Sanctum** -- intact, powered, defence grid online. Atlas `ATLAS_INNER_SANCTUM`.
 
+The Sanctum still has power, and the commissary vending machine still has stock and a sales
+pitch. That is the zone's thesis in one object: the facility never failed, only its people
+did. Cheap to deliver -- it is a tile, a shop, and some cheerful marketing copy.
+
 The environmental shift is doing narrative work ("No more rusted scrap") and should be visible
 at a glance: different palette, different tile density, different music. It is the cheapest
 possible act break -- a palette swap and a track change read as a whole new place.
@@ -68,7 +72,7 @@ absent is the hook.
 - **The collapse.** Sector 4 becomes a tomb. Duration unstated.
 - **Now.** Van takes the contract.
 
-**Open:** is Van Subject 7? The script strongly implies it and never confirms it, and Van's
+**Deferred (post-slice):** is Van Subject 7? The script strongly implies it and never confirms it, and Van's
 "Subject 7." followed by the Mage's "you're not a subject" plays either way. Deciding is not
 urgent -- but knowing which one you are writing toward is, because it changes whether Van is
 returning to this place or arriving at it.

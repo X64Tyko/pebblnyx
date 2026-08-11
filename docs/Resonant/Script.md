@@ -246,6 +246,23 @@ bool flag_gear_check = false;       // For tutorial tease
     - **VAN:** "Or they were hiding something." (30)
 - **Post-Script:** Gain 3 scrap (hidden loot).
 
+### Optional C: Sanctum Commissary (Merchant / Grind Gate)
+- **Trigger:** Player action facing the vending machine cell (Inner Sanctum, side corridor)
+- **Condition:** `flag_guard_awakened`
+- **Script (first visit):**
+    - **VEND:** "WELCOME, VALUED PERSONNEL! SECTOR 4 COMMISSARY IS PLEASED TO SERVE." (68)
+    - **VAN:** "It's still running." (20)
+    - **KELL:** "Of course it is. The grid never went down -- only the people did." (67)
+    - **VEND:** "TODAY'S SPECIAL: FIELD-GRADE PLATING. ASK ABOUT PAYROLL DEDUCTION!" (67)
+    - **VAN:** "I'll pay in scrap." (19)
+    - **VEND:** "SCRAP ACCEPTED. THANK YOU FOR YOUR CONTINUED SERVICE." (54)
+- **Script (repeat visits):** open shop UI directly, no dialogue.
+- **Post-Script:** `flag_vendor_found = true`. Opens shop. Stocks consumables plus the
+  Sanctum gear set (see `Items.md`). Full set costs 360 scrap against ~45 from normal play --
+  an optional grind, in the spirit of the Millennial Fair.
+
+---
+
 ### Optional B: Faded Mural (Lore)
 - **Trigger:** Facing a wall mural
 - **Condition:** `flag_mage_joined`

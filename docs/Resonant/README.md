@@ -27,10 +27,29 @@ client wants them for something else.
 
 ## Status
 
-`Script.md` is a V1 draft. Everything else here is a first pass written against it, and
-several entries are marked **TBD** where a decision is genuinely open rather than where I
-had nothing to write. Names in particular: the Mage has no name in the script, and OPR's
-meaning is unstated.
+`Script.md` is a V1 draft. Everything else is a first pass written against it. The Mage is
+named **Kell**; `Script.md` still uses the `MAGE` speaker tag and wants a find-and-replace,
+which reflows nothing since both are four characters.
+
+## Deferred until after the slice
+
+Held open deliberately. Each one is a world-building decision that the demo does not need and
+that answering early would only constrain:
+
+| Question | Where | Why it can wait |
+|---|---|---|
+| What the Nodes were *for* | `World.md` | The slice is stronger withholding it. But it decides whether the client is a villain or a rival, so it wants answering before Act II is written. |
+| Is Van Subject 7? | `World.md` | Plays either way as written. Changes whether Van is *returning* to this place or arriving at it. |
+| Six Nodes, or four? | `World.md` | Budget says six do not fit at slice density. A stripped Node the player arrives at too late is a better beat than a sixth dungeon. |
+| Can Instability reach a fail state? | `Combat.md`, `Stats.md` | The slice only needs it to visibly rise. If it never threatens the player, the mechanic is a lie -- but that lie is only exposed over a full game. |
+| Forge: a place or a portable tool? | `Gear.md` | A place gives Crystal Peaks a reason to be a hub; a tool suits ninety-second sessions. The slice has neither. |
+| Do combos cost both turns? | `Combat.md` | One initiating and pulling the other in is more exciting and much harder to telegraph on this screen. |
+| Does Precision earn its place? | `Stats.md` | It makes the timing window buyable. Simplest answer is to leave it out of the slice and decide later. |
+| Who is the client? | `World.md`, `Characters.md` | The final exchange is the hook. It only holds if the player has nothing to guess with. |
+
+**Not deferred:** the `flag_boss_dead` / `flag_boss_defeated` mismatch is a bug, the cold open
+does not exist yet, the four tutorials are named but not designed, and Kell is never wrong
+about anything. Those are slice-blocking.
 
 ## The rule these documents follow
 

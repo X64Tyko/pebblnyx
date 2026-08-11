@@ -55,7 +55,7 @@ menu-only.
 when two characters both have Focus and compatible techs. The script already names one --
 Chain Lightning, unlocked at Event 04 -- and the mid-boss teaches Van-tanks / Mage-supports.
 
-**Open:** whether combos need both characters to spend a turn, or one initiates and the other
+**Deferred (post-slice):** whether combos need both characters to spend a turn, or one initiates and the other
 is pulled in. The second is more exciting and much harder to telegraph on this screen.
 
 ## Resonance (the transformation)
@@ -70,7 +70,7 @@ reduced at Nodes. The player is spending story-health for combat power. That mak
 "34% stability" line mechanical rather than flavour, and gives the six Nodes a gameplay
 reason to be collected beyond plot.
 
-**Open, and it matters:** if Instability never actually threatens the player, the mechanic is
+**Deferred (post-slice), and it matters:** if Instability never actually threatens the player, the mechanic is
 a lie. Decide whether it can reach a fail state, and what that state is.
 
 ## Enemies

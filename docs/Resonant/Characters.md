@@ -25,14 +25,13 @@ flippancy is a working style, not a lack of understanding.
 **Arc across the slice.** Contractor -> unwilling cargo -> someone who chooses the next job.
 The last beat only works if he is never shown *wanting* purpose beforehand.
 
-## The Mage -- **name TBD**
+## Kell
 
-**Tag:** `MAGE` (or a 4-letter name) | **Role:** support, AoE, doors
+**Tag:** `KELL` | **Role:** support, AoE, doors
 
-The script never names her, and she is the character the player spends the most time with.
-Proposed working name: **Kell**. Short tags matter -- the speaker tag is drawn on every
-dialogue page and eats width that the line needs. Any name chosen should be four characters
-or fewer.
+Four characters, which matters: the speaker tag is drawn on every dialogue page and eats width
+the line needs. `Script.md` still uses the `MAGE` tag throughout and wants a pass to replace
+it -- same length, so nothing reflows.
 
 An independent researcher, ten years into studying Resonance, who has never seen a living
 subject survive it. Her interest in Van is genuine and also self-serving, and the script is
@@ -45,7 +44,7 @@ good about not resolving which dominates.
 - Her warmth arrives as concession, never as declaration: "...Fair point." "Fine. A partner.
   For now."
 - She is wrong about something at least once. Currently she never is, which makes her an
-  oracle rather than a person. **Open:** pick the thing she gets wrong.
+  oracle rather than a person. **Open:** pick the thing she gets wrong. Slice-level, not deferred.
 
 ## GRD
 

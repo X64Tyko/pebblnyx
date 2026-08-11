@@ -60,6 +60,7 @@ visible -- currently the slice is dialogue-heavy and this is where that shows.
 | 06 | Terminal log 1 | optional | 0:20 | lore |
 | 05C | Guard's awakening | dialogue | 1:00 | third party member |
 | -- | Corridor, GRD in party | walk, 2 encounters | 1:30 | party switching |
+| -- | Commissary | optional shop | 0:40 | scrap has a use |
 | 06B | Terminal log 2 | optional | 0:30 | Subject 7 |
 | 07 | The Vault | **boss** | 4:00 | **Resonance transformation** |
 | 07B | Realization | dialogue | 0:40 | -- |
@@ -97,6 +98,21 @@ explanation, arriving after the player has felt it.
 **Party switching** is named in 05C's post-script but is not really a tutorial -- it is a
 menu. Introduce it in the corridor after 05C with a fight that a two-member party handles
 badly and a three-member party handles easily.
+
+## The optional grind
+
+The Sanctum commissary is reachable after `05C` and sells a full gear set for 360 scrap
+against the ~45 a normal run yields. This is Chrono Trigger's fair: a player who wants to
+farm drones for fifteen minutes gets something clearly above the curve, and a player who does
+not never learns it was there.
+
+It has to stay genuinely optional in both directions. **The slice must be winnable with zero
+purchases**, and the boss must not become trivial for a player who bought everything -- gear
+should make that fight *faster*, not skippable. Tune the boss to level 6 and let the ceiling
+be speed.
+
+Placing it after `05C` is deliberate: the third party member makes farming efficient enough to
+be tempting rather than tedious.
 
 ## Difficulty and level targets
 
