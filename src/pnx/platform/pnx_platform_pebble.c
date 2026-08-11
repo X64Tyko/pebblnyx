@@ -100,10 +100,19 @@ size_t pnx_platform_resource_read(uint32_t resource_id, size_t offset,
 static bool s_audio_open;
 
 bool pnx_platform_audio_open(PnxAudioFormat format, uint8_t volume) {
+  // Designated initialisers, keyed by our own enum. A positional array silently mapped
+  // every format to the wrong one when the enum was reordered in comment but not in code:
+  // PNX_AUDIO_8KHZ_8BIT opened the device as 8kHz **16-bit**, so it read our 8-bit samples
+  // as 16-bit little-endian and turned every pair into one wrong value. That was the static
+  // and the thrum, and no amount of mixer work could have touched it.
   static const SpeakerPcmFormat map[] = {
-    SpeakerPcmFormat_16kHz_8bit, SpeakerPcmFormat_16kHz_16bit,
-    SpeakerPcmFormat_8kHz_8bit,  SpeakerPcmFormat_8kHz_16bit,
+    [PNX_AUDIO_16KHZ_16BIT] = SpeakerPcmFormat_16kHz_16bit,
+    [PNX_AUDIO_16KHZ_8BIT]  = SpeakerPcmFormat_16kHz_8bit,
+    [PNX_AUDIO_8KHZ_16BIT]  = SpeakerPcmFormat_8kHz_16bit,
+    [PNX_AUDIO_8KHZ_8BIT]   = SpeakerPcmFormat_8kHz_8bit,
   };
+  _Static_assert(sizeof(map) / sizeof(map[0]) == PNX_AUDIO_8KHZ_8BIT + 1,
+                 "format map must cover every PnxAudioFormat");
   if (s_audio_open) return true;
   s_audio_open = speaker_stream_open(map[format], volume);
   return s_audio_open;

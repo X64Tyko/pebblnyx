@@ -113,7 +113,11 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
   const PnxAudioStats *au = pnx_audio_stats();
   const PnxFrameStats *fs = pnx_diag_stats();
   static const char *STATE[] = { "idle", "play", "drain", "?" };
-  static const char *FMT[] = { "16k/8", "16k/16", "8k/8", "8k/16" };
+  // Keyed by the enum, not by position, for the same reason the platform map is.
+  static const char *FMT[] = {
+    [PNX_AUDIO_16KHZ_16BIT] = "16k/16", [PNX_AUDIO_16KHZ_8BIT] = "16k/8",
+    [PNX_AUDIO_8KHZ_16BIT]  = "8k/16",  [PNX_AUDIO_8KHZ_8BIT]  = "8k/8",
+  };
   pnx_format(a->hud, sizeof(a->hud), "%s gap%u/%u lead%u v%u",
              FMT[pnx_audio_format() & 3], au->gap_ms, au->worst_gap_ms,
              pnx_audio_lead(), au->active_voices);

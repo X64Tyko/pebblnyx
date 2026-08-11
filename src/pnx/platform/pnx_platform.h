@@ -73,11 +73,16 @@ size_t pnx_platform_resource_read(uint32_t resource_id, size_t offset,
 // flow-control signal the mixer needs -- write until it stops accepting, and the buffer
 // depth takes care of itself without us modelling it.
 
+// Order is arbitrary and must NOT be relied on: map to the platform's own constants by
+// name, never by position. A positional table here mapped every format to the wrong one.
+//
+// 8-bit is the right choice with an 8-bit mixer -- a 16-bit stream would be the same
+// samples shifted left eight, carrying no extra information for twice the bandwidth.
 typedef enum {
-  PNX_AUDIO_16KHZ_16BIT = 0,   // 32 KB/s; the default, enough headroom to mix into
-  PNX_AUDIO_16KHZ_8BIT,        // 16 KB/s; half the writes, audibly noisier
-  PNX_AUDIO_8KHZ_16BIT,
-  PNX_AUDIO_8KHZ_8BIT,
+  PNX_AUDIO_16KHZ_16BIT = 0,   // 32 KB/s
+  PNX_AUDIO_16KHZ_8BIT,        // 16 KB/s
+  PNX_AUDIO_8KHZ_16BIT,        // 16 KB/s
+  PNX_AUDIO_8KHZ_8BIT,         //  8 KB/s; the default
 } PnxAudioFormat;
 
 bool pnx_platform_audio_open(PnxAudioFormat format, uint8_t volume);

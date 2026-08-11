@@ -734,9 +734,37 @@ metallic.
 difference, so the lead should be chosen for latency -- how long after a trigger a sound is
 heard -- and nothing else.
 
+### The actual cause: a positional format table
+
+All of the above is real, and none of it was the fault being heard. The platform mapped
+our `PnxAudioFormat` to the SDK's `SpeakerPcmFormat` through a **positional array**, while
+the enum's comments had been reordered and its members had not. Every entry was wrong:
+
+| We asked for | Device was opened as |
+|---|---|
+| 16k/16 | 16kHz **8-bit** |
+| 16k/8 | 16kHz **16-bit** |
+| 8k/16 | 8kHz **8-bit** |
+| 8k/8 | 8kHz **16-bit** |
+
+So while the mixer wrote 8-bit samples, the device read them as 16-bit little-endian,
+turning every *pair* of samples into one wrong value. That is the static and the thrum, and
+no amount of work inside the mixer could have touched it. It also explains why the format
+sweep gave the results it did -- the labels and the behaviour were two positions apart.
+
+The fix is designated initialisers keyed by our own enum plus a `_Static_assert` on the
+table's size, so the mapping cannot drift from the enum again. **Never map to a platform
+constant by position.**
+
+The lesson is not about audio. Every measurement in this section was taken *above* the
+platform boundary and every one read correct, because they were correct -- the bug lived in
+the one line that translates our vocabulary into the device's, which is exactly the place a
+platform seam exists to isolate and therefore the last place anything gets checked.
+
 ### Still open
 
-A low thrum behind a single sustained tone, plus an occasional hiccup, survives every
+Whether anything remains once the format mapping is corrected is not yet known. Before the
+fix, a low thrum behind a single sustained tone plus an occasional hiccup survived every
 software variable above. The mixer's own output is verifiably clean: 3 seconds captured on
 the host showed zero sample-to-sample deltas above 6 across 47,679 samples and flat peak
 amplitude in all 148 windows. The speaker reports `Playing` continuously with zero
