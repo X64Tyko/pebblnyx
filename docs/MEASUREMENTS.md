@@ -326,6 +326,32 @@ commercial asset packs where every tile was drawn individually, so shapes almost
 across recolours. It would pay on art authored with deliberate swaps -- a content decision,
 not a pipeline one.
 
+**The match is a colour-to-colour bijection, not an offset.** Each distinct source colour takes
+the next index on first appearance, so two colours can never collapse into one and an arbitrary
+recolour is caught -- green to brown while the outline stays black. An offset would also be
+meaningless here: GColor8 is ARGB2222 packed bit fields, so adding 1 steps blue and then carries
+into green. Numeric proximity has no perceptual meaning.
+
+**Transparency must be pinned to index 0**, not numbered by raster order. With it free, two tiles
+can match where one's transparent pixels align with the other's opaque ones, and storing a single
+bitmap for both renders one with holes. On these sheets pinning changes the count by zero, so the
+requirement is latent rather than benign -- exactly the shape of bug that ships because the test
+data never triggers it.
+
+**And most of the 1.5% is coincidence.** Only 16 signature groups are shared by more than one
+distinct tile, and filtered by how much colour a group actually has:
+
+| Minimum colours | Groups |
+|---|---|
+| >= 2 | 16 |
+| >= 4 | 14 |
+| >= 6 | **3** |
+
+At any threshold where a match plausibly means "the artist recoloured this", there are three. The
+rest are simple low-colour tiles sharing a spatial pattern -- lossless to merge, but not evidence
+of palette-swapped art. An editor reporting these needs a colour floor, or it will claim two
+unrelated flat tiles are related.
+
 Note the measurement trap: mirroring a tile changes raster order, so the signature of a
 mirrored tile is NOT the mirror of its signature. It has to be re-derived per orientation. The
 first attempt got this wrong and reported shape+mirrors as *worse* than exact+mirrors, which is
