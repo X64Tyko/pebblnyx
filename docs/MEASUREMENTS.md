@@ -643,9 +643,29 @@ code -- an L-sample cycle played at `note_hz * L` advances exactly `note_hz` cyc
 second, which the mixer's existing resampling already does.
 
 **No fill-level query exists**, so underrun is inferred from bytes written against elapsed
-time, and feeding is lead-based at 120 ms. Verified in host tests across a simulated 37 ms
-frame cadence: zero deficit, and a stall inside the lead produces none while a stall beyond
-it is reported rather than hidden.
+time, and feeding is lead-based at 60 ms from a dedicated timer. Verified in host tests: a
+stall inside the queue produces no deficit, and one beyond it is reported rather than hidden.
+
+### Static RAM: buffers, not code
+
+The mixer's cost is almost entirely buffers, and it took four of them before anyone looked:
+
+| | Before | After |
+|---|---|---|
+| `.text` | 3,420 | 3,356 |
+| `.bss` | **8,007** | **2,375** |
+| Module total | 11,432 | 5,736 |
+
+The four were an int16 accumulator, an 8-bit output, a 16-bit widening of that output, and a
+copy of whatever the device refused -- 7,168 bytes holding the same signal at four stages.
+One buffer serves all of them: each stage is no wider than the last, so output overwrites the
+accumulator in place, and a short write leaves its remainder where it lies with an index
+marking how far the device got. Chunk also dropped from 1,024 samples to 768, which is still
+ample against the ~512 a 32 ms feed needs at 16 kHz.
+
+Worth generalising: on a platform where `.text` and statics share a 64 KB ceiling, a buffer
+per pipeline stage is the expensive habit, not the code. The example app fell from 21,128 to
+15,420 bytes -- **27% of the whole app** -- with no change to the audio.
 
 
 ## Audio streaming: short writes are normal, discarding them is not

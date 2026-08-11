@@ -27,10 +27,10 @@
 #define PNX_AUDIO_LEAD_MS 60
 #endif
 
-// Scratch samples per feed. One frame at 16 kHz needs ~600, so this covers a frame plus
-// catch-up without a large buffer.
+// Samples per feed, and the size of the mix buffer. Feeds measured ~32ms apart, which at
+// 16kHz is ~512 samples; 768 keeps margin and stays a multiple of the 256-byte quantum.
 #ifndef PNX_AUDIO_CHUNK
-#define PNX_AUDIO_CHUNK 1024
+#define PNX_AUDIO_CHUNK 768
 #endif
 
 // Writes are rounded down to a multiple of this and the remainder is left for next time.
@@ -173,18 +173,24 @@ static void build_wavetable(void) {
 }
 
 static Voice s_voices[PNX_AUDIO_VOICES];
-static int8_t s_scratch[PNX_AUDIO_CHUNK];
 
-// Accumulator, so summing happens at full width and clamps ONCE at the end. Clamping
-// inside the per-voice loop saturates intermediate sums instead of the final one.
-static int16_t s_acc[PNX_AUDIO_CHUNK];
+// One buffer for every stage of a feed: accumulate, output, and hold what the device would
+// not take. Was four buffers holding the same signal -- 7,168 of the module's 8,007 bytes.
+//
+// Each stage fits in place because none is wider than the last. Voices sum as int16, so the
+// sum clamps once at the end rather than saturating intermediates. Output overwrites the
+// accumulator: 16-bit is the same width, 8-bit is half, so writing byte n touches only the
+// entry at n/2, already read. A short write leaves the remainder where it lies and
+// s_carry_head marks how far the device got -- update() returns early while one is pending,
+// so mixing cannot overwrite it.
+//
+// int16 keeps the accumulator aligned, and an int16 array is little-endian in memory on both
+// ARM and the host, which is the byte order the speaker wants -- so 16-bit output needs no
+// conversion.
+static int16_t s_mix[PNX_AUDIO_CHUNK];
 
-// Bytes mixed but not yet accepted by the device. A short write means the buffer is full,
-// which is normal; dropping the remainder puts a hole in the waveform that the mixer cannot
-// regenerate, because voice phases have already advanced.
-static uint8_t s_carry[PNX_AUDIO_CHUNK * 2];
-static uint32_t s_carry_bytes;
-static uint32_t s_carry_head;
+static uint32_t s_carry_bytes;   // bytes in s_mix awaiting the device
+static uint32_t s_carry_head;    // how many it has taken; equal means drained
 
 static PnxAudioStats s_stats;
 
@@ -358,11 +364,11 @@ bool pnx_audio_voice_active(uint8_t voice) {
   return voice < PNX_AUDIO_VOICES && s_voices[voice].active;
 }
 
-// Sums active voices into signed 8-bit. Accumulating in int32 and clamping once at the
-// end keeps intermediate sums from wrapping, which is what makes several loud voices
-// distort rather than invert.
-static void mix(int8_t *out, uint32_t count) {
-  memset(s_acc, 0, sizeof(int16_t) * count);
+// Sums active voices into s_mix, then converts in place to the output format and returns
+// the byte count. Clamping once at the end is what makes several loud voices distort rather
+// than invert.
+static uint32_t mix(uint32_t count) {
+  memset(s_mix, 0, sizeof(int16_t) * count);
   uint8_t active = 0;
 
   for (int v = 0; v < PNX_AUDIO_VOICES; v++) {
@@ -454,44 +460,48 @@ static void mix(int8_t *out, uint32_t count) {
       const int32_t enveloped = (o->stage == ENV_OFF)
           ? sample
           : ((sample * (o->level >> 8)) >> 8);
-      s_acc[n] += (int16_t)((enveloped * o->volume) >> 8);
+      s_mix[n] += (int16_t)((enveloped * o->volume) >> 8);
       o->phase += o->step;
     }
   }
 
+  // Clamped to 8-bit range even for 16-bit output, which then shifts left 8. The mixer has
+  // more resolution than that now the accumulator is the output buffer, but widening the
+  // range would change the loudness of every existing instrument.
+  int8_t *out8 = (int8_t *)s_mix;
   for (uint32_t n = 0; n < count; n++) {
-    int32_t v = s_acc[n] >> MIX_HEADROOM_SHIFT;
+    int32_t v = s_mix[n] >> MIX_HEADROOM_SHIFT;
 
     if (s_lp_a) {
       // y += (x - y) * a. Percussion still reads as a hit: noise is broadband and its
-      // transient survives a gentle slope, which is why this does not need to spare it.
+      // transient survives a gentle slope.
       s_lp += ((v << 8) - s_lp) * s_lp_a >> 16;
       v = s_lp >> 8;
     }
 
-    out[n] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
+    const int8_t c = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
+    if (s_16bit) s_mix[n] = (int16_t)(c << 8);   // same entry, read above
+    else         out8[n]  = c;                   // byte n lives in entry n/2, already read
   }
+
   s_stats.active_voices = active;
+  return s_16bit ? count * 2u : count;
 }
 
-// Hands bytes to the device and keeps whatever it would not take.
-static void offer(const uint8_t *data, uint32_t bytes) {
-  const size_t wrote = pnx_platform_audio_write(data, bytes);
+// Hands the freshly mixed bytes to the device. A short write is normal -- it means the
+// buffer is full -- and the tail must not be dropped: dropped samples are a hole in the
+// waveform the mixer cannot regenerate, because the voice phases have moved on. It stays
+// in s_mix and s_carry_head records where the device stopped.
+static void offer(uint32_t bytes) {
+  const size_t wrote = pnx_platform_audio_write(s_mix, bytes);
   s_stats.written += (uint32_t)wrote;
+
   if (wrote < bytes) {
     // The first short write reveals the buffer depth, which the device will not tell us.
     if (s_stats.capacity == 0) s_stats.capacity = s_stats.written;
     s_stats.short_writes++;
-    const uint32_t left = bytes - (uint32_t)wrote;
-    // Carry the tail rather than dropping it: dropped samples are a hole in the waveform,
-    // and the mixer cannot regenerate them because the voice phases have moved on.
-    if (left <= sizeof(s_carry)) {
-      memmove(s_carry, data + wrote, left);
-      s_carry_bytes = left;
-      s_carry_head = 0;
-    } else {
-      s_carry_bytes = s_carry_head = 0;
-    }
+    s_carry_bytes = bytes;
+    s_carry_head = (uint32_t)wrote;
   } else {
     s_carry_bytes = s_carry_head = 0;
   }
@@ -537,7 +547,7 @@ void pnx_audio_update(uint32_t now_ms) {
   // would reorder the stream.
   if (s_carry_bytes > s_carry_head) {
     const uint32_t left = s_carry_bytes - s_carry_head;
-    const size_t wrote = pnx_platform_audio_write(s_carry + s_carry_head, left);
+    const size_t wrote = pnx_platform_audio_write((const uint8_t *)s_mix + s_carry_head, left);
     s_stats.written += (uint32_t)wrote;
     s_carry_head += (uint32_t)wrote;
     if (s_carry_head < s_carry_bytes) {
@@ -562,23 +572,13 @@ void pnx_audio_update(uint32_t now_ms) {
   const uint32_t samples = s_16bit ? want_bytes / 2u : want_bytes;
   if (samples == 0) return;
 
-  mix(s_scratch, samples);
+  const uint32_t out_bytes = mix(samples);
   s_stats.feeds++;
   if (samples < s_stats.feed_min || s_stats.feed_min == 0)
     s_stats.feed_min = (uint16_t)samples;
   if (samples > s_stats.feed_max) s_stats.feed_max = (uint16_t)samples;
 
-  if (s_16bit) {
-    static uint8_t wide[PNX_AUDIO_CHUNK * 2];
-    for (uint32_t i = 0; i < samples; i++) {
-      const int16_t v = (int16_t)(s_scratch[i] << 8);
-      wide[i * 2] = (uint8_t)(v & 0xFF);
-      wide[i * 2 + 1] = (uint8_t)((v >> 8) & 0xFF);
-    }
-    offer(wide, samples * 2u);
-  } else {
-    offer((const uint8_t *)s_scratch, samples);
-  }
+  offer(out_bytes);
 }
 
 // a = 1 - exp(-2*pi*fc/rate), approximated as 2*pi*fc/(rate + 2*pi*fc) which is accurate

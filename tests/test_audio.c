@@ -141,4 +141,71 @@ void test_audio(void) {
   pnx_audio_stop_all();
   pnx_audio_shutdown();
   AU_CHECK(!pnx_platform_audio_is_open());
+
+  // --- the waveform itself, across feed boundaries
+  //
+  // A click is a step discontinuity, and the seam between one feed and the next is where
+  // buffer bugs put one. Every earlier click was found by ear on device; this catches the
+  // same class in a second. Checked on a sustained triangle because it has a known maximum
+  // slope -- 440Hz at 16kHz is 36 samples a cycle, so ~5.6 per step. Percussion is noise and
+  // has no bound worth asserting.
+  pnx_audio_shutdown();
+  AU_CHECK(pnx_audio_init(PNX_AUDIO_16KHZ_8BIT, 60));
+  const PnxEnvelope flat = { .attack_ms = 1, .decay_ms = 1, .sustain = 255, .release_ms = 1 };
+  pnx_audio_note(PNX_WAVE_TRIANGLE, 69, 255, &flat, 0);   // A4
+
+  // The host keeps only the most recent block, so the running total is what says whether
+  // there is new data and whether any was missed. Without that, an update which skips its
+  // write leaves the same block in place and gets compared against itself -- a fake seam.
+  int32_t worst_delta = 0, prev = 0;
+  uint32_t sampled = 0, boundaries = 0;
+  bool have_prev = false;
+  uint32_t seen_total = pnx_host_audio_total();
+  for (uint32_t t = 0; t <= 3000; t += 10) {
+    pnx_audio_update(t);
+    const uint32_t total = pnx_host_audio_total();
+    if (total == seen_total) continue;                 // nothing written this update
+
+    size_t bytes = 0;
+    const int8_t *block = (const int8_t *)pnx_host_audio_last(&bytes);
+    const bool contiguous = (total - seen_total) == bytes;   // no earlier write was missed
+    seen_total = total;
+    if (!block || bytes == 0) continue;
+    if (contiguous) boundaries++; else have_prev = false;
+
+    for (size_t i = 0; i < bytes; i++) {
+      if (have_prev) {
+        const int32_t d = block[i] > prev ? block[i] - prev : prev - block[i];
+        if (d > worst_delta) worst_delta = d;
+      }
+      prev = block[i];
+      have_prev = true;
+      sampled++;
+    }
+  }
+  AU_CHECK(boundaries > 50);            // the seams were actually exercised
+  AU_CHECK(sampled > 20000);
+  AU_CHECK(worst_delta <= 12);
+  if (worst_delta > 12) printf("    worst sample-to-sample delta %d over %u samples\n",
+                              (int)worst_delta, sampled);
+
+  // The in-place conversion must leave 16-bit output as the 8-bit waveform shifted left 8.
+  // Reading an entry after writing the byte that shares it would corrupt exactly this.
+  pnx_audio_shutdown();
+  AU_CHECK(pnx_audio_init(PNX_AUDIO_16KHZ_16BIT, 60));
+  pnx_audio_note(PNX_WAVE_TRIANGLE, 69, 255, &flat, 0);
+  pnx_audio_update(0);
+  size_t wide_bytes = 0;
+  const int16_t *wide = (const int16_t *)pnx_host_audio_last(&wide_bytes);
+  AU_CHECK(wide != NULL && wide_bytes >= 64);
+  if (wide && wide_bytes >= 64) {
+    bool clean = true;
+    for (size_t i = 0; i < wide_bytes / 2; i++) {
+      if ((wide[i] & 0xFF) != 0) clean = false;      // low byte must be zero: c << 8
+    }
+    AU_CHECK(clean);
+  }
+
+  pnx_audio_stop_all();
+  pnx_audio_shutdown();
 }
