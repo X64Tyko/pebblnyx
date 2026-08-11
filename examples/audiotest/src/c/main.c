@@ -25,6 +25,7 @@ typedef struct {
 
   bool ready;
   bool music_on;
+  bool sfx_on;      // auto-firing effects; off by default so the tone is clean
   uint32_t ticks, accumulator_ms;
   uint32_t next_auto_ms;
   char hud[48];
@@ -53,12 +54,13 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
   PnxEvent ev;
   while (pnx_platform_poll_event(&ev)) {
     if (ev.type != PNX_EVENT_BUTTON_DOWN) continue;
-    if (ev.button == PNX_BUTTON_SELECT && a->laser) {
-      // Priority 4: an effect must be able to steal a channel from the music, which
-      // holds priority 1. If it cannot, the melody silences the gameplay.
-      pnx_audio_play_pri(a->laser, a->laser_len, PNX_AUDIO_NO_LOOP, a->laser_hz,
-                         255, 4, NULL);
+    if (ev.button == PNX_BUTTON_SELECT) {
+      // Toggles the unattended effects. Default off, so what you hear on startup is the
+      // mixer and nothing else -- an artefact is then attributable without argument.
+      a->sfx_on = !a->sfx_on;
+      a->next_auto_ms = now + 400;
     } else if (ev.button == PNX_BUTTON_DOWN && a->boom) {
+      // One shot, on demand, regardless of the auto setting.
       pnx_audio_play_pri(a->boom, a->boom_len, PNX_AUDIO_NO_LOOP, a->boom_hz,
                          255, 5, NULL);
     } else if (ev.button == PNX_BUTTON_UP) {
@@ -76,12 +78,10 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
     a->ticks++;
   }
 
-  // Effects fire unattended only during the density and all-four patterns. Patterns 0 and
-  // 1 are controls -- 0 is a single sustained voice with no row events, 1 is one note per
-  // row -- and spraying effects over them defeats the whole point: an artefact heard
-  // during a control has to be attributable to the control, not to a laser.
-  const bool stress = (pnx_music_pattern() >= 2);
-  if (a->ready && stress && now >= a->next_auto_ms) {
+  // Unattended effects, off unless asked for. Pattern 0 is a control -- one voice, one
+  // note, no row events -- and effects sprayed over it make any artefact heard there
+  // unattributable, which is the one thing a control has to rule out.
+  if (a->ready && a->sfx_on && now >= a->next_auto_ms) {
     static bool alternate;
     alternate = !alternate;
     if (alternate && a->laser) {
@@ -92,9 +92,9 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
                          200, 5, NULL);
     }
     a->next_auto_ms = now + 1400;
-  } else if (!stress) {
-    // Do not let the timer accumulate while suppressed, or the first stress pattern gets
-    // a burst of everything that was owed.
+  } else if (!a->sfx_on) {
+    // Do not let the timer accumulate while off, or switching on delivers a burst of
+    // everything that was owed.
     a->next_auto_ms = now + 1400;
   }
 
@@ -116,7 +116,8 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
              fs ? (unsigned)(fs->fps_x10 / 10) : 0,
              fs ? (unsigned)(fs->fps_x10 % 10) : 0,
              fs ? (unsigned)fs->work_us : 0,
-             a->music_on ? "music" : "silent");
+             a->music_on ? (a->sfx_on ? "mus+sfx" : "music")
+                         : (a->sfx_on ? "sfx" : "silent"));
 
   if (a->ticks % 50 == 0) {
     if (a->ticks == 50) pnx_diag_flush();
@@ -134,9 +135,8 @@ static void draw_text(void *ctx) {
   pnx_platform_text_draw(a->hud, PNX_TEXT_SMALL, 0xFF, 6, 56, 190, 20);
   pnx_platform_text_draw(a->hud2, PNX_TEXT_SMALL, 0xFF, 6, 76, 190, 20);
   pnx_platform_text_draw(a->hud3, PNX_TEXT_SMALL, 0xFF, 6, 96, 190, 20);
-  pnx_platform_text_draw("0 one tone   1 chromatic\n2 density    3 all four\n"
-                        "effects auto-fire in 2,3\n\n"
-                        "SELECT laser  DOWN boom\nUP music on/off",
+  pnx_platform_text_draw("0 one tone   1 chromatic\n2 density    3 all four\n\n"
+                        "UP     music on/off\nSELECT sfx auto (off)\nDOWN   one explosion",
                         PNX_TEXT_SMALL, 0xFF, 6, 118, 190, 100);
 }
 
