@@ -294,6 +294,54 @@ would otherwise churn.
 colour art, and three of seven platforms need it. Decide whether those platforms get their
 own art or are simply out of scope before building the 1-bit path, not after.
 
+### Author once: one game, one build, seven watches
+
+The goal is not seven ports. It is one set of sprites, one set of game logic, one
+`pebble build`, and a single `.pbw` that installs everywhere. What varies, and how each
+difference is absorbed without the game knowing:
+
+| Varies | Absorbed by | Art or logic change |
+|---|---|---|
+| Screen 144x168 to 260x260 | camera shows more or less world | none |
+| Round corners | safe-area rect from per-row bounds | none |
+| 64 colour vs 1-bit | **palette ink mask** (below) | none |
+| Speaker or not | API stubs to a no-op | none |
+| Touch or not | abstract actions, not buttons or taps | none |
+| 24 KB app RAM (`aplite`) | nothing -- see below | out of scope |
+
+**1-bit is a palette property, not an art asset.** This falls out of a decision already
+made: art is 4bpp indexed, so shape and colour are already separate. A 1-bit platform needs
+one extra field per palette -- a 16-bit mask saying which of the 16 indices are ink and which
+are paper. Two bytes. Index 0 stays transparent as it already is, so nothing else changes:
+tile and sprite blobs ship **byte-identical to all seven platforms**, and only the palette
+resource and the span writer differ. The pipeline proposes a split by luminance and the
+editor lets you flip individual entries against a live 1-bit preview, because thresholding
+by luminance alone will vanish any figure that matches its ground.
+
+Note what this avoids. Per-pixel thresholding needs separate 1-bit art; dithering survives
+on backgrounds but shimmers on anything that moves and destroys readability at 16x16. Neither
+is necessary when the decision can be made 16 entries at a time.
+
+**Blocker to clear first: opt-outs must stub, not delete.** `PNX_USE_AUDIO=0` removes the
+declarations, so game code calling `pnx_music_play` fails to compile rather than doing
+nothing -- which forces `#if` into game logic and breaks author-once immediately. The same
+fault already breaks `PNX_USE_DIAGNOSTICS=0` in two of the three examples. The rule the
+framework needs: **a disabled subsystem keeps its entire API as inline no-ops returning a
+safe value.** Cheap to do, and it is what makes `gabbro` having no speaker a non-event for
+the game.
+
+**Packaging.** One bundle via `targetPlatforms` plus the SDK's per-platform resources. The
+pipeline has to budget per platform rather than once, since the appstore resource cap is
+131,072 bytes on `aplite` against 262,144 everywhere else.
+
+**What author-once cannot absorb.** `aplite`'s 24 KB is a hard exclusion, not a tuning
+problem. And screen size is only free for a game that can show more or less world -- a fixed
+play area would have to letterbox or scale, and integer scaling is the only kind that stays
+crisp. An RPG absorbs this; a puzzle grid would not.
+
+Done when: one game source with no `#if` in it, one build, one `.pbw`, running on `emery`,
+`gabbro` and `flint` -- colour rect, colour round, and 1-bit.
+
 ---
 
 ## Editor track (parallel)
