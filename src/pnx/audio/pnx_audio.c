@@ -33,6 +33,16 @@
 #define PNX_AUDIO_CHUNK 1024
 #endif
 
+// Writes are rounded down to a multiple of this and the remainder is left for next time.
+//
+// Without it the write size drifts every feed as the lead target moves -- 253 bytes, then
+// 259, then 247 -- and a device consuming in fixed blocks has to straddle them. Uniform
+// aligned writes cost nothing but a few bytes of latency and remove a per-feed seam as a
+// possible source of clicking.
+#ifndef PNX_AUDIO_QUANTUM
+#define PNX_AUDIO_QUANTUM 64
+#endif
+
 // One cycle per waveform, generated once at init. 64 samples is enough for the harmonics
 // this speaker can reproduce and keeps the tables in cache.
 #define CYCLE 64
@@ -507,6 +517,11 @@ void pnx_audio_update(uint32_t now_ms) {
   uint32_t want_bytes = target - s_stats.written;
   const uint32_t max_bytes = s_16bit ? PNX_AUDIO_CHUNK * 2u : PNX_AUDIO_CHUNK;
   if (want_bytes > max_bytes) want_bytes = max_bytes;
+
+  // Align down, and skip the feed entirely rather than writing a runt. The next call will
+  // have a whole quantum to offer, which keeps every write the same shape.
+  want_bytes -= want_bytes % PNX_AUDIO_QUANTUM;
+  if (want_bytes == 0) return;
 
   const uint32_t samples = s_16bit ? want_bytes / 2u : want_bytes;
   if (samples == 0) return;
