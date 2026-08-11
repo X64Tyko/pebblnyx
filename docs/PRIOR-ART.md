@@ -97,7 +97,71 @@ palettes, so a 1-bit target remaps palette entries rather than needing separate 
 Before building our 1-bit path, read how theirs handles it. It is the one place where prior art
 on this platform is ahead of us, and re-deriving it would be a waste.
 
+## Pebblemon's actual footprint
+
+Read from the `.pbw` committed in its repo -- shipped binaries, not a build of mine.
+`virtual_size` is at offset `0x80` in the app header and is the number directly comparable to
+our size report. This version targets four platforms and predates `emery`.
+
+| Platform | `virtual_size` (static RAM) | Resources (flash) |
+|---|---|---|
+| `aplite` | **13,972** | 19,302 |
+| `diorite` | ~13,976 | 19,302 |
+| `basalt` | **18,806** | 19,327 |
+| `chalk` | ~18,882 | 19,327 |
+
+**Only 154 bytes of that is `.bss`** on basalt -- `virtual_size` 18,806 against `load_size`
+18,652. Everything else the game needs is heap, which is what allocating VRAM, tilemaps and
+OAM in the constructor buys. Independent confirmation of the shape.
+
+### Resource composition
+
+Uncompressed on disk; the pbpack ships at 19,302 after compression. Tiles are 8x8 at 2bpp,
+so **16 bytes each**.
+
+| | Bytes | Tiles |
+|---|---|---|
+| Spritesheet | 8,640 | **540** |
+| World tilesheet | 2,592 | **162** |
+| Animation tilesheet | 304 | **19** |
+| **All tile data** | **11,536** | **721** |
+| Five area maps + location table | 3,514 | |
+| Two fonts (TTF) | 9,060 | |
+| Menu icon | 956 | |
+| Total on disk | 25,066 | |
+
+### Persistence
+
+Two keys, written with a single `persist_write_data` each: one save struct and one settings
+struct. Against our measured ~7 ms per persist call regardless of size, that is about as cheap
+as saving gets.
+
+## What this says about our headroom
+
+**Their entire game is 18,806 bytes of static RAM. Our framework demo is 13,384.** That is the
+sobering comparison and it is a fair one -- though ours includes a software audio mixer, which
+Pebblemon has no equivalent of, and theirs includes a complete game.
+
+Against `basalt`'s 64 KB that is 29% for a finished game. Against `emery`'s 128 KB it would be
+15%. **Static RAM is not what will run out.**
+
+**Fonts are 9,060 bytes -- 36% of their resource payload**, the single largest line item, and
+bigger than every tile in the game combined. We have no font strategy written down anywhere,
+and `Resonant/Budget.md` guesses 4,000 bytes for "UI and font glyphs". That guess is probably
+low by a factor of two, and it is the number most worth replacing with a measurement.
+
+**Our tiles cost 8x theirs, each.** 4bpp at 16x16 is 128 bytes per tile; 2bpp at 8x8 is 16.
+Per unit of screen area we pay 2x for the extra colour depth, and we lose again on reuse
+because larger tiles deduplicate worse -- their whole overworld is 162 tiles in 2,592 bytes,
+where our 48-tile carve is ~6,144.
+
+That gap is exactly what metatiles close: the pipeline already composes 16x16 tiles from
+deduplicated 8x8 quadrants and measured **1.96x reuse on full sheets** against 1.19x on the
+small carves used so far, which is why it currently declines. **Their engine is natively 8x8,
+which is the entire reason their art budget goes so far.** Once real tilesets exist, metatiles
+stop being an optimisation and become the thing that makes the art budget work.
+
 ## Not measured
 
-Pebblemon's total app footprint and frame rate. Both would need the whole app built and run,
-and the figures above are about the renderer, which is the question that was asked.
+Pebblemon's frame rate, and its heap high-water mark. Both need the app built and run on
+device.
