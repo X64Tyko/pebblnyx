@@ -307,6 +307,46 @@ remains available; it is simply the wrong default for map-heavy content, which a
 Sprites are unaffected either way: sprite frames carry their own dimensions and are not tied
 to the tile grid. The hero is 16x24.
 
+### Palette-swap dedup: sound idea, wrong art
+
+A tile that is another tile recoloured needs no second bitmap -- store the shape once and let
+each use name its own palette. Detected by numbering colours in first-appearance raster order,
+which makes the index pattern a signature independent of the colours themselves.
+
+| Dedup key | Tiles | Bytes |
+|---|---|---|
+| exact pixels | 1,451 | 185,728 |
+| exact + mirrors (current) | 1,380 | 176,640 |
+| shape only | 1,430 | 183,040 |
+| **shape + mirrors** | **1,359** | **173,952 (-1.5%)** |
+
+**1.5%, and nearer 1.3% net** once each swap's own palette is counted. The technique is how
+NES and SNES art was built, because palette swapping was a hardware necessity there. These are
+commercial asset packs where every tile was drawn individually, so shapes almost never recur
+across recolours. It would pay on art authored with deliberate swaps -- a content decision,
+not a pipeline one.
+
+Note the measurement trap: mirroring a tile changes raster order, so the signature of a
+mirrored tile is NOT the mirror of its signature. It has to be re-derived per orientation. The
+first attempt got this wrong and reported shape+mirrors as *worse* than exact+mirrors, which is
+impossible for a strictly more aggressive key -- the contradiction is what exposed the bug.
+
+### Where these optimisations live
+
+Each one is pipeline analysis plus one field in the map entry plus a few lines in the blitter.
+The pipeline can only exploit redundancy the map format can express:
+
+| Optimisation | Pipeline | Map entry | Blitter |
+|---|---|---|---|
+| Mirror dedup | yes | flip bits | done |
+| Metatiles | yes | atlas-level | done |
+| Palette swap | yes | palette bits (reserved) | **not wired** |
+
+`tile_palette[]` holds one palette per tile, so two cells sharing a shape with different
+palettes need the cell to carry the palette. That is what the four reserved bits are for, and
+`pnx_tilemap_draw` ignores them today. Four bits is fifteen overrides, against 37 merged
+palettes -- so it would want a per-map palette table, which is the GBC's 8-per-bank model.
+
 ### What this changed
 
 Metatiles as implemented save **9-18%** depending on map size, against a threshold of 25% --
