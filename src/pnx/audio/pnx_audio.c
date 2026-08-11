@@ -98,9 +98,13 @@ static void build_wavetable(void) {
   for (int i = 0; i < CYCLE; i++) {
     s_wavetable[PNX_WAVE_SQUARE][i] = (int8_t)(i < CYCLE / 2 ? 100 : -100);
     s_wavetable[PNX_WAVE_SAW][i] = (int8_t)((i * 200 / CYCLE) - 100);
-    s_wavetable[PNX_WAVE_TRIANGLE][i] = (int8_t)(i < CYCLE / 2
-        ? (i * 400 / CYCLE) - 100
-        : 100 - ((i - CYCLE / 2) * 400 / CYCLE));
+    // Symmetric about the midpoint, so the two halves meet without a step. The previous
+    // form ramped to +93 then restarted at +100, putting a discontinuity at each turning
+    // point -- audible as buzz on what should be the smoothest waveform available.
+    const int tri = (i < CYCLE / 2)
+        ? (i * 2 * 200 / CYCLE) - 100
+        : 100 - ((i - CYCLE / 2) * 2 * 200 / CYCLE);
+    s_wavetable[PNX_WAVE_TRIANGLE][i] = (int8_t)tri;
     // xorshift, so the noise table is identical on every run and in every build --
     // reproducible audio matters for the same reason reproducible simulation does.
     rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
@@ -312,15 +316,25 @@ static void mix(int8_t *out, uint32_t count) {
     active++;
 
     for (uint32_t n = 0; n < count; n++) {
-      const uint32_t index = o->phase >> 16;
+      uint32_t index = o->phase >> 16;
+
       if (index >= o->samples) {
         if (o->loop_start == PNX_AUDIO_NO_LOOP) { o->active = false; break; }
+
         // Subtract the loop length rather than assigning the loop point, so the
         // fractional phase survives the wrap. Assigning discarded the overshoot every
         // cycle, which quantised the period to a whole number of samples: a 440Hz note
-        // came out at 432Hz, 32 cents flat, and the error grew with pitch.
+        // came out at 432Hz, 32 cents flat.
         o->phase -= (o->samples - o->loop_start) << 16;
-        continue;
+        index = o->phase >> 16;
+
+        // Re-read and carry on rather than `continue`. Skipping the iteration left this
+        // output sample at zero -- a one-sample dropout on every wrap, so 440 of them per
+        // second on a 440Hz note. Because the wrap drifts against the sample grid, which
+        // samples got zeroed beat against the tone, and that is heard as pulsing. It was
+        // audible on a single sustained voice, which is exactly what the control pattern
+        // was built to isolate.
+        if (index >= o->samples) { o->active = false; break; }   // pathological step
       }
 
       // Envelope advance. One add and a stage test per sample, which at 600 samples x
@@ -337,7 +351,13 @@ static void mix(int8_t *out, uint32_t count) {
               o->rate = o->env.decay_ms
                   ? -(int32_t)(((1 << 16) - target) / ((o->env.decay_ms * sr) / 1000 + 1))
                   : 0;
-              if (!o->env.decay_ms) { o->level = target; o->stage = ENV_SUSTAIN; }
+              // rate must be cleared too, or sustain keeps applying the attack ramp and
+              // the note swells indefinitely.
+              if (!o->env.decay_ms) {
+                o->level = target;
+                o->rate = 0;
+                o->stage = ENV_SUSTAIN;
+              }
             }
             break;
           case ENV_DECAY:
