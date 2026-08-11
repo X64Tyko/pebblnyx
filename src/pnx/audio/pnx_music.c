@@ -20,18 +20,84 @@ static uint8_t s_row;
 static uint32_t s_next_row_ms;
 static uint8_t s_channel_voice[PNX_MUSIC_CHANNELS];
 
+// Instruments are decoded into a small fixed table rather than pointed at in the blob,
+// because PnxEnvelope has padding a packed blob does not -- casting onto it would read
+// whatever the compiler chose to leave between fields.
+#define MAX_INSTRUMENTS 16
+
+static PnxEnvelope s_env[MAX_INSTRUMENTS];
+static uint8_t s_wave[MAX_INSTRUMENTS];
+
 bool pnx_music_load(PnxSong *out, uint16_t asset_id) {
-  // Format after the header (patterns, order length, rows, instruments in bytes 3..6):
-  //   u16 tempo, u8 channels, u8 pad
-  //   instrument_count * (waveform, attack_lo, attack_hi, decay_lo, decay_hi,
-  //                       sustain, release_lo, release_hi)   -- 8 bytes each
-  //   order_length bytes
-  //   pattern_count * rows_per_pattern * channels * 2 bytes
-  (void)out; (void)asset_id;
-  // Loading is wired in the same shape as the other assets; the pipeline emits this in
-  // pnx_assets.py. Kept separate from the sequencer so a game can also build a song in
-  // memory, which is what the tests do.
-  return false;
+  uint8_t patterns = 0, order_len = 0, rows = 0, instruments = 0;
+  size_t payload = 0;
+  const uint8_t *data = pnx_blob_load(asset_id, "PN", &patterns, &order_len, &rows,
+                                     &instruments, &payload);
+  if (!data) return false;
+
+  if (patterns == 0 || order_len == 0 || rows == 0 || instruments == 0) {
+    pnx_log("music %u: empty song (%u patterns, %u order, %u rows, %u instruments)",
+            asset_id, patterns, order_len, rows, instruments);
+    return false;
+  }
+  if (instruments > MAX_INSTRUMENTS) {
+    pnx_log("music %u: %u instruments, PNX_MUSIC max is %u",
+            asset_id, instruments, MAX_INSTRUMENTS);
+    return false;
+  }
+
+  // u16 tempo, u8 channels, u8 pad, then instruments, order, patterns.
+  if (payload < 4) return false;
+  const uint16_t tempo = (uint16_t)(data[0] | (data[1] << 8));
+  const uint8_t channels = data[2];
+  if (channels != PNX_MUSIC_CHANNELS) {
+    pnx_log("music %u: %u channels, the sequencer has %u",
+            asset_id, channels, PNX_MUSIC_CHANNELS);
+    return false;
+  }
+
+  const size_t inst_bytes = (size_t)instruments * 8u;
+  const size_t order_bytes = ((size_t)order_len + 3u) & ~(size_t)3u;
+  const size_t row_bytes = (size_t)patterns * rows * channels * 2u;
+  const size_t expected = 4 + inst_bytes + order_bytes + row_bytes;
+  if (payload != expected) {
+    pnx_log("music %u: needs %u bytes, blob has %u",
+            asset_id, (unsigned)expected, (unsigned)payload);
+    return false;
+  }
+
+  const uint8_t *ins = data + 4;
+  for (uint8_t i = 0; i < instruments; i++) {
+    const uint8_t *e = ins + (size_t)i * 8u;
+    if (e[0] >= PNX_WAVE_COUNT) {
+      pnx_log("music %u: instrument %u has waveform %u", asset_id, i, e[0]);
+      return false;
+    }
+    s_wave[i] = e[0];
+    s_env[i].attack_ms = (uint16_t)(e[1] | (e[2] << 8));
+    s_env[i].decay_ms = (uint16_t)(e[3] | (e[4] << 8));
+    s_env[i].sustain = e[5];
+    s_env[i].release_ms = (uint16_t)(e[6] | (e[7] << 8));
+  }
+
+  out->order = ins + inst_bytes;
+  out->rows = out->order + order_bytes;
+  out->instruments = s_env;
+  out->waveforms = s_wave;
+  out->pattern_count = patterns;
+  out->order_length = order_len;
+  out->rows_per_pattern = rows;
+  out->instrument_count = instruments;
+  out->tempo_bpm = tempo;
+
+  for (uint8_t i = 0; i < order_len; i++) {
+    if (out->order[i] >= patterns) {
+      pnx_log("music %u: order[%u] is pattern %u of %u",
+              asset_id, i, out->order[i], patterns);
+      return false;
+    }
+  }
+  return true;
 }
 
 void pnx_music_play(const PnxSong *song, bool loop) {

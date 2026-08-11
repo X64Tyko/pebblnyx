@@ -1,0 +1,94 @@
+# Audio stress test.
+#
+# The point is not the tune. It is whether music and effects coexist without underruns:
+# four sequenced channels running continuously while lasers and explosions steal voices.
+# That is the one M4 claim host tests cannot settle.
+
+[project]
+name = "audiotest"
+resources = "resources"
+header = "src/c/assets_gen.h"
+budget_bytes = 262144
+
+# ------------------------------------------------------------------------------ music
+
+# Corneria-INSPIRED, not a transcription: a bright fanfare over a walking bass, which is
+# what makes that piece a good audio test -- sustained lead notes to expose envelope
+# problems, a moving bass line to exercise a second channel, and a wide range to catch
+# pitch errors at the extremes. The original is Nintendo's composition; this is not it.
+
+[music.theme]
+tempo = 132
+channels = 4
+
+[[music.theme.instrument]]
+wave = "triangle"       # 0: lead, soft and sustained
+attack = 8
+decay = 110
+sustain = 175
+release = 160
+
+[[music.theme.instrument]]
+wave = "square"         # 1: bass, punchy
+attack = 2
+decay = 45
+sustain = 205
+release = 70
+
+[[music.theme.instrument]]
+wave = "saw"             # 2: harmony, bright
+attack = 12
+decay = 130
+sustain = 140
+release = 180
+
+# '.' holds, '-' releases. Four cells per row: lead, harmony, spare, bass.
+[[music.theme.pattern]]
+rows = [
+  "D5:0  A4:2  .  D3:1",
+  ".     .     .  .   ",
+  "F5:0  .     .  A3:1",
+  ".     .     .  -   ",
+  "A5:0  D5:2  .  D3:1",
+  ".     .     .  .   ",
+  "G5:0  .     .  A3:1",
+  ".     .     .  -   ",
+  "F5:0  C5:2  .  F3:1",
+  ".     .     .  .   ",
+  "E5:0  .     .  C4:1",
+  ".     .     .  -   ",
+  "D5:0  A4:2  .  D3:1",
+  ".     .     .  .   ",
+  ".     .     .  A3:1",
+  "-     -     .  -   ",
+]
+
+[[music.theme.pattern]]
+rows = [
+  "A5:0  E5:2  .  A3:1",
+  ".     .     .  .   ",
+  "G5:0  .     .  E3:1",
+  ".     .     .  -   ",
+  "F5:0  C5:2  .  F3:1",
+  ".     .     .  .   ",
+  "E5:0  .     .  C4:1",
+  ".     .     .  -   ",
+  "D5:0  A4:2  .  D3:1",
+  ".     .     .  .   ",
+  "F5:0  .     .  A3:1",
+  ".     .     .  -   ",
+  "E5:0  B4:2  .  E3:1",
+  ".     .     .  .   ",
+  "D5:0  .     .  A3:1",
+  "-     -     .  -   ",
+]
+
+order = [0, 1, 0, 1]
+
+# ---------------------------------------------------------------------------- samples
+
+[sample.laser]
+file = "art/laser.wav"
+
+[sample.explosion]
+file = "art/explosion.wav"

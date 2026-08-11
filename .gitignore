@@ -26,3 +26,9 @@ node_modules/
 
 # Alloy scripting artefact from the probe lineage
 src/c/mc.ffi.c
+
+# Reference MIDI kept locally for analysis. Not committed: these are other people's
+# compositions, and a public MIT repo is the wrong place for them. The importer is the
+# deliverable; the songs it reads are the user's own business.
+*.mid
+*.midi

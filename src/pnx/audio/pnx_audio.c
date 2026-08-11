@@ -81,6 +81,19 @@ static void build_wavetable(void) {
 
 static Voice s_voices[PNX_AUDIO_VOICES];
 static int8_t s_scratch[PNX_AUDIO_CHUNK];
+
+// Bytes mixed but not yet accepted by the device.
+//
+// speaker_stream_write returns how much it took, and a full buffer takes less than
+// offered -- which is normal, not an error. The first version DISCARDED the remainder and
+// mixed fresh audio next frame from a phase that had already advanced past it, putting a
+// discontinuity in the waveform on every short write. At 82% short writes that is
+// continuous glitching, and it sounded exactly as bad as it was.
+//
+// So the remainder is carried and offered again before anything new is mixed.
+static uint8_t s_carry[PNX_AUDIO_CHUNK * 2];
+static uint32_t s_carry_bytes;
+static uint32_t s_carry_head;
 static PnxAudioStats s_stats;
 
 static bool s_on;
@@ -102,6 +115,7 @@ bool pnx_audio_init(PnxAudioFormat format, uint8_t volume) {
   s_byte_rate = pnx_audio_byte_rate(format);
   s_16bit = (format == PNX_AUDIO_16KHZ_16BIT || format == PNX_AUDIO_8KHZ_16BIT);
   s_start_ms = 0;
+  s_carry_bytes = s_carry_head = 0;
   s_on = true;
   return true;
 }
@@ -267,6 +281,32 @@ static void mix(int8_t *out, uint32_t count) {
   s_stats.active_voices = active;
 }
 
+// Hands bytes to the device and keeps whatever it would not take.
+static void offer(const uint8_t *data, uint32_t bytes) {
+  const size_t wrote = pnx_platform_audio_write(data, bytes);
+  s_stats.written += (uint32_t)wrote;
+  if (wrote < bytes) {
+    // The first short write reveals the buffer depth, which the device will not tell us.
+    // Worth recording: if the lead exceeds it, every write is short by construction.
+    if (s_stats.capacity == 0) s_stats.capacity = s_stats.written;
+    s_stats.short_writes++;
+    const uint32_t left = bytes - (uint32_t)wrote;
+    // Carry the tail rather than dropping it. This is the whole fix: dropped samples are
+    // a hole in the waveform, and the mixer cannot regenerate them because the voice
+    // phases have moved on.
+    if (left <= sizeof(s_carry)) {
+      memmove(s_carry, data + wrote, left);
+      s_carry_bytes = left;
+      s_carry_head = 0;
+    } else {
+      s_carry_bytes = s_carry_head = 0;   // cannot happen with CHUNK sizing; be safe
+    }
+  } else {
+    s_carry_bytes = s_carry_head = 0;
+  }
+  s_stats.carried = s_carry_bytes - s_carry_head;
+}
+
 void pnx_audio_update(uint32_t now_ms) {
   if (!s_on) return;
   if (s_start_ms == 0) s_start_ms = now_ms;
@@ -281,6 +321,20 @@ void pnx_audio_update(uint32_t now_ms) {
     if (deficit > s_stats.worst_deficit) s_stats.worst_deficit = deficit;
   }
 
+  // Anything held over goes first, in order. Mixing more while a remainder is pending
+  // would reorder the stream.
+  if (s_carry_bytes > s_carry_head) {
+    const uint32_t left = s_carry_bytes - s_carry_head;
+    const size_t wrote = pnx_platform_audio_write(s_carry + s_carry_head, left);
+    s_stats.written += (uint32_t)wrote;
+    s_carry_head += (uint32_t)wrote;
+    if (s_carry_head < s_carry_bytes) {
+      s_stats.short_writes++;
+      return;                 // still backed up; do not mix ahead of it
+    }
+    s_carry_bytes = s_carry_head = 0;
+  }
+
   const uint32_t target = (elapsed + PNX_AUDIO_LEAD_MS) * s_byte_rate / 1000u;
   if (target <= s_stats.written) return;
 
@@ -292,25 +346,19 @@ void pnx_audio_update(uint32_t now_ms) {
   if (samples == 0) return;
 
   mix(s_scratch, samples);
+  s_stats.feeds++;
 
-  size_t wrote;
   if (s_16bit) {
-    // Widen in place into the caller's view of the buffer. Two bytes per sample, little
-    // endian, which is what the device expects.
     static uint8_t wide[PNX_AUDIO_CHUNK * 2];
     for (uint32_t i = 0; i < samples; i++) {
       const int16_t v = (int16_t)(s_scratch[i] << 8);
       wide[i * 2] = (uint8_t)(v & 0xFF);
       wide[i * 2 + 1] = (uint8_t)((v >> 8) & 0xFF);
     }
-    wrote = pnx_platform_audio_write(wide, samples * 2u);
+    offer(wide, samples * 2u);
   } else {
-    wrote = pnx_platform_audio_write(s_scratch, samples);
+    offer((const uint8_t *)s_scratch, samples);
   }
-
-  if (wrote < (s_16bit ? samples * 2u : samples)) s_stats.short_writes++;
-  s_stats.written += (uint32_t)wrote;
-  s_stats.feeds++;
 }
 
 const PnxAudioStats *pnx_audio_stats(void) { return &s_stats; }

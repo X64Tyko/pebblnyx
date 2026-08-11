@@ -1,0 +1,47 @@
+{
+  "name": "pnx-audiotest",
+  "author": "tyton",
+  "version": "1.0.0",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "pnx audio",
+    "uuid": "e2a7f4c1-8b93-4d16-a5e7-3c9f0d824b16",
+    "sdkVersion": "3",
+    "enableMultiJS": false,
+    "targetPlatforms": [
+      "emery"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [],
+    "resources": {
+      "media": [
+        {
+          "type": "raw",
+          "name": "PALETTES",
+          "file": "palettes.bin"
+        },
+        {
+          "type": "raw",
+          "name": "THEME",
+          "file": "music_theme.bin"
+        },
+        {
+          "type": "raw",
+          "name": "EXPLOSION",
+          "file": "sfx_explosion.bin"
+        },
+        {
+          "type": "raw",
+          "name": "LASER",
+          "file": "sfx_laser.bin"
+        }
+      ]
+    }
+  }
+}

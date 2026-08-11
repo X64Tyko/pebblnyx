@@ -27,6 +27,14 @@
 #include "gfx/pnx_sprite.h"
 #endif
 
+#if PNX_USE_AUDIO
+#include "audio/pnx_audio.h"
+#endif
+
+#if PNX_USE_SEQUENCER
+#include "audio/pnx_music.h"
+#endif
+
 // Later milestones add their headers here behind their own #if guards:
 //   #if PNX_USE_TILEMAP
 //   #include "gfx/pnx_tilemap.h"

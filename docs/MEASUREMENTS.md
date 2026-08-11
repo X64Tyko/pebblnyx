@@ -640,3 +640,47 @@ second, which the mixer's existing resampling already does.
 time, and feeding is lead-based at 120 ms. Verified in host tests across a simulated 37 ms
 frame cadence: zero deficit, and a stall inside the lead produces none while a stall beyond
 it is reported rather than hidden.
+
+
+## Audio streaming: short writes are normal, discarding them is not
+
+First device run of the mixer sounded badly broken, and the log said why:
+
+    voices 5  deficit 7456 | short 392 feeds 479
+
+**82% of writes were short**, and the first implementation *discarded* whatever the device
+would not accept. The voices' phase had already advanced past those samples, so the next
+frame mixed from a later point -- a discontinuity in the waveform on four writes in five.
+
+A short write is not an error. It means the buffer is full, which is the healthy state.
+The fix is to carry the remainder and offer it again before mixing anything new; mixing
+ahead of a pending remainder would also reorder the stream.
+
+**And the 16-bit format was pure waste.** The mixer accumulates and clamps in 8-bit, so a
+16-bit stream is the same samples shifted left eight -- identical audio at twice the
+bandwidth. That doubling is what kept the buffer permanently full: a 120 ms lead is 3,840
+bytes at 32 KB/s but only 1,920 at 16 KB/s. 8-bit is now the default, and the mixer records
+the buffer depth it discovers at the first short write, since the device offers no way to
+ask.
+
+The `deficit 7456` was a startup artefact, constant from the first sample: the gap between
+opening the stream and the first feed, while assets loaded. Not an ongoing underrun.
+
+## MIDI as a music source: the reduction is the hard part
+
+A real SNES-era arrangement, analysed to size the problem:
+
+| | |
+|---|---|
+| Tracks with notes | 11, on 11 separate MIDI channels |
+| Note-ons | 5,440 over ~131 bars |
+| Pitch range | MIDI 26-89, over five octaves |
+| 16th-note slots needing >4 simultaneous notes | **646 of 1,380 (47%)**, peaking at 9 |
+
+Parsing MIDI is straightforward. **Fitting it into four channels is not** -- nearly half of
+a real arrangement is too thick, so an importer must choose what to drop and say so. A
+silent reduction would make a song sound wrong with no indication why, which is the same
+class of failure as an unreachable warp: the output looks fine and simply is not.
+
+That argues for reduction driven by declared intent -- which tracks are melody, bass,
+harmony -- rather than a generic algorithm guessing.

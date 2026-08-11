@@ -176,6 +176,13 @@ bool pnx_map_load(PnxMap *out, uint16_t asset_id, const PnxAtlas *atlas);
 // loader uses it to pick the right one among several.
 bool pnx_map_atlas_asset(uint16_t asset_id, uint8_t *out_atlas_asset);
 
+// Reads a whole blob into the scene arena and validates magic and version, handing back
+// the four format-specific header bytes. Shared so modules outside assets/ -- audio, for
+// instance -- do not each reimplement the header check.
+const uint8_t *pnx_blob_load(uint16_t asset_id, const char *magic,
+                             uint8_t *a, uint8_t *b, uint8_t *c, uint8_t *d,
+                             size_t *payload);
+
 // Bytes read from flash since init, for budgeting scene loads.
 uint32_t pnx_assets_bytes_loaded(void);
 

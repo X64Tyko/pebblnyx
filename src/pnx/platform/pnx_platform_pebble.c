@@ -94,8 +94,8 @@ static bool s_audio_open;
 
 bool pnx_platform_audio_open(PnxAudioFormat format, uint8_t volume) {
   static const SpeakerPcmFormat map[] = {
-    SpeakerPcmFormat_16kHz_16bit, SpeakerPcmFormat_16kHz_8bit,
-    SpeakerPcmFormat_8kHz_16bit,  SpeakerPcmFormat_8kHz_8bit,
+    SpeakerPcmFormat_16kHz_8bit, SpeakerPcmFormat_16kHz_16bit,
+    SpeakerPcmFormat_8kHz_8bit,  SpeakerPcmFormat_8kHz_16bit,
   };
   if (s_audio_open) return true;
   s_audio_open = speaker_stream_open(map[format], volume);

@@ -66,6 +66,9 @@ typedef struct {
   uint32_t worst_deficit;  // worst shortfall against the consume rate, in bytes
   uint32_t short_writes;   // times the device accepted less than offered
   uint32_t feeds;
+  uint32_t capacity;       // bytes accepted before the first short write -- the device's
+                           // buffer depth, which it offers no way to query
+  uint32_t carried;        // bytes currently held over from a short write
   uint8_t active_voices;
 } PnxAudioStats;
 

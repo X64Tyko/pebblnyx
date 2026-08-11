@@ -100,9 +100,9 @@ uint32_t pnx_assets_bytes_loaded(void) { return s_bytes_loaded; }
 // The size check is the one that earns its keep: it catches a resource that was
 // truncated, half-written, or built by a different version of the pipeline. Without it
 // those present as garbage pixels or a wild pointer, with nothing pointing at the cause.
-static const uint8_t *load_blob(uint16_t asset_id, const char *magic,
-                                uint8_t *out_a, uint8_t *out_b, uint8_t *out_c,
-                                size_t *out_payload) {
+static const uint8_t *load_blob_4(uint16_t asset_id, const char *magic,
+                                  uint8_t *out_a, uint8_t *out_b, uint8_t *out_c,
+                                  uint8_t *out_d, size_t *out_payload) {
   if (!s_arena || asset_id >= s_resource_count) {
     pnx_log("asset %u: out of range (have %u)", asset_id, s_resource_count);
     return NULL;
@@ -143,9 +143,22 @@ static const uint8_t *load_blob(uint16_t asset_id, const char *magic,
   if (out_a) *out_a = buf[3];
   if (out_b) *out_b = buf[4];
   if (out_c) *out_c = buf[5];
+  if (out_d) *out_d = buf[6];
   if (out_payload) *out_payload = size - PNX_BLOB_HEADER_BYTES;
 
   return buf + PNX_BLOB_HEADER_BYTES;
+}
+
+static const uint8_t *load_blob(uint16_t asset_id, const char *magic,
+                                uint8_t *a, uint8_t *b, uint8_t *c,
+                                size_t *payload) {
+  return load_blob_4(asset_id, magic, a, b, c, NULL, payload);
+}
+
+const uint8_t *pnx_blob_load(uint16_t asset_id, const char *magic,
+                             uint8_t *a, uint8_t *b, uint8_t *c, uint8_t *d,
+                             size_t *payload) {
+  return load_blob_4(asset_id, magic, a, b, c, d, payload);
 }
 
 // Both tables are padded to 4 so the pixel block starts aligned.
