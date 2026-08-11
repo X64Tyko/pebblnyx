@@ -117,13 +117,20 @@ static int8_t s_scratch[PNX_AUDIO_CHUNK];
 // and the result sounded distorted rather than loud. int16 is enough -- 8 voices x 127.
 static int16_t s_acc[PNX_AUDIO_CHUNK];
 
-// Master gain, 16.16, glided rather than switched.
+// Fixed master headroom. NOT derived from the active voice count.
 //
-// The first version divided by a voice count, so the divisor stepped 1 -> 2 the instant a
-// voice started and the whole mix halved between one sample and the next. That is a pop on
-// every voice change, and with percussion it is a pop per beat. Gliding to the target over
-// a few milliseconds is inaudible; jumping to it is not.
-static int32_t s_gain = 1 << 16;
+// Two attempts at a dynamic gain both failed, in opposite ways. Dividing by the voice
+// count stepped the whole mix the instant a voice started -- a pop per beat. Gliding to
+// that target instead spread the step over ~125ms, which at a 300ms row is 42% of every
+// row: a continuous amplitude warble, worse at a pattern boundary where the voice count
+// changes more.
+//
+// The mistake was making loudness depend on something that changes constantly. A fixed
+// divisor is stable by construction, and headroom becomes the composer's business through
+// instrument volumes -- which is how trackers have always done it. Four channels at
+// PNX_MUSIC_CHANNELS is the design point, so dividing by four lets four full-scale voices
+// sum without clipping and leaves room for an effect on top.
+#define MIX_HEADROOM_SHIFT 2   // divide by 4
 
 // Bytes mixed but not yet accepted by the device.
 //
@@ -159,7 +166,6 @@ bool pnx_audio_init(PnxAudioFormat format, uint8_t volume) {
   s_16bit = (format == PNX_AUDIO_16KHZ_16BIT || format == PNX_AUDIO_8KHZ_16BIT);
   s_start_ms = 0;
   s_carry_bytes = s_carry_head = 0;
-  s_gain = 1 << 16;
   s_on = true;
   return true;
 }
@@ -337,28 +343,37 @@ static void mix(int8_t *out, uint32_t count) {
         if (!o->active) break;
       }
 
+      // Linear interpolation between table entries.
+      //
+      // The step is almost never a whole number -- 440Hz on a 64-entry cycle at 16kHz is
+      // 1.76 -- so nearest-neighbour lookup reads an irregular pattern of entries that
+      // repeats at its own frequency, adding a tone that is not in the signal. At 440Hz
+      // that artefact lands near 640Hz and is plainly audible as roughness.
+      //
+      // Interpolating costs one multiply and one shift per sample per voice. Against ~30ms
+      // of idle CPU per frame that is free, and it is the difference between a tone and a
+      // buzz.
+      const uint32_t frac = o->phase & 0xFFFF;
+      const int32_t a0 = o->pcm[index];
+      uint32_t next = index + 1u;
+      if (next >= o->samples) {
+        // Wrap to the loop point so the seam interpolates too; a one-cycle wavetable is
+        // continuous across it, and treating the end as a cliff would tick once per cycle.
+        next = (o->loop_start == PNX_AUDIO_NO_LOOP) ? index : o->loop_start;
+      }
+      const int32_t a1 = o->pcm[next];
+      const int32_t sample = a0 + (((a1 - a0) * (int32_t)frac) >> 16);
+
       const int32_t enveloped = (o->stage == ENV_OFF)
-          ? (int32_t)o->pcm[index]
-          : (((int32_t)o->pcm[index] * (o->level >> 8)) >> 8);
+          ? sample
+          : ((sample * (o->level >> 8)) >> 8);
       s_acc[n] += (int16_t)((enveloped * o->volume) >> 8);
       o->phase += o->step;
     }
   }
 
-  // Target gain gives every voice room: N voices at full scale sum to N x 127, so 1/N
-  // cannot clip. Glide toward it rather than snapping, one step per sample.
-  const int32_t target = (1 << 16) / (active ? active : 1);
-  const int32_t glide = (1 << 16) / 2000;   // ~125ms to traverse the full range at 16kHz
-
   for (uint32_t n = 0; n < count; n++) {
-    if (s_gain < target) {
-      s_gain += glide;
-      if (s_gain > target) s_gain = target;
-    } else if (s_gain > target) {
-      s_gain -= glide;
-      if (s_gain < target) s_gain = target;
-    }
-    const int32_t v = ((int32_t)s_acc[n] * s_gain) >> 16;
+    const int32_t v = s_acc[n] >> MIX_HEADROOM_SHIFT;
     out[n] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
   }
   s_stats.active_voices = active;

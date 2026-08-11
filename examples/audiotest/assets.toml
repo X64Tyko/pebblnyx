@@ -60,26 +60,28 @@ release = 15
 # Four diagnostic patterns, each isolating a different failure mode. Played in order, so
 # a fault that appears in one and not the others names itself.
 
-# 0 -- SUSTAIN. Long held notes, nothing else moving. Any click, dropout, or pitch drift
-# is obvious against silence; this is the pattern that caught the short-write glitching.
+# 0 -- SINGLE TONE. One note, one voice, held for the whole pattern: 4.8s with no row
+# events at all after the first. This is the control. If it thrums, wavers or pulses, the
+# fault is in the mixer or the stream, because nothing else is happening. If it is steady
+# and the other patterns thrum, the fault is in note handling or is simply the rhythm.
 [[music.theme.pattern]]
 rows = [
-  "D5:0  .     .     D3:1",
+  "A4:0  .     .     .   ",
   ".     .     .     .   ",
   ".     .     .     .   ",
   ".     .     .     .   ",
   ".     .     .     .   ",
   ".     .     .     .   ",
   ".     .     .     .   ",
-  "-     .     .     -   ",
-  "A5:0  .     .     A2:1",
   ".     .     .     .   ",
   ".     .     .     .   ",
   ".     .     .     .   ",
   ".     .     .     .   ",
   ".     .     .     .   ",
   ".     .     .     .   ",
-  "-     .     .     -   ",
+  ".     .     .     .   ",
+  ".     .     .     .   ",
+  ".     .     .     .   ",
 ]
 
 # 1 -- CHROMATIC. Every semitone in sequence across two octaves. Tuning errors show up as

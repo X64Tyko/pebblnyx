@@ -17,7 +17,9 @@
 static const PnxSong *s_song;
 static bool s_loop;
 static bool s_playing;
-static uint8_t s_volume = 200;
+// Full scale. The mixer's fixed headroom already reserves room for four channels plus an
+// effect, so attenuating here as well would only make the music quiet.
+static uint8_t s_volume = 255;
 
 static uint8_t s_order_pos;
 static uint8_t s_row;
