@@ -59,39 +59,23 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
   PnxEvent ev;
   while (pnx_platform_poll_event(&ev)) {
     if (ev.type != PNX_EVENT_BUTTON_DOWN) continue;
-    if (ev.button == PNX_BUTTON_SELECT) {
-      // Toggles the unattended effects. Default off, so what you hear on startup is the
-      // mixer and nothing else -- an artefact is then attributable without argument.
-      a->sfx_on = !a->sfx_on;
-      a->next_auto_ms = now + 400;
-    } else if (ev.button == PNX_BUTTON_DOWN) {
-      // Cycles the lead. Now that gaps are known to reach 140-305ms, the useful range is
-      // above that, not below it.
-      static const uint16_t leads[] = { 80, 40, 150, 250, 20 };
-      a->lead_index = (uint8_t)((a->lead_index + 1) % 5);
-      pnx_audio_set_lead(leads[a->lead_index]);
-    } else if (ev.button == PNX_BUTTON_UP) {
-      // Toggles the sequencer. Startup plays ONE note directly, with no sequencer running
-      // at all -- the last untested link. The mixer's output is provably clean on the host
-      // and the stream lead makes no difference on device, so if a bare tone with nothing
-      // calling into the sequencer is also clean, the fault is in the sequencer. If it
-      // blips too, the fault is in the platform stream and nothing above it.
-      // Cycles the PCM format and restarts the bare tone in it. Every measurement says
-      // the pipeline is correct -- clean mixer output, continuous Playing state, no short
-      // writes, correct aggregate rate -- so the remaining variable is how the device
-      // renders each format. This is the only way to compare them.
-      // 8k/8 measured best by ear on device and 16k/16 worst, so the sweep starts from
-      // the good end rather than making you cycle past the bad one to reach it.
-      static const PnxAudioFormat fmts[] = {
-        PNX_AUDIO_8KHZ_8BIT, PNX_AUDIO_16KHZ_8BIT,
-        PNX_AUDIO_8KHZ_16BIT, PNX_AUDIO_16KHZ_16BIT,
-      };
-      a->fmt_index = (uint8_t)((a->fmt_index + 1) % 4);
-      pnx_music_stop();
-      a->seq_on = false;
-      if (pnx_audio_reopen(fmts[a->fmt_index], 85)) {
+    if (ev.button == PNX_BUTTON_UP) {
+      a->seq_on = !a->seq_on;
+      if (a->seq_on) {
+        pnx_audio_stop_all();          // drop the bare tone if it is still sounding
+        pnx_music_play(&a->song, true);
+      } else {
+        pnx_music_stop();
+        // Back to the control tone, which is still the cleanest thing to judge the mixer
+        // by: one voice, no row events.
         a->held = pnx_audio_note(PNX_WAVE_TRIANGLE, 69, 255, &a->tone_env, 1);
       }
+    } else if (ev.button == PNX_BUTTON_SELECT) {
+      a->sfx_on = !a->sfx_on;
+      a->next_auto_ms = now + 400;
+    } else if (ev.button == PNX_BUTTON_DOWN && a->boom) {
+      pnx_audio_play_pri(a->boom, a->boom_len, PNX_AUDIO_NO_LOOP, a->boom_hz,
+                         255, 5, NULL);
     }
   }
 
@@ -173,7 +157,7 @@ static void post_frame(void *ctx) {
   pnx_platform_text_draw(a->hud2, PNX_TEXT_SMALL, 0xFF, 6, 76, 190, 20);
   pnx_platform_text_draw(a->hud3, PNX_TEXT_SMALL, 0xFF, 6, 96, 190, 20);
   pnx_platform_text_draw("0 one tone   1 chromatic\n2 density    3 all four\n\n"
-                        "UP     cycle PCM format\nDOWN   cycle stream lead\nSELECT sfx auto (off)",
+                        "UP     music / tone\nSELECT sfx auto-fire\nDOWN   one explosion",
                         PNX_TEXT_SMALL, 0xFF, 6, 118, 190, 100);
 }
 
@@ -201,9 +185,14 @@ int main(void) {
   // fault is below everything we have written.
   a.tone_env = (PnxEnvelope){ .attack_ms = 6, .decay_ms = 70,
                               .sustain = 165, .release_ms = 60 };
-  a.held = pnx_audio_note(PNX_WAVE_TRIANGLE, 69, 255, &a.tone_env, 1);
-  a.music_on = false;
-  a.seq_on = false;
+  if (a.ready) {
+    pnx_music_play(&a.song, true);
+    a.seq_on = true;
+  } else {
+    // No song loaded, so at least give the control tone something to sound.
+    a.held = pnx_audio_note(PNX_WAVE_TRIANGLE, 69, 255, &a.tone_env, 1);
+  }
+  a.sfx_on = true;
   pnx_log("start: song=%d (%u patterns, %ubpm) laser=%u boom=%u arena %u/%u",
           (int)a.ready, a.song.pattern_count, a.song.tempo_bpm,
           (unsigned)a.laser_len, (unsigned)a.boom_len,
