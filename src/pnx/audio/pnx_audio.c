@@ -4,6 +4,7 @@
 
 #include "../core/pnx_diag.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #ifndef PNX_AUDIO_VOICES
@@ -84,7 +85,7 @@ typedef struct {
   int32_t rate;
 } Voice;
 
-static int8_t s_wavetable[PNX_WAVE_COUNT][CYCLE];
+static int8_t (*s_wavetable)[CYCLE];
 
 // Equal temperament, one octave tabulated and shifted. Values are Hz x 100 for C4..B4 so
 // the arithmetic stays integral.
@@ -172,7 +173,19 @@ static void build_wavetable(void) {
   }
 }
 
-static Voice s_voices[PNX_AUDIO_VOICES];
+// Every audio buffer lives in ONE heap allocation made on first init, not in statics.
+//
+// Statics are charged against the 64KB link-time ceiling (`virtual_size` is a uint16); the
+// heap is the other ~115KB of the same 128KB slot and is not. Physical use is identical
+// either way -- this buys headroom against the cap, not memory. One allocation rather than
+// four keeps that to a single failure path, and the pointers cost 12 bytes of the 2,288
+// they replace.
+//
+// Carved by decreasing alignment -- Voice is 4, mix is 2, the wavetable is 1 -- so no
+// padding arithmetic is needed. Held for the app's lifetime rather than freed on shutdown,
+// because init/shutdown is also how the format is changed and churning the heap on every
+// change is worse than holding 2KB of it.
+static Voice *s_voices;
 
 // One buffer for every stage of a feed: accumulate, output, and hold what the device would
 // not take. Was four buffers holding the same signal -- 7,168 of the module's 8,007 bytes.
@@ -187,7 +200,28 @@ static Voice s_voices[PNX_AUDIO_VOICES];
 // int16 keeps the accumulator aligned, and an int16 array is little-endian in memory on both
 // ARM and the host, which is the byte order the speaker wants -- so 16-bit output needs no
 // conversion.
-static int16_t s_mix[PNX_AUDIO_CHUNK];
+static int16_t *s_mix;
+
+static void *s_block;
+
+#define VOICES_BYTES (sizeof(Voice) * PNX_AUDIO_VOICES)
+#define MIX_BYTES    (sizeof(int16_t) * PNX_AUDIO_CHUNK)
+#define WAVE_BYTES   ((size_t)PNX_WAVE_COUNT * CYCLE)
+
+static bool reserve(void) {
+  if (s_block) return true;
+  uint8_t *p = (uint8_t *)malloc(VOICES_BYTES + MIX_BYTES + WAVE_BYTES);
+  if (!p) {
+    pnx_log("audio: %u bytes unavailable",
+            (uint32_t)(VOICES_BYTES + MIX_BYTES + WAVE_BYTES));
+    return false;
+  }
+  s_block = p;
+  s_voices    = (Voice *)p;              p += VOICES_BYTES;
+  s_mix       = (int16_t *)p;            p += MIX_BYTES;
+  s_wavetable = (int8_t (*)[CYCLE])p;
+  return true;
+}
 
 static uint32_t s_carry_bytes;   // bytes in s_mix awaiting the device
 static uint32_t s_carry_head;    // how many it has taken; equal means drained
@@ -216,11 +250,14 @@ static bool s_on;
 
 bool pnx_audio_init(PnxAudioFormat format, uint8_t volume) {
   if (s_on) return true;
+  if (!reserve()) return false;              // before opening, so a failure leaves no stream
   if (!pnx_platform_audio_open(format, volume)) {
     pnx_log("audio: stream would not open");
     return false;
   }
-  memset(s_voices, 0, sizeof(s_voices));
+  // Explicit byte count: sizeof a pointer is 4. And necessary rather than tidy now the
+  // buffers are malloc'd -- statics arrive zeroed, heap does not.
+  memset(s_voices, 0, VOICES_BYTES);
   memset(&s_stats, 0, sizeof(s_stats));
   build_wavetable();
   s_format = format;
