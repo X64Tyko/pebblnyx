@@ -58,101 +58,331 @@ decay = 25
 sustain = 0
 release = 15
 
-# Four diagnostic patterns, each isolating a different failure mode. Played in order, so
-# a fault that appears in one and not the others names itself.
+# The song. Twelve bars of material arranged into 22, which is what makes it a song rather
+# than a loop: at 132bpm a 16-row pattern is one bar of 1.82s, so four bars repeating was
+# over in seven seconds and grating by the third pass. Structure is intro / A / A / B /
+# break / bridge / A / outro -- about 40 seconds before it comes back around.
+#
+# D natural minor throughout (D E F G A A# C), which is where the original test material
+# already sat. The two diagnostic patterns are still here, at the end and out of the order
+# list, because they are worth keeping and not worth listening to.
 
-# 0 -- SINGLE TONE. One note, one voice, held for the whole pattern: 4.8s with no row
-# events at all after the first. This is the control. If it thrums, wavers or pulses, the
-# fault is in the mixer or the stream, because nothing else is happening. If it is steady
-# and the other patterns thrum, the fault is in note handling or is simply the rhythm.
+# 0 -- INTRO. Drums and bass alone, so the beat establishes before anything melodic.
 [[music.theme.pattern]]
 rows = [
-  "A4:0  .     .     .   ",
-  ".     .     .     .   ",
-  ".     .     .     .   ",
-  ".     .     .     .   ",
-  ".     .     .     .   ",
-  ".     .     .     .   ",
-  ".     .     .     .   ",
-  ".     .     .     .   ",
-  ".     .     .     .   ",
-  ".     .     .     .   ",
-  ".     .     .     .   ",
-  ".     .     .     .   ",
-  ".     .     .     .   ",
-  ".     .     .     .   ",
-  ".     .     .     .   ",
-  ".     .     .     .   ",
+  ".     .     C3:3  D3:1 ",
+  ".     .     .     .    ",
+  ".     .     G5:3  .    ",
+  ".     .     .     D3:1 ",
+  ".     .     A4:3  .    ",
+  ".     .     .     .    ",
+  ".     .     G5:3  A2:1 ",
+  ".     .     .     .    ",
+  ".     .     C3:3  D3:1 ",
+  ".     .     .     .    ",
+  ".     .     G5:3  .    ",
+  ".     .     .     D3:1 ",
+  ".     .     A4:3  .    ",
+  ".     .     .     .    ",
+  ".     .     G5:3  A2:1 ",
+  ".     .     G5:3  C3:1 ",
 ]
 
-# 1 -- CHROMATIC. Every semitone in sequence across two octaves. Tuning errors show up as
-# uneven steps, and aliasing shows up as the top of the run turning harsh.
+# 1 -- INTRO B. The saw harmony enters on chord tones, walking D minor up to C.
 [[music.theme.pattern]]
 rows = [
-  "C4:0  .     .     .   ",
-  "C#4:0 .     .     .   ",
-  "D4:0  .     .     .   ",
-  "D#4:0 .     .     .   ",
-  "E4:0  .     .     .   ",
-  "F4:0  .     .     .   ",
-  "F#4:0 .     .     .   ",
-  "G4:0  .     .     .   ",
-  "G#4:0 .     .     .   ",
-  "A4:0  .     .     .   ",
-  "A#4:0 .     .     .   ",
-  "B4:0  .     .     .   ",
-  "C5:0  .     .     .   ",
-  "D5:0  .     .     .   ",
-  "E5:0  .     .     .   ",
-  "F5:0  .     .     .   ",
+  ".     D3:2  C3:3  D3:1 ",
+  ".     .     .     .    ",
+  ".     .     G5:3  .    ",
+  ".     .     .     D3:1 ",
+  ".     F3:2  A4:3  .    ",
+  ".     .     .     .    ",
+  ".     .     G5:3  A2:1 ",
+  ".     .     .     .    ",
+  ".     A3:2  C3:3  D3:1 ",
+  ".     .     .     .    ",
+  ".     .     G5:3  .    ",
+  ".     .     .     D3:1 ",
+  ".     C4:2  A4:3  .    ",
+  ".     .     .     .    ",
+  ".     .     G5:3  A2:1 ",
+  ".     -     G5:3  C3:1 ",
 ]
 
-# 2 -- DENSITY. Busy percussion over a moving bass, which is this piece's actual character:
-# four of eleven reference tracks are bass and the drum channel is the densest of all.
-# Clipping and mix headroom problems surface here first.
+# 2 -- A (a). The theme: a rising fanfare on the triangle, D up to A and back.
 [[music.theme.pattern]]
 rows = [
-  ".     .     C4:3  D3:1",
-  ".     .     G5:3  .   ",
-  ".     .     C4:3  D3:1",
-  ".     .     G5:3  A2:1",
-  ".     .     C4:3  D3:1",
-  ".     .     G5:3  .   ",
-  ".     .     C4:3  F3:1",
-  ".     .     G5:3  A2:1",
-  ".     .     C4:3  G2:1",
-  ".     .     G5:3  .   ",
-  ".     .     C4:3  G2:1",
-  ".     .     G5:3  D3:1",
-  ".     .     C4:3  A2:1",
-  ".     .     G5:3  .   ",
-  ".     .     C4:3  D3:1",
-  ".     .     G5:3  .   ",
+  "D5:0  D3:2  C3:3  D3:1 ",
+  ".     .     .     .    ",
+  ".     .     G5:3  .    ",
+  ".     .     .     D3:1 ",
+  "F5:0  .     A4:3  .    ",
+  ".     .     .     .    ",
+  "A5:0  F3:2  G5:3  A2:1 ",
+  ".     .     .     .    ",
+  ".     .     C3:3  D3:1 ",
+  ".     .     .     .    ",
+  "G5:0  .     G5:3  .    ",
+  ".     .     .     D3:1 ",
+  "F5:0  A3:2  A4:3  .    ",
+  ".     .     .     .    ",
+  ".     .     G5:3  A2:1 ",
+  ".     .     G5:3  C3:1 ",
 ]
 
-# 3 -- ALL FOUR. Everything at once, which is where voice stealing and headroom are under
-# real pressure. Effects firing over this is the worst case the mixer will meet.
+# 3 -- A (b). The answering phrase, over A# and G -- the minor turn.
 [[music.theme.pattern]]
 rows = [
-  "D5:0  A2:2  C4:3  D3:1",
-  ".     .     G5:3  .   ",
-  "F5:0  .     C4:3  A2:1",
-  ".     .     G5:3  .   ",
-  "A5:0  D4:2  C4:3  D3:1",
-  ".     .     G5:3  .   ",
-  "G5:0  .     C4:3  A2:1",
-  ".     .     G5:3  .   ",
-  "F5:0  C4:2  C4:3  F3:1",
-  ".     .     G5:3  .   ",
-  "E5:0  .     C4:3  C4:1",
-  ".     .     G5:3  .   ",
-  "D5:0  A3:2  C4:3  D3:1",
-  ".     .     G5:3  .   ",
-  "-     -     C4:3  A2:1",
-  ".     .     G5:3  -   ",
+  "E5:0  A#3:2 C3:3  A#2:1",
+  ".     .     .     .    ",
+  ".     .     G5:3  .    ",
+  ".     .     .     A#2:1",
+  "D5:0  .     A4:3  .    ",
+  ".     .     .     .    ",
+  "C5:0  G3:2  G5:3  G2:1 ",
+  ".     .     .     .    ",
+  ".     .     C3:3  G2:1 ",
+  ".     .     .     .    ",
+  "D5:0  .     G5:3  .    ",
+  ".     .     .     A2:1 ",
+  "E5:0  A3:2  A4:3  .    ",
+  ".     .     .     .    ",
+  ".     .     G5:3  A2:1 ",
+  ".     .     G5:3  E3:1 ",
 ]
 
-order = [0, 1, 2, 3]
+# 4 -- A (c). The theme again from the top of its range, stepping all the way down.
+[[music.theme.pattern]]
+rows = [
+  "A5:0  D4:2  C3:3  D3:1 ",
+  ".     .     .     .    ",
+  ".     .     G5:3  .    ",
+  ".     .     .     D3:1 ",
+  "G5:0  .     A4:3  .    ",
+  ".     .     .     .    ",
+  "F5:0  A3:2  G5:3  A2:1 ",
+  ".     .     .     .    ",
+  "E5:0  .     C3:3  D3:1 ",
+  ".     .     .     .    ",
+  "D5:0  .     G5:3  .    ",
+  ".     .     .     D3:1 ",
+  "C5:0  F3:2  A4:3  .    ",
+  ".     .     .     .    ",
+  "D5:0  .     G5:3  A2:1 ",
+  ".     .     G5:3  C3:1 ",
+]
+
+# 5 -- A (d). Turnaround: releases lead and harmony on row 12 so the bar breathes before
+# the section repeats or hands over to B.
+[[music.theme.pattern]]
+rows = [
+  "F5:0  A#3:2 C3:3  A#2:1",
+  ".     .     .     .    ",
+  "E5:0  .     G5:3  .    ",
+  ".     .     .     A#2:1",
+  "D5:0  .     A4:3  .    ",
+  ".     .     .     .    ",
+  "A4:0  C4:2  G5:3  C3:1 ",
+  ".     .     .     .    ",
+  "D5:0  .     C3:3  D3:1 ",
+  ".     .     .     .    ",
+  ".     .     G5:3  .    ",
+  ".     .     .     A2:1 ",
+  "-     -     A4:3  .    ",
+  ".     .     .     .    ",
+  ".     .     G5:3  A2:1 ",
+  ".     .     G5:3  A2:1 ",
+]
+
+# 6 -- B (a). Moves to F, and the lead holds far longer -- long sustains are also the
+# case that exposes envelope drift, so the contrast earns its place twice.
+[[music.theme.pattern]]
+rows = [
+  "C5:0  F3:2  C3:3  F3:1 ",
+  ".     .     .     .    ",
+  ".     .     G5:3  .    ",
+  ".     .     .     F3:1 ",
+  ".     .     A4:3  .    ",
+  ".     .     .     .    ",
+  "D5:0  A3:2  G5:3  C3:1 ",
+  ".     .     .     .    ",
+  ".     .     C3:3  F3:1 ",
+  ".     .     .     .    ",
+  ".     .     G5:3  .    ",
+  ".     .     .     F3:1 ",
+  "C5:0  C4:2  A4:3  .    ",
+  ".     .     .     .    ",
+  ".     .     G5:3  C3:1 ",
+  ".     .     G5:3  .    ",
+]
+
+# 7 -- B (b). A full scale climb, A#4 to A5, which is the tension that sends it back to A.
+[[music.theme.pattern]]
+rows = [
+  "A#4:0 A#3:2 C3:3  A#2:1",
+  ".     .     .     .    ",
+  ".     .     G5:3  .    ",
+  ".     .     .     A#2:1",
+  "C5:0  .     A4:3  .    ",
+  ".     .     .     .    ",
+  "D5:0  D4:2  G5:3  D3:1 ",
+  ".     .     .     .    ",
+  "E5:0  .     C3:3  D3:1 ",
+  ".     .     .     .    ",
+  "F5:0  .     G5:3  .    ",
+  ".     .     .     A2:1 ",
+  "G5:0  E4:2  A4:3  .    ",
+  ".     .     .     .    ",
+  "A5:0  .     G5:3  A2:1 ",
+  ".     .     G5:3  A2:1 ",
+]
+
+# 8 -- BRIDGE (a). Lead rests and the kick drops out entirely: hats and harmony only. The
+# quietest bar in the song, which is what makes the return land.
+[[music.theme.pattern]]
+rows = [
+  ".     D4:2  G5:3  D3:1 ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     G5:3  .    ",
+  ".     C4:2  .     .    ",
+  ".     .     .     A2:1 ",
+  ".     .     G5:3  .    ",
+  ".     .     .     .    ",
+  ".     A#3:2 .     A#2:1",
+  ".     .     G5:3  .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     A3:2  G5:3  A2:1 ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     G5:3  .    ",
+]
+
+# 9 -- BRIDGE (b). Builds back with eighth-note snares under the theme's opening notes --
+# the densest percussion in the song, and so the one bar most likely to clip.
+[[music.theme.pattern]]
+rows = [
+  "D5:0  D4:2  C3:3  D3:1 ",
+  ".     .     A4:3  .    ",
+  ".     .     G5:3  .    ",
+  ".     .     A4:3  D3:1 ",
+  "F5:0  .     C3:3  .    ",
+  ".     .     A4:3  .    ",
+  ".     .     G5:3  A2:1 ",
+  ".     .     A4:3  .    ",
+  "A5:0  A3:2  C3:3  D3:1 ",
+  ".     .     A4:3  .    ",
+  ".     .     G5:3  .    ",
+  ".     .     A4:3  D3:1 ",
+  ".     .     C3:3  .    ",
+  ".     .     A4:3  .    ",
+  ".     .     G5:3  A2:1 ",
+  ".     .     A4:3  C3:1 ",
+]
+
+# 10 -- BREAK. No lead or harmony: sixteenth-note drums over a bass that moves every row.
+# This is the old density test, kept as an arrangement element because it works as one.
+[[music.theme.pattern]]
+rows = [
+  ".     .     C3:3  D3:1 ",
+  ".     .     G5:3  .    ",
+  ".     .     C3:3  D3:1 ",
+  ".     .     G5:3  A2:1 ",
+  ".     .     A4:3  D3:1 ",
+  ".     .     G5:3  .    ",
+  ".     .     C3:3  F3:1 ",
+  ".     .     G5:3  A2:1 ",
+  ".     .     C3:3  G2:1 ",
+  ".     .     G5:3  .    ",
+  ".     .     C3:3  G2:1 ",
+  ".     .     G5:3  D3:1 ",
+  ".     .     A4:3  A2:1 ",
+  ".     .     G5:3  .    ",
+  ".     .     C3:3  D3:1 ",
+  ".     .     G5:3  .    ",
+]
+
+# 11 -- OUTRO. Lands on D and releases everything on row 12, leaving four rows of silence
+# before the loop restarts. Without that gap the intro's first kick collides with the tail
+# of the last chord.
+[[music.theme.pattern]]
+rows = [
+  "D5:0  D4:2  C3:3  D3:1 ",
+  ".     .     .     .    ",
+  ".     .     G5:3  .    ",
+  ".     .     .     .    ",
+  ".     .     A4:3  .    ",
+  ".     .     .     .    ",
+  ".     .     G5:3  A2:1 ",
+  ".     .     .     .    ",
+  ".     .     C3:3  D3:1 ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  "-     -     .     -    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+]
+
+# 12 -- DIAGNOSTIC: SINGLE TONE. Not in the order list. One note held for a whole bar with
+# no further row events: the control. If this thrums, the fault is in the mixer or the
+# stream, because nothing else is happening.
+[[music.theme.pattern]]
+rows = [
+  "A4:0  .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+  ".     .     .     .    ",
+]
+
+# 13 -- DIAGNOSTIC: CHROMATIC. Not in the order list. Every semitone across two octaves;
+# tuning errors show as uneven steps and aliasing as the top of the run turning harsh.
+[[music.theme.pattern]]
+rows = [
+  "C4:0  .     .     .    ",
+  "C#4:0 .     .     .    ",
+  "D4:0  .     .     .    ",
+  "D#4:0 .     .     .    ",
+  "E4:0  .     .     .    ",
+  "F4:0  .     .     .    ",
+  "F#4:0 .     .     .    ",
+  "G4:0  .     .     .    ",
+  "G#4:0 .     .     .    ",
+  "A4:0  .     .     .    ",
+  "A#4:0 .     .     .    ",
+  "B4:0  .     .     .    ",
+  "C5:0  .     .     .    ",
+  "D5:0  .     .     .    ",
+  "E5:0  .     .     .    ",
+  "F5:0  .     .     .    ",
+]
+
+# The arrangement. Bars, not patterns: intro, the A section twice, B twice, a drum break,
+# the bridge, A once more, and an outro. 22 bars at 1.82s is roughly 40 seconds.
+order = [
+  0, 1,                 # intro
+  2, 3, 4, 5,           # A
+  2, 3, 4, 5,           # A again
+  6, 7, 6, 7,           # B
+  10,                   # break
+  8, 9,                 # bridge
+  2, 3, 4, 5,           # A, last time
+  11,                   # outro
+]
 
 # ---------------------------------------------------------------------------- samples
 
