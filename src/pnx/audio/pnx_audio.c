@@ -13,8 +13,18 @@
 // How far ahead of playback to keep the stream. The spike measured 120 ms as sufficient
 // at 8 kHz; kept here because the thing it absorbs is a late frame, and frames get very
 // late (~0.4fps) whenever a modal covers the app.
+// Measured on device, the interval between feeds reaches 140ms in steady state and 305ms
+// during startup while assets load. A lead only survives stalls SHORTER than itself, so
+// 120ms was starving the buffer several times a second -- audible as thrumming, and
+// invisible to the deficit statistic, which compares aggregate bytes written against
+// elapsed time and so cannot see a buffer that empties and refills.
+//
+// 400ms clears the worst observed gap with room over. The cost is latency: a sound effect
+// starts up to 400ms after it is triggered, which for footsteps and menu blips is too much
+// and is why this wants revisiting with a shorter feed interval rather than a deeper
+// buffer. It is the correct trade for continuity today.
 #ifndef PNX_AUDIO_LEAD_MS
-#define PNX_AUDIO_LEAD_MS 120
+#define PNX_AUDIO_LEAD_MS 400
 #endif
 
 // Scratch samples per feed. One frame at 16 kHz needs ~600, so this covers a frame plus
@@ -175,6 +185,11 @@ bool pnx_audio_init(PnxAudioFormat format, uint8_t volume) {
   s_byte_rate = pnx_audio_byte_rate(format);
   s_16bit = (format == PNX_AUDIO_16KHZ_16BIT || format == PNX_AUDIO_8KHZ_16BIT);
   s_start_ms = 0;
+  // Cleared so the first gap after an open is not measured from before it. Not doing this
+  // reported a 2,398ms gap after a format change, which was the measurement and not the
+  // device.
+  s_last_update_ms = 0;
+  s_stats.worst_gap_ms = 0;
   s_carry_bytes = s_carry_head = 0;
   s_on = true;
   return true;

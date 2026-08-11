@@ -64,10 +64,12 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
       // mixer and nothing else -- an artefact is then attributable without argument.
       a->sfx_on = !a->sfx_on;
       a->next_auto_ms = now + 400;
-    } else if (ev.button == PNX_BUTTON_DOWN && a->boom) {
-      // One shot, on demand, regardless of the auto setting.
-      pnx_audio_play_pri(a->boom, a->boom_len, PNX_AUDIO_NO_LOOP, a->boom_hz,
-                         255, 5, NULL);
+    } else if (ev.button == PNX_BUTTON_DOWN) {
+      // Cycles the lead. Now that gaps are known to reach 140-305ms, the useful range is
+      // above that, not below it.
+      static const uint16_t leads[] = { 400, 250, 600, 1000, 150 };
+      a->lead_index = (uint8_t)((a->lead_index + 1) % 5);
+      pnx_audio_set_lead(leads[a->lead_index]);
     } else if (ev.button == PNX_BUTTON_UP) {
       // Toggles the sequencer. Startup plays ONE note directly, with no sequencer running
       // at all -- the last untested link. The mixer's output is provably clean on the host
@@ -128,9 +130,9 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
   const PnxFrameStats *fs = pnx_diag_stats();
   static const char *STATE[] = { "idle", "play", "drain", "?" };
   static const char *FMT[] = { "16k/8", "16k/16", "8k/8", "8k/16" };
-  pnx_format(a->hud, sizeof(a->hud), "%s %s gap%u v%u",
-             FMT[pnx_audio_format() & 3], STATE[au->state & 3],
-             au->worst_gap_ms, au->active_voices);
+  pnx_format(a->hud, sizeof(a->hud), "%s gap%u lead%u v%u",
+             FMT[pnx_audio_format() & 3], au->worst_gap_ms,
+             pnx_audio_lead(), au->active_voices);
   pnx_format(a->hud3, sizeof(a->hud3), "%s%u r%2u  feed %u-%u",
              a->seq_on ? "pat " : "off ", pnx_music_pattern(), pnx_music_row(),
              au->feed_min, au->feed_max);
@@ -165,7 +167,7 @@ static void post_frame(void *ctx) {
   pnx_platform_text_draw(a->hud2, PNX_TEXT_SMALL, 0xFF, 6, 76, 190, 20);
   pnx_platform_text_draw(a->hud3, PNX_TEXT_SMALL, 0xFF, 6, 96, 190, 20);
   pnx_platform_text_draw("0 one tone   1 chromatic\n2 density    3 all four\n\n"
-                        "UP     cycle PCM format\nSELECT sfx auto (off)\nDOWN   one explosion",
+                        "UP     cycle PCM format\nDOWN   cycle stream lead\nSELECT sfx auto (off)",
                         PNX_TEXT_SMALL, 0xFF, 6, 118, 190, 100);
 }
 
