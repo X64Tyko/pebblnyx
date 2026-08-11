@@ -111,10 +111,6 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
     a->next_auto_ms = now + 1400;
   }
 
-  // Only when the sequencer is on. With it off, nothing touches the voices after the one
-  // note started at launch -- which is the point of the isolation.
-  if (a->seq_on) pnx_music_update(now);
-  pnx_audio_update(now);
 
   pnx_gfx_clear(target, 0xC0);
 
@@ -143,8 +139,15 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
   pnx_diag_frame(elapsed_ms, pnx_platform_now_ms() - work_start);
 }
 
-static void draw_text(void *ctx) {
+// Runs after the framebuffer is released. Both the audio feed and the text draw live here
+// because both talk to the system, and the capture window is the wrong place for either.
+static void post_frame(void *ctx) {
   App *a = (App *)ctx;
+
+  const uint32_t now = pnx_platform_now_ms();
+  if (a->seq_on) pnx_music_update(now);
+  pnx_audio_update(now);
+
   pnx_platform_text_draw("pnx audio test", PNX_TEXT_MEDIUM, 0xFF, 6, 20, 190, 26);
   pnx_platform_text_draw(a->hud, PNX_TEXT_SMALL, 0xFF, 6, 56, 190, 20);
   pnx_platform_text_draw(a->hud2, PNX_TEXT_SMALL, 0xFF, 6, 76, 190, 20);
@@ -186,7 +189,7 @@ int main(void) {
           (unsigned)a.laser_len, (unsigned)a.boom_len,
           (unsigned)a.scene.used, (unsigned)a.scene.capacity);
 
-  pnx_platform_set_text_fn(draw_text);
+  pnx_platform_set_post_frame_fn(post_frame);
   pnx_platform_run(frame, &a);
 
   pnx_audio_shutdown();

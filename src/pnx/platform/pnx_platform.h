@@ -158,10 +158,15 @@ bool pnx_platform_has_touch(void);
 // a frame can arrive carrying seconds. Clamp before feeding a fixed-timestep sim.
 typedef void (*PnxFrameFn)(void *ctx, uint32_t elapsed_ms, PnxTarget *target);
 
-// Called after the frame's pixels, once the framebuffer has been released -- the SDK
-// refuses to draw text while it is captured. Optional.
-typedef void (*PnxTextFn)(void *ctx);
-void pnx_platform_set_text_fn(PnxTextFn fn);
+// Called after the frame's pixels, once the framebuffer has been RELEASED.
+//
+// Holding the framebuffer captured blocks the compositor, and the SDK will not draw text
+// while it is held. Audio belongs here for the same reason: feeding the speaker stream
+// from inside the capture window was measurably audible as periodic blips on a single
+// sustained tone, with the mixer's own output proven clean and no underrun reported.
+// Anything that talks to the system rather than to pixels goes here.
+typedef void (*PnxPostFrameFn)(void *ctx);
+void pnx_platform_set_post_frame_fn(PnxPostFrameFn fn);
 
 // Sets up the window and runs until the app exits. Returns on exit.
 void pnx_platform_run(PnxFrameFn frame, void *ctx);

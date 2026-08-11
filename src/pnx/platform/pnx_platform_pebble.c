@@ -33,7 +33,7 @@ static Layer *s_canvas;
 static AppTimer *s_timer;
 
 static PnxFrameFn s_frame_fn;
-static PnxTextFn s_text_fn;
+static PnxPostFrameFn s_post_fn;
 static void *s_frame_ctx;
 static uint32_t s_last_frame_ms;
 static bool s_quit;
@@ -229,9 +229,10 @@ static void update_proc(Layer *layer, GContext *ctx) {
 
     graphics_release_frame_buffer(ctx, fb);
 
-    // Text goes after the release, because the SDK will not draw while the framebuffer
-    // is captured. A frame that wants both draws its pixels, then its text.
-    if (s_text_fn) s_text_fn(s_frame_ctx);
+    // Everything that talks to the system rather than to pixels happens here, after the
+    // release: text, because the SDK will not draw while the framebuffer is captured, and
+    // audio, because feeding the speaker inside the capture window is audible.
+    if (s_post_fn) s_post_fn(s_frame_ctx);
   }
 
   if (s_quit) {
@@ -265,7 +266,7 @@ static void window_unload(Window *window) {
   s_canvas = NULL;
 }
 
-void pnx_platform_set_text_fn(PnxTextFn fn) { s_text_fn = fn; }
+void pnx_platform_set_post_frame_fn(PnxPostFrameFn fn) { s_post_fn = fn; }
 
 void pnx_platform_run(PnxFrameFn frame, void *ctx) {
   s_frame_fn = frame;

@@ -166,7 +166,7 @@ void pnx_platform_text_draw(const char *text, PnxTextSize size, uint8_t colour,
 
 const char *pnx_host_last_text(void) { return s_last_text; }
 
-void pnx_platform_set_text_fn(PnxTextFn fn) { (void)fn; }
+void pnx_platform_set_post_frame_fn(PnxPostFrameFn fn) { (void)fn; }
 
 // ------------------------------------------------------------------------- audio
 //

@@ -170,7 +170,7 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
 
 // Drawn after the framebuffer is released, which is the only time the SDK will render
 // text. Kept to one line: a text draw costs ~4.3 ms, 12% of the frame.
-static void draw_text(void *ctx) {
+static void post_frame(void *ctx) {
   Game *g = (Game *)ctx;
   if (g->hud[0]) pnx_platform_text_draw(g->hud, PNX_TEXT_SMALL, 0xFF, 2, 0, 196, 18);
 }
@@ -198,7 +198,7 @@ int main(void) {
   pnx_log("start: ready=%d, %u palettes, %u B flash",
           (int)g.ready, pnx_palette_count(), (unsigned)pnx_assets_bytes_loaded());
 
-  pnx_platform_set_text_fn(draw_text);
+  pnx_platform_set_post_frame_fn(post_frame);
   pnx_platform_run(frame, &g);
 
   pnx_arena_destroy(&g.scene);
