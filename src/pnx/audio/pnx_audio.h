@@ -129,4 +129,10 @@ const PnxAudioStats *pnx_audio_stats(void);
 void pnx_audio_set_lead(uint16_t ms);
 uint16_t pnx_audio_lead(void);
 
+// Reopens the stream in another format, preserving nothing. For A/B testing on device:
+// 8-bit carries exactly the information an 8-bit mixer produces, but that is a claim about
+// information, not about how a particular DAC path sounds.
+bool pnx_audio_reopen(PnxAudioFormat format, uint8_t volume);
+PnxAudioFormat pnx_audio_format(void);
+
 #endif  // PNX_USE_AUDIO

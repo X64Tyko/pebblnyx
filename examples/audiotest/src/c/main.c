@@ -29,6 +29,7 @@ typedef struct {
   bool music_on;
   bool sfx_on;
   uint8_t lead_index;
+  uint8_t fmt_index;
   bool seq_on;      // sequencer; off at startup so a bare tone can be judged alone      // auto-firing effects; off by default so the tone is clean
   uint32_t ticks, accumulator_ms;
   uint32_t next_auto_ms;
@@ -73,11 +74,18 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
       // and the stream lead makes no difference on device, so if a bare tone with nothing
       // calling into the sequencer is also clean, the fault is in the sequencer. If it
       // blips too, the fault is in the platform stream and nothing above it.
-      a->seq_on = !a->seq_on;
-      if (a->seq_on) {
-        pnx_music_play(&a->song, true);
-      } else {
-        pnx_music_stop();
+      // Cycles the PCM format and restarts the bare tone in it. Every measurement says
+      // the pipeline is correct -- clean mixer output, continuous Playing state, no short
+      // writes, correct aggregate rate -- so the remaining variable is how the device
+      // renders each format. This is the only way to compare them.
+      static const PnxAudioFormat fmts[] = {
+        PNX_AUDIO_16KHZ_8BIT, PNX_AUDIO_16KHZ_16BIT,
+        PNX_AUDIO_8KHZ_8BIT,  PNX_AUDIO_8KHZ_16BIT,
+      };
+      a->fmt_index = (uint8_t)((a->fmt_index + 1) % 4);
+      pnx_music_stop();
+      a->seq_on = false;
+      if (pnx_audio_reopen(fmts[a->fmt_index], 85)) {
         a->held = pnx_audio_note(PNX_WAVE_TRIANGLE, 69, 255, &a->tone_env, 1);
       }
     }
@@ -117,9 +125,10 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
   const PnxAudioStats *au = pnx_audio_stats();
   const PnxFrameStats *fs = pnx_diag_stats();
   static const char *STATE[] = { "idle", "play", "drain", "?" };
-  pnx_format(a->hud, sizeof(a->hud), "v%u %s stop%u def%u",
-             au->active_voices, STATE[au->state & 3],
-             au->left_playing, (unsigned)au->worst_deficit);
+  static const char *FMT[] = { "16k/8", "16k/16", "8k/8", "8k/16" };
+  pnx_format(a->hud, sizeof(a->hud), "%s %s stop%u v%u",
+             FMT[pnx_audio_format() & 3], STATE[au->state & 3],
+             au->left_playing, au->active_voices);
   pnx_format(a->hud3, sizeof(a->hud3), "%s%u r%2u  feed %u-%u",
              a->seq_on ? "pat " : "off ", pnx_music_pattern(), pnx_music_row(),
              au->feed_min, au->feed_max);
@@ -154,7 +163,7 @@ static void post_frame(void *ctx) {
   pnx_platform_text_draw(a->hud2, PNX_TEXT_SMALL, 0xFF, 6, 76, 190, 20);
   pnx_platform_text_draw(a->hud3, PNX_TEXT_SMALL, 0xFF, 6, 96, 190, 20);
   pnx_platform_text_draw("0 one tone   1 chromatic\n2 density    3 all four\n\n"
-                        "UP     sequencer on/off\nSELECT sfx auto (off)\nDOWN   one explosion",
+                        "UP     cycle PCM format\nSELECT sfx auto (off)\nDOWN   one explosion",
                         PNX_TEXT_SMALL, 0xFF, 6, 118, 190, 100);
 }
 

@@ -502,6 +502,15 @@ void pnx_audio_update(uint32_t now_ms) {
   }
 }
 
+PnxAudioFormat pnx_audio_format(void) { return s_format; }
+
+bool pnx_audio_reopen(PnxAudioFormat format, uint8_t volume) {
+  pnx_audio_stop_all();
+  pnx_platform_audio_close();
+  s_on = false;
+  return pnx_audio_init(format, volume);
+}
+
 void pnx_audio_set_lead(uint16_t ms) {
   s_lead_ms = ms ? ms : 1u;
   // Reset the deficit so a sweep is judged on the new setting rather than on the worst
