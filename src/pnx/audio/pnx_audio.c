@@ -155,6 +155,7 @@ static uint32_t s_carry_head;
 static PnxAudioStats s_stats;
 
 static uint16_t s_lead_ms = PNX_AUDIO_LEAD_MS;
+static uint32_t s_last_update_ms;
 static bool s_on;
 static PnxAudioFormat s_format;
 static uint32_t s_byte_rate;
@@ -449,6 +450,17 @@ void pnx_audio_update(uint32_t now_ms) {
   }
   s_stats.state = (uint8_t)st;
 
+  // Longest gap between feeds. A stall longer than the lead starves the stream no matter
+  // how correct the aggregate rate is, and blocking calls -- APP_LOG over Bluetooth being
+  // the obvious one -- are exactly how a gap appears intermittently.
+  if (s_last_update_ms) {
+    const uint32_t gap = now_ms - s_last_update_ms;
+    if (gap > s_stats.worst_gap_ms && gap < 60000u) {
+      s_stats.worst_gap_ms = (uint16_t)gap;
+    }
+  }
+  s_last_update_ms = now_ms;
+
   const uint32_t elapsed = now_ms - s_start_ms;
 
   // No fill-level query exists, so underrun is inferred: if playback has consumed more
@@ -519,6 +531,8 @@ void pnx_audio_set_lead(uint16_t ms) {
   s_stats.short_writes = 0;
   s_stats.feeds = 0;
   s_stats.feed_min = s_stats.feed_max = 0;
+  s_stats.worst_gap_ms = 0;
+  s_last_update_ms = 0;
 }
 
 uint16_t pnx_audio_lead(void) { return s_lead_ms; }

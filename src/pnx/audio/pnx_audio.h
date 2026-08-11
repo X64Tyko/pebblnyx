@@ -73,6 +73,9 @@ typedef struct {
                            // is playback halting and resuming, which is heard as the
                            // sound starting over.
   uint8_t state;           // most recent PnxAudioState
+  uint16_t worst_gap_ms;   // longest interval between feeds. The lead only survives gaps
+                           // shorter than itself, so this is the number that says whether
+                           // an occasional stall is starving the stream.
   uint16_t feed_min;       // smallest and largest bytes mixed in one call. A pulse at the
   uint16_t feed_max;       // frame rate (~27Hz) sounds like a thrum, and an uneven feed
                            // is the mechanism that would cause one.

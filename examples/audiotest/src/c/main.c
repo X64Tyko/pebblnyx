@@ -78,9 +78,11 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
       // the pipeline is correct -- clean mixer output, continuous Playing state, no short
       // writes, correct aggregate rate -- so the remaining variable is how the device
       // renders each format. This is the only way to compare them.
+      // 8k/8 measured best by ear on device and 16k/16 worst, so the sweep starts from
+      // the good end rather than making you cycle past the bad one to reach it.
       static const PnxAudioFormat fmts[] = {
-        PNX_AUDIO_16KHZ_8BIT, PNX_AUDIO_16KHZ_16BIT,
-        PNX_AUDIO_8KHZ_8BIT,  PNX_AUDIO_8KHZ_16BIT,
+        PNX_AUDIO_8KHZ_8BIT, PNX_AUDIO_16KHZ_8BIT,
+        PNX_AUDIO_8KHZ_16BIT, PNX_AUDIO_16KHZ_16BIT,
       };
       a->fmt_index = (uint8_t)((a->fmt_index + 1) % 4);
       pnx_music_stop();
@@ -126,9 +128,9 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
   const PnxFrameStats *fs = pnx_diag_stats();
   static const char *STATE[] = { "idle", "play", "drain", "?" };
   static const char *FMT[] = { "16k/8", "16k/16", "8k/8", "8k/16" };
-  pnx_format(a->hud, sizeof(a->hud), "%s %s stop%u v%u",
+  pnx_format(a->hud, sizeof(a->hud), "%s %s gap%u v%u",
              FMT[pnx_audio_format() & 3], STATE[au->state & 3],
-             au->left_playing, au->active_voices);
+             au->worst_gap_ms, au->active_voices);
   pnx_format(a->hud3, sizeof(a->hud3), "%s%u r%2u  feed %u-%u",
              a->seq_on ? "pat " : "off ", pnx_music_pattern(), pnx_music_row(),
              au->feed_min, au->feed_max);
@@ -139,7 +141,7 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
              a->seq_on ? (a->sfx_on ? "seq+sfx" : "seq")
                        : (a->sfx_on ? "tone+sfx" : "TONE ONLY"));
 
-  if (a->ticks % 50 == 0) {
+  if (a->ticks % 250 == 0) {
     if (a->ticks == 50) pnx_diag_flush();
     pnx_log("audio: %s | %s | %s | short %u/%u carry %u", a->hud, a->hud3, a->hud2,
             (unsigned)au->short_writes, (unsigned)au->feeds,
@@ -178,7 +180,7 @@ int main(void) {
   }
   pnx_assets_init(&a.persistent, &a.scene, RESOURCES, PNX_ASSET_COUNT);
 
-  if (!pnx_audio_init(PNX_AUDIO_16KHZ_8BIT, 85)) {
+  if (!pnx_audio_init(PNX_AUDIO_8KHZ_8BIT, 85)) {
     pnx_log("audio would not open");
   }
 
