@@ -53,9 +53,30 @@ build, so this table has a short shelf life and that is fine.
 
 ## The multipliers worth using
 
-**Palette swaps.** A recoloured enemy costs **8 bytes**, not a sprite. Four silhouettes across
-three palettes each reads as twelve enemy types for the price of four. This is the single
-largest lever available and the engine already supports per-entity palette override.
+**Palette swaps, and the pipeline now does them for you.** Declare recolours next to the sheet
+they recolour and each variant costs a 16-byte palette instead of another copy of every frame:
+
+```toml
+[[sprite]]
+name = "drone"
+sheet = "art/drone.png"
+frames = [[0, 0, 16, 16]]
+variants = ["art/drone_ranged.png", "art/drone_swarm.png"]
+```
+
+Measured on the example's one-frame npc: 384 bytes of pixels replaced by 32 bytes of palettes.
+A six-frame character sheet saves over a kilobyte per recolour. **So the six enemy classes in
+`Combat.md` should be four silhouettes with variants**, not six sheets -- which is what makes
+that table affordable rather than aspirational.
+
+Two authoring rules the pipeline enforces. A variant may change any colour but must not move,
+add or remove a pixel, and transparency must match -- a mismatch is a build error naming the
+frame. And it must not *merge* two colours into one, which a hue shift in an art tool can do
+accidentally after quantisation: recolour by remapping colours one-to-one.
+
+**Mirrored tiles are free.** A tile that is the horizontal, vertical or 180-degree reflection
+of one already in the atlas is dropped and referenced with flip bits, which cost nothing -- the
+map entry carries them. Worth knowing while drawing: a symmetric tileset genuinely is cheaper.
 
 **Carving.** Never import a whole sheet. A region of each tileset is a fraction of the cost of
 all of them -- the difference between 111% of budget and comfortably under it.

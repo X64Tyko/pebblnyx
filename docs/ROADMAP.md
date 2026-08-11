@@ -54,8 +54,8 @@ Extract `platform` and `core` from the probes; establish the machinery that keep
 startup log written from `main()` *survived*, which is the deferred ring doing the one
 job it exists for.
 
-The empty example costs **6,296 bytes of 65,535 (9.6%)**; with diagnostics
-off, **2,376 (3.6%)**, which verifies the zero-cost claim rather than asserting it. The
+The empty example costs **6,392 bytes of 65,535 (9.8%)**; with diagnostics
+off, **2,468 (3.8%)**, which verifies the zero-cost claim rather than asserting it. The
 size report paid for itself immediately by exposing 754 bytes of `__udivmoddi4` pulled in
 by one `uint64_t` division in the formatter. Findings in
 [`MEASUREMENTS.md`](MEASUREMENTS.md).
@@ -73,7 +73,7 @@ Generalise the probe's pipeline into a reusable tool.
 - Quantisation to `GColor8`, tile dedup, colour-key handling
 - Generated header: handles, counts, tile roles, dialog ids. No number in it is
   something a human should ever type into game code
-- **Validation that fails the build**, with **18 tests asserting that it does** — and
+- **Validation that fails the build**, with **22 tests asserting that it does** — and
   asserting the message names the actual problem, since an error saying only "invalid
   manifest" leaves the author as stuck as silence
 - **256KB appstore budget enforcement** with a per-category breakdown
@@ -164,7 +164,7 @@ is knowable before it runs.
 
 | Module | Bytes |
 |---|---|
-| pnx/gfx | 942 |
+| pnx/gfx | 1,442 |
 | pnx/assets | 2,455 |
 | pnx/core | 3,817 |
 | pnx/platform | 1,525 |

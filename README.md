@@ -12,17 +12,20 @@ see [`docs/GAME.md`](docs/GAME.md), which is also why a few framework features e
 
 **Status: playable slice running on hardware.** Platform, core, assets, graphics and an
 audio mixer are built and verified on a real Pebble Time 2; there is a visual editor for
-maps and asset import. Every number in this repo was measured on the device, and the ones
+maps and asset import. The pipeline deduplicates mirrored tiles, composes 16x16 tiles from
+shared 8x8 quadrants when that pays, and collapses palette-swapped sprite recolours to one
+bitmap plus a palette each. Every number in this repo was measured on the device, and the ones
 that overturned a design decision are recorded as such in
 [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md) — including several where the estimate was
 wrong by more than 2x.
 
 | | |
 |---|---|
-| Example app | 12,952 of 65,535 code bytes (19.8%) |
-| Content | 14,186 of 262,144 resource bytes (5.4%) |
+| Smallest complete game | 6,392 of 65,535 static bytes (9.8%) — 2,468 (3.8%) with diagnostics off |
+| Playable slice | 13,356 static (20.4%), 22,469 of 262,144 resource bytes (8.6%) |
+| Runtime memory | 13,356 static + 117,716 bytes of heap, of one 128KB slot |
 | Frame cost | ~5,100 µs of ~35,000 available, holding the 26.8fps ceiling |
-| Tests | 213 host checks + 18 pipeline-validation tests |
+| Tests | 240 host checks + 22 pipeline-validation tests |
 
 ---
 
@@ -76,13 +79,13 @@ docs/blog/            notes toward a writeup on old techniques, re-priced
 src/pnx/platform/     THE ONLY layer that touches Pebble APIs
 src/pnx/core/         fixed point, arenas, containers, diagnostics
 src/pnx/assets/       handle-based asset registry
-src/pnx/gfx/          blitter, camera, tilemap, sprites with depth sort
+src/pnx/gfx/          blitter with X/Y flip, camera, tilemap, sprites with depth sort
 src/pnx/audio/        software mixer over a streamed PCM buffer
 src/pnx/input/        swappable input backends (planned)
 src/pnx/save/         chunk-packed persistence (planned)
 src/pnx/app/          fixed-timestep loop, scene stack, lifecycle (planned)
 
-tests/                213 host checks, run with a normal compiler
+tests/                240 host checks, run with a normal compiler
 tools/pnx_assets.py   the asset pipeline: manifest -> blobs + generated header
 tools/pnx_editor.py   visual editor: maps, transitions, asset import, build
 tools/pnx_preview.py  renders the shipped blobs as an HTML report
@@ -120,17 +123,23 @@ python3 tools/pnx_editor.py          # finds the example on its own
 module                 text   rodata    data      bss    total
 --------------------------------------------------------------
 pnx/core               1470        0       0     2347     3817
-pnx/assets             2190        0       0      265     2455
-pnx/platform           1234        0       0      291     1525
-game                   1054        0       0      232     1286
-pnx/gfx                 942        0       0        0      942
+pnx/assets             2522        0       0      305     2827
+pnx/platform           1274        0       0      299     1573
+pnx/gfx                1442        0       0        0     1442
+game                   1090        0       0      232     1322
 (sdk/libc)                0      130       0        0      130
 --------------------------------------------------------------
-TOTAL                  6890      130       0     3135    10155
-(headers/padding)                                         1632
+TOTAL                  7798      130       0     3183    11111
+(headers/padding)                                         2245
 
-[#######.................................] 12952 / 65535 bytes (19.8%)
+[########................................] 13356 / 65535 bytes (20.4%)
 ```
+
+**Static bytes and resource bytes are separate budgets.** The report above counts what the
+linker places, which `virtual_size` caps at 65,535; resources live in flash against a 256KB
+appstore limit. The rest of the 128KB slot is heap -- 117,716 bytes free in the slice above --
+so a large buffer belongs there rather than in a static array. Audio's buffers were moved for
+exactly that reason and the module fell from 11,432 bytes to 3,672.
 
 That report is not optional decoration. `virtual_size` in the app header is a **uint16**,
 so code, constants and static data together must stay under 65,535 bytes — and going over
@@ -141,7 +150,7 @@ has an answer.
 To check what a module actually costs, turn it off:
 
 ```sh
-PNX_DEFINES=PNX_USE_DIAGNOSTICS=0 pebble build   # 6,296 B -> 2,376 B
+PNX_DEFINES=PNX_USE_DIAGNOSTICS=0 pebble build   # 6,392 B -> 2,468 B
 ```
 
 A game project reaches the framework through a symlink at `src/c/pnx`, which keeps every
@@ -151,7 +160,7 @@ source file inside the project tree where waf can resolve it. See
 The pipeline **fails the build on content that cannot work** — a warp on a tile that
 triggers nothing, a door sealed inside a wall, a destination inside a wall or in a closed
 pocket. That matters because content bugs do not crash on a watch; they present as nothing
-happening, with a binary that looks perfectly fine. There are 18 tests asserting the build
+happening, with a binary that looks perfectly fine. There are 22 tests asserting the build
 does fail, and that the message names the actual problem.
 
 ## Provenance

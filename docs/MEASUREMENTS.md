@@ -445,6 +445,36 @@ binding constraint while frame time is not.
 On the small carved regions the examples use, reuse is 1.04-1.12x and metatiles still lose --
 correctly declined. The pipeline reports the verdict and the margin on every build.
 
+## Map format: u16 cells, blob v5
+
+Map cells were one byte of tile index. They are now u16, which is what lets the pipeline's
+deduplication survive into the map:
+
+| Bits | Field |
+|---|---|
+| 0-9 | tile index (1,024, up from 255) |
+| 10 | flip X |
+| 11 | flip Y |
+| 12-15 | reserved -- per-cell palette index |
+
+Doubling the cells costs 3,223 bytes across the two example maps, up from ~2,071. That buys 128
+bytes back for every tile a mirrored pair no longer needs its own copy of, and the flip bits are
+what make mirror dedup expressible at all -- a pipeline can only exploit redundancy the format
+can carry.
+
+Flip cost 60 bytes of blitter (1,382 to 1,442). Half of it already existed as a `mirror` bool
+for sprite facing; that became a `uint8_t flip` with `PNX_FLIP_X == 1`, so every existing `true`
+still means the same thing and no call site changed. **Flip Y is one index inversion** choosing
+the source row -- no second span writer, no per-pixel cost.
+
+The four reserved bits are not wired. Four bits is fifteen palettes against 37 merged, so
+per-cell palette needs a per-map palette table first.
+
+**`PNX_BLOB_VERSION` must be bumped in `pnx_assets.h` and `pnx_assets.py` together.** Changing
+only the pipeline made the runtime guard refuse every blob, which is correct behaviour -- but the
+host test then continued past the failed load and segfaulted on a NULL palette table, which
+reads as a code bug and is not one.
+
 ## Asset pipeline (M2)
 
 The probe's content through the new pipeline, `examples/overworld`:
@@ -685,9 +715,13 @@ That reframes the choice as a trade rather than a saving:
 | 64-tile region | 8.6% (764 B) | +35% | **no** |
 | five full tilesets | 42% (117 KB) | +35% | yes |
 
-So auto-selection requires a **25% minimum saving** before choosing metatiles, not merely
-a positive one. Small atlases stay flat; large ones pay the render cost to buy back a
-large fraction of the content budget.
+So auto-selection requires a minimum saving before choosing metatiles, not merely a positive
+one. Small atlases stay flat; large ones pay the render cost to buy back content budget.
+
+**Both figures above are superseded.** They predate mirror-aware dedup, which overlaps with
+quadrant dedup and reduced what metatiling adds -- the real saving is 9-18% and the threshold
+is now 0.12, overridable per atlas. See "Tile encoding" above for the re-measurement; this row
+is kept because the 42% figure is quoted elsewhere and should not be trusted.
 
 Also visible: a frame containing a **scene load peaks at 31,000 µs** -- 83% of the frame
 period, from flash reads. It does not drop a frame here, but a larger scene would, so a
@@ -788,8 +822,8 @@ Measured with `tools/size_report.py` against the 65,535-byte ceiling.
 
 | Configuration | Footprint | Notes |
 |---|---|---|
-| Default (`PNX_USE_DIAGNOSTICS=1`) | **6,296 B** (9.6%) | platform 1,277 + core 3,743 + game 446 |
-| `PNX_USE_DIAGNOSTICS=0` | **2,376 B** (3.6%) | core falls to 92 B — the arena alone |
+| Default (`PNX_USE_DIAGNOSTICS=1`) | **6,392 B** (9.8%) | platform 1,369 + core 3,743 + game 446 |
+| `PNX_USE_DIAGNOSTICS=0` | **2,468 B** (3.8%) | core falls to 92 B — the arena alone |
 | M2 `examples/overworld` | **8,580 B** (13.1%) | adds assets 824 B + a naive renderer |
 
 The delta is the point: switching one module off reclaims **3,920 bytes**, including the
@@ -832,7 +866,7 @@ The mixer's cost is almost entirely buffers, and it took four of them before any
 |---|---|---|
 | `.text` | 3,420 | 3,356 |
 | `.bss` | **8,007** | **2,375** |
-| Module total | 11,432 | 5,736 |
+| Module total | 11,432 | 5,736, then **3,672** once the buffers moved to the heap |
 
 The four were an int16 accumulator, an 8-bit output, a 16-bit widening of that output, and a
 copy of whatever the device refused -- 7,168 bytes holding the same signal at four stages.
@@ -842,8 +876,9 @@ marking how far the device got. Chunk also dropped from 1,024 samples to 768, wh
 ample against the ~512 a 32 ms feed needs at 16 kHz.
 
 Worth generalising: on a platform where `.text` and statics share a 64 KB ceiling, a buffer
-per pipeline stage is the expensive habit, not the code. The example app fell from 21,128 to
-15,420 bytes -- **27% of the whole app** -- with no change to the audio.
+per pipeline stage is the expensive habit, not the code. The audiotest app fell from 21,128 to
+15,420 bytes on the collapse, and to **13,384** once the single remaining buffer moved to the
+heap -- **37% of the whole app** -- with no change to the audio.
 
 
 ## Audio streaming: short writes are normal, discarding them is not
