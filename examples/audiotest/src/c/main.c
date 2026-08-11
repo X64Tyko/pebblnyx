@@ -25,7 +25,8 @@ typedef struct {
 
   bool ready;
   bool music_on;
-  bool sfx_on;      // auto-firing effects; off by default so the tone is clean
+  bool sfx_on;
+  uint8_t lead_index;      // auto-firing effects; off by default so the tone is clean
   uint32_t ticks, accumulator_ms;
   uint32_t next_auto_ms;
   char hud[48];
@@ -64,9 +65,12 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
       pnx_audio_play_pri(a->boom, a->boom_len, PNX_AUDIO_NO_LOOP, a->boom_hz,
                          255, 5, NULL);
     } else if (ev.button == PNX_BUTTON_UP) {
-      a->music_on = !a->music_on;
-      if (a->music_on) pnx_music_play(&a->song, true);
-      else pnx_music_stop();
+      // Cycles the stream lead. The mixer's output is provably clean on the host -- a
+      // perfect triangle with no steps and flat amplitude -- so a blip heard on device is
+      // in the feed or the buffer. This sweeps the one parameter that governs both.
+      static const uint16_t leads[] = { 120, 60, 40, 250, 500 };
+      a->lead_index = (uint8_t)((a->lead_index + 1) % 5);
+      pnx_audio_set_lead(leads[a->lead_index]);
     }
   }
 
@@ -106,9 +110,9 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
 
   const PnxAudioStats *au = pnx_audio_stats();
   const PnxFrameStats *fs = pnx_diag_stats();
-  pnx_format(a->hud, sizeof(a->hud), "voices %u def %u cap %u",
-             au->active_voices, (unsigned)au->worst_deficit,
-             (unsigned)au->capacity);
+  pnx_format(a->hud, sizeof(a->hud), "v%u lead %u def %u cap %u",
+             au->active_voices, pnx_audio_lead(),
+             (unsigned)au->worst_deficit, (unsigned)au->capacity);
   pnx_format(a->hud3, sizeof(a->hud3), "pat %u row %2u  feed %u-%u",
              pnx_music_pattern(), pnx_music_row(),
              au->feed_min, au->feed_max);
@@ -136,7 +140,7 @@ static void draw_text(void *ctx) {
   pnx_platform_text_draw(a->hud2, PNX_TEXT_SMALL, 0xFF, 6, 76, 190, 20);
   pnx_platform_text_draw(a->hud3, PNX_TEXT_SMALL, 0xFF, 6, 96, 190, 20);
   pnx_platform_text_draw("0 one tone   1 chromatic\n2 density    3 all four\n\n"
-                        "UP     music on/off\nSELECT sfx auto (off)\nDOWN   one explosion",
+                        "UP     cycle stream lead\nSELECT sfx auto (off)\nDOWN   one explosion",
                         PNX_TEXT_SMALL, 0xFF, 6, 118, 190, 100);
 }
 

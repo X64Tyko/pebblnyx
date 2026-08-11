@@ -154,6 +154,7 @@ static uint32_t s_carry_bytes;
 static uint32_t s_carry_head;
 static PnxAudioStats s_stats;
 
+static uint16_t s_lead_ms = PNX_AUDIO_LEAD_MS;
 static bool s_on;
 static PnxAudioFormat s_format;
 static uint32_t s_byte_rate;
@@ -463,7 +464,7 @@ void pnx_audio_update(uint32_t now_ms) {
     s_carry_bytes = s_carry_head = 0;
   }
 
-  const uint32_t target = (elapsed + PNX_AUDIO_LEAD_MS) * s_byte_rate / 1000u;
+  const uint32_t target = (elapsed + s_lead_ms) * s_byte_rate / 1000u;
   if (target <= s_stats.written) return;
 
   uint32_t want_bytes = target - s_stats.written;
@@ -491,6 +492,18 @@ void pnx_audio_update(uint32_t now_ms) {
     offer((const uint8_t *)s_scratch, samples);
   }
 }
+
+void pnx_audio_set_lead(uint16_t ms) {
+  s_lead_ms = ms ? ms : 1u;
+  // Reset the deficit so a sweep is judged on the new setting rather than on the worst
+  // value any earlier setting produced.
+  s_stats.worst_deficit = 0;
+  s_stats.short_writes = 0;
+  s_stats.feeds = 0;
+  s_stats.feed_min = s_stats.feed_max = 0;
+}
+
+uint16_t pnx_audio_lead(void) { return s_lead_ms; }
 
 const PnxAudioStats *pnx_audio_stats(void) { return &s_stats; }
 

@@ -115,4 +115,14 @@ bool pnx_audio_voice_active(uint8_t voice);
 
 const PnxAudioStats *pnx_audio_stats(void);
 
+// How far ahead of playback to keep the stream, in milliseconds.
+//
+// Adjustable because the device gives no way to ask how deep its buffer is, and the
+// consequences of guessing wrong are opposite: too little and it drains between feeds,
+// too much and -- if write accepts bytes it cannot hold -- the surplus is silently
+// discarded and the shortfall never shows up as a short write. Sweeping this is the only
+// way to find out which is happening.
+void pnx_audio_set_lead(uint16_t ms);
+uint16_t pnx_audio_lead(void);
+
 #endif  // PNX_USE_AUDIO
