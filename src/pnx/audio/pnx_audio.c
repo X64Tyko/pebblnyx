@@ -82,6 +82,12 @@ static void build_wavetable(void) {
 static Voice s_voices[PNX_AUDIO_VOICES];
 static int8_t s_scratch[PNX_AUDIO_CHUNK];
 
+// Accumulator, so summing happens at full width and clamps ONCE at the end. The first
+// version clamped inside the per-voice loop, which saturates intermediate sums: five
+// voices at ~78 each summed to ~390 against a +/-127 range, so every peak was flattened
+// and the result sounded distorted rather than loud. int16 is enough -- 8 voices x 127.
+static int16_t s_acc[PNX_AUDIO_CHUNK];
+
 // Bytes mixed but not yet accepted by the device.
 //
 // speaker_stream_write returns how much it took, and a full buffer takes less than
@@ -222,7 +228,7 @@ bool pnx_audio_voice_active(uint8_t voice) {
 // end keeps intermediate sums from wrapping, which is what makes several loud voices
 // distort rather than invert.
 static void mix(int8_t *out, uint32_t count) {
-  memset(out, 0, count);
+  memset(s_acc, 0, sizeof(int16_t) * count);
   uint8_t active = 0;
 
   for (int v = 0; v < PNX_AUDIO_VOICES; v++) {
@@ -237,6 +243,7 @@ static void mix(int8_t *out, uint32_t count) {
         o->phase = o->loop_start << 16;
         continue;
       }
+
       // Envelope advance. One add and a stage test per sample, which at 600 samples x
       // 8 voices is nothing against ~30 ms of idle CPU.
       if (o->stage != ENV_OFF) {
@@ -272,11 +279,18 @@ static void mix(int8_t *out, uint32_t count) {
       const int32_t enveloped = (o->stage == ENV_OFF)
           ? (int32_t)o->pcm[index]
           : (((int32_t)o->pcm[index] * (o->level >> 8)) >> 8);
-      const int32_t s = (enveloped * o->volume) >> 8;
-      const int32_t acc = out[n] + s;
-      out[n] = (int8_t)(acc < -128 ? -128 : (acc > 127 ? 127 : acc));
+      s_acc[n] += (int16_t)((enveloped * o->volume) >> 8);
       o->phase += o->step;
     }
+  }
+
+  // Headroom scaled to what is actually sounding, so a lone effect stays loud while a
+  // full mix does not saturate. A fixed divisor would make single sounds too quiet;
+  // dividing by the full voice count would make a busy mix collapse.
+  const int32_t div = active > 2 ? ((active + 1) / 2) : 1;
+  for (uint32_t n = 0; n < count; n++) {
+    const int32_t v = s_acc[n] / div;
+    out[n] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
   }
   s_stats.active_voices = active;
 }
@@ -287,19 +301,17 @@ static void offer(const uint8_t *data, uint32_t bytes) {
   s_stats.written += (uint32_t)wrote;
   if (wrote < bytes) {
     // The first short write reveals the buffer depth, which the device will not tell us.
-    // Worth recording: if the lead exceeds it, every write is short by construction.
     if (s_stats.capacity == 0) s_stats.capacity = s_stats.written;
     s_stats.short_writes++;
     const uint32_t left = bytes - (uint32_t)wrote;
-    // Carry the tail rather than dropping it. This is the whole fix: dropped samples are
-    // a hole in the waveform, and the mixer cannot regenerate them because the voice
-    // phases have moved on.
+    // Carry the tail rather than dropping it: dropped samples are a hole in the waveform,
+    // and the mixer cannot regenerate them because the voice phases have moved on.
     if (left <= sizeof(s_carry)) {
       memmove(s_carry, data + wrote, left);
       s_carry_bytes = left;
       s_carry_head = 0;
     } else {
-      s_carry_bytes = s_carry_head = 0;   // cannot happen with CHUNK sizing; be safe
+      s_carry_bytes = s_carry_head = 0;
     }
   } else {
     s_carry_bytes = s_carry_head = 0;

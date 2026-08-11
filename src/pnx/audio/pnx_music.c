@@ -144,10 +144,12 @@ static void play_row(const PnxSong *s, uint8_t pattern, uint8_t row) {
 
     if (note == PNX_MUSIC_NO_NOTE) continue;      // hold whatever is sounding
 
-    // Release the channel's previous note before starting another, so the two do not
-    // stack and double the channel's volume.
+    // Cut the previous note rather than releasing it. A release longer than a row --
+    // 160ms against 113ms at 132bpm -- makes every note overlap its successor, so the
+    // channel permanently sounds two notes and the result is muddy. A channel is
+    // monophonic by definition; only an explicit '-' gets a release tail.
     if (s_channel_voice[c] != PNX_AUDIO_NO_VOICE) {
-      pnx_audio_release(s_channel_voice[c]);
+      pnx_audio_stop(s_channel_voice[c]);
       s_channel_voice[c] = PNX_AUDIO_NO_VOICE;
     }
     if (note == PNX_MUSIC_NOTE_OFF) continue;

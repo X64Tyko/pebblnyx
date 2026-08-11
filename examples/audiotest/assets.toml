@@ -21,26 +21,28 @@ budget_bytes = 262144
 tempo = 132
 channels = 4
 
+# A row at 132bpm is 113ms, so every stage has to fit inside that. A release longer than a
+# row makes each note outlive the one replacing it.
 [[music.theme.instrument]]
-wave = "triangle"       # 0: lead, soft and sustained
-attack = 8
-decay = 110
-sustain = 175
-release = 160
+wave = "triangle"       # 0: lead
+attack = 6
+decay = 70
+sustain = 165
+release = 60
 
 [[music.theme.instrument]]
-wave = "square"         # 1: bass, punchy
+wave = "square"         # 1: bass
 attack = 2
-decay = 45
-sustain = 205
-release = 70
+decay = 40
+sustain = 190
+release = 45
 
 [[music.theme.instrument]]
-wave = "saw"             # 2: harmony, bright
-attack = 12
-decay = 130
-sustain = 140
-release = 180
+wave = "saw"            # 2: harmony
+attack = 10
+decay = 80
+sustain = 130
+release = 70
 
 # '.' holds, '-' releases. Four cells per row: lead, harmony, spare, bass.
 [[music.theme.pattern]]
