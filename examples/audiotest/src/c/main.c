@@ -116,9 +116,10 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
 
   const PnxAudioStats *au = pnx_audio_stats();
   const PnxFrameStats *fs = pnx_diag_stats();
-  pnx_format(a->hud, sizeof(a->hud), "v%u lead %u def %u cap %u",
-             au->active_voices, pnx_audio_lead(),
-             (unsigned)au->worst_deficit, (unsigned)au->capacity);
+  static const char *STATE[] = { "idle", "play", "drain", "?" };
+  pnx_format(a->hud, sizeof(a->hud), "v%u %s stop%u def%u",
+             au->active_voices, STATE[au->state & 3],
+             au->left_playing, (unsigned)au->worst_deficit);
   pnx_format(a->hud3, sizeof(a->hud3), "%s%u r%2u  feed %u-%u",
              a->seq_on ? "pat " : "off ", pnx_music_pattern(), pnx_music_row(),
              au->feed_min, au->feed_max);

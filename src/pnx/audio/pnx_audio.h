@@ -69,6 +69,10 @@ typedef struct {
   uint32_t capacity;       // bytes accepted before the first short write -- the device's
                            // buffer depth, which it offers no way to query
   uint32_t carried;        // bytes currently held over from a short write
+  uint16_t left_playing;   // times the speaker stopped being in Playing state. Each one
+                           // is playback halting and resuming, which is heard as the
+                           // sound starting over.
+  uint8_t state;           // most recent PnxAudioState
   uint16_t feed_min;       // smallest and largest bytes mixed in one call. A pulse at the
   uint16_t feed_max;       // frame rate (~27Hz) sounds like a thrum, and an uneven feed
                            // is the mechanism that would cause one.

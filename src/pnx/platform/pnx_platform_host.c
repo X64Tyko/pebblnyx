@@ -198,6 +198,10 @@ size_t pnx_platform_audio_write(const void *data, size_t bytes) {
 void pnx_platform_audio_close(void) { s_audio_open = false; }
 bool pnx_platform_audio_is_open(void) { return s_audio_open; }
 
+PnxAudioState pnx_platform_audio_state(void) {
+  return s_audio_open ? PNX_AUDIO_PLAYING : PNX_AUDIO_IDLE;
+}
+
 const void *pnx_host_audio_last(size_t *bytes) {
   if (bytes) *bytes = s_audio_last_bytes;
   return s_audio_last;

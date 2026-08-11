@@ -115,6 +115,16 @@ void pnx_platform_audio_close(void) {
 
 bool pnx_platform_audio_is_open(void) { return s_audio_open; }
 
+PnxAudioState pnx_platform_audio_state(void) {
+  if (!s_audio_open) return PNX_AUDIO_IDLE;
+  switch (speaker_get_status()) {
+    case SpeakerStatusIdle:     return PNX_AUDIO_IDLE;
+    case SpeakerStatusPlaying:  return PNX_AUDIO_PLAYING;
+    case SpeakerStatusDraining: return PNX_AUDIO_DRAINING;
+    default:                    return PNX_AUDIO_UNKNOWN;
+  }
+}
+
 // -------------------------------------------------------------------------- text
 
 void pnx_platform_text_draw(const char *text, PnxTextSize size, uint8_t colour,

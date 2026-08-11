@@ -440,6 +440,15 @@ void pnx_audio_update(uint32_t now_ms) {
   if (!s_on) return;
   if (s_start_ms == 0) s_start_ms = now_ms;
 
+  // A drained stream leaves Playing and resumes on the next write, which is audible as
+  // the sound restarting -- and invisible to the deficit, which only measures aggregate
+  // supply. Count the transitions.
+  const PnxAudioState st = pnx_platform_audio_state();
+  if (s_stats.state == PNX_AUDIO_PLAYING && st != PNX_AUDIO_PLAYING) {
+    if (s_stats.left_playing < 0xFFFF) s_stats.left_playing++;
+  }
+  s_stats.state = (uint8_t)st;
+
   const uint32_t elapsed = now_ms - s_start_ms;
 
   // No fill-level query exists, so underrun is inferred: if playback has consumed more

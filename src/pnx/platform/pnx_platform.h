@@ -85,6 +85,19 @@ size_t pnx_platform_audio_write(const void *data, size_t bytes);
 void pnx_platform_audio_close(void);
 bool pnx_platform_audio_is_open(void);
 
+// What the speaker itself thinks it is doing. Worth asking, because "we supplied enough
+// bytes in aggregate" and "the buffer never emptied" are different claims, and only the
+// second one keeps playback continuous. A stream that drains transitions out of Playing
+// and restarts on the next write, which sounds like the note beginning again.
+typedef enum {
+  PNX_AUDIO_IDLE = 0,
+  PNX_AUDIO_PLAYING,
+  PNX_AUDIO_DRAINING,
+  PNX_AUDIO_UNKNOWN,
+} PnxAudioState;
+
+PnxAudioState pnx_platform_audio_state(void);
+
 // Bytes per second for a format, so the mixer can size a frame's worth of samples.
 static inline uint32_t pnx_audio_byte_rate(PnxAudioFormat f) {
   const uint32_t rate = (f == PNX_AUDIO_16KHZ_16BIT || f == PNX_AUDIO_16KHZ_8BIT)
