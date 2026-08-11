@@ -39,8 +39,25 @@
 // 259, then 247 -- and a device consuming in fixed blocks has to straddle them. Uniform
 // aligned writes cost nothing but a few bytes of latency and remove a per-feed seam as a
 // possible source of clicking.
+// Divide by two, not four. Four gave four channels perfect headroom but left a SINGLE voice
+// at 20% of full scale, which is quiet and coarsely quantised at 8-bit output. Halving puts
+// one voice near 40% and clamps four channels only on coincident peaks -- the trade trackers
+// make: loud, with occasional limiting. NOT derived from the active voice count: doing that
+// steps the mix when a voice starts (a pop per beat) and gliding to it warbles instead.
+#define MIX_HEADROOM_SHIFT 1
+
+// 5kHz by default: high enough to leave the waveforms their brightness, low enough to take
+// the edge off the top of a lead's range. The filter was written to fix harshness that turned
+// out to be undersampling at 8kHz -- at 16kHz the Nyquist limit is 8kHz and the folded
+// harmonics are largely not there -- so it is no longer load-bearing, and a cutoff this high
+// is a balance rather than a repair. Costs one multiply and one shift per sample.
+// pnx_audio_set_lowpass(0) turns it off.
+#ifndef PNX_AUDIO_CUTOFF_HZ
+#define PNX_AUDIO_CUTOFF_HZ 5000
+#endif
+
 #ifndef PNX_AUDIO_QUANTUM
-#define PNX_AUDIO_QUANTUM 64
+#define PNX_AUDIO_QUANTUM 256
 #endif
 
 // One cycle per waveform, generated once at init. 64 samples is enough for the harmonics
@@ -113,74 +130,83 @@ uint32_t pnx_note_hz(uint8_t midi_note) {
   return hz ? hz : 1u;
 }
 
+// Every table begins at amplitude ZERO, not at a peak.
+//
+// A new note starts at phase 0, and phase 0 used to be index 0 -- which for the triangle is
+// its trough at -100. So every note onset jumped the output to full negative amplitude, and
+// the attack envelope is far too short to hide it: 6ms is 48 samples at 8kHz and percussion
+// asks for 1ms, which is 8. That step is a click, and with four channels changing notes it
+// is a click several times a second.
+//
+// Starting at a zero crossing means the onset is silent regardless of how fast the envelope
+// opens. The square wave is the exception -- it has no zero to start from -- so it begins at
+// a transition and relies on its envelope, which is why a square lead clicks more than a
+// triangle one.
 static void build_wavetable(void) {
+  const int q = CYCLE / 4;
   uint32_t rng = 0x2545F491u;
+
   for (int i = 0; i < CYCLE; i++) {
-    s_wavetable[PNX_WAVE_SQUARE][i] = (int8_t)(i < CYCLE / 2 ? 100 : -100);
-    s_wavetable[PNX_WAVE_SAW][i] = (int8_t)((i * 200 / CYCLE) - 100);
-    // Symmetric about the midpoint, so the two halves meet without a step. The previous
-    // form ramped to +93 then restarted at +100, putting a discontinuity at each turning
-    // point -- audible as buzz on what should be the smoothest waveform available.
-    const int tri = (i < CYCLE / 2)
-        ? (i * 2 * 200 / CYCLE) - 100
-        : 100 - ((i - CYCLE / 2) * 2 * 200 / CYCLE);
+    // Triangle: 0 -> +100 -> 0 -> -100 -> 0, symmetric, starting and ending at silence.
+    int tri;
+    if (i < q)            tri =  i * 100 / q;
+    else if (i < 3 * q)   tri =  100 - (i - q) * 200 / (2 * q);
+    else                  tri = -100 + (i - 3 * q) * 100 / q;
     s_wavetable[PNX_WAVE_TRIANGLE][i] = (int8_t)tri;
-    // xorshift, so the noise table is identical on every run and in every build --
-    // reproducible audio matters for the same reason reproducible simulation does.
+
+    // Saw: 0 -> +100, wrap to -100, -100 -> 0. One inherent discontinuity, placed at the
+    // midpoint rather than at the note onset.
+    const int saw = (i < CYCLE / 2)
+        ? (i * 200 / CYCLE)
+        : ((i - CYCLE / 2) * 200 / CYCLE) - 100;
+    s_wavetable[PNX_WAVE_SAW][i] = (int8_t)saw;
+
+    // Square: no zero to begin at, so it starts at a transition and depends on its
+    // envelope. Kept honest rather than pretending otherwise.
+    s_wavetable[PNX_WAVE_SQUARE][i] = (int8_t)(i < CYCLE / 2 ? 100 : -100);
+
+    // xorshift, so the noise table is identical in every build -- reproducible audio for
+    // the same reason as reproducible simulation.
     rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-    s_wavetable[PNX_WAVE_NOISE][i] = (int8_t)((rng >> 8) & 0xFF) / 2;
+    s_wavetable[PNX_WAVE_NOISE][i] = (int8_t)((int8_t)((rng >> 8) & 0xFF) / 2);
   }
 }
 
 static Voice s_voices[PNX_AUDIO_VOICES];
 static int8_t s_scratch[PNX_AUDIO_CHUNK];
 
-// Accumulator, so summing happens at full width and clamps ONCE at the end. The first
-// version clamped inside the per-voice loop, which saturates intermediate sums: five
-// voices at ~78 each summed to ~390 against a +/-127 range, so every peak was flattened
-// and the result sounded distorted rather than loud. int16 is enough -- 8 voices x 127.
+// Accumulator, so summing happens at full width and clamps ONCE at the end. Clamping
+// inside the per-voice loop saturates intermediate sums instead of the final one.
 static int16_t s_acc[PNX_AUDIO_CHUNK];
 
-// Fixed master headroom. NOT derived from the active voice count.
-//
-// Two attempts at a dynamic gain both failed, in opposite ways. Dividing by the voice
-// count stepped the whole mix the instant a voice started -- a pop per beat. Gliding to
-// that target instead spread the step over ~125ms, which at a 300ms row is 42% of every
-// row: a continuous amplitude warble, worse at a pattern boundary where the voice count
-// changes more.
-//
-// The mistake was making loudness depend on something that changes constantly. A fixed
-// divisor is stable by construction, and headroom becomes the composer's business through
-// instrument volumes -- which is how trackers have always done it. Four channels at
-// PNX_MUSIC_CHANNELS is the design point, so dividing by four lets four full-scale voices
-// sum without clipping and leaves room for an effect on top.
-// Divide by two, not four. Four gave four channels perfect headroom but left a SINGLE
-// voice at 20% of full scale -- quiet, and coarsely quantised when the output is 8-bit.
-// Halving instead means one voice sits near 40% and four channels clamp only on
-// coincident peaks, which is the trade trackers make: loud, with occasional limiting.
-#define MIX_HEADROOM_SHIFT 1
-
-// Bytes mixed but not yet accepted by the device.
-//
-// speaker_stream_write returns how much it took, and a full buffer takes less than
-// offered -- which is normal, not an error. The first version DISCARDED the remainder and
-// mixed fresh audio next frame from a phase that had already advanced past it, putting a
-// discontinuity in the waveform on every short write. At 82% short writes that is
-// continuous glitching, and it sounded exactly as bad as it was.
-//
-// So the remainder is carried and offered again before anything new is mixed.
+// Bytes mixed but not yet accepted by the device. A short write means the buffer is full,
+// which is normal; dropping the remainder puts a hole in the waveform that the mixer cannot
+// regenerate, because voice phases have already advanced.
 static uint8_t s_carry[PNX_AUDIO_CHUNK * 2];
 static uint32_t s_carry_bytes;
 static uint32_t s_carry_head;
+
 static PnxAudioStats s_stats;
 
-static uint16_t s_lead_ms = PNX_AUDIO_LEAD_MS;
-static uint32_t s_last_update_ms;
-static bool s_on;
+// One-pole low-pass state, 16.16.
+//
+// A 64-entry wavetable read at a large step undersamples badly: at 880Hz on an 8kHz stream
+// the step is 7 table entries per sample, and the waveform's harmonics above Nyquist fold
+// back as inharmonic components -- heard as fast ticking rather than as a tone. Raising the
+// sample rate helps but does not eliminate it, and band-limited tables per octave would be
+// the thorough fix. A one-pole filter costs one multiply and one shift per sample and
+// removes the harshness that is genuinely too high to belong there.
+static int32_t s_lp;
+static int32_t s_lp_a = 0;      // 0 disables the filter entirely
+static uint16_t s_cutoff_hz = PNX_AUDIO_CUTOFF_HZ;
+
 static PnxAudioFormat s_format;
 static uint32_t s_byte_rate;
 static uint32_t s_start_ms;
 static bool s_16bit;
+static uint16_t s_lead_ms = PNX_AUDIO_LEAD_MS;
+static uint32_t s_last_update_ms;
+static bool s_on;
 
 bool pnx_audio_init(PnxAudioFormat format, uint8_t volume) {
   if (s_on) return true;
@@ -201,6 +227,8 @@ bool pnx_audio_init(PnxAudioFormat format, uint8_t volume) {
   s_last_update_ms = 0;
   s_stats.worst_gap_ms = 0;
   s_carry_bytes = s_carry_head = 0;
+  s_lp = 0;
+  pnx_audio_set_lowpass(s_cutoff_hz);
   s_on = true;
   return true;
 }
@@ -432,7 +460,15 @@ static void mix(int8_t *out, uint32_t count) {
   }
 
   for (uint32_t n = 0; n < count; n++) {
-    const int32_t v = s_acc[n] >> MIX_HEADROOM_SHIFT;
+    int32_t v = s_acc[n] >> MIX_HEADROOM_SHIFT;
+
+    if (s_lp_a) {
+      // y += (x - y) * a. Percussion still reads as a hit: noise is broadband and its
+      // transient survives a gentle slope, which is why this does not need to spare it.
+      s_lp += ((v << 8) - s_lp) * s_lp_a >> 16;
+      v = s_lp >> 8;
+    }
+
     out[n] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
   }
   s_stats.active_voices = active;
@@ -544,6 +580,23 @@ void pnx_audio_update(uint32_t now_ms) {
     offer((const uint8_t *)s_scratch, samples);
   }
 }
+
+// a = 1 - exp(-2*pi*fc/rate), approximated as 2*pi*fc/(rate + 2*pi*fc) which is accurate
+// enough well below Nyquist and needs no floating point.
+void pnx_audio_set_lowpass(uint16_t cutoff_hz) {
+  s_cutoff_hz = cutoff_hz;
+  if (!cutoff_hz || !s_on) { s_lp_a = cutoff_hz ? s_lp_a : 0; return; }
+
+  const uint32_t rate = output_rate();
+  if (cutoff_hz * 2u >= rate) { s_lp_a = 0; return; }   // above Nyquist: no filtering
+
+  const uint32_t wc = (cutoff_hz * 6283u) / 1000u;      // 2*pi*fc
+  // 32-bit throughout: one 64-bit division costs 754 bytes of __udivmoddi4, and the Nyquist
+  // check above bounds wc at 50,264, so wc << 16 stays under 3.3e9 and inside a uint32.
+  s_lp_a = (int32_t)((wc << 16) / (rate + wc));
+}
+
+uint16_t pnx_audio_lowpass(void) { return s_cutoff_hz; }
 
 PnxAudioFormat pnx_audio_format(void) { return s_format; }
 

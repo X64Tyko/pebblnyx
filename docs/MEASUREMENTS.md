@@ -161,6 +161,12 @@ Two frames where 37 ms cadence would give ~123: the app is throttled to roughly
   `elapsed` values fast-forward the sim by seconds on return.
 - Battery while covered is effectively free.
 - **Save-on-blur is viable**: ~297 ms of warning against a 106 ms 4KB save.
+- **Timers are not throttled with rendering.** Music kept playing at full speed and full
+  tempo through a notification on device — no slowdown, no gap. The 0.4fps figure is the
+  *render* rate; the audio timer keeps its own cadence. This is the payoff for moving audio
+  off the render loop onto `app_timer`: had it stayed there, every notification would have
+  stalled the mixer for seconds. It also means the sequencer's 4-row catch-up clamp never
+  fires for notifications, only for something that stalls timers outright.
 
 ## Alloy (JavaScript): viable as scripting, not as an engine
 
@@ -725,10 +731,12 @@ mix when a voice starts -- a pop per beat. Gliding to that target spreads the st
 amplitude warble at 42% of a row. A fixed shift is stable by construction; headroom belongs
 in instrument volumes, as trackers have always done it.
 
-**8-bit output beats 16-bit on this device.** With an 8-bit mixer, a 16-bit stream is the
-same samples shifted left eight: no extra information, twice the bandwidth. By ear, 8kHz
-8-bit plays a nearly solid tone while both 16-bit formats produce static, and 16kHz 8-bit is
-metallic.
+**~~8-bit output beats 16-bit on this device.~~** *Retracted.* Every format comparison in
+this section was taken through the scrambled mapping described below, so each label named a
+different format than the one being heard. The reasoning that a 16-bit stream carries no
+extra information from an 8-bit mixer still holds -- it is the same samples shifted left
+eight, at twice the bandwidth -- but the listening results proved nothing. **Rate is what
+mattered, not depth**: see below.
 
 **Buffer depth does not govern quality.** Swept 20ms to 250ms of lead with no audible
 difference, so the lead should be chosen for latency -- how long after a trigger a sound is
@@ -761,14 +769,39 @@ platform boundary and every one read correct, because they were correct -- the b
 the one line that translates our vocabulary into the device's, which is exactly the place a
 platform seam exists to isolate and therefore the last place anything gets checked.
 
-### Still open
+### Resolved: the sample rate was the rest of it
 
-Whether anything remains once the format mapping is corrected is not yet known. Before the
-fix, a low thrum behind a single sustained tone plus an occasional hiccup survived every
-software variable above. The mixer's own output is verifiably clean: 3 seconds captured on
-the host showed zero sample-to-sample deltas above 6 across 47,679 samples and flat peak
-amplitude in all 148 windows. The speaker reports `Playing` continuously with zero
-transitions out of it.
+With the mapping fixed, **16kHz sounds clean on device** -- confirmed by ear on the real
+watch, playing music with sound effects over it. Two changes closed the remaining gap:
+
+**16kHz, not 8kHz.** 8kHz puts the Nyquist limit at 4kHz, and a generated waveform has
+harmonics well above that. They fold back as inharmonic components, which is not heard as
+dullness but as *harshness and fast ticking* on high notes -- and only on high notes, which
+is why a sustained A4 test tone sounded fine while the lead did not. 16kHz doubles the limit
+to 8kHz and the folding largely stops. This was never fairly tested earlier because the
+scrambled table meant "8kHz" and "16kHz" both opened something else.
+
+**Wavetables must begin at amplitude zero.** A new note starts at phase 0, and phase 0 was
+the triangle's trough at -100, so every onset stepped the output to full negative amplitude.
+A 6ms envelope is 48 samples at 8kHz and percussion asks for 1ms; neither hides a step that
+large. Rotating each table to start at a zero crossing makes the onset silent regardless of
+how fast the envelope opens. The square wave has no zero to start from and so still depends
+on its envelope -- a square lead clicks more than a triangle one.
+
+A one-pole low-pass was added while chasing this and is **no longer load-bearing**: the build
+sounds good with it disabled. It is kept at a default 5kHz cutoff as a balance -- bright
+enough to leave the waveforms alone, low enough to take the edge off the top of a range --
+for one multiply and one shift per sample. `pnx_audio_set_lowpass(0)` turns it off.
+
+**The requested lead is not the queue you get.** Measured on the host: an 80ms lead settles
+at 52-58ms actually queued, because quantum alignment defers each write until 256 bytes have
+accrued and a single feed is capped at one chunk. So a stall must fit inside roughly 0.7x the
+configured lead -- ask for about 1.5x the stall you intend to survive. A 40ms stall against
+an 80ms lead holds; 60ms does not.
+
+The mixer's own output was verifiably clean throughout: 3 seconds captured on the host showed
+zero sample-to-sample deltas above 6 across 47,679 samples and flat peak amplitude in all 148
+windows. That capture was right, and it is why the search eventually went below the mixer.
 
 Every quantity reachable from inside the app now reads correct, so the next step is not more
 instrumentation -- it is recording the speaker and looking at a spectrum. A fixed frequency

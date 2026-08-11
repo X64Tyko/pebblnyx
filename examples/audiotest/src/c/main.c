@@ -30,6 +30,7 @@ typedef struct {
   bool sfx_on;
   uint8_t lead_index;
   uint8_t fmt_index;
+  uint8_t cut_index;
   bool seq_on;      // sequencer; off at startup so a bare tone can be judged alone      // auto-firing effects; off by default so the tone is clean
   uint32_t ticks, accumulator_ms;
   uint32_t next_auto_ms;
@@ -60,16 +61,10 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
   while (pnx_platform_poll_event(&ev)) {
     if (ev.type != PNX_EVENT_BUTTON_DOWN) continue;
     if (ev.button == PNX_BUTTON_UP) {
-      a->seq_on = !a->seq_on;
-      if (a->seq_on) {
-        pnx_audio_stop_all();          // drop the bare tone if it is still sounding
-        pnx_music_play(&a->song, true);
-      } else {
-        pnx_music_stop();
-        // Back to the control tone, which is still the cleanest thing to judge the mixer
-        // by: one voice, no row events.
-        a->held = pnx_audio_note(PNX_WAVE_TRIANGLE, 69, 255, &a->tone_env, 1);
-      }
+      // Sweeps the low-pass cutoff. 0 is off, which is what every earlier build did.
+      static const uint16_t cuts[] = { 3200, 2400, 1800, 5000, 0 };
+      a->cut_index = (uint8_t)((a->cut_index + 1) % 5);
+      pnx_audio_set_lowpass(cuts[a->cut_index]);
     } else if (ev.button == PNX_BUTTON_SELECT) {
       a->sfx_on = !a->sfx_on;
       a->next_auto_ms = now + 400;
@@ -118,9 +113,9 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
     [PNX_AUDIO_16KHZ_16BIT] = "16k/16", [PNX_AUDIO_16KHZ_8BIT] = "16k/8",
     [PNX_AUDIO_8KHZ_16BIT]  = "8k/16",  [PNX_AUDIO_8KHZ_8BIT]  = "8k/8",
   };
-  pnx_format(a->hud, sizeof(a->hud), "%s gap%u/%u lead%u v%u",
-             FMT[pnx_audio_format() & 3], au->gap_ms, au->worst_gap_ms,
-             pnx_audio_lead(), au->active_voices);
+  pnx_format(a->hud, sizeof(a->hud), "%s lp%u gap%u v%u",
+             FMT[pnx_audio_format() & 3], pnx_audio_lowpass(),
+             au->gap_ms, au->active_voices);
   pnx_format(a->hud3, sizeof(a->hud3), "%s%u r%2u  feed %u-%u",
              a->seq_on ? "pat " : "off ", pnx_music_pattern(), pnx_music_row(),
              au->feed_min, au->feed_max);
@@ -161,7 +156,7 @@ static void post_frame(void *ctx) {
   pnx_platform_text_draw(a->hud2, PNX_TEXT_SMALL, 0xFF, 6, 76, 190, 20);
   pnx_platform_text_draw(a->hud3, PNX_TEXT_SMALL, 0xFF, 6, 96, 190, 20);
   pnx_platform_text_draw("0 one tone   1 chromatic\n2 density    3 all four\n\n"
-                        "UP     music / tone\nSELECT sfx auto-fire\nDOWN   one explosion",
+                        "UP     low-pass cutoff\nSELECT sfx auto-fire\nDOWN   one explosion",
                         PNX_TEXT_SMALL, 0xFF, 6, 118, 190, 100);
 }
 
@@ -176,7 +171,7 @@ int main(void) {
   }
   pnx_assets_init(&a.persistent, &a.scene, RESOURCES, PNX_ASSET_COUNT);
 
-  if (!pnx_audio_init(PNX_AUDIO_8KHZ_8BIT, 85)) {
+  if (!pnx_audio_init(PNX_AUDIO_16KHZ_8BIT, 85)) {
     pnx_log("audio would not open");
   }
 

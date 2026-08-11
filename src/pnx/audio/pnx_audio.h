@@ -140,6 +140,15 @@ uint16_t pnx_audio_lead(void);
 // 8-bit carries exactly the information an 8-bit mixer produces, but that is a claim about
 // information, not about how a particular DAC path sounds.
 bool pnx_audio_reopen(PnxAudioFormat format, uint8_t volume);
+
+// One-pole low-pass on the mix, in Hz. 0 disables it.
+//
+// A 64-entry wavetable read at a large step undersamples: at 880Hz on an 8kHz stream that is
+// 7 table entries per output sample, and harmonics above Nyquist fold back as inharmonic
+// components -- fast ticking rather than tone. Band-limited tables per octave would be the
+// thorough fix; this is the cheap one that removes what is audibly too high.
+void pnx_audio_set_lowpass(uint16_t cutoff_hz);
+uint16_t pnx_audio_lowpass(void);
 PnxAudioFormat pnx_audio_format(void);
 
 #endif  // PNX_USE_AUDIO
