@@ -240,6 +240,60 @@ Only if the FFI overhead measurement supports it.
 
 Gate: JS must be able to express a scene without exceeding ~10,000 operations/frame.
 
+## M9 — The rest of the Pebble family
+
+Reachable because the engine fits in 20% of one watch's budget. The matrix below is read
+from the SDK itself (`sdk-core/pebble/common/tools/pebble_sdk_platform.py`), not recalled:
+
+| Platform | Screen | Colour | App RAM | Speaker | Touch |
+|---|---|---|---|---|---|
+| `emery` | 200x228 rect | 64 | 128 KB | yes | yes |
+| `gabbro` | **260x260 round** | 64 | 128 KB | **no** | yes |
+| `flint` | 144x168 rect | **1-bit** | 64 KB | yes | no |
+| `basalt` | 144x168 rect | 64 | 64 KB | no | no |
+| `chalk` | 180x180 round | 64 | 64 KB | no | no |
+| `diorite` | 144x168 rect | **1-bit** | 64 KB | no | no |
+| `aplite` | 144x168 rect | 1-bit | **24 KB** | no | no |
+
+`flint` and `gabbro` are the new hardware; the watch names are inferred from their
+capabilities and want confirming. Two consequences stand out before any work starts:
+**`gabbro` has no speaker tag**, so the flagship round watch cannot use M4 at all, and
+**`gabbro` is 260x260** -- 1.48x emery's pixel count, against a fill rate only ever measured
+on emery.
+
+The work, in dependency order:
+
+1. **Resolution independence.** 200x228 is currently hardcoded in the host target, and the
+   camera clamp and tilemap viewport assume it. Drive all three from
+   `PBL_DISPLAY_WIDTH`/`HEIGHT`.
+2. **Round displays.** The platform seam already anticipated this: `PnxRow` carries
+   `min_x`/`max_x` because that is what `gbitmap_get_data_row_info` returns per row on a
+   round display. Verify the blitter honours them and that nothing assumes a rectangle.
+3. **1-bit output**, for `flint`, `diorite` and `aplite`. The largest engine change: the
+   4bpp indexed path needs a 1-bit sibling, thresholded or dithered *in the pipeline* and
+   shipped as per-platform blobs. See the risk below -- most of this cost is not engine work.
+4. **Audio only where there is a speaker** (`emery`, `flint`). `PNX_USE_AUDIO` already gates
+   it; what is untested is a build with it off.
+5. **Memory.** At ~13.4 KB static the engine fits every platform but `aplite`, where 24 KB
+   total leaves ~11 KB for game code, statics *and* heap. Note that moving statics to the
+   heap buys much less on the 64 KB platforms, because there both come from the same 64 KB
+   rather than from 128 KB.
+6. **Pipeline.** Per-platform resources and per-platform atlas carves -- a 144x168 screen
+   wants a different carve budget than 260x260 -- plus `targetPlatforms` in `package.json`
+   and per-platform ceilings in the size report.
+7. **Tests.** Parameterise the host target over the matrix instead of hardcoding one screen.
+
+Done when: one game source builds and runs on `emery`, one round platform and one 1-bit
+platform, with the size report inside each ceiling.
+
+**Sequencing.** This has to land before M7 ships to the appstore, or the game ships for one
+watch out of seven. But it wants M6 settled first, since the app framework is what a port
+would otherwise churn.
+
+**The real risk is content, not code.** 1-bit art is a separate art pass, not a downscale of
+colour art, and three of seven platforms need it. Decide whether those platforms get their
+own art or are simply out of scope before building the 1-bit path, not after.
+
 ---
 
 ## Editor track (parallel)
@@ -285,3 +339,7 @@ Found while probing; each currently wastes other people's time:
    cap, making the real ceiling look 4x closer.
 4. Exceeding the 64KB virtual-size cap fails with a bare
    `struct.error: 'H' format requires 0 <= number <= 65535` and no indication of cause.
+5. `MAX_APP_BINARY_SIZE` is **131,072** for `emery` and `gabbro`, but `inject_metadata.py`
+   still packs `virtual_size` as `"<H"` -- so those platforms advertise a binary cap their
+   own metadata format cannot express. Either the field needs widening or the cap is wrong;
+   as it stands the second 64KB is unreachable. Same root cause as (4).
