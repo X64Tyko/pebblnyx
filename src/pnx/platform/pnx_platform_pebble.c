@@ -13,11 +13,18 @@
 #include <pebble.h>
 #include <string.h>
 
-// The frame loop is a self-rearming 1ms timer that marks the canvas dirty, which is the
-// same shape the probes used. It cannot beat the display: PebbleOS gates rendering on
-// framebuffer_render_pending, so the real pace is ~37.33ms no matter what is requested.
-// Asking for 1ms simply means "as soon as allowed".
-#define FRAME_TIMER_MS 1
+// The frame loop is a self-rearming timer that marks the canvas dirty. It cannot beat the
+// display: PebbleOS gates rendering on framebuffer_render_pending, so the real pace is
+// ~37.33ms no matter what is requested.
+//
+// It used to ask for 1ms, on the reasoning that "as soon as allowed" costs nothing. It is
+// not free: at 1ms this timer floods the app's event loop and starves every other timer in
+// it. A 10ms audio timer measured at 54-59ms on device for exactly that reason, which held
+// the stream lead high and made effects late.
+//
+// 16ms still arrives well before the display will accept a frame, so the frame rate is
+// unchanged, and it leaves the loop free for anything else that needs it.
+#define FRAME_TIMER_MS 16
 
 #define EVENT_QUEUE_LEN 16
 
