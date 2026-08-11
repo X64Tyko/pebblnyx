@@ -38,51 +38,60 @@ sustain = 190
 release = 45
 
 [[music.theme.instrument]]
-wave = "saw"            # 2: harmony
-attack = 10
+wave = "saw"            # 2: harmony -- an octave below the lead, so the two do not
+attack = 10             #    compete for the same register and muddy each other
 decay = 80
-sustain = 130
+sustain = 120
 release = 70
 
 # '.' holds, '-' releases. Four cells per row: lead, harmony, spare, bass.
+# Percussion instrument: noise with almost no envelope, so it reads as a hit rather than
+# a pitch. Channel 2 was empty before, which left the piece with no rhythmic anchor at all.
+[[music.theme.instrument]]
+wave = "noise"          # 3: percussion
+attack = 1
+decay = 25
+sustain = 0
+release = 15
+
 [[music.theme.pattern]]
 rows = [
-  "D5:0  A4:2  .  D3:1",
-  ".     .     .  .   ",
-  "F5:0  .     .  A3:1",
-  ".     .     .  -   ",
-  "A5:0  D5:2  .  D3:1",
-  ".     .     .  .   ",
-  "G5:0  .     .  A3:1",
-  ".     .     .  -   ",
-  "F5:0  C5:2  .  F3:1",
-  ".     .     .  .   ",
-  "E5:0  .     .  C4:1",
-  ".     .     .  -   ",
-  "D5:0  A4:2  .  D3:1",
-  ".     .     .  .   ",
-  ".     .     .  A3:1",
-  "-     -     .  -   ",
+  "D5:0  A2:2  C4:3  D3:1",
+  ".     .     .     .",
+  "F5:0  .     G5:3  A3:1",
+  ".     .     .     -",
+  "A5:0  D4:2  C4:3  D3:1",
+  ".     .     .     .",
+  "G5:0  .     G5:3  A3:1",
+  ".     .     .     -",
+  "F5:0  C4:2  C4:3  F3:1",
+  ".     .     .     .",
+  "E5:0  .     G5:3  C4:1",
+  ".     .     .     -",
+  "D5:0  A3:2  C4:3  D3:1",
+  ".     .     .     .",
+  ".     .     G5:3  A3:1",
+  "-     -     .     -",
 ]
 
 [[music.theme.pattern]]
 rows = [
-  "A5:0  E5:2  .  A3:1",
-  ".     .     .  .   ",
-  "G5:0  .     .  E3:1",
-  ".     .     .  -   ",
-  "F5:0  C5:2  .  F3:1",
-  ".     .     .  .   ",
-  "E5:0  .     .  C4:1",
-  ".     .     .  -   ",
-  "D5:0  A4:2  .  D3:1",
-  ".     .     .  .   ",
-  "F5:0  .     .  A3:1",
-  ".     .     .  -   ",
-  "E5:0  B4:2  .  E3:1",
-  ".     .     .  .   ",
-  "D5:0  .     .  A3:1",
-  "-     -     .  -   ",
+  "A5:0  E4:2  C4:3  A3:1",
+  ".     .     .     .",
+  "G5:0  .     G5:3  E3:1",
+  ".     .     .     -",
+  "F5:0  C4:2  C4:3  F3:1",
+  ".     .     .     .",
+  "E5:0  .     G5:3  C4:1",
+  ".     .     .     -",
+  "D5:0  A3:2  C4:3  D3:1",
+  ".     .     .     .",
+  "F5:0  .     G5:3  A3:1",
+  ".     .     .     -",
+  "E5:0  B3:2  C4:3  E3:1",
+  ".     .     .     .",
+  "D5:0  .     G5:3  A3:1",
+  "-     -     .     -",
 ]
 
 order = [0, 1, 0, 1]

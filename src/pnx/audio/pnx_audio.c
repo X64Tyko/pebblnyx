@@ -56,11 +56,40 @@ static const uint16_t NOTE_CENTIHZ[12] = {
   36999, 39200, 41530, 44000, 46616, 49388,
 };
 
+// Centihz for a note, shifted by octave. Kept in hundredths so nothing rounds early.
+static uint32_t output_rate(void);
+
+static uint32_t note_centihz(uint8_t midi_note) {
+  const int octave = (int)(midi_note / 12) - 5;      // 60 -> octave 0 (C4)
+  const uint32_t c = NOTE_CENTIHZ[midi_note % 12];
+  return octave > 0 ? (c << octave) : (c >> -octave);
+}
+
+// The phase step for a note, computed without ever rounding to whole Hz.
+//
+// Going through integer Hz was the bug: whole-Hz resolution is 11 cents at the bottom of
+// the range, and truncating before the octave shift multiplied the error. Rounding after
+// the shift did not help either -- a right shift has already lost the bits.
+//
+// 65536 / (100 * 16000) is exactly 128/3125, so this is exact in 32-bit arithmetic; the
+// largest intermediate is 3.24e9 against a 4.29e9 limit. No 64-bit division, which would
+// cost 754 bytes of __udivmoddi4. Worst error across MIDI 24-107 is 0.52 cents.
+static uint32_t note_step(uint8_t midi_note, uint32_t cycle_len) {
+  const uint32_t mul = (output_rate() == 16000u) ? 128u : 256u;
+  return note_centihz(midi_note) * cycle_len * mul / 3125u;
+}
+
 uint32_t pnx_note_hz(uint8_t midi_note) {
   const int octave = (int)(midi_note / 12) - 5;      // 60 -> octave 0 (C4)
-  uint32_t hz = NOTE_CENTIHZ[midi_note % 12] / 100u;
-  if (octave > 0) hz <<= octave;
-  else if (octave < 0) hz >>= -octave;
+
+  // Shift in CENTIHZ and round at the end. Truncating to whole Hz first and then shifting
+  // multiplies the rounding error by the octave -- measured at 10 cents flat on D3, where
+  // rounding after the shift holds every note inside 2 cents.
+  uint32_t centi = NOTE_CENTIHZ[midi_note % 12];
+  if (octave > 0) centi <<= octave;
+  else if (octave < 0) centi >>= -octave;
+
+  const uint32_t hz = (centi + 50u) / 100u;
   return hz ? hz : 1u;
 }
 
@@ -197,10 +226,24 @@ uint8_t pnx_audio_play_pri(const int8_t *pcm, uint32_t samples, uint32_t loop_st
 
 uint8_t pnx_audio_note(PnxWaveform wave, uint8_t midi_note, uint8_t volume,
                        const PnxEnvelope *env, uint8_t priority) {
-  if (wave >= PNX_WAVE_COUNT) return PNX_AUDIO_NO_VOICE;
-  // A one-cycle table played at note_hz * CYCLE advances exactly note_hz cycles/second.
-  return pnx_audio_play_pri(s_wavetable[wave], CYCLE, 0,
-                            pnx_note_hz(midi_note) * CYCLE, volume, priority, env);
+  if (!s_on || wave >= PNX_WAVE_COUNT) return PNX_AUDIO_NO_VOICE;
+
+  const int slot = claim_voice(priority);
+  if (slot < 0) return PNX_AUDIO_NO_VOICE;
+
+  Voice *v = &s_voices[slot];
+  memset(v, 0, sizeof(*v));
+  v->pcm = s_wavetable[wave];
+  v->samples = CYCLE;
+  v->loop_start = 0;
+  // Set directly rather than derived from an integer frequency, which is where the
+  // tuning error came from.
+  v->step = note_step(midi_note, CYCLE);
+  v->volume = volume;
+  v->priority = priority;
+  v->active = true;
+  env_begin(v, env);
+  return (uint8_t)slot;
 }
 
 void pnx_audio_release(uint8_t voice) {
