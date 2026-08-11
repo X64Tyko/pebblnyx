@@ -18,6 +18,8 @@
 typedef struct {
   PnxArena persistent, scene;
   PnxSong song;
+  PnxEnvelope tone_env;
+  uint8_t held;
   const int8_t *laser;
   uint32_t laser_len, laser_hz;
   const int8_t *boom;
@@ -26,7 +28,8 @@ typedef struct {
   bool ready;
   bool music_on;
   bool sfx_on;
-  uint8_t lead_index;      // auto-firing effects; off by default so the tone is clean
+  uint8_t lead_index;
+  bool seq_on;      // sequencer; off at startup so a bare tone can be judged alone      // auto-firing effects; off by default so the tone is clean
   uint32_t ticks, accumulator_ms;
   uint32_t next_auto_ms;
   char hud[48];
@@ -65,12 +68,18 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
       pnx_audio_play_pri(a->boom, a->boom_len, PNX_AUDIO_NO_LOOP, a->boom_hz,
                          255, 5, NULL);
     } else if (ev.button == PNX_BUTTON_UP) {
-      // Cycles the stream lead. The mixer's output is provably clean on the host -- a
-      // perfect triangle with no steps and flat amplitude -- so a blip heard on device is
-      // in the feed or the buffer. This sweeps the one parameter that governs both.
-      static const uint16_t leads[] = { 120, 60, 40, 250, 500 };
-      a->lead_index = (uint8_t)((a->lead_index + 1) % 5);
-      pnx_audio_set_lead(leads[a->lead_index]);
+      // Toggles the sequencer. Startup plays ONE note directly, with no sequencer running
+      // at all -- the last untested link. The mixer's output is provably clean on the host
+      // and the stream lead makes no difference on device, so if a bare tone with nothing
+      // calling into the sequencer is also clean, the fault is in the sequencer. If it
+      // blips too, the fault is in the platform stream and nothing above it.
+      a->seq_on = !a->seq_on;
+      if (a->seq_on) {
+        pnx_music_play(&a->song, true);
+      } else {
+        pnx_music_stop();
+        a->held = pnx_audio_note(PNX_WAVE_TRIANGLE, 69, 255, &a->tone_env, 1);
+      }
     }
   }
 
@@ -102,8 +111,9 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
     a->next_auto_ms = now + 1400;
   }
 
-  // Music before the mixer: the sequencer starts notes, then the mixer renders them.
-  pnx_music_update(now);
+  // Only when the sequencer is on. With it off, nothing touches the voices after the one
+  // note started at launch -- which is the point of the isolation.
+  if (a->seq_on) pnx_music_update(now);
   pnx_audio_update(now);
 
   pnx_gfx_clear(target, 0xC0);
@@ -113,15 +123,15 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
   pnx_format(a->hud, sizeof(a->hud), "v%u lead %u def %u cap %u",
              au->active_voices, pnx_audio_lead(),
              (unsigned)au->worst_deficit, (unsigned)au->capacity);
-  pnx_format(a->hud3, sizeof(a->hud3), "pat %u row %2u  feed %u-%u",
-             pnx_music_pattern(), pnx_music_row(),
+  pnx_format(a->hud3, sizeof(a->hud3), "%s%u r%2u  feed %u-%u",
+             a->seq_on ? "pat " : "off ", pnx_music_pattern(), pnx_music_row(),
              au->feed_min, au->feed_max);
   pnx_format(a->hud2, sizeof(a->hud2), "%u.%ufps  work %uus  %s",
              fs ? (unsigned)(fs->fps_x10 / 10) : 0,
              fs ? (unsigned)(fs->fps_x10 % 10) : 0,
              fs ? (unsigned)fs->work_us : 0,
-             a->music_on ? (a->sfx_on ? "mus+sfx" : "music")
-                         : (a->sfx_on ? "sfx" : "silent"));
+             a->seq_on ? (a->sfx_on ? "seq+sfx" : "seq")
+                       : (a->sfx_on ? "tone+sfx" : "TONE ONLY"));
 
   if (a->ticks % 50 == 0) {
     if (a->ticks == 50) pnx_diag_flush();
@@ -140,7 +150,7 @@ static void draw_text(void *ctx) {
   pnx_platform_text_draw(a->hud2, PNX_TEXT_SMALL, 0xFF, 6, 76, 190, 20);
   pnx_platform_text_draw(a->hud3, PNX_TEXT_SMALL, 0xFF, 6, 96, 190, 20);
   pnx_platform_text_draw("0 one tone   1 chromatic\n2 density    3 all four\n\n"
-                        "UP     cycle stream lead\nSELECT sfx auto (off)\nDOWN   one explosion",
+                        "UP     sequencer on/off\nSELECT sfx auto (off)\nDOWN   one explosion",
                         PNX_TEXT_SMALL, 0xFF, 6, 118, 190, 100);
 }
 
@@ -163,10 +173,14 @@ int main(void) {
   a.boom = load_sample(PNX_ASSET_SAMPLE_EXPLOSION, &a.boom_len, &a.boom_hz);
   a.ready = pnx_music_load(&a.song, PNX_ASSET_MUSIC_THEME);
 
-  if (a.ready) {
-    pnx_music_play(&a.song, true);
-    a.music_on = true;
-  }
+  // Start with a bare sustained note and NO sequencer. If this is clean and enabling the
+  // sequencer introduces blips, the sequencer is the cause; if it blips on its own, the
+  // fault is below everything we have written.
+  a.tone_env = (PnxEnvelope){ .attack_ms = 6, .decay_ms = 70,
+                              .sustain = 165, .release_ms = 60 };
+  a.held = pnx_audio_note(PNX_WAVE_TRIANGLE, 69, 255, &a.tone_env, 1);
+  a.music_on = false;
+  a.seq_on = false;
   pnx_log("start: song=%d (%u patterns, %ubpm) laser=%u boom=%u arena %u/%u",
           (int)a.ready, a.song.pattern_count, a.song.tempo_bpm,
           (unsigned)a.laser_len, (unsigned)a.boom_len,
