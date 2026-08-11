@@ -10,6 +10,10 @@
 // interrupted for one note is far less noticeable than an effect that never plays.
 #define MUSIC_PRIORITY 1
 
+// Fade applied when a note is replaced. Short enough not to overlap the next note at any
+// sane tempo, long enough that the waveform has no step in it.
+#define PNX_MUSIC_CUT_MS 6
+
 static const PnxSong *s_song;
 static bool s_loop;
 static bool s_playing;
@@ -150,12 +154,12 @@ static void play_row(const PnxSong *s, uint8_t pattern, uint8_t row) {
 
     if (note == PNX_MUSIC_NO_NOTE) continue;      // hold whatever is sounding
 
-    // Cut the previous note rather than releasing it. A release longer than a row --
-    // 160ms against 113ms at 132bpm -- makes every note overlap its successor, so the
-    // channel permanently sounds two notes and the result is muddy. A channel is
-    // monophonic by definition; only an explicit '-' gets a release tail.
+    // Fade the previous note out fast rather than cutting it. Cutting was a step
+    // discontinuity in the waveform -- a click on every note change. A release long
+    // enough to overlap the next note was the opposite problem, muddiness. A few
+    // milliseconds is neither: too short to hear as a tail, long enough to have no edge.
     if (s_channel_voice[c] != PNX_AUDIO_NO_VOICE) {
-      pnx_audio_stop(s_channel_voice[c]);
+      pnx_audio_release_in(s_channel_voice[c], PNX_MUSIC_CUT_MS);
       s_channel_voice[c] = PNX_AUDIO_NO_VOICE;
     }
     if (note == PNX_MUSIC_NOTE_OFF) continue;

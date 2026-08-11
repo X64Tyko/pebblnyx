@@ -117,6 +117,14 @@ static int8_t s_scratch[PNX_AUDIO_CHUNK];
 // and the result sounded distorted rather than loud. int16 is enough -- 8 voices x 127.
 static int16_t s_acc[PNX_AUDIO_CHUNK];
 
+// Master gain, 16.16, glided rather than switched.
+//
+// The first version divided by a voice count, so the divisor stepped 1 -> 2 the instant a
+// voice started and the whole mix halved between one sample and the next. That is a pop on
+// every voice change, and with percussion it is a pop per beat. Gliding to the target over
+// a few milliseconds is inaudible; jumping to it is not.
+static int32_t s_gain = 1 << 16;
+
 // Bytes mixed but not yet accepted by the device.
 //
 // speaker_stream_write returns how much it took, and a full buffer takes less than
@@ -151,6 +159,7 @@ bool pnx_audio_init(PnxAudioFormat format, uint8_t volume) {
   s_16bit = (format == PNX_AUDIO_16KHZ_16BIT || format == PNX_AUDIO_8KHZ_16BIT);
   s_start_ms = 0;
   s_carry_bytes = s_carry_head = 0;
+  s_gain = 1 << 16;
   s_on = true;
   return true;
 }
@@ -246,13 +255,22 @@ uint8_t pnx_audio_note(PnxWaveform wave, uint8_t midi_note, uint8_t volume,
   return (uint8_t)slot;
 }
 
-void pnx_audio_release(uint8_t voice) {
+void pnx_audio_release_in(uint8_t voice, uint16_t ms) {
   if (voice >= PNX_AUDIO_VOICES || !s_voices[voice].active) return;
   Voice *v = &s_voices[voice];
-  if (v->stage == ENV_OFF) { v->active = false; return; }
+  const uint32_t samples = ((uint32_t)ms * output_rate()) / 1000u + 1u;
+
+  // Even a voice with no envelope gets a fade, because the alternative is a step in the
+  // waveform. There is no such thing as a silent hard cut.
+  if (v->stage == ENV_OFF) v->level = 1 << 16;
   v->stage = ENV_RELEASE;
-  const uint32_t rate = output_rate();
-  v->rate = -(int32_t)(v->level / ((v->env.release_ms * rate) / 1000 + 1));
+  v->rate = -(int32_t)(v->level / samples);
+  if (v->rate == 0) v->rate = -1;
+}
+
+void pnx_audio_release(uint8_t voice) {
+  if (voice >= PNX_AUDIO_VOICES || !s_voices[voice].active) return;
+  pnx_audio_release_in(voice, s_voices[voice].env.release_ms);
 }
 
 void pnx_audio_stop(uint8_t voice) {
@@ -327,12 +345,20 @@ static void mix(int8_t *out, uint32_t count) {
     }
   }
 
-  // Headroom scaled to what is actually sounding, so a lone effect stays loud while a
-  // full mix does not saturate. A fixed divisor would make single sounds too quiet;
-  // dividing by the full voice count would make a busy mix collapse.
-  const int32_t div = active > 2 ? ((active + 1) / 2) : 1;
+  // Target gain gives every voice room: N voices at full scale sum to N x 127, so 1/N
+  // cannot clip. Glide toward it rather than snapping, one step per sample.
+  const int32_t target = (1 << 16) / (active ? active : 1);
+  const int32_t glide = (1 << 16) / 2000;   // ~125ms to traverse the full range at 16kHz
+
   for (uint32_t n = 0; n < count; n++) {
-    const int32_t v = s_acc[n] / div;
+    if (s_gain < target) {
+      s_gain += glide;
+      if (s_gain > target) s_gain = target;
+    } else if (s_gain > target) {
+      s_gain -= glide;
+      if (s_gain < target) s_gain = target;
+    }
+    const int32_t v = ((int32_t)s_acc[n] * s_gain) >> 16;
     out[n] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
   }
   s_stats.active_voices = active;

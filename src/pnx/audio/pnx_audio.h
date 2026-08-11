@@ -96,6 +96,11 @@ uint8_t pnx_audio_note(PnxWaveform wave, uint8_t midi_note, uint8_t volume,
 // Begins the release phase rather than cutting the voice, so a held note ends musically.
 void pnx_audio_release(uint8_t voice);
 
+// Releases over a given time. A few milliseconds is enough to avoid a click without
+// audibly lengthening the note -- cutting a voice mid-waveform is a step discontinuity,
+// which is exactly what a click is.
+void pnx_audio_release_in(uint8_t voice, uint16_t ms);
+
 // Full form: a PCM sample with priority and an optional envelope.
 uint8_t pnx_audio_play_pri(const int8_t *pcm, uint32_t samples, uint32_t loop_start,
                            uint32_t sample_hz, uint8_t volume, uint8_t priority,

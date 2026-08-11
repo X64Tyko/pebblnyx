@@ -18,7 +18,10 @@ budget_bytes = 262144
 # pitch errors at the extremes. The original is Nintendo's composition; this is not it.
 
 [music.theme]
-tempo = 132
+# Deliberately slow. At 132bpm a row is 113ms, so a 16-row pattern lasted 1.8s and the
+# whole suite was over in seven seconds -- far too fast to judge whether a held note is
+# clean. At 50bpm a row is 300ms, so a note sustained over 8 rows lasts 2.4s.
+tempo = 50
 channels = 4
 
 # A row at 132bpm is 113ms, so every stage has to fit inside that. A release longer than a
