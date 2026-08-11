@@ -54,52 +54,96 @@ decay = 25
 sustain = 0
 release = 15
 
+# Four diagnostic patterns, each isolating a different failure mode. Played in order, so
+# a fault that appears in one and not the others names itself.
+
+# 0 -- SUSTAIN. Long held notes, nothing else moving. Any click, dropout, or pitch drift
+# is obvious against silence; this is the pattern that caught the short-write glitching.
+[[music.theme.pattern]]
+rows = [
+  "D5:0  .     .     D3:1",
+  ".     .     .     .   ",
+  ".     .     .     .   ",
+  ".     .     .     .   ",
+  ".     .     .     .   ",
+  ".     .     .     .   ",
+  ".     .     .     .   ",
+  "-     .     .     -   ",
+  "A5:0  .     .     A2:1",
+  ".     .     .     .   ",
+  ".     .     .     .   ",
+  ".     .     .     .   ",
+  ".     .     .     .   ",
+  ".     .     .     .   ",
+  ".     .     .     .   ",
+  "-     .     .     -   ",
+]
+
+# 1 -- CHROMATIC. Every semitone in sequence across two octaves. Tuning errors show up as
+# uneven steps, and aliasing shows up as the top of the run turning harsh.
+[[music.theme.pattern]]
+rows = [
+  "C4:0  .     .     .   ",
+  "C#4:0 .     .     .   ",
+  "D4:0  .     .     .   ",
+  "D#4:0 .     .     .   ",
+  "E4:0  .     .     .   ",
+  "F4:0  .     .     .   ",
+  "F#4:0 .     .     .   ",
+  "G4:0  .     .     .   ",
+  "G#4:0 .     .     .   ",
+  "A4:0  .     .     .   ",
+  "A#4:0 .     .     .   ",
+  "B4:0  .     .     .   ",
+  "C5:0  .     .     .   ",
+  "D5:0  .     .     .   ",
+  "E5:0  .     .     .   ",
+  "F5:0  .     .     .   ",
+]
+
+# 2 -- DENSITY. Busy percussion over a moving bass, which is this piece's actual character:
+# four of eleven reference tracks are bass and the drum channel is the densest of all.
+# Clipping and mix headroom problems surface here first.
+[[music.theme.pattern]]
+rows = [
+  ".     .     C4:3  D3:1",
+  ".     .     G5:3  .   ",
+  ".     .     C4:3  D3:1",
+  ".     .     G5:3  A2:1",
+  ".     .     C4:3  D3:1",
+  ".     .     G5:3  .   ",
+  ".     .     C4:3  F3:1",
+  ".     .     G5:3  A2:1",
+  ".     .     C4:3  G2:1",
+  ".     .     G5:3  .   ",
+  ".     .     C4:3  G2:1",
+  ".     .     G5:3  D3:1",
+  ".     .     C4:3  A2:1",
+  ".     .     G5:3  .   ",
+  ".     .     C4:3  D3:1",
+  ".     .     G5:3  .   ",
+]
+
+# 3 -- ALL FOUR. Everything at once, which is where voice stealing and headroom are under
+# real pressure. Effects firing over this is the worst case the mixer will meet.
 [[music.theme.pattern]]
 rows = [
   "D5:0  A2:2  C4:3  D3:1",
-  ".     .     .     .",
-  "F5:0  .     G5:3  A3:1",
-  ".     .     .     -",
+  ".     .     G5:3  .   ",
+  "F5:0  .     C4:3  A2:1",
+  ".     .     G5:3  .   ",
   "A5:0  D4:2  C4:3  D3:1",
-  ".     .     .     .",
-  "G5:0  .     G5:3  A3:1",
-  ".     .     .     -",
+  ".     .     G5:3  .   ",
+  "G5:0  .     C4:3  A2:1",
+  ".     .     G5:3  .   ",
   "F5:0  C4:2  C4:3  F3:1",
-  ".     .     .     .",
-  "E5:0  .     G5:3  C4:1",
-  ".     .     .     -",
+  ".     .     G5:3  .   ",
+  "E5:0  .     C4:3  C4:1",
+  ".     .     G5:3  .   ",
   "D5:0  A3:2  C4:3  D3:1",
-  ".     .     .     .",
-  ".     .     G5:3  A3:1",
-  "-     -     .     -",
+  ".     .     G5:3  .   ",
+  "-     -     C4:3  A2:1",
+  ".     .     G5:3  -   ",
 ]
 
-[[music.theme.pattern]]
-rows = [
-  "A5:0  E4:2  C4:3  A3:1",
-  ".     .     .     .",
-  "G5:0  .     G5:3  E3:1",
-  ".     .     .     -",
-  "F5:0  C4:2  C4:3  F3:1",
-  ".     .     .     .",
-  "E5:0  .     G5:3  C4:1",
-  ".     .     .     -",
-  "D5:0  A3:2  C4:3  D3:1",
-  ".     .     .     .",
-  "F5:0  .     G5:3  A3:1",
-  ".     .     .     -",
-  "E5:0  B3:2  C4:3  E3:1",
-  ".     .     .     .",
-  "D5:0  .     G5:3  A3:1",
-  "-     -     .     -",
-]
-
-order = [0, 1, 0, 1]
-
-# ---------------------------------------------------------------------------- samples
-
-[sample.laser]
-file = "art/laser.wav"
-
-[sample.explosion]
-file = "art/explosion.wav"
+order = [0, 1, 2, 3]

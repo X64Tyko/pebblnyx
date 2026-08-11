@@ -124,6 +124,12 @@ void pnx_music_stop(void) {
 }
 
 bool pnx_music_playing(void) { return s_playing; }
+
+uint8_t pnx_music_pattern(void) {
+  return (s_song && s_order_pos < s_song->order_length)
+         ? s_song->order[s_order_pos] : 0;
+}
+uint8_t pnx_music_row(void) { return s_row; }
 void pnx_music_set_volume(uint8_t volume) { s_volume = volume; }
 
 // A tracker row is a sixteenth note, so a row lasts 60000 / (bpm * 4) ms.

@@ -49,4 +49,9 @@ void pnx_music_update(uint32_t now_ms);
 // 0..255, applied on top of each note's own volume. For ducking music under dialogue.
 void pnx_music_set_volume(uint8_t volume);
 
+// Where playback is, for diagnostics: a fault heard in one pattern and not the others
+// names itself.
+uint8_t pnx_music_pattern(void);
+uint8_t pnx_music_row(void);
+
 #endif  // PNX_USE_SEQUENCER

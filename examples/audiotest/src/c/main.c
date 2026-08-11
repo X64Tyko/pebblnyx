@@ -29,6 +29,7 @@ typedef struct {
   uint32_t next_auto_ms;
   char hud[48];
   char hud2[48];
+  char hud3[32];
 } App;
 
 static const uint32_t RESOURCES[] = PNX_ASSET_RESOURCE_TABLE;
@@ -101,6 +102,8 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
   pnx_format(a->hud, sizeof(a->hud), "voices %u def %u cap %u",
              au->active_voices, (unsigned)au->worst_deficit,
              (unsigned)au->capacity);
+  pnx_format(a->hud3, sizeof(a->hud3), "pattern %u row %2u",
+             pnx_music_pattern(), pnx_music_row());
   pnx_format(a->hud2, sizeof(a->hud2), "%u.%ufps  work %uus  %s",
              fs ? (unsigned)(fs->fps_x10 / 10) : 0,
              fs ? (unsigned)(fs->fps_x10 % 10) : 0,
@@ -109,7 +112,7 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
 
   if (a->ticks % 50 == 0) {
     if (a->ticks == 50) pnx_diag_flush();
-    pnx_log("audio: %s | %s | short %u/%u carry %u", a->hud, a->hud2,
+    pnx_log("audio: %s | %s | %s | short %u/%u carry %u", a->hud, a->hud3, a->hud2,
             (unsigned)au->short_writes, (unsigned)au->feeds,
             (unsigned)au->carried);
   }
@@ -122,8 +125,10 @@ static void draw_text(void *ctx) {
   pnx_platform_text_draw("pnx audio test", PNX_TEXT_MEDIUM, 0xFF, 6, 20, 190, 26);
   pnx_platform_text_draw(a->hud, PNX_TEXT_SMALL, 0xFF, 6, 56, 190, 20);
   pnx_platform_text_draw(a->hud2, PNX_TEXT_SMALL, 0xFF, 6, 76, 190, 20);
-  pnx_platform_text_draw("SELECT laser\nDOWN explosion\nUP music on/off",
-                        PNX_TEXT_SMALL, 0xFF, 6, 120, 190, 80);
+  pnx_platform_text_draw(a->hud3, PNX_TEXT_SMALL, 0xFF, 6, 96, 190, 20);
+  pnx_platform_text_draw("0 sustain  1 chromatic\n2 density  3 all four\n\n"
+                        "SELECT laser  DOWN boom\nUP music on/off",
+                        PNX_TEXT_SMALL, 0xFF, 6, 124, 190, 90);
 }
 
 int main(void) {

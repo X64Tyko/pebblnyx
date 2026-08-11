@@ -30,16 +30,6 @@
           "type": "raw",
           "name": "THEME",
           "file": "music_theme.bin"
-        },
-        {
-          "type": "raw",
-          "name": "EXPLOSION",
-          "file": "sfx_explosion.bin"
-        },
-        {
-          "type": "raw",
-          "name": "LASER",
-          "file": "sfx_laser.bin"
         }
       ]
     }
