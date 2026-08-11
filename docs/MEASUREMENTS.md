@@ -315,9 +315,36 @@ so auto-selection could never fire. The threshold was calibrated on 1.96x reuse 
 fraction that sets that atlas's own threshold. Reuse is a property of how the art was drawn,
 so an artist tuning one tileset should not have to argue with a global constant.
 
+### Metatiles work by sharing ACROSS tiles, not by symmetry within one
+
+Distinct quadrants needed per 16x16 tile, over the 2,093 unique tiles in five sheets:
+
+| Quadrants | Exact | With flips |
+|---|---|---|
+| 1 | 1.3% | 1.5% |
+| 2 | 2.4% | 3.5% |
+| 3 | 7.8% | 9.1% |
+| 4 | **88.5%** | 85.9% |
+
+A 4-way symmetric tile does collapse to a single quadrant referenced four times -- 40 bytes
+against 128 -- but **only 1.5% of real tiles are built that way**, and 86% need all four
+distinct. Were quadrants shared only within a tile, metatiling would be a net LOSS: 270,888
+bytes against 267,904 flat, because the 8-byte definition outweighs the rare symmetry.
+
+So the entire saving comes from quadrants recurring across *different* tiles -- one grass
+corner in forty tiles -- which is also why the effect scales with sheet size. Five full sheets
+give 1.29x; a 60-tile carve gives 1.04-1.12x. **Metatile value is a function of how many tiles
+share the atlas, not of how the individual tiles are drawn.**
+
 **Quadrant flips would add 2-4 points and cost nothing.** Storing a quadrant once and
 referencing it flipped brings reuse from 1.29x to 1.33x, and the flip bits are free: 6,486
 quadrants needs 13 bits of the u16 table entry, leaving three spare. Not implemented yet.
+
+Given the distribution above, the size case for quadrant flips is thin -- they barely move
+within-tile reuse and only slightly improve cross-tile collision odds, and the palette
+constraint will erode even that. **The reason to implement them is parity, not size:** a
+metatiled atlas cannot honour map-level flips at all today, so placing a mirrored tile in an
+editor would force a choice between metatiles and flips on the same atlas.
 
 It would also un-block flipping a whole metatile from the map, which is currently refused.
 That is not a draw-order problem as first assumed -- it is a 2-bit permutation. Flip X reads
