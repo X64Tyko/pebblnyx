@@ -81,7 +81,9 @@ typedef struct {
   uint16_t feed_min;       // smallest and largest bytes mixed in one call. A pulse at the
   uint16_t feed_max;       // frame rate (~27Hz) sounds like a thrum, and an uneven feed
                            // is the mechanism that would cause one.
-  uint8_t active_voices;
+  uint8_t active_voices;   // snapshot from the last mix, not a live count. An update that
+                           // has already reached its lead returns without mixing and leaves
+                           // this stale; use pnx_audio_voice_active for the current state.
 } PnxAudioStats;
 
 // `volume` is 0..100, matching the platform.

@@ -53,8 +53,22 @@ void test_audio(void) {
   AU_CHECK(v != PNX_AUDIO_NO_VOICE);
   AU_CHECK(pnx_audio_voice_active(v));
 
+  // Counted on a LOOPING voice. The one-shot above is 64 samples at 16kHz -- 4ms -- so
+  // whether it survives a given update depends on how many samples that feed happened to
+  // mix, which follows from the lead and chunk size. A test should not be coupled to
+  // those: lowering the lead from 80ms to 60ms broke this assertion without anything
+  // being wrong.
+  // Asserted on the voice itself, not on stats->active_voices. That field is a snapshot
+  // taken inside mix(), so an update which reaches its lead and returns without mixing
+  // leaves it stale -- it reports what was sounding at the last mix, not what is sounding
+  // now. Voice state is the thing being tested here.
+  const uint8_t sustained = pnx_audio_play(tone, 64, 0, 16000, 200);
   pnx_audio_update(40);
-  AU_CHECK_EQ(pnx_audio_stats()->active_voices, 1);
+  AU_CHECK(pnx_audio_voice_active(sustained));
+  pnx_audio_update(80);
+  AU_CHECK(pnx_audio_voice_active(sustained));   // looping: never retires on its own
+  pnx_audio_stop(sustained);
+  AU_CHECK(!pnx_audio_voice_active(sustained));
 
   // A non-looping sample must retire itself; 64 samples at 16kHz is 4ms, long gone.
   pnx_audio_update(200);

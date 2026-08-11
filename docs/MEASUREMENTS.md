@@ -684,3 +684,64 @@ class of failure as an unreachable warp: the output looks fine and simply is not
 
 That argues for reduction driven by declared intent -- which tracks are melody, bass,
 harmony -- rather than a generic algorithm guessing.
+
+
+## Streaming audio: what actually governs continuity
+
+Getting a clean stream took eight rounds of device testing, and most of the statistics
+added along the way measured the wrong thing. Recorded so the next person does not repeat
+it.
+
+**The trap.** The obvious health check is "have we written as many bytes as playback has
+consumed", comparing a running total against elapsed time. It is useless: a buffer can
+empty and refill repeatedly while the running total stays perfectly ahead. That figure read
+zero deficit for eight rounds while the stream was starving several times a second.
+
+**The number that matters is the interval between feeds.** A lead only survives stalls
+*shorter than itself*. Measured on device, feeding from the render loop gave 140ms intervals
+in steady state and 305ms during startup, against a 120ms lead -- so the buffer emptied
+constantly. Nothing else revealed this.
+
+**Audio must not ride the render loop.** Rendering is gated at ~37.33ms and a frame can be
+much later than that. Feeding from a dedicated `app_timer` decoupled the two and brought
+the interval to ~32ms.
+
+**A 1ms self-rearming frame timer starves every other timer in the app.** The frame loop
+re-armed at 1ms on the reasoning that the display gates rendering anyway, so asking sooner
+costs nothing. It costs the event loop: a 10ms audio timer measured 54-59ms until the frame
+timer was moved to 16ms, after which it measured ~32ms. Frame rate was unchanged, because
+16ms still beats the display's gate.
+
+**Feeding inside the framebuffer capture window is audible.** `graphics_capture_frame_buffer`
+blocks the compositor, which is why the SDK will not draw text there. Audio belongs after
+the release for the same reason.
+
+**A short write is normal and must not be discarded.** `speaker_stream_write` returns bytes
+accepted; a full buffer accepts less. Dropping the remainder puts a hole in the waveform
+that the mixer cannot regenerate, because voice phases have already advanced. Carry it.
+
+**Dynamic mix gain is worse than fixed.** Dividing by the active voice count steps the whole
+mix when a voice starts -- a pop per beat. Gliding to that target spreads the step into an
+amplitude warble at 42% of a row. A fixed shift is stable by construction; headroom belongs
+in instrument volumes, as trackers have always done it.
+
+**8-bit output beats 16-bit on this device.** With an 8-bit mixer, a 16-bit stream is the
+same samples shifted left eight: no extra information, twice the bandwidth. By ear, 8kHz
+8-bit plays a nearly solid tone while both 16-bit formats produce static, and 16kHz 8-bit is
+metallic.
+
+**Buffer depth does not govern quality.** Swept 20ms to 250ms of lead with no audible
+difference, so the lead should be chosen for latency -- how long after a trigger a sound is
+heard -- and nothing else.
+
+### Still open
+
+A low thrum behind a single sustained tone, plus an occasional hiccup, survives every
+software variable above. The mixer's own output is verifiably clean: 3 seconds captured on
+the host showed zero sample-to-sample deltas above 6 across 47,679 samples and flat peak
+amplitude in all 148 windows. The speaker reports `Playing` continuously with zero
+transitions out of it.
+
+Every quantity reachable from inside the app now reads correct, so the next step is not more
+instrumentation -- it is recording the speaker and looking at a spectrum. A fixed frequency
+implicates the device's DAC or power path; one that tracks the feed interval is still ours.
