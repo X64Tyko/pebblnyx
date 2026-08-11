@@ -130,8 +130,8 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
   const PnxFrameStats *fs = pnx_diag_stats();
   static const char *STATE[] = { "idle", "play", "drain", "?" };
   static const char *FMT[] = { "16k/8", "16k/16", "8k/8", "8k/16" };
-  pnx_format(a->hud, sizeof(a->hud), "%s gap%u lead%u v%u",
-             FMT[pnx_audio_format() & 3], au->worst_gap_ms,
+  pnx_format(a->hud, sizeof(a->hud), "%s gap%u/%u lead%u v%u",
+             FMT[pnx_audio_format() & 3], au->gap_ms, au->worst_gap_ms,
              pnx_audio_lead(), au->active_voices);
   pnx_format(a->hud3, sizeof(a->hud3), "%s%u r%2u  feed %u-%u",
              a->seq_on ? "pat " : "off ", pnx_music_pattern(), pnx_music_row(),

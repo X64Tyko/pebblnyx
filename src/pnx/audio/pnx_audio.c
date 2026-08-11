@@ -469,8 +469,9 @@ void pnx_audio_update(uint32_t now_ms) {
   // the obvious one -- are exactly how a gap appears intermittently.
   if (s_last_update_ms) {
     const uint32_t gap = now_ms - s_last_update_ms;
-    if (gap > s_stats.worst_gap_ms && gap < 60000u) {
-      s_stats.worst_gap_ms = (uint16_t)gap;
+    if (gap < 60000u) {
+      s_stats.gap_ms = (uint16_t)gap;
+      if (gap > s_stats.worst_gap_ms) s_stats.worst_gap_ms = (uint16_t)gap;
     }
   }
   s_last_update_ms = now_ms;
