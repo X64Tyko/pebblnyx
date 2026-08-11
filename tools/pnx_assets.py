@@ -268,11 +268,31 @@ def finish_atlas(atlas, tile_flags, shared):
 
     flags = bytes(tile_flags.get(i, 0) for i in range(len(tiles)))
 
-    # Decide by arithmetic, not by the flag alone. Metatile reuse scales with the size
-    # and repetitiveness of a tileset: 1.33x across five full sheets with mirrors, but
-    # only 1.04-1.12x on a
+    # Decide by arithmetic, not by the flag alone. Metatile reuse scales with the size and
+    # repetitiveness of a tileset: 1.29x across five full sheets, but only 1.04-1.12x on a
     # 64-tile hand-picked region, where the 9-byte definitions can outweigh the saving.
+    #
+    # `metatiles` accepts four things, because "auto" cannot know what a given game values:
+    #
+    #   true / false   force it on or off
+    #   "auto"         use the default threshold
+    #   0.0 .. 1.0     use THIS threshold -- 0.0 means any saving at all, 0.30 means only
+    #                  take it when the saving is large
+    #
+    # A number is the useful form for an artist tuning one atlas: reuse is a property of how
+    # the art was drawn, and a tileset with deliberate repetition may be worth metatiling at
+    # a margin that a painterly one is not.
     want = atlas.get("metatiles")
+    threshold = METATILE_MIN_SAVING
+    if isinstance(want, bool):
+        pass                                  # explicit; no arithmetic needed
+    elif isinstance(want, (int, float)):
+        threshold = float(want)
+        if not 0.0 <= threshold <= 1.0:
+            raise BuildError(
+                f"atlas {atlas['name']!r}: metatiles = {want} is out of range. Give a "
+                f"fraction from 0.0 (take any saving) to 1.0 (never), or true/false/\"auto\".")
+        want = "auto"
     if want in (None, "auto"):
         bank, _defs = build_metatiles(tiles, assign, T, quiet=True)
         flat_size = len(tiles) * (T * T // 2)
@@ -284,10 +304,10 @@ def finish_atlas(atlas, tile_flags, shared):
         # spans instead of one. So a saving has to be worth that, not merely positive.
         # 8.6% for 35% render was a bad trade; 14-19% on a real sheet is not, because
         # resources are the binding constraint here and frame time is not.
-        want = saving >= METATILE_MIN_SAVING
+        want = saving >= threshold
         verdict = "chosen" if want else "skipped"
         print(f"    metatiles {verdict}: {meta_size:,} B vs {flat_size:,} B flat "
-              f"({saving * 100:.0f}% saved, need {METATILE_MIN_SAVING * 100:.0f}% to "
+              f"({saving * 100:.0f}% saved, need {threshold * 100:.0f}% to "
               f"pay for ~35% more render time)")
 
     if want:

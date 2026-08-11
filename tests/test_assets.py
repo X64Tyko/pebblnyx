@@ -451,6 +451,33 @@ def main():
         accent = 2
     ''')
 
+    # The per-atlas metatile threshold. A fraction is the form an artist reaches for, so a
+    # typo like a percentage (12 instead of 0.12) has to be a build error naming the range
+    # rather than silently meaning "never metatile".
+    expect_fail("metatile threshold out of range", "out of range", atlas='''
+        [[atlas]]
+        name = "tiles"
+        sheet = "sheet.png"
+        tile = 16
+        region = [0, 0, 2, 2]
+        max_tiles = 16
+        out = "tiles.bin"
+        metatiles = 12
+        autopick = ["floor", "wall", "accent"]
+    ''')
+
+    expect_ok("metatile threshold as a fraction", atlas='''
+        [[atlas]]
+        name = "tiles"
+        sheet = "sheet.png"
+        tile = 16
+        region = [0, 0, 2, 2]
+        max_tiles = 16
+        out = "tiles.bin"
+        metatiles = 0.3
+        autopick = ["floor", "wall", "accent"]
+    ''')
+
     print(f"\n{checks} checks, {failures} failures")
     return 1 if failures else 0
 

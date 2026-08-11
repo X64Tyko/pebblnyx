@@ -274,16 +274,16 @@ Re-measured after mirror-aware dedup landed, because that change moved the numbe
 original metatile decision rested on. Five full sheets, mirrors collapsed in every column,
 so the comparison is fair:
 
-| Sheet | Unique 16x16 | Unique 8x8 | Quadrant reuse |
+| Sheet | Unique 16x16 | Quadrants, exact | Quadrants, with flips |
 |---|---|---|---|
-| world | 439 | 1,306 | 1.34x |
-| dungeon | 403 | 1,243 | 1.30x |
-| exterior | 441 | 1,359 | 1.30x |
-| interior | 443 | 1,327 | 1.34x |
-| ship | 367 | 1,050 | 1.40x |
-| **pooled** | **2,093** | **6,285** | **1.33x** |
+| world | 439 | 1,334 | 1,306 |
+| dungeon | 403 | 1,294 | 1,243 |
+| exterior | 441 | 1,389 | 1,359 |
+| interior | 443 | 1,368 | 1,327 |
+| ship | 367 | 1,101 | 1,050 |
+| **pooled** | **2,093** | **6,486 (1.29x)** | **6,285 (1.33x)** |
 
-**Quadrant reuse is 1.33x, not 1.96x.** The earlier figure predates mirror-aware dedup, and
+**Quadrant reuse is 1.29x, not 1.96x.** The earlier figure predates mirror-aware dedup, and
 the two optimisations overlap: a quadrant that is another's mirror was already being
 collapsed before metatiling saw it. Introducing mirror dedup therefore *reduced* what
 metatiling adds -- worth knowing generally, since stacked size optimisations are rarely
@@ -294,11 +294,10 @@ additive.
 Map cells are u16, so a native 8x8 grid needs four times the cells for the same world area.
 `world.png` at three map sizes:
 
-| Map cells | Flat 16x16 | Metatiled | Native 8x8 |
-|---|---|---|---|
-| 768 (32x24) | 57,728 | **46,840** | 47,936 |
-| 3,000 | 62,192 | **51,304** | 65,792 |
-| 12,000 | 80,192 | **69,304** | 137,792 |
+| Map cells | Flat 16x16 | Metatiled | Metatiled + quadrant flips | Native 8x8 |
+|---|---|---|---|---|
+| 768 (32x24) | 57,728 | 47,736 (-17%) | **46,840 (-19%)** | 47,936 |
+| 12,000 | 80,192 | 70,200 (-12%) | **69,304 (-14%)** | 137,792 |
 
 **Metatiled 16x16 wins at every scale, and native 8x8 collapses as maps grow.** Four times the
 cells beats any atlas saving the smaller grid can offer -- at 12,000 cells native 8x8 costs
@@ -310,8 +309,20 @@ to the tile grid. The hero is 16x24.
 
 ### What this changed
 
-Metatiles save **14-19%** on full sheets, against a threshold of 25% -- so auto-selection
-could never fire. The threshold was calibrated on 1.96x reuse and is now **0.12**. The 35%
+Metatiles as implemented save **9-18%** depending on map size, against a threshold of 25% --
+so auto-selection could never fire. The threshold was calibrated on 1.96x reuse and is now
+**0.12**, and is overridable per atlas: `metatiles` takes `true`, `false`, `"auto"`, or a
+fraction that sets that atlas's own threshold. Reuse is a property of how the art was drawn,
+so an artist tuning one tileset should not have to argue with a global constant.
+
+**Quadrant flips would add 2-4 points and cost nothing.** Storing a quadrant once and
+referencing it flipped brings reuse from 1.29x to 1.33x, and the flip bits are free: 6,486
+quadrants needs 13 bits of the u16 table entry, leaving three spare. Not implemented yet.
+
+It would also un-block flipping a whole metatile from the map, which is currently refused.
+That is not a draw-order problem as first assumed -- it is a 2-bit permutation. Flip X reads
+quadrants (TR, TL, BR, BL) instead of (TL, TR, BL, BR) with each one's X bit toggled, so once
+the table carries flip bits both cases fall out of the same code. The 35%
 render cost it buys is affordable: 14.5% of the frame becomes 19.7%, and resources are the
 binding constraint while frame time is not.
 

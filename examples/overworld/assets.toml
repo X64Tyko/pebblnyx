@@ -36,7 +36,9 @@ autopick = ["floor", "wall", "accent"]
 # pipeline picks by arithmetic and this 64-tile region is too small to benefit (1.19x
 # quadrant reuse against 1.96x on full sheets), and the runtime does not read the layout
 # yet. Set `metatiles = true` to force it, or "auto" to let the pipeline choose.
-metatiles = "auto"
+# A fraction sets this atlas's own threshold: take metatiles when they save at least
+# this much. true/false force it, "auto" uses the pipeline default of 12%.
+metatiles = 0.12
 
 # --------------------------------------------------------------------------- sprites
 
