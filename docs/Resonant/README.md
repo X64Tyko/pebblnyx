@@ -42,7 +42,9 @@ that answering early would only constrain:
 | Does anyone alive state the sacrifice truth? | `World.md` | Leaning no -- the player infers it. Moireage knows the god part and not the sacrifice; nobody else has an unforged history to reason from. |
 | Runigran or Runigan? | -- | Spelled both ways so far. Docs use **Runigran**; say which and it is one find-and-replace. |
 | ~~Does transformation stay auto-triggered in the final fight?~~ | `Combat.md` | **Settled: neither.** Soul Bond at 100% means Destabilisation reads NONE, so the last phase is sustained with no gauge at all. The mechanic it would have gated on stops existing. |
-| Who has the realisation if OPRA died? | `World.md` | **The last real gap.** Van is weak (he has carried one longest), Kell undercuts her own wrongness. Leaning: whoever bears two Cores hears one while nearly burning out -- same revelation, paid for in damage. |
+| ~~Who has the realisation if OPRA died?~~ | `World.md` | **Settled: the player chooses who takes Moireage's Core.** Same outcome, but the double bearer dies after the fight and relays the voice. Play Node 2 well and nobody dies; otherwise choose which of them will. |
+| Is Van eligible for the sacrifice? | `World.md` | If yes, the epilogue must support the protagonist's death. If no, say why the choice is Kell or GORD. |
+| Does GORD's loss cost the same? | `World.md` | He is the emotionally cheap pick and would calculate that he is correct, which drains the choice of weight. |
 | Is Van Subject 7? | `World.md` | Plays either way as written. Changes whether Van is *returning* to this place or arriving at it. |
 | ~~How many Nodes?~~ | `World.md` | **Settled: four, one held by the Client**, and the number erased from history so everyone says three. The party reaches ~60% holding three; the final act is taking his. |
 | ~~Can Instability reach a fail state?~~ | `Combat.md`, `Stats.md` | **Settled: no fail state needed.** It is Act I's motivation -- Van wants it out of him -- so it drives the plot instead of punishing the player. Reduced only at Nodes until the second tangent teaches balancing. |

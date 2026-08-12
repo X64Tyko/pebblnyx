@@ -276,17 +276,51 @@ lands on GORD, who reports state and never opinion, which makes it land harder t
 The party bursts into a sustained form of their transformation. No gauge, no drain, no auto-trigger:
 **the meter is simply gone**, replaced by Soul Bond.
 
-### The question this leaves
+### Why that Core is the one that speaks
 
-**OPRA is optional.** If she died at Node 2, who has the realisation?
+**Moireage carried it for an age and it was never dormant.** The other three lay sealed and silent; his
+learned to communicate. And through communication a vessel and a Core work *together* -- where a vessel who
+treats the Core as a power source is only ever borrowing from it.
 
-Handing it to Van is weak -- he has carried a Core longest and should have noticed. Kell reasoning it out
-undercuts her being wrong about the history. The strongest answer is that **without OPRA it costs
-something**: whoever is bearing two Cores is pushed to the edge of burning out, and hears one *there*.
-Same revelation, arrived at through damage instead of recognition, and it makes the branch change the
-texture of the finale rather than just its cast.
+That is one mechanism serving both branches. The talkative Core is the talkative Core regardless of who
+ends up holding it; only the holder changes.
 
-**Still to decide**, and it is the last real gap in the outline.
+It also indicts Moireage completely. He had the one Core that could speak to him, for centuries, and never
+listened -- which is precisely the failure Runigran is laughing at the party for. The most tragic reading
+available is that it had been trying to tell him the whole time.
+
+### Without OPRA: a chosen sacrifice
+
+If she died at Node 2, **the player chooses who takes Moireage's Core.** They discover a bearer can hold
+two.
+
+Whoever does screams, and the pain comes out of them as raw energy that fills the other Cores like a
+battery. **The outcome is the same** -- everyone reaches full power, the fight is winnable, nothing is
+gated. The cost is a person: the double bearer is in agony throughout and **dies shortly after the fight**,
+telling the party about the voice they heard while doing it.
+
+So the knowledge lands on both branches. The lore payoff is never branch-exclusive; only who survives to
+hear it is.
+
+That makes the Node 2 stun branch enormous in retrospect: play it competently and nobody dies, or choose
+which of them will. Which is exactly why the requirements on that fight in
+[`Combat.md`](Combat.md) -- a visible crystal, Kell's line, competence not perfection -- are requirements
+and not suggestions. Losing a character to a mechanic nobody mentioned would be indefensible.
+
+### What this opens
+
+**Is Van eligible?** If the player can pick the protagonist, the epilogue has to support his death, which
+is a real authoring cost and the kind that gets discovered late. If he is not eligible, the choice is Kell
+or GORD and should say why.
+
+**GORD is the emotionally cheap pick, which is a hazard.** He is a construct who reports state without
+opinion; a player looking for the least painful option takes him, and the sacrifice loses its weight. He
+would also *calculate* that he is the correct choice, which is characterful and makes it worse. Either
+give each option a final line that costs the same, or make GORD's loss land -- he is the one who has been
+quietly becoming a person.
+
+**Epilogue variants.** One for the OPRA path, one per eligible sacrifice. That is the real price of this
+branch, and it is paid in authoring rather than bytes.
 
 ## The facility
 
