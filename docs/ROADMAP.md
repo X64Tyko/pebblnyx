@@ -218,6 +218,66 @@ question -- mixing palettes inside one map -- and stay unbuilt until something n
 Done when: two maps share one atlas at different palettes, and the size report shows the second
 costing a palette rather than an atlas.
 
+## M4c — Orientation and screen lock
+
+Landscape is not a cosmetic option. **Rotating the display changes what the physical buttons are for**,
+which makes whole genres available:
+
+| Orientation | The three-button cluster sits | Reads as |
+|---|---|---|
+| Portrait | right edge, under a thumb | menus, an RPG |
+| Landscape, cluster on top | under both index fingers | **shoulder triggers** -- a shooter |
+| Landscape, cluster on bottom | under both thumbs | **flippers** -- pinball |
+| 180 | mirrored | left-handed play |
+
+This only makes sense because the device is played off the wrist in two hands
+([`PLATFORM.md`](PLATFORM.md)). A wrist-mounted watch in landscape is unreadable; a handheld one is
+a tiny gamepad whose button placement the game gets to choose.
+
+### The seam already nearly supports it
+
+`PnxRow` exists so the blitter never touches the framebuffer directly -- it asks for row `y` and gets
+a pointer plus valid column bounds. **Rotation is a change to what that returns**, not a rewrite:
+
+- `PnxRow` gains a **`step`**: bytes between adjacent columns. Portrait is 1; rotated 90 degrees a
+  game-space row walks *down* the framebuffer, so step is the row pitch.
+- Span writers index `dst[i * step]` -- or walk an incrementing pointer -- which is a few instructions
+  across four writers and **zero RAM**. The alternative, rendering to an offscreen buffer and blitting
+  it rotated, costs 45,600 bytes on `emery` and a whole extra full-screen copy per frame.
+- Width and height swap; the camera and viewport follow from `pnx_target_width/height` already.
+- Touch coordinates transform in the platform layer, so nothing above it knows.
+
+**Rectangular displays only.** The step trick needs a uniform row pitch, and round displays
+(`chalk`, `gabbro`) have per-row bounds by nature. Rotation there would want a different approach or
+a letterboxed square, and it should refuse rather than draw garbage.
+
+### Screen lock
+
+Two separate things, both platform-layer:
+
+- **Consume BACK.** It dismisses the app by default, which mid-game is a lost session. A game in play
+  should be able to hold it, with a deliberate exit path.
+- **Hold the backlight.** `light_enable` -- off-wrist play in a dim room otherwise goes dark mid-turn,
+  and the display timing out during a boss is the same failure as a crash from the player's side.
+
+### Open, and one that must be measured
+
+- **Strided writes hurt locality.** Portrait writes run sequentially along a framebuffer row; rotated
+  writes stride by the pitch. On SRAM with no cache that is probably fine against 6x frame headroom --
+  but "probably fine" is an estimate, and this project does not ship estimates. **Measure the rotated
+  full-screen blit before committing to the step approach**; if it is bad, the offscreen buffer is the
+  fallback and it costs 45,600 bytes.
+- Which orientations to support. 180 is free once 90 works.
+- Whether input mapping is per-orientation in the framework or left to the game. Leaning framework:
+  logical actions with an orientation-aware default mapping, which is what `src/pnx/input/` was always
+  for.
+
+Opt-in behind its own flag, per the zero-cost rule -- a portrait RPG must not pay a multiply per pixel
+for a feature it never uses.
+
+Done when: one example builds in portrait and landscape from the same source, the host tests run the
+blitter at both 200x228 and 228x200, and the rotated frame cost is measured on device.
+
 ## M5 — Save
 
 - Chunk packing into 256-byte units, minimum key count

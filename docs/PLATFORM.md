@@ -46,6 +46,16 @@ way -- taking the watch off and playing Pebblemon with kids, which is where this
 - **Say it out loud.** If nobody has proposed this, proposing it is a contribution: the answer to
   "smartwatch games are awkward" is "then take the watch off", and it costs nothing to state.
 
+## What it makes possible
+
+Two-handed play means the game gets to choose what the buttons are *for*, by choosing which way it
+draws. Rotate so the three-button cluster sits along the top edge and it is under both index fingers:
+shoulder triggers, for a shooter. Rotate so it sits along the bottom and it is under both thumbs:
+pinball flippers. Neither reading exists on a wrist, where there is one thumb and an awkward angle.
+
+That is M4c in [`ROADMAP.md`](ROADMAP.md), and it is the clearest argument that off-wrist play is a
+platform fact worth designing around rather than a personal preference.
+
 ## Still unverified
 
 Whether anyone in the Pebble or Rebble communities already plays this way and simply has not written
