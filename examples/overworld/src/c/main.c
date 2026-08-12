@@ -151,6 +151,17 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
 
     pnx_tilemap_draw(map, atlas, target, &g->camera);
     pnx_sprites_draw_sorted(g->sprites, g->sprite_count, g->order, target, &g->camera);
+
+    // The HUD draws HERE, inside the frame, like anything else. It used to be deferred
+    // to post_frame because the SDK would not render text into a held framebuffer -- so
+    // text could never have anything drawn over it, and each draw cost ~4.3 ms. A glyph
+    // blit is an ordinary blit.
+    //
+    // y is the BASELINE, so adding the font's own baseline positions from the top edge.
+    const PnxFont *hud = pnx_scene_font(0);
+    if (hud && g->hud[0]) {
+      pnx_text_draw(target, hud, g->hud, 2, 2 + hud->baseline, 0xFF);
+    }
   }
 
   pnx_diag_frame(elapsed_ms, pnx_platform_now_ms() - work_start);
@@ -168,11 +179,12 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
   }
 }
 
-// Drawn after the framebuffer is released, which is the only time the SDK will render
-// text. Kept to one line: a text draw costs ~4.3 ms, 12% of the frame.
+// Runs after the framebuffer is released. The HUD used to be drawn here, because the
+// SDK would not render text into a held framebuffer; it now draws in the frame itself
+// through the glyph blitter. Nothing needs this hook any more, and it stays only to keep
+// the audio feed off the capture window -- see the note on PnxPostFrameFn.
 static void post_frame(void *ctx) {
-  Game *g = (Game *)ctx;
-  if (g->hud[0]) pnx_platform_text_draw(g->hud, PNX_TEXT_SMALL, 0xFF, 2, 0, 196, 18);
+  (void)ctx;
 }
 
 // ---------------------------------------------------------------------------- main

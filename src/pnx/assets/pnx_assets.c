@@ -13,6 +13,11 @@
 #ifndef PNX_SCENE_MAX_SPRITES
 #define PNX_SCENE_MAX_SPRITES 8
 #endif
+// Two covers the shape E7 was written around -- a small HUD face and a larger dialogue
+// one. Raising it costs sizeof(PnxFont) of bss per slot and nothing else.
+#ifndef PNX_SCENE_MAX_FONTS
+#define PNX_SCENE_MAX_FONTS 2
+#endif
 
 static PnxArena *s_persistent;
 static const uint8_t *s_scene_table;
@@ -21,9 +26,10 @@ static uint8_t s_scene_count;
 static PnxAtlas s_atlases[PNX_SCENE_MAX_ATLASES];
 static uint16_t s_atlas_asset[PNX_SCENE_MAX_ATLASES];
 static PnxSprite s_sprites[PNX_SCENE_MAX_SPRITES];
+static PnxFont s_fonts[PNX_SCENE_MAX_FONTS];
 static PnxMap s_map;
 static PnxDialog s_dialog;
-static uint8_t s_atlas_count, s_sprite_count;
+static uint8_t s_atlas_count, s_sprite_count, s_font_count;
 static bool s_have_map, s_have_dialog;
 
 static PnxPalette *s_palettes;
@@ -362,6 +368,89 @@ bool pnx_dialog_load(PnxDialog *out, uint16_t asset_id) {
   return true;
 }
 
+bool pnx_font_load(PnxFont *out, uint16_t asset_id) {
+  uint8_t depth = 0, line_height = 0, baseline = 0;
+  size_t payload = 0;
+  const uint8_t *data = load_blob(asset_id, "PF", &depth, &line_height, &baseline,
+                                  &payload);
+  if (!data) return false;
+
+  // u16 glyph_count, u16 bitmap_bytes, u8 first_cp, last_cp, fallback, space_advance.
+  if (payload < 8) {
+    pnx_log("font %u: payload %u is shorter than its own header", asset_id,
+            (unsigned)payload);
+    return false;
+  }
+
+  const uint16_t glyphs = (uint16_t)(data[0] | (data[1] << 8));
+  const uint16_t bitmap_bytes = (uint16_t)(data[2] | (data[3] << 8));
+  const uint8_t first_cp = data[4], last_cp = data[5];
+  const uint8_t fallback = data[6], space_advance = data[7];
+
+  if (depth != 1 && depth != 2) {
+    pnx_log("font %u: depth %u, expected 1 or 2", asset_id, depth);
+    return false;
+  }
+  if (glyphs == 0 || line_height == 0 || first_cp > last_cp) {
+    pnx_log("font %u: %u glyphs, %upx line, cp %u..%u -- not a usable font",
+            asset_id, glyphs, line_height, first_cp, last_cp);
+    return false;
+  }
+  if (fallback >= glyphs) {
+    pnx_log("font %u: fallback glyph %u of %u", asset_id, fallback, glyphs);
+    return false;
+  }
+
+  const size_t index_bytes = (size_t)glyphs * PNX_FONT_GLYPH_BYTES;
+  const size_t map_bytes = (size_t)(last_cp - first_cp) + 1u;
+  const size_t expected = 8 + index_bytes + map_bytes + bitmap_bytes;
+  if (payload != expected) {
+    pnx_log("font %u: %u glyphs, %u cp, %u bitmap bytes needs %u, blob has %u",
+            asset_id, glyphs, (unsigned)map_bytes, bitmap_bytes,
+            (unsigned)expected, (unsigned)payload);
+    return false;
+  }
+
+  out->glyphs = data + 8;
+  out->map = data + 8 + index_bytes;
+  out->bitmaps = data + 8 + index_bytes + map_bytes;
+  out->glyph_count = glyphs;
+  out->bitmap_bytes = bitmap_bytes;
+  out->depth = depth;
+  out->line_height = line_height;
+  out->baseline = baseline;
+  out->space_advance = space_advance;
+  out->first_cp = first_cp;
+  out->last_cp = last_cp;
+  out->fallback = fallback;
+
+  // Both tables are validated once, here, so the blitter can index them per pixel with
+  // no checks at all -- the same bargain pnx_atlas_load makes with palette slots. An
+  // out-of-range offset would otherwise read arbitrary arena memory as glyph pixels.
+  for (uint16_t i = 0; i < glyphs; i++) {
+    const uint8_t *e = out->glyphs + (size_t)i * PNX_FONT_GLYPH_BYTES;
+    const uint16_t off = (uint16_t)(e[0] | (e[1] << 8));
+    const uint8_t w = e[2], h = e[3];
+    if (w == 0) continue;
+
+    const size_t need = (size_t)off + (size_t)h * pnx_font_row_bytes(out, w);
+    if (need > bitmap_bytes) {
+      pnx_log("font %u: glyph %u (%ux%u at %u) runs %u past its %u bitmap bytes",
+              asset_id, i, w, h, off, (unsigned)(need - bitmap_bytes), bitmap_bytes);
+      return false;
+    }
+  }
+
+  for (size_t i = 0; i < map_bytes; i++) {
+    if (out->map[i] != PNX_FONT_NO_GLYPH && out->map[i] >= glyphs) {
+      pnx_log("font %u: codepoint %u maps to glyph %u of %u", asset_id,
+              (unsigned)(first_cp + i), out->map[i], glyphs);
+      return false;
+    }
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------- accessors
 
 const PnxWarp *pnx_map_warp_at(const PnxMap *m, int32_t x, int32_t y) {
@@ -431,7 +520,7 @@ bool pnx_scene_load(uint16_t scene_id) {
   // Everything the previous scene held goes at once. There is no partial free anywhere
   // in the framework, and a scene boundary is the only point that needs one.
   pnx_arena_reset(s_arena);
-  s_atlas_count = s_sprite_count = 0;
+  s_atlas_count = s_sprite_count = s_font_count = 0;
   s_have_map = s_have_dialog = false;
   s_palettes = NULL;
   s_palette_count = 0;
@@ -484,6 +573,10 @@ bool pnx_scene_load(uint16_t scene_id) {
     } else if (magic[0] == 'P' && magic[1] == 'D') {
       ok = pnx_dialog_load(&s_dialog, asset);
       s_have_dialog = ok;
+    } else if (magic[0] == 'P' && magic[1] == 'F') {
+      ok = s_font_count < PNX_SCENE_MAX_FONTS
+           && pnx_font_load(&s_fonts[s_font_count], asset);
+      if (ok) s_font_count++;
     }
 
     if (!ok) {
@@ -493,8 +586,8 @@ bool pnx_scene_load(uint16_t scene_id) {
     }
   }
 
-  pnx_log("scene %u: %u assets, %u atlases, %u sprites, arena %u/%u",
-          scene_id, count, s_atlas_count, s_sprite_count,
+  pnx_log("scene %u: %u assets, %u atlases, %u sprites, %u fonts, arena %u/%u",
+          scene_id, count, s_atlas_count, s_sprite_count, s_font_count,
           (unsigned)s_arena->used, (unsigned)s_arena->capacity);
   return true;
 }
@@ -505,9 +598,13 @@ const PnxAtlas *pnx_scene_atlas(uint8_t index) {
 const PnxSprite *pnx_scene_sprite(uint8_t index) {
   return index < s_sprite_count ? &s_sprites[index] : NULL;
 }
+const PnxFont *pnx_scene_font(uint8_t index) {
+  return index < s_font_count ? &s_fonts[index] : NULL;
+}
 const PnxMap *pnx_scene_map(void) { return s_have_map ? &s_map : NULL; }
 const PnxDialog *pnx_scene_dialog(void) { return s_have_dialog ? &s_dialog : NULL; }
 uint8_t pnx_scene_atlas_count(void) { return s_atlas_count; }
 uint8_t pnx_scene_sprite_count(void) { return s_sprite_count; }
+uint8_t pnx_scene_font_count(void) { return s_font_count; }
 
 #endif  // PNX_USE_ASSETS

@@ -54,6 +54,8 @@ extern int s_checks;
 #define A_OUTDOOR  PNX_ASSET_MAP_OUTDOOR
 #define A_CAVE     PNX_ASSET_MAP_CAVE
 #define A_DIALOG   PNX_ASSET_DIALOG_DIALOG
+#define A_FONT_HUD PNX_ASSET_FONT_HUD
+#define A_FONT_DLG PNX_ASSET_FONT_DIALOGUE
 #define A_SCENES   PNX_ASSET_SCENES_SCENES
 #define A_COUNT    PNX_ASSET_COUNT
 
@@ -73,6 +75,8 @@ static const char *ASSET_PATHS[A_COUNT] = {
   [A_OUTDOOR]  = ASSETS_DIR "map_outdoor.bin",
   [A_CAVE]     = ASSETS_DIR "map_cave.bin",
   [A_DIALOG]   = ASSETS_DIR "dialog.bin",
+  [A_FONT_HUD] = ASSETS_DIR "font_hud.bin",
+  [A_FONT_DLG] = ASSETS_DIR "font_dialogue.bin",
   [A_SCENES]   = ASSETS_DIR "scenes.bin",
 };
 
@@ -332,11 +336,32 @@ void test_assets(void) {
   A_CHECK(pnx_scene_dialog() != NULL);
   if (pnx_scene_map()) A_CHECK_EQ(pnx_scene_map()->w, MAP_OUTDOOR_W);
 
+  // Fonts load as scene assets like anything else, and the metrics the runtime reads
+  // must match what the pipeline wrote into the header.
+  A_CHECK_EQ(pnx_scene_font_count(), 2);
+  const PnxFont *hud = pnx_scene_font(0);
+  A_CHECK(hud != NULL);
+  if (hud) {
+    A_CHECK_EQ(hud->line_height, FONT_HUD_LINE_HEIGHT);
+    A_CHECK_EQ(hud->baseline, FONT_HUD_BASELINE);
+    A_CHECK_EQ(hud->glyph_count, FONT_HUD_GLYPHS);
+    A_CHECK_EQ(hud->depth, FONT_HUD_DEPTH);
+    // `extra` put digits in the HUD face that no dialog page contains; the dialogue
+    // face, derived from dialog alone, has no '7' and must fall back rather than
+    // index past its glyph table.
+    A_CHECK(pnx_font_glyph_index(hud, '7') != hud->fallback);
+  }
+  const PnxFont *dlg = pnx_scene_font(1);
+  A_CHECK(dlg != NULL);
+  if (dlg) A_CHECK_EQ(dlg->depth, FONT_DIALOGUE_DEPTH);
+  A_CHECK(pnx_scene_font(2) == NULL);
+
   // Loading another scene must release the first entirely rather than accumulating.
   const size_t after_outdoor = arena.used;
   A_CHECK(pnx_scene_load(SCENE_CAVE));
   A_CHECK_EQ(pnx_scene_sprite_count(), 1);       // cave declares no npc
   A_CHECK(pnx_scene_dialog() == NULL);           // nor dialog
+  A_CHECK_EQ(pnx_scene_font_count(), 1);         // HUD only: no conversations here
   if (pnx_scene_map()) A_CHECK_EQ(pnx_scene_map()->w, MAP_CAVE_W);
   A_CHECK(arena.used < after_outdoor);           // smaller scene, less arena
 

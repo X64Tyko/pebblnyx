@@ -27,9 +27,9 @@ import sys
 import tomllib
 
 try:
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageFont
 except ImportError:
-    Image = None
+    Image = ImageFont = None
 
 # ARGB2222. 0x00 is fully transparent; opaque colours carry alpha 0b11 in the top bits.
 TRANSPARENT = 0x00
@@ -44,7 +44,7 @@ FLAG_NAMES = {"solid": FLAG_SOLID, "warp": FLAG_WARP}
 # Blob format versions. A mismatch between a stale .bin and a newer runtime is exactly
 # the kind of failure that presents as garbage pixels rather than an error, so every
 # blob is tagged and the runtime checks.
-BLOB_VERSION = 6
+BLOB_VERSION = 7
 MAGIC_ATLAS = b"PA"
 MAGIC_SPRITE = b"PS"
 MAGIC_MAP = b"PM"
@@ -53,6 +53,7 @@ MAGIC_PALETTES = b"PP"
 MAGIC_SCENES = b"PC"
 MAGIC_MUSIC = b"PN"
 MAGIC_SAMPLE = b"PW"
+MAGIC_FONT = b"PF"
 
 HEADER_BYTES = 8
 
@@ -134,6 +135,24 @@ def pack_atlas(root, spec):
     rx, ry, rw, rh = spec["region"]
     max_tiles = int(spec.get("max_tiles", 255))
 
+    # Tiles the author dropped in the editor, as indices into the REGION read left to
+    # right, top to bottom -- which is the order the editor lays them out, so the number
+    # in the manifest is the cell that was clicked.
+    #
+    # Excluded before dedup, not after, because that is what the author is looking at:
+    # a grid of sheet positions. Dropping a deduplicated tile instead would silently take
+    # every other position that happens to share its pixels.
+    excluded = set()
+    for e in spec.get("exclude", []):
+        if isinstance(e, (list, tuple)) and len(e) == 2:
+            excluded.add((int(e[0]), int(e[1])))         # absolute sheet coordinates
+        else:
+            i = int(e)
+            if not 0 <= i < rw * rh:
+                raise BuildError(f"atlas {name!r}: exclude index {i} is outside the "
+                                 f"{rw}x{rh} region ({rw * rh} cells)")
+            excluded.add((rx + i % rw, ry + i // rw))
+
     sheet_w, sheet_h = im.size
     if (rx + rw) * T > sheet_w or (ry + rh) * T > sheet_h:
         raise BuildError(
@@ -154,6 +173,8 @@ def pack_atlas(root, spec):
     origin = []          # sheet position each unique tile was first seen at
     for ty in range(ry, ry + rh):
         for tx in range(rx, rx + rw):
+            if (tx, ty) in excluded:
+                continue
             buf = bytearray(T * T)
             for j in range(T):
                 for i in range(T):
@@ -181,7 +202,10 @@ def pack_atlas(root, spec):
                     seen[variant] = (idx, bits)
 
     if not unique:
-        raise BuildError(f"atlas {name!r}: region contains no non-empty tiles")
+        raise BuildError(
+            f"atlas {name!r}: region contains no non-empty tiles"
+            + (f" -- all {len(excluded)} remaining cells were excluded" if excluded
+               else ""))
     if len(unique) > 255:
         raise BuildError(f"atlas {name!r}: {len(unique)} tiles, but map tile indices "
                          f"are u8 -- cap max_tiles at 255")
@@ -1267,6 +1291,308 @@ def pack_music(specs):
     return songs
 
 
+# ----------------------------------------------------------------------------- font
+#
+# A font is the one asset nobody can author by hand at this scale, and it is also the one
+# most likely to be illegible after import: at 12px hinting dominates, and a typeface that
+# reads beautifully on a page turns to mush. So the pipeline's job here is not merely to
+# convert a TTF -- it is to produce metrics the editor can show at the target size, and to
+# fail loudly on the things that are silently wrong.
+#
+# Glyphs are 1bpp or 2bpp, NOT the 4bpp every other asset uses. Text has one colour, so
+# the 4 bits an atlas spends naming a palette entry would be 3 bits of waste per pixel.
+# 1bpp is `ink or nothing`; 2bpp adds two intermediate coverage levels the blitter blends
+# against whatever is already on screen.
+
+FONT_ASCII_FIRST = 32       # space
+FONT_ASCII_LAST = 126       # tilde
+FONT_GLYPH_ENTRY = 8        # bytes per glyph index entry
+FONT_ABSENT = 0xFF          # codepoint map entry for a glyph the font does not carry
+
+# The map is byte-indexed and 0xFF means absent, so 255 is the ceiling on glyph count.
+# ASCII needs 95, so this only binds if someone tries to smuggle in a larger script.
+FONT_MAX_GLYPHS = 255
+
+
+def derive_charset(man, spec, name):
+    """The set of characters a font must carry.
+
+    `charset = "auto"` takes it from the content the pipeline already reads -- every
+    dialog page -- rather than making the author restate it. That matters because the
+    alternative is shipping all 95 printable ASCII glyphs whether or not the game uses
+    them, and a dialogue-sized face wastes real budget on characters no page contains.
+
+    `extra` exists because not all text is content: damage numbers, "HP", a percent sign
+    in a menu appear in no dialog page and would otherwise be missing at runtime, which
+    presents as gaps in a string rather than as an error.
+    """
+    want = spec.get("charset", "auto")
+    origin = {}
+
+    if want == "auto":
+        chars = set()
+        for entry_name, entry in sorted(man.get("dialog", {}).items()):
+            for i, page in enumerate(entry.get("pages", [])):
+                for ch in page:
+                    chars.add(ch)
+                    origin.setdefault(ch, f"dialog {entry_name!r} page {i}")
+    elif want == "ascii":
+        chars = {chr(c) for c in range(FONT_ASCII_FIRST, FONT_ASCII_LAST + 1)}
+    elif isinstance(want, str):
+        chars = set(want)
+        for ch in chars:
+            origin.setdefault(ch, f"font {name!r} charset")
+    else:
+        raise BuildError(f"font {name!r}: charset must be \"auto\", \"ascii\", or a "
+                         f"string of characters, not {want!r}")
+
+    for ch in spec.get("extra", ""):
+        chars.add(ch)
+        origin.setdefault(ch, f"font {name!r} extra")
+
+    # Space is always carried. Its advance is what separates words, and a font without it
+    # renders every line as one run.
+    chars.add(" ")
+    chars.discard("\n")
+
+    bad = sorted(c for c in chars if not FONT_ASCII_FIRST <= ord(c) <= FONT_ASCII_LAST)
+    if bad:
+        where = "; ".join(f"{c!r} (U+{ord(c):04X}) from {origin.get(c, 'the manifest')}"
+                          for c in bad[:4])
+        raise BuildError(
+            f"font {name!r}: {len(bad)} character(s) outside printable ASCII: {where}"
+            + ("; ..." if len(bad) > 4 else "")
+            + ". Only ASCII 32-126 is supported -- a non-Latin script needs a wider "
+              "codepoint map than the byte-indexed one this format uses. Replace typographic "
+              "quotes and dashes with their ASCII equivalents.")
+
+    if len(chars) > FONT_MAX_GLYPHS:
+        raise BuildError(f"font {name!r}: {len(chars)} glyphs exceeds the {FONT_MAX_GLYPHS} "
+                         f"the codepoint map can index")
+
+    return sorted(chars), origin
+
+
+def quantise_coverage(value, depth, threshold):
+    """One greyscale sample to a glyph level.
+
+    At depth 1 this is a plain cutoff and `threshold` is the whole story -- which is why
+    the editor puts a slider on it. Move it 20 either way at 12px and stems appear or
+    vanish; there is no correct value, only a legible one for a given typeface.
+
+    At depth 2, `threshold` is the black point below which a sample is transparent, and
+    what remains is spread over levels 1-3. Keeping the same field meaningful at both
+    depths means the slider does not change job when the depth changes.
+    """
+    if value < threshold:
+        return 0
+    if depth == 1:
+        return 1
+    span = 255 - threshold
+    if span <= 0:
+        return 3
+    return 1 + min(2, ((value - threshold) * 2 + span // 2) // span)
+
+
+def rasterise_glyph(pil_font, ch, depth, threshold, pad):
+    """Render one character and trim it to its inked box.
+
+    Returns levels as a list of rows, plus metrics measured FROM THE BASELINE, which is
+    the only origin that keeps two different fonts aligned on one line.
+
+    Quantisation happens before the box is measured, deliberately: measuring the greyscale
+    bbox first would keep rows whose every sample falls below the threshold, padding the
+    glyph with blank lines that cost bytes and shift the bearing.
+    """
+    img = Image.new("L", (pad * 3, pad * 3), 0)
+    ImageDraw.Draw(img).text((pad, pad), ch, fill=255, font=pil_font, anchor="ls")
+
+    px = img.load()
+    w, h = img.size
+    levels = [[quantise_coverage(px[x, y], depth, threshold) for x in range(w)]
+              for y in range(h)]
+
+    rows = [y for y in range(h) if any(levels[y])]
+    cols = [x for x in range(w) if any(levels[y][x] for y in range(h))]
+    if not rows or not cols:
+        return None, 0, 0            # no ink: a space, or a glyph the face lacks
+
+    top, bottom = rows[0], rows[-1]
+    left, right = cols[0], cols[-1]
+    trimmed = [row[left:right + 1] for row in levels[top:bottom + 1]]
+    return trimmed, left - pad, pad - top
+
+
+def pack_glyph_rows(rows, depth):
+    """Levels to packed bytes, MSB-first, one row at a time.
+
+    Row-aligned rather than a continuous bit stream, so the blitter can index a row by
+    multiply-and-add instead of tracking a bit offset across rows. Costs at most 7 bits
+    per row and makes the inner loop a great deal simpler.
+    """
+    out = bytearray()
+    for row in rows:
+        acc, bits = 0, 0
+        for level in row:
+            acc = (acc << depth) | level
+            bits += depth
+            if bits == 8:
+                out.append(acc)
+                acc, bits = 0, 0
+        if bits:
+            out.append((acc << (8 - bits)) & 0xFF)
+    return bytes(out)
+
+
+def pack_font(root, spec, man):
+    """Rasterise a TTF/OTF at a pixel size and pack it as a PF blob.
+
+    Format after the header (depth, line_height, baseline in bytes 3-5):
+        u16 glyph_count, u16 bitmap_bytes
+        u8  first_cp, last_cp, fallback_index, space_advance
+        glyph_count * 8: u16 offset, u8 w, u8 h, u8 advance, s8 bearing_x, s8 bearing_y, pad
+        (last_cp - first_cp + 1) bytes: codepoint -> glyph index, 0xFF absent
+        bitmap block
+    """
+    if Image is None:
+        raise BuildError("Pillow is required for fonts: pip install pillow")
+
+    name = spec.get("name")
+    if not name:
+        raise BuildError("a [[font]] block has no name")
+    if "source" not in spec:
+        raise BuildError(f"font {name!r}: no source -- point it at a .ttf or .otf")
+
+    path = os.path.join(root, spec["source"])
+    if not os.path.exists(path):
+        raise BuildError(f"font {name!r}: missing source: {path}")
+
+    # Rasterised glyphs are a redistribution of the typeface even though the outlines
+    # stay behind, and a bundle that ships them without a licence is a problem the author
+    # discovers from a rights holder rather than from a build. Cheap to record, so it is
+    # required rather than suggested.
+    if not spec.get("license"):
+        raise BuildError(
+            f"font {name!r}: no license. Rasterising {os.path.basename(path)} into the "
+            f"bundle redistributes the typeface, so the manifest has to record the terms "
+            f'-- e.g. license = "SIL OFL 1.1", or "public domain". This is checked because '
+            f"the alternative is finding out later.")
+
+    depth = int(spec.get("depth", 1))
+    if depth not in (1, 2):
+        raise BuildError(f"font {name!r}: depth must be 1 (crisp) or 2 (antialiased), "
+                         f"not {depth}")
+
+    size = int(spec.get("size", 12))
+    if not 4 <= size <= 64:
+        raise BuildError(f"font {name!r}: size {size} is outside 4-64 px")
+
+    # Default black point depends on depth: 128 is the natural cutoff for a hard
+    # threshold, but it would discard every antialiased sample at depth 2 and produce a
+    # font indistinguishable from depth 1 at twice the bytes.
+    threshold = int(spec.get("threshold", 128 if depth == 1 else 24))
+    if not 1 <= threshold <= 254:
+        raise BuildError(f"font {name!r}: threshold {threshold} is outside 1-254")
+
+    tracking = int(spec.get("tracking", 0))
+    overrides = {str(k): int(v) for k, v in spec.get("advance", {}).items()}
+
+    try:
+        pil_font = ImageFont.truetype(path, size)
+    except OSError as e:
+        raise BuildError(f"font {name!r}: cannot open {path} at {size}px: {e}") from None
+
+    ascent, descent = pil_font.getmetrics()
+    chars, origin = derive_charset(man, spec, name)
+
+    glyphs, bitmaps, dedup = [], bytearray(), {}
+    for ch in chars:
+        rows, bearing_x, bearing_y = rasterise_glyph(pil_font, ch, depth, threshold,
+                                                     max(size, 8) * 2)
+        advance = overrides.get(ch, int(round(pil_font.getlength(ch)))) + tracking
+        if advance < 0:
+            raise BuildError(f"font {name!r}: advance for {ch!r} is negative ({advance}) "
+                             f"-- tracking = {tracking} is too small")
+
+        if rows is None:
+            glyphs.append({"ch": ch, "offset": 0, "w": 0, "h": 0, "advance": advance,
+                           "bx": 0, "by": 0})
+            continue
+
+        w, h = len(rows[0]), len(rows)
+        packed = pack_glyph_rows(rows, depth)
+
+        # Identical bitmaps share one copy. Cheap, and it fires more than it looks like it
+        # would: at small sizes 'l' and 'I', 'O' and '0', or a comma and an apostrophe
+        # frequently rasterise to the same pixels even when the outlines differ.
+        key = (w, h, packed)
+        if key in dedup:
+            offset = dedup[key]
+        else:
+            offset = len(bitmaps)
+            dedup[key] = offset
+            bitmaps += packed
+
+        for field, value in (("bearing_x", bearing_x), ("bearing_y", bearing_y)):
+            if not -128 <= value <= 127:
+                raise BuildError(f"font {name!r}: {field} for {ch!r} is {value}, outside "
+                                 f"a signed byte -- the face is not usable at {size}px")
+        if w > 255 or h > 255:
+            raise BuildError(f"font {name!r}: glyph {ch!r} rasterises to {w}x{h}, "
+                             f"which exceeds the 255px a byte can hold")
+
+        glyphs.append({"ch": ch, "offset": offset, "w": w, "h": h, "advance": advance,
+                       "bx": bearing_x, "by": bearing_y})
+
+    if len(bitmaps) > 0xFFFF:
+        raise BuildError(f"font {name!r}: {len(bitmaps)} bytes of glyph bitmaps exceeds "
+                         f"the u16 offset limit; use a smaller size or a narrower charset")
+
+    inked = [g for g in glyphs if g["w"]]
+    if not inked:
+        raise BuildError(f"font {name!r}: every glyph rasterised blank at {size}px with "
+                         f"threshold {threshold}. A bitmap-only face renders nothing "
+                         f"except at its designed size; try that size, or lower the "
+                         f"threshold.")
+
+    first_cp, last_cp = ord(chars[0]), ord(chars[-1])
+    index_of = {g["ch"]: i for i, g in enumerate(glyphs)}
+
+    # The fallback is what an unmapped codepoint draws. '?' if the font carries one,
+    # otherwise the first inked glyph -- anything visible beats a silent gap, because a
+    # gap reads as a layout bug rather than as a missing character.
+    fallback = index_of.get("?", index_of[inked[0]["ch"]])
+    space_advance = glyphs[index_of[" "]]["advance"]
+
+    body = bytearray()
+    body += len(glyphs).to_bytes(2, "little") + len(bitmaps).to_bytes(2, "little")
+    body += bytes([first_cp, last_cp, fallback, space_advance & 0xFF])
+    for g in glyphs:
+        body += g["offset"].to_bytes(2, "little")
+        body += bytes([g["w"], g["h"], g["advance"] & 0xFF,
+                       g["bx"] & 0xFF, g["by"] & 0xFF, 0])
+    body += bytes(index_of.get(chr(cp), FONT_ABSENT)
+                  for cp in range(first_cp, last_cp + 1))
+    body += bitmaps
+
+    line_height = ascent + descent
+    blob = blob_header(MAGIC_FONT, depth, line_height, ascent) + bytes(body)
+
+    saved = sum(g["w"] for g in inked) and (
+        len(glyphs) - len({(g["w"], g["h"], g["offset"]) for g in inked}))
+    print(f"  font {name}: {len(glyphs)} glyphs at {size}px depth {depth}, "
+          f"{line_height}px line / {ascent}px baseline, {len(bitmaps)} B bitmaps"
+          + (f", {saved} shared" if saved else "")
+          + f", {len(blob)} bytes total")
+
+    return {"name": name, "blob": blob, "out": spec.get("out", f"font_{name}.bin"),
+            "glyphs": glyphs, "chars": chars, "origin": origin,
+            "depth": depth, "size": size, "threshold": threshold,
+            "tracking": tracking, "line_height": line_height, "baseline": ascent,
+            "license": spec["license"], "source": spec["source"],
+            "bitmap_bytes": len(bitmaps)}
+
+
 # --------------------------------------------------------------------------- scenes
 
 def build_scenes(man, asset_index, maps=()):
@@ -1292,7 +1618,7 @@ def build_scenes(man, asset_index, maps=()):
         spec = specs[name]
         ids = []
 
-        for kind, key in (("ATLAS", "atlases"), ("SPRITE", "sprites")):
+        for kind, key in (("ATLAS", "atlases"), ("SPRITE", "sprites"), ("FONT", "fonts")):
             for ref in spec.get(key, []):
                 handle = f"PNX_ASSET_{kind}_{c_ident(ref)}"
                 if handle not in asset_index:
@@ -1381,7 +1707,7 @@ def write_blob(path, blob):
 
 
 def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0,
-                    scenes=None, songs=None, samples=None):
+                    scenes=None, songs=None, samples=None, fonts=None):
     L = [
         "// GENERATED by tools/pnx_assets.py -- do not edit.",
         "//",
@@ -1401,6 +1727,7 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
               + ([("DIALOG", "dialog")] if dialog else [])
               + [("MUSIC", sg["name"]) for sg in (songs or [])]
               + [("SAMPLE", sm["name"]) for sm in (samples or [])]
+              + [("FONT", ft["name"]) for ft in (fonts or [])]
               + ([("SCENES", "scenes")] if scenes else []))
 
     L += ["// Stable asset handles. Index into the runtime registry.",
@@ -1488,6 +1815,16 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
             L.append(f"#define DIALOG_{c_ident(name)} {i}")
         L += [f"#define DIALOG_COUNT {len(dialog['names'])}", ""]
 
+    if fonts:
+        L += ["// Font metrics. LINE_HEIGHT paces successive lines; BASELINE is the",
+              "// offset from a line's top to the baseline pnx_text_draw() takes as y."]
+        for ft in fonts:
+            n = c_ident(ft["name"])
+            L += [f"#define FONT_{n}_LINE_HEIGHT {ft['line_height']}",
+                  f"#define FONT_{n}_BASELINE {ft['baseline']}",
+                  f"#define FONT_{n}_GLYPHS {len(ft['glyphs'])}",
+                  f"#define FONT_{n}_DEPTH {ft['depth']}", ""]
+
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write("\n".join(L))
@@ -1520,6 +1857,20 @@ def sync_package_json(path, blobs):
         f.write("\n")
 
     print(f"package.json: {len(media)} resources declared")
+
+
+def report_font_licences(fonts):
+    """Print what the bundle redistributes and under what terms.
+
+    Rasterised glyphs are the typeface, minus the outlines. Someone shipping to the
+    appstore needs this list to write their credits, and it should not require reading
+    the manifest to assemble.
+    """
+    print("\nfont licences -- rasterised glyphs are redistribution; credit accordingly")
+    width = max(len(f["name"]) for f in fonts)
+    for ft in fonts:
+        print(f"  {ft['name'].ljust(width)}  {os.path.basename(ft['source'])} "
+              f"@{ft['size']}px  --  {ft['license']}")
 
 
 def report_budget(entries, budget):
@@ -1626,7 +1977,8 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
                + [f"PNX_ASSET_MUSIC_{c_ident(sg['name'])}" for sg in
                   pack_music_names(man)]
                + [f"PNX_ASSET_SAMPLE_{c_ident(n)}" for n in
-                  sorted(man.get("sample", {}))])
+                  sorted(man.get("sample", {}))]
+               + [f"PNX_ASSET_FONT_{c_ident(f['name'])}" for f in man.get("font", [])])
     asset_index = {h: i for i, h in enumerate(ordered)}
 
     # One running palette list across every asset, so a later atlas or sprite reuses or
@@ -1663,6 +2015,14 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
     dialog = pack_dialog(dialog_specs) if dialog_specs else None
     songs = pack_music(man.get("music", {})) if man.get("music") else []
     samples = pack_samples(root, man.get("sample", {})) if man.get("sample") else []
+
+    # Fonts come after dialog is known, because `charset = "auto"` derives its glyph set
+    # from the dialog pages -- a font cannot be sized until the text it must render is.
+    font_specs = man.get("font", [])
+    font_names = [f.get("name") for f in font_specs]
+    if len(set(font_names)) != len(font_names):
+        raise BuildError("duplicate font names")
+    fonts = [pack_font(root, f, man) for f in font_specs]
 
     # Order here defines the PnxAssetId enum and the resource table, so it must match
     # generate_header's. Both walk atlases, sprites, maps, dialog in that order.
@@ -1701,6 +2061,11 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
                         write_blob(os.path.join(out_dir, sm["out"]), sm["blob"])))
         blobs.append((sm["name"], sm["out"]))
 
+    for ft in fonts:
+        entries.append(("font", ft["name"],
+                        write_blob(os.path.join(out_dir, ft["out"]), ft["blob"])))
+        blobs.append((ft["name"], ft["out"]))
+
     scenes = build_scenes(man, asset_index, maps)
     if scenes:
         scene_out = project.get("scenes_out", "scenes.bin")
@@ -1711,8 +2076,11 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
         asset_index["PNX_ASSET_SCENES_SCENES"] = len(ordered) - 1
 
     generate_header(header_path, atlases, sprites, maps, dialog, roles_by_atlas,
-                    len(shared), scenes, songs, samples)
+                    len(shared), scenes, songs, samples, fonts)
     print(f"\nheader: {header_path}")
+
+    if fonts:
+        report_font_licences(fonts)
 
     if package:
         sync_package_json(package, blobs)

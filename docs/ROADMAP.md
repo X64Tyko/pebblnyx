@@ -425,7 +425,14 @@ code. Staged so each piece is independently useful:
 | **E4** | Asset import: sheet slicing, colour key, quantisation and dedup preview | E1 | when the pain justifies it |
 | **E5** | Package button: validate, build, enforce budget, emit `.pbw` | E1 | with E3 |
 | **E6** | Music editor: tracker view over the sequencer model | M4 | last |
-| **E7** | Font import: drop a TTF, rasterise glyphs at a chosen pixel size, preview legibility, emit an atlas plus width table. **Multiple fonts** -- a small one for the HUD, a larger one for dialogue -- are the same system with a glyph map each, so plan for N from the start rather than retrofitting | E4 | with the first text work |
+| **E7** | Font import: drop a TTF, rasterise glyphs at a chosen pixel size, preview legibility, emit an atlas plus width table. **Multiple fonts** -- a small one for the HUD, a larger one for dialogue -- are the same system with a glyph map each, so plan for N from the start rather than retrofitting | E4 | **DONE** |
+| **E8** | One-file editor executable with a native window | E1 | **DONE** |
+| **E9** | Settings tab: detect the Pebble SDK, show its licence, install it on request | E8 | **DONE** |
+| **E10** | Open any project folder; `.pknproj`; the engine ships in the editor and stages into a build | E8 | **DONE** |
+| **E11** | Release CI: tested builds for Linux, Windows, macOS x86_64 and arm64 | E10 | **DONE** |
+| **E12** | Sprite editor painting in ARGB2222; code editor over the project tree (stubs) | E10 | **DONE** |
+| **E13** | IDE shell: activity rail, contextual toolbar, shared output panel, status bar | E12 | **DONE** |
+| **E14** | Live budget while editing; per-tile import selection; opt-in engine editing; C highlighting and symbol checking | E13 | **DONE** |
 
 **E7 exists because a font is the one asset a person cannot author by hand at this scale.** At
 6x12 most typefaces are illegible -- hinting dominates at small sizes, and a pixel font designed
@@ -434,6 +441,49 @@ target size before it is committed, not just accept a file. Two things fall out 
 set should be derived from the content the pipeline already reads, with a manifest override for
 runtime strings like damage numbers that appear in no dialogue; and font licensing needs a note,
 since shipping rasterised glyphs is redistribution even when the outlines stay behind.
+
+**Result.** Text is an ordinary asset now: `[[font]]` in the manifest, a `PF` blob, and a glyph
+blitter in `gfx` that draws during the frame like a sprite. The old path went through the SDK and
+cost **~4.3 ms a draw, 12% of the frame** -- and could only run *after* the framebuffer was
+released, so nothing could ever be drawn over text. The SDK hook stays for now as an escape hatch
+and comes out in the M6/M7 cleanup.
+
+- **Depth is per font.** `depth = 1` is crisp; `depth = 2` is antialiased over three coverage
+  levels, blended against the destination through a 32-byte ARGB2222 table. The HUD stays sharp
+  and dialogue can be smooth without a format break. The blend LUT M3 anticipated lands here,
+  because this is the first thing that needed it.
+- **Glyphs are trimmed to their inked box**, not padded to a uniform cell. A wash at 12px, roughly
+  half at 24px, because most glyphs are nowhere near the full line box.
+- **`charset = "auto"` derives the glyph set from the dialog pages** the pipeline already reads,
+  with `extra` for runtime strings no conversation contains. The example's HUD face carries 40
+  glyphs, not 95.
+- **A licence is required and its absence fails the build**, with the build printing what it
+  redistributes and under what terms.
+- **The editor is where a font is judged.** Threshold, size and depth re-rasterise live against a
+  200x228 canvas showing real map tiles, a real dialogue box and real dialog pages -- and it counts
+  glyphs that rasterised blank, which is how an imported font is usually quietly broken. At
+  threshold 230 the example face loses three glyphs and still builds clean; only looking at it
+  catches that.
+
+Costs on the overworld example: HUD 12px 1bpp **757 B / 40 glyphs**, dialogue 16px 2bpp
+**902 B / 27 glyphs**. Engine growth is 662 B in `gfx` and 993 B in `assets`; the app is
+**14,784 of 65,535 bytes (22.6%)**.
+
+**Not yet measured on hardware.** The glyph blit should be far cheaper than 4.3 ms -- it writes
+one byte per set pixel with no palette read -- but that is reasoning, not a number, and the whole
+justification for this work is a measurement. It wants timing on a watch before the claim is made.
+
+**E8** falls out of the same goal: the editor is now one ~20 MB executable with a native window,
+so using it needs no Python, no Pillow and no terminal. It drives the OS's own webview rather than
+bundling Chromium.
+
+**E9 answers the rest of it, and the licence decided the design.** The Pebble Developer License
+grants a **non-transferable, non-sublicensable** licence *to the user* and §5(f) prohibits
+distributing the SDK -- so shipping it inside the editor was never available, however convenient.
+What is available: show the terms, take a real acceptance, and drive Pebble's own `pebble sdk
+install`, so the download goes from Pebble to the user and the editor never holds a copy. One
+useful discovery -- **the SDK carries its own ARM toolchain**, so it is a single ~767MB install
+rather than two. Full reasoning and the quoted clauses in [`EDITOR.md`](EDITOR.md).
 
 **Stack is settled by a measurement, not a preference:** the emulator is QEMU with a VNC
 display and `pebble-tool` already ships `websockify`, so a browser UI embeds the watch

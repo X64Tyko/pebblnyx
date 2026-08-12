@@ -89,6 +89,179 @@ report size breakdown against every cap.
 **E6 — Music editor.** A tracker view over the sequencer's data model. Only meaningful
 after M4 exists, and probably the largest single piece.
 
+**E7 — Font import. DONE.** Pick a TTF, choose a size and depth, and watch it rasterise.
+
+The reason this needs a UI at all is that a font is the one asset that can pass every
+check the pipeline makes and still be unusable. "Legible at 12px" is not a property bytes
+have. So the tab is built around one interaction — drag the threshold, watch the text —
+and everything else supports it:
+
+- **The preview is the real thing.** The candidate is packed into an actual `PF` blob and
+  parsed straight back, then drawn with the same metrics the runtime uses. Previewing from
+  the rasteriser's intermediate output, or compositing in the browser, would mean two
+  implementations of the same thing — and the moment they disagree the preview is worse
+  than useless, because it still looks authoritative.
+- **The background is editable, because text fails differently over different things.** A
+  HUD sits over gameplay and has to survive whatever tile scrolls under it; dialogue sits
+  on a flat panel and only has to be comfortable to read. The canvas is 200x228 at 1:1 to
+  4x, and the background is a flat colour or a real map from the manifest at any scroll
+  offset, with an optional text box. The text itself can be any `[dialog.*]` page.
+- **It counts glyphs that rasterised blank.** That is how an imported font is usually
+  quietly broken: the threshold eats the thin strokes, the build succeeds, and the watch
+  shows gaps. The count goes red rather than waiting to be noticed.
+- **A system typeface is copied into `art/fonts/`, not referenced in place.** A manifest
+  pointing at `/usr/share/fonts` builds on one machine.
+
+Deliberately not in this stage: **per-glyph pixel editing.** Rasterising at 12px does break
+the occasional glyph and it will be wanted eventually, but it is a small editor of its own
+and the threshold slider recovers most cases.
+
+**E8 — One executable. DONE.** `tools/build_editor.py` freezes the editor into a single
+~20 MB file that opens its own window. Verified running with no Python and no Pillow in the
+environment: it serves the UI, rasterises a TTF, and runs the pipeline.
+
+**Native window via pywebview, not Electron.** Both put the HTML in a real desktop window.
+Electron does it by bundling its own Chromium — identical rendering everywhere, ~200 MB,
+and a Node toolchain to maintain next to the Python one. pywebview drives the webview the
+OS already ships (WebKitGTK, WebView2, WKWebView): ~1 MB, no second toolchain, and a binary
+a tenth the size. The cost is depending on something the OS provides, so it is a soft
+dependency — no webview means a browser tab, not a failure, and `--browser` forces that
+path.
+
+**This required one real fix.** `Project.build()` shelled out to
+`sys.executable pnx_assets.py`, which is correct from a checkout and wrong from a frozen
+binary, where `sys.executable` is the editor — pressing Build would have relaunched the
+editor. It now imports the pipeline and calls it in-process, which is what this document
+specified in the first place.
+
+**E10 — Projects anywhere, and the engine in the editor. DONE.** The editor opens an
+arbitrary folder, creates new projects, and — the part that makes it a tool rather than a
+viewer — **carries the pnx engine inside it**.
+
+A project on disk holds content and game code, not a copy of the framework. Before every
+build the editor stages its own engine into `<project>/src/c/pnx`, so a game anywhere
+compiles against the engine in the editor doing the compiling. That directory is a build
+artefact: the scaffold gitignores it, and it is refreshed rather than trusted, so it
+cannot drift from the editor that produced it.
+
+The wrinkle this works around is waf: `pebble build` globs `src/c/**/*.c` relative to the
+project and a glob pointing outside `top` does not work. The examples in this repository
+use a symlink, which needs privileges on Windows and breaks the moment a project is zipped
+and sent to someone. Staging sidesteps both. A symlinked `src/c/pnx` is detected and left
+alone, so the in-repo examples keep picking up live engine edits.
+
+**`.pknproj`** sits at each project root. JSON rather than TOML precisely because nobody
+should hand-edit it — it records what the editor decided (name, manifest, the engine
+version last built against), while `assets.toml` stays TOML and stays commented because it
+records what the *author* decided. A folder with an `assets.toml` and no `.pknproj` still
+opens: the format change was not allowed to orphan existing projects, and adopting one is a
+button.
+
+Verified end to end: a frozen binary in a stripped environment created a project in a
+temporary directory, staged the engine out of its own bundle, ran the pipeline, and
+produced a `.pbw`.
+
+**E11 — Release CI. DONE.** `.github/workflows/editor.yml` tests, then builds and packages
+for Linux, Windows, macOS Intel and macOS Apple silicon, and drafts a GitHub Release on a
+`v*` tag.
+
+- **Tests gate the builds.** Producing installers from a failing tree is worse than
+  producing none, because the artefact looks legitimate.
+- **The pipeline runs before the host tests**, because the generated header and the asset
+  blobs are derived and therefore gitignored — and `tests/test_assets.c` includes that
+  header. In the other order a fresh checkout does not compile.
+- **CI fails if the font tests would skip.** `test_assets.py` skips when it cannot find a
+  TTF, and a suite that quietly stops testing a feature is worse than one that fails.
+- **The smoke test asserts the engine is in the bundle**, which is the failure this design
+  is exposed to: PyInstaller silently omitting the added data would ship an editor that
+  opens projects and cannot build one.
+
+Not signed or notarised — that needs an Apple Developer account and a Windows
+code-signing certificate. Until then macOS wants one right-click → Open and Windows may
+show SmartScreen.
+
+**E12 — Sprites and Code. STUBS, on purpose.** Two tabs that exist so the shape is right
+and the external detour is gone, not because they are finished.
+
+*Sprites* is a pixel editor that **paints in ARGB2222** — the device's own 64 colours.
+Same principle as the font preview: what is on the canvas is what ships, so two colours
+chosen to contrast cannot quietly collapse on import. Pencil, fill, pick, erase, undo, a
+grid, frames stacked vertically to match what `[[sprite]] frames` already expects, and an
+actual-size view beside the zoomed one. It saves an ordinary PNG into the project, so the
+result goes through the same importer as art made anywhere else and nothing downstream
+knows where it came from.
+
+*Code* is a file tree over the project plus an editor. Deliberately a tree over the
+**project**, not something C-specific: when M8's Alloy scripting lands, `.js` joins the
+same tree through the same endpoints. The staged engine is listed and readable — looking
+up what `pnx_text_draw` takes should not mean going to find the framework — but is
+read-only, because it is overwritten from the editor's copy before every build and an edit
+there would vanish at the worst moment. `assets_gen.h` is marked generated for the same
+reason. Paths are checked lexically against the project root, so a stray `..` cannot read
+or write outside it.
+
+Not in these yet: syntax highlighting, multiple open documents, selection tools,
+onion-skinning, undo beyond 40 steps.
+
+**E13 — The shell, modelled on VS Code / Rider. DONE.** Six top tabs was already crowded
+and every capability added a seventh — the same crowding that made Toolchain a bad peer to
+Maps. So the layout is now the one those tools converged on: an **activity rail** down the
+left, a **contextual toolbar** carrying only what the current activity needs, the
+**sidebar and document** area, one **shared output panel**, and a **status bar** showing
+project, engine version, budget and SDK state at a glance.
+
+The output panel is shared rather than per-tab because a build result is not a property of
+whichever tab you were on when you pressed Build — it used to be a box inside the Maps
+sidebar, invisible from everywhere else.
+
+**E14 — Four things that make it usable rather than demonstrable. DONE.**
+
+*The budget is live.* It used to reflect the last build, which means a map could be grown
+past the appstore cap and only say so hours later, after the work. Now maps are priced
+**exactly** from the manifest — the blob layout is arithmetic on width, height, warps and
+flag overrides — and everything else reuses the blob already on disk, because
+re-quantising a tileset on every keystroke would cost seconds and change nothing. It
+matches the pipeline to the byte on the example. Overrides are read from the previous
+build rather than assumed zero, because assuming zero *under*-estimates and
+underestimating is the one direction that matters: it is what lets someone sail past the
+cap believing they are inside it. The status bar goes red at the moment it is crossed,
+from any tab.
+
+*Tiles are chosen, not accepted.* The Import tab renders the whole slice with each cell
+marked as it would be packed — kept, a free duplicate, empty — and any cell can be
+dropped by clicking it, with the price updating as you go. Exclusions are recorded in the
+manifest as region-relative indices, and are applied **before** dedup, because a grid of
+sheet positions is what the author is looking at; dropping a deduplicated tile instead
+would silently take every other position sharing its pixels.
+
+*Engine editing is opt-in and honest about the trade.* Unlocking is not just write
+permission — it stops the editor restaging the engine, so edits survive, and the project
+stops receiving engine fixes. Both halves are stated, because stating only the first
+would be a pleasant surprise followed by an unpleasant one. `.pknproj` records the version
+it forked from and when.
+
+*The code editor highlights and checks.* Highlighting is a `<pre>` overlay behind a
+transparent textarea, so caret, selection, undo and IME remain the browser's job. Three
+checks: bracket balance, unterminated literals, and unknown `pnx_*`/`PNX_*` identifiers
+matched against symbols parsed from the engine headers and the generated header — with
+an edit-distance suggestion. That last one exists because of a real mistake: the project
+scaffold called `pnx_platform_exit`, the name is `pnx_platform_quit`, and nothing said so
+until a full ARM compile failed.
+
+**Three bugs this work surfaced**, all of the same family — silent, and invisible to
+Python:
+
+- `PAGE` is an r-string, so `'\\n'` in the inline JavaScript reached the browser as a
+  backslash and an `n` rather than a newline, and `\\'` terminated a string early.
+- The code editor's `analyse()` shadowed the importer's. The later definition won and the
+  Import tab's statistics panel silently went blank.
+- Three leftover `className=` assignments from the old tab bar wiped the `act` class off
+  half the activity rail the first time Sprites was opened.
+
+`tests/test_assets.py` now checks the inline page for all three: doubled escapes,
+duplicate top-level names, and unbalanced tags. It was worth the twenty lines — each of
+these cost more than that to find by hand.
+
 ## Honest scope warning
 
 **A full editor can easily exceed the engine in effort.** E1–E3 are modest because they
@@ -108,6 +281,75 @@ Two sequencing risks worth naming:
 
 Recommended: **E1 alongside M2, E3 after M3, E2 once the first real maps exist, and
 E4–E6 only when the pain justifies them.**
+
+## The toolchain: what the licence allows, and what the editor does
+
+Freezing the editor removed the Python install as a barrier. The larger one is that
+**producing a `.pbw` needs the Pebble SDK**. Two useful facts, both checked rather than
+assumed:
+
+- **It is one install, not two.** The SDK download carries its own ARM toolchain at
+  `<sdk>/toolchain/arm-none-eabi`. Nothing separate has to be sourced. It is ~767MB.
+- **`pebble-tool` and the SDK have completely different licences.** The tool is MIT
+  ([coredevices/pebble-tool](https://github.com/coredevices/pebble-tool)). The SDK is not.
+
+### What the Pebble Developer License actually says
+
+The clauses that decide the design, quoted from
+[the licence](https://developer.repebble.com/legal/sdk-license/index.html):
+
+> **§3.** Pebble grants to you a limited, **non-transferable, non-sublicensable**,
+> non-exclusive, worldwide, license to use the Pebble SDK solely to develop, test and
+> operate applications that will run on the Pebble Platform. **You will have no right to
+> license, distribute or otherwise transfer the Pebble SDK** or any rights therein.
+
+> **§5(f).** You will not: … **distribute the Pebble SDK** (other than the incorporation
+> of distributable elements of the Pebble SDK in your application …)
+
+Two conclusions follow directly:
+
+1. **Bundling the SDK into the editor is out.** Not a grey area — §3 and §5(f) both
+   prohibit it. Any plan to ship a single binary containing the toolchain is dead.
+2. **The licence is granted to the person, not to the tool.** It is non-transferable and
+   non-sublicensable, so the editor cannot hold a licence on a user's behalf or accept on
+   their behalf. Each user's acceptance has to be genuinely their own.
+
+Worth noting §4: open-source components inside the SDK are governed by their own licences
+"and not this Agreement", so the GPL'd ARM toolchain is not itself restricted by the above.
+Separating it out would mean taking on the GPL's own distribution obligations for no gain,
+given the approach below works.
+
+### So the editor drives Pebble's own tool
+
+The Settings tab shows both documents, requires an explicit acceptance, and then runs
+`pebble sdk install`. The bytes travel from Pebble's server to the user's disk; the editor
+never holds or transfers a copy. This is the user doing what they would have done by hand,
+with the typing removed — which is the barrier worth removing, and the only part of it that
+was ever ours to remove.
+
+It also means the editor never touches `sdk.repebble.com` itself, which sidesteps the
+Terms of Use clause prohibiting "any robot, spider, scraper or other automated means to
+access the Site(s)". That clause sits in a list about forum conduct and uploads, so it
+probably was not aimed at build tooling — but the list is explicitly "not complete or
+exclusive", and there is no reason to test it when the first-party tool will do the
+download for us.
+
+`pebble-tool` being MIT is what makes the first step safe: when it is absent the editor
+installs it via whichever of `uv`, `pipx` or `pip` the machine has, and says so plainly
+when it has none.
+
+**The acceptance gate is deliberately stricter than the official CLI's.** `pebble sdk
+install` only *prints* the licence links and proceeds. The editor requires a real click and
+records what was accepted and when, in `~/.config/pebblnyx/`. Given the grant is personal
+and non-transferable, a tool acting on the user's behalf should be able to show that the
+user actually agreed.
+
+### What it does not do
+
+**It does not auto-update.** A newer SDK is reported in the status panel and updating is a
+button; it never happens on its own. A toolchain that changes under a project between two
+builds is its own category of confusing bug, and the roadmap already depends on `4.17`
+behaviour in measured ways.
 
 ## Open questions
 

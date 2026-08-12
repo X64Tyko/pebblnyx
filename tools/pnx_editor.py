@@ -19,30 +19,239 @@ Usage:
 """
 
 import argparse
+import contextlib
 import http.server
+import io
 import json
 import os
 import re
+import shutil
 import socketserver
 import subprocess
 import sys
 import threading
 import tomllib
+import traceback
 import webbrowser
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pnx_preview as pv                                    # noqa: E402
 import pnx_assets as pa                                     # noqa: E402
+import pnx_project as pp                                    # noqa: E402
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
+
+
+# ---------------------------------------------------------------------- toolchain
+#
+# Everything except producing a .pbw runs with no external dependency. The .pbw needs the
+# Pebble SDK, which is ~767MB and carries its own ARM toolchain at
+# <sdk>/toolchain/arm-none-eabi -- so there is exactly one thing to install, not two.
+#
+# **We do not ship it and we do not fetch it ourselves.** The Pebble Developer License
+# grants the licence to the USER -- "limited, non-transferable, non-sublicensable" -- and
+# section 5(f) prohibits distributing the SDK. So the editor drives Pebble's own
+# first-party tool: it shows the terms, takes a real acceptance, and then runs
+# `pebble sdk install`. The bytes go from Pebble's server to the user's disk and we never
+# hold a copy, which is the same thing the user would do by hand.
+#
+# pebble-tool itself is MIT (github.com/coredevices/pebble-tool), so installing it on the
+# user's behalf carries none of that weight.
+
+SDK_TERMS = [
+    ("Pebble Terms of Use",
+     "https://developer.repebble.com/legal/terms-of-use/index.html"),
+    ("Pebble Developer License",
+     "https://developer.repebble.com/legal/sdk-license/index.html"),
+]
+
+# Where the acceptance is recorded. Beside the editor's own state rather than inside a
+# project, because it is a property of the person, not of the game.
+def _config_dir():
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    path = os.path.join(base, "pebblnyx")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+class Toolchain:
+    """Finds, installs and keeps track of the Pebble SDK."""
+
+    def __init__(self):
+        self.log = []
+        self.busy = False
+        self._lock = threading.Lock()
+
+    # ------------------------------------------------------------- detection
+
+    @staticmethod
+    def pebble_path():
+        return shutil.which("pebble")
+
+    @staticmethod
+    def installer():
+        """How pebble-tool can be installed on this machine.
+
+        A frozen editor has no pip of its own, so this looks for a package manager the
+        user already has rather than assuming a Python environment we control.
+        """
+        for name, cmd in (("uv", ["uv", "tool", "install", "pebble-tool"]),
+                          ("pipx", ["pipx", "install", "pebble-tool"]),
+                          ("pip", [sys.executable, "-m", "pip", "install", "--user",
+                                   "pebble-tool"])):
+            if name == "pip":
+                if getattr(sys, "frozen", False):
+                    continue          # sys.executable is the editor, not an interpreter
+                try:
+                    subprocess.run([sys.executable, "-m", "pip", "--version"],
+                                   capture_output=True, timeout=10)
+                except Exception:     # noqa: BLE001
+                    continue
+                return name, cmd
+            if shutil.which(name):
+                return name, cmd
+        return None, None
+
+    def accepted(self):
+        return os.path.exists(os.path.join(_config_dir(), "sdk-license-accepted"))
+
+    def accept(self):
+        """Record that the user accepted, with what and when.
+
+        Written as a file rather than held in memory because the grant is to the person
+        and persists across runs -- and because a record of what was agreed to, and when,
+        is worth having if it is ever asked about.
+        """
+        import datetime
+        with open(os.path.join(_config_dir(), "sdk-license-accepted"), "w") as f:
+            f.write(f"accepted {datetime.datetime.now().isoformat(timespec='seconds')}\n")
+            for title, url in SDK_TERMS:
+                f.write(f"{title}: {url}\n")
+
+    def status(self, remote=False):
+        """What is installed, and whether a build can run.
+
+        `remote` is opt-in because listing available versions hits Pebble's server, and
+        doing that on every page load would be both slow and rude.
+        """
+        pebble = self.pebble_path()
+        out = {"pebble": pebble, "installed": [], "active": None, "available": [],
+               "accepted": self.accepted(), "busy": self.busy,
+               "log": "".join(self.log[-400:]),
+               "installer": self.installer()[0], "terms": SDK_TERMS}
+
+        if pebble:
+            try:
+                r = subprocess.run([pebble, "sdk", "list"], capture_output=True,
+                                   text=True, timeout=60 if remote else 15)
+                section = None
+                for line in (r.stdout or "").splitlines():
+                    low = line.strip().lower()
+                    if low.startswith("installed"):
+                        section = "installed"
+                    elif low.startswith("available"):
+                        section = "available"
+                    elif line.strip() and section:
+                        v = line.strip()
+                        if v.endswith("(active)"):
+                            v = v.replace("(active)", "").strip()
+                            out["active"] = v
+                        out[section].append(v)
+            except Exception as e:                       # noqa: BLE001
+                out["error"] = str(e)
+
+        out["can_build"] = bool(pebble and out["active"])
+        # Newer SDKs are reported rather than installed silently: a toolchain that
+        # changes under a project between builds is its own class of confusing bug.
+        newer = [v for v in out["available"] if v not in out["installed"]]
+        out["newer"] = newer[-1] if newer else None
+        return out
+
+    # -------------------------------------------------------------- installing
+
+    def _run(self, cmd, label):
+        self.log.append(f"\n$ {' '.join(cmd)}\n")
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 text=True, bufsize=1)
+            for line in p.stdout:
+                self.log.append(line)
+                del self.log[:-400]
+            return p.wait() == 0
+        except FileNotFoundError:
+            self.log.append(f"{label}: {cmd[0]} not found\n")
+            return False
+        except Exception as e:                           # noqa: BLE001
+            self.log.append(f"{label} failed: {e}\n")
+            return False
+
+    def install(self, version="latest"):
+        """Install pebble-tool if needed, then the SDK. Runs on a worker thread.
+
+        Refuses without a recorded acceptance. The licence is granted to the user and
+        cannot be accepted on their behalf, so this is a real gate rather than a notice --
+        which is a little stricter than the official CLI, and the safer side to err on.
+        """
+        if not self.accepted():
+            raise ValueError("the Pebble SDK licence has to be accepted first")
+        with self._lock:
+            if self.busy:
+                raise ValueError("an install is already running")
+            self.busy = True
+
+        def work():
+            try:
+                if not self.pebble_path():
+                    name, cmd = self.installer()
+                    if not cmd:
+                        self.log.append(
+                            "No uv, pipx or pip found to install pebble-tool with.\n"
+                            "Install one, or install pebble-tool yourself:\n"
+                            "    pip install pebble-tool\n")
+                        return
+                    self.log.append(f"Installing pebble-tool with {name}...\n")
+                    if not self._run(cmd, "pebble-tool"):
+                        return
+
+                pebble = self.pebble_path()
+                if not pebble:
+                    self.log.append(
+                        "pebble-tool installed but `pebble` is not on PATH -- "
+                        "you may need to open a new terminal or add its bin directory.\n")
+                    return
+
+                self.log.append(f"\nInstalling Pebble SDK {version} "
+                                f"(~767MB, includes the ARM toolchain)...\n")
+                if self._run([pebble, "sdk", "install", version], "sdk"):
+                    self.log.append("\nDone. The Build button can produce a .pbw now.\n")
+            finally:
+                self.busy = False
+
+        threading.Thread(target=work, daemon=True).start()
 
 
 class Project:
     """Everything the editor knows, reloaded from disk on demand."""
 
-    def __init__(self, manifest_path):
-        self.path = os.path.abspath(manifest_path)
-        self.root = os.path.dirname(self.path)
+    def __init__(self, target):
+        """`target` is a project FOLDER or a path to its manifest.
+
+        Folders are the interesting case: a distributed editor is handed a directory and
+        has to work out the rest. A manifest path still works, because that is what every
+        existing invocation passes.
+        """
+        target = os.path.abspath(target)
+        if os.path.isdir(target):
+            self.root = target
+            self.meta = pp.load(target)          # raises if it is not a project
+            self.path = os.path.join(target, self.meta.get("manifest", "assets.toml"))
+        else:
+            self.path = target
+            self.root = os.path.dirname(self.path)
+            try:
+                self.meta = pp.load(self.root)
+            except ValueError:
+                self.meta = {"name": None, "manifest": os.path.basename(self.path)}
         self.reload()
 
     def reload(self):
@@ -120,10 +329,25 @@ class Project:
         return {
             "name": self.project.get("name", "project"),
             "built": self.built,
+            # Where this project actually lives. Worth surfacing because the editor can
+            # find a manifest on its own, and "which project am I editing" then stops
+            # being obvious.
+            "paths": {
+                "root": self.root,
+                "manifest": self.path,
+                "resources": self.res,
+                "header": os.path.join(
+                    self.root, self.project.get("header", "src/c/assets_gen.h")),
+            },
+            "project_file": self.meta,
+            "engine": pp.framework_state(self.root, self.meta),
             "legend": legend,
             "atlases": self.atlases(),
             "palettes": self.palette_swatches(),
             "maps": self.maps(),
+            "fonts": self.fonts(),
+            "dialog": {k: v.get("pages", [])
+                       for k, v in self.man.get("dialog", {}).items()},
             "scenes": list(self.man.get("scene", {})),
             "budget": self.project.get("budget_bytes", 262144),
             "used": sum(os.path.getsize(os.path.join(self.res, f))
@@ -131,14 +355,677 @@ class Project:
             if self.built else 0,
         }
 
+    def code_symbols(self):
+        """Every `pnx_*` / `PNX_*` name the engine and the generated header declare.
+
+        This exists because of a mistake made writing the project scaffold: it called
+        `pnx_platform_exit`, the real name is `pnx_platform_quit`, and nothing said so
+        until a full ARM compile failed. On a watch that round trip is slow enough to
+        matter, and the check that prevents it is a set membership test.
+        """
+        names = set()
+        roots = [os.path.join(self.root, "src", "c", "pnx")]
+        gen = os.path.join(self.root,
+                           self.project.get("header", "src/c/assets_gen.h"))
+        files = []
+        for r in roots:
+            if os.path.isdir(r):
+                for dp, _dn, fs in os.walk(r, followlinks=True):
+                    files += [os.path.join(dp, f) for f in fs if f.endswith((".h", ".c"))]
+        if os.path.exists(gen):
+            files.append(gen)
+
+        ident = re.compile(r"\b((?:pnx|Pnx|PNX)[A-Za-z0-9_]*)")
+        for path in files:
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    for m in ident.finditer(f.read()):
+                        names.add(m.group(1))
+            except OSError:
+                continue
+
+        # Names the generated header produces that do not carry a pnx prefix -- tile
+        # roles, sprite dimensions, scene and dialog ids.
+        if os.path.exists(gen):
+            with open(gen, encoding="utf-8", errors="replace") as f:
+                for m in re.finditer(r"^#define\s+([A-Z][A-Z0-9_]*)", f.read(), re.M):
+                    names.add(m.group(1))
+        return sorted(names)
+
+    # ------------------------------------------------------------------ estimate
+    #
+    # The budget used to reflect the LAST BUILD, which means a map can be grown past the
+    # appstore cap and only say so hours later, after the work is done. That is the worst
+    # possible time to find out. So the cost is recomputed as content changes.
+    #
+    # Maps are computed EXACTLY -- the blob layout is arithmetic on width, height, warps
+    # and flag overrides, no packing required. Everything else reuses the size of the blob
+    # already on disk, because re-quantising a tileset on every keystroke would cost
+    # seconds and change nothing. An asset that has never been built is the only thing
+    # estimated, and it is reported as such rather than pretended to be exact.
+
+    def _map_bytes(self, spec, roles=None, legend=None):
+        """Exact blob size for a map, without building it.
+
+        Mirrors finish_map() in the pipeline: an 8-byte header, u16 override count plus
+        two bytes, an optional palette table, two bytes per cell, three per override,
+        five per warp.
+        """
+        rows = [r for r in spec["rows"].strip("\n").split("\n") if r.strip()]
+        h = len(rows)
+        w = max((len(r) for r in rows), default=0)
+        warps = len(spec.get("warps", []))
+
+        pal_bytes = 0
+        if spec.get("palette"):
+            atlas = spec.get("atlas") or (self.man.get("atlas") or [{}])[0].get("name")
+            pal_bytes = self._atlas_tile_count(atlas)
+
+        # Flag overrides need the atlas's flag defaults, which only exist after a build.
+        # Taken from the previous build's blob where there is one, because assuming zero
+        # UNDER-estimates -- and underestimating is the one direction that matters here:
+        # it is what lets someone sail past the cap believing they are inside it.
+        overrides = self._map_overrides(spec)
+        return (pa.HEADER_BYTES + 4 + pal_bytes + w * h * 2 + overrides * 3 + warps * 5,
+                w, h)
+
+    def _map_overrides(self, spec):
+        """Override count from the last build, or a conservative guess if never built."""
+        out = spec.get("out")
+        blob = os.path.join(self.res, out) if out else None
+        if blob and os.path.exists(blob):
+            try:
+                with open(blob, "rb") as f:
+                    head = f.read(pa.HEADER_BYTES + 2)
+                return int.from_bytes(head[pa.HEADER_BYTES:pa.HEADER_BYTES + 2], "little")
+            except Exception:                            # noqa: BLE001
+                pass
+        # Never built. Rather than zero, assume the density this project's other maps
+        # actually show, so a first estimate errs high instead of low.
+        rows = [r for r in spec["rows"].strip("\n").split("\n") if r.strip()]
+        cells = len(rows) * max((len(r) for r in rows), default=0)
+        return int(cells * self._override_density())
+
+    def _override_density(self):
+        """Overrides per cell across the maps that have been built. Default 0.25."""
+        seen, total_cells, total_over = False, 0, 0
+        for spec in self.man.get("map", []):
+            out = spec.get("out")
+            blob = os.path.join(self.res, out) if out else None
+            if not (blob and os.path.exists(blob)):
+                continue
+            try:
+                with open(blob, "rb") as f:
+                    head = f.read(pa.HEADER_BYTES + 2)
+                w, h = head[3], head[4]
+                total_over += int.from_bytes(
+                    head[pa.HEADER_BYTES:pa.HEADER_BYTES + 2], "little")
+                total_cells += w * h
+                seen = True
+            except Exception:                            # noqa: BLE001
+                continue
+        return (total_over / total_cells) if (seen and total_cells) else 0.25
+
+    def _atlas_tile_count(self, name):
+        if not self.built:
+            return 0
+        spec = next((a for a in self.man.get("atlas", []) if a["name"] == name), None)
+        if not spec:
+            return 0
+        blob = os.path.join(self.res, spec["out"])
+        if not os.path.exists(blob):
+            return 0
+        try:
+            return pv.parse_atlas(pv.read(blob))["count"]
+        except Exception:                                # noqa: BLE001
+            return 0
+
+    def estimate(self, overrides=None):
+        """Current resource cost, per category, without running the pipeline.
+
+        `overrides` lets the editor price a map it has not saved yet -- {name: rows} --
+        so the number moves while a map is being painted rather than after.
+        """
+        overrides = overrides or {}
+        budget = int(self.project.get("budget_bytes", 262144))
+        entries, exact = [], True
+
+        # Built blobs, by the manifest key that produced them.
+        def blob_size(out):
+            p = os.path.join(self.res, out) if out else None
+            return os.path.getsize(p) if p and os.path.exists(p) else None
+
+        for kind, key, outfn in (
+                ("atlas", "atlas", lambda s: s.get("out")),
+                ("sprite", "sprite", lambda s: s.get("out")),
+                ("font", "font", lambda s: s.get("out", f"font_{s.get('name')}.bin")),
+        ):
+            for spec in self.man.get(key, []):
+                size = blob_size(outfn(spec))
+                if size is None:
+                    exact = False
+                entries.append({"kind": kind, "name": spec.get("name"),
+                                "bytes": size or 0, "known": size is not None})
+
+        for name in ("palettes.bin", "dialog.bin", "scenes.bin"):
+            size = blob_size(name)
+            if size:
+                entries.append({"kind": name.split(".")[0], "name": name.split(".")[0],
+                                "bytes": size, "known": True})
+
+        for sm in sorted(self.man.get("sample", {})):
+            size = blob_size(f"sfx_{sm}.bin")
+            entries.append({"kind": "sample", "name": sm, "bytes": size or 0,
+                            "known": size is not None})
+        for sg in sorted(self.man.get("music", {})):
+            size = blob_size(f"music_{sg}.bin")
+            entries.append({"kind": "music", "name": sg, "bytes": size or 0,
+                            "known": size is not None})
+
+        # Maps last, and always computed rather than read: they are the thing being
+        # edited, so their on-disk size is the stale one.
+        for spec in self.man.get("map", []):
+            s = dict(spec)
+            if s["name"] in overrides:
+                s["rows"] = overrides[s["name"]]
+            size, w, h = self._map_bytes(s)
+            entries.append({"kind": "map", "name": s["name"], "bytes": size,
+                            "known": True, "dims": [w, h]})
+
+        total = sum(e["bytes"] for e in entries)
+        by_kind = {}
+        for e in entries:
+            by_kind[e["kind"]] = by_kind.get(e["kind"], 0) + e["bytes"]
+
+        return {"entries": entries, "by_kind": by_kind, "total": total,
+                "budget": budget, "pct": 100.0 * total / budget if budget else 0,
+                "over": total > budget, "exact": exact,
+                # Warn before the cliff, not at it: at 90% one more zone is the problem.
+                "warn": total > budget * 0.9}
+
+    # ---------------------------------------------------------------------- code
+    #
+    # STUB. Enough to read and edit the project's C without leaving the editor, sized so
+    # that the tab exists and has the right shape rather than pretending to be an IDE.
+    # When M8's Alloy scripting lands, `.js` joins the same tree and the same read/write
+    # endpoints serve it -- which is why this is a file tree over the project rather than
+    # a C-specific thing.
+
+    # The staged engine is deliberately readable: looking up what pnx_text_draw takes
+    # should not mean going and finding the framework. It is NOT writable, because it is
+    # overwritten from the editor's own copy before every build, so an edit here would
+    # vanish at the worst possible moment.
+    CODE_EXTS = (".c", ".h", ".js", ".json", ".toml")
+
+    def _safe(self, rel):
+        """Resolve a project-relative path, refusing anything outside the project.
+
+        The editor serves on localhost, but "only local" is not the same as "only this
+        project" -- a stray `../../../..` in a request should not be able to read or
+        write the user's home directory.
+
+        Checked LEXICALLY, with abspath rather than realpath. abspath collapses `..`, so
+        traversal is still blocked, but it does not resolve symlinks -- and it must not,
+        because this repository's own examples reach the engine through a symlinked
+        `src/c/pnx`. Resolving would put those files outside the project and make the
+        engine unreadable in exactly the tree where reading it is most useful.
+        """
+        full = os.path.abspath(os.path.join(self.root, rel))
+        root = os.path.abspath(self.root)
+        if full != root and not full.startswith(root + os.sep):
+            raise ValueError(f"{rel!r} is outside the project")
+        return full
+
+    def code_tree(self):
+        """Every source file in the project, engine last and marked read-only."""
+        out = []
+        for base in ("src", "."):
+            start = os.path.join(self.root, base)
+            if not os.path.isdir(start):
+                continue
+            # followlinks, because the engine reaches a project either as a staged copy
+            # or -- in this repository -- as a symlink, and both should list.
+            for dirpath, dirnames, files in os.walk(start, followlinks=True):
+                dirnames[:] = [d for d in dirnames
+                               if d not in ("build", ".git", "__pycache__", "resources",
+                                            "art", "node_modules")]
+                if base == ".":
+                    dirnames[:] = []          # top level only, for assets.toml et al
+                for fn in sorted(files):
+                    if not fn.endswith(self.CODE_EXTS):
+                        continue
+                    full = os.path.join(dirpath, fn)
+                    rel = os.path.relpath(full, self.root)
+                    if rel in [e["path"] for e in out]:
+                        continue
+                    engine = rel.replace("\\", "/").startswith("src/c/pnx/")
+                    out.append({
+                        "path": rel, "name": fn,
+                        "dir": os.path.dirname(rel) or ".",
+                        "bytes": os.path.getsize(full),
+                        "engine": engine,
+                        "editable": not engine,
+                        "generated": fn == "assets_gen.h",
+                    })
+        out.sort(key=lambda e: (e["engine"], e["dir"], e["name"]))
+        return out
+
+    def _engine_owned(self):
+        try:
+            return bool(pp.load(self.root).get("engine_owned"))
+        except Exception:                                # noqa: BLE001
+            return False
+
+    def code_read(self, rel):
+        full = self._safe(rel)
+        with open(full, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        engine = rel.replace("\\", "/").startswith("src/c/pnx/")
+        owned = engine and self._engine_owned()
+
+        if engine and owned:
+            note = ("This project owns its engine copy — edits are kept, and it no "
+                    "longer tracks the editor.")
+        elif engine:
+            note = ("The engine is restaged from the editor before every build, so edits "
+                    "here would be overwritten. Unlock it in Settings to take ownership.")
+        elif rel.endswith("assets_gen.h"):
+            note = "Generated from assets.toml — edits are overwritten by the next build."
+        else:
+            note = ""
+
+        return {"path": rel, "text": text, "editable": (not engine) or owned,
+                "engine": engine, "note": note}
+
+    def code_write(self, rel, text):
+        if rel.replace("\\", "/").startswith("src/c/pnx/") and not self._engine_owned():
+            raise ValueError("the staged engine is restaged on every build, so edits "
+                             "would be lost. Take ownership of it in Settings first.")
+        full = self._safe(rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        return {"ok": True, "bytes": len(text.encode("utf-8"))}
+
+    # -------------------------------------------------------------------- sprites
+    #
+    # STUB, but a deliberately truthful one: the canvas paints in ARGB2222, the device's
+    # actual 64 colours, so what is drawn is what ships. Painting in full RGB and
+    # quantising on import is how you discover at build time that two colours you chose
+    # to contrast collapsed into one.
+
+    def art_files(self):
+        art = os.path.join(self.root, "art")
+        out = []
+        for dirpath, dirnames, files in os.walk(art) if os.path.isdir(art) else []:
+            dirnames[:] = [d for d in dirnames if d not in ("fonts", "__pycache__")]
+            for fn in sorted(files):
+                if fn.lower().endswith(".png"):
+                    full = os.path.join(dirpath, fn)
+                    out.append({"path": os.path.relpath(full, self.root), "name": fn,
+                                "bytes": os.path.getsize(full)})
+        return out
+
+    def sprite_read(self, rel):
+        """Load a PNG as ARGB2222 indices, so it can be edited in device colours."""
+        from PIL import Image
+        full = self._safe(rel)
+        im = Image.open(full).convert("RGBA")
+        px = im.load()
+        return {"w": im.width, "h": im.height,
+                "pixels": [pa.to_gcolor8(px[x, y])
+                           for y in range(im.height) for x in range(im.width)]}
+
+    def sprite_write(self, rel, w, h, pixels):
+        """Write ARGB2222 values back out as an ordinary RGBA PNG.
+
+        A PNG rather than a private format so the result is an ordinary art file: it goes
+        through the same importer as anything drawn elsewhere, and nothing in the pipeline
+        needs to know it came from here.
+        """
+        from PIL import Image
+        if not rel.lower().endswith(".png"):
+            rel += ".png"
+        if len(pixels) != w * h:
+            raise ValueError(f"expected {w * h} pixels, got {len(pixels)}")
+
+        full = self._safe(rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        put = im.load()
+        for i, v in enumerate(pixels):
+            rgb = pv.gcolor_rgb(int(v))
+            if rgb:
+                put[i % w, i // w] = rgb + (255,)
+        im.save(full)
+        return {"ok": True, "path": os.path.relpath(full, self.root),
+                "bytes": os.path.getsize(full)}
+
+    # --------------------------------------------------------------------- fonts
+    #
+    # A font is the one asset that can pass every check the pipeline makes and still be
+    # unusable, because "legible at 12px" is not a property bytes have. That is the whole
+    # reason this tab exists: the pipeline can say a font packs, only a person looking at
+    # it can say it reads. So the job here is to put the real glyphs, at real size, over
+    # the real background, before anything is committed to the manifest.
+
+    FONT_DIRS = [
+        # Linux
+        "/usr/share/fonts", "/usr/local/share/fonts", "~/.fonts", "~/.local/share/fonts",
+        # macOS
+        "/System/Library/Fonts", "/Library/Fonts", "~/Library/Fonts",
+        # Windows
+        "C:/Windows/Fonts",
+    ]
+
+    def font_sources(self):
+        """Typefaces the editor can offer: the project's own first, then the system's.
+
+        System fonts are listed because the alternative is a file dialog, and the barrier
+        this editor exists to remove is exactly that kind of detour. Picking one COPIES it
+        into the project rather than referencing it in place -- a manifest pointing at
+        /usr/share/fonts builds on this machine and nowhere else.
+        """
+        out, seen = [], set()
+
+        def add(path, where):
+            full = os.path.realpath(path)
+            if full in seen or not os.path.isfile(full):
+                return
+            seen.add(full)
+            out.append({"path": full, "name": os.path.basename(full), "where": where,
+                        "in_project": where == "project",
+                        "rel": os.path.relpath(full, self.root)
+                        if where == "project" else None})
+
+        for dirpath, dirnames, files in os.walk(self.root):
+            dirnames[:] = [d for d in dirnames
+                           if d not in ("build", ".git", "resources", "__pycache__")]
+            for fn in files:
+                if fn.lower().endswith((".ttf", ".otf")):
+                    add(os.path.join(dirpath, fn), "project")
+
+        for base in self.FONT_DIRS:
+            base = os.path.expanduser(base)
+            if not os.path.isdir(base):
+                continue
+            for dirpath, _dirnames, files in os.walk(base):
+                for fn in sorted(files):
+                    if fn.lower().endswith((".ttf", ".otf")):
+                        add(os.path.join(dirpath, fn), "system")
+                if len(out) > 400:
+                    break
+
+        out.sort(key=lambda f: (not f["in_project"], f["name"].lower()))
+        return out
+
+    def fonts(self):
+        """Fonts already declared, with their built metrics where a build exists."""
+        out = []
+        for spec in self.man.get("font", []):
+            entry = {"name": spec.get("name"), "source": spec.get("source"),
+                     "size": spec.get("size", 12), "depth": spec.get("depth", 1),
+                     "threshold": spec.get("threshold"),
+                     "tracking": spec.get("tracking", 0),
+                     "charset": spec.get("charset", "auto"),
+                     "extra": spec.get("extra", ""),
+                     "license": spec.get("license", ""), "bytes": None}
+            blob = os.path.join(self.res, spec.get("out", f"font_{entry['name']}.bin"))
+            if os.path.exists(blob):
+                entry["bytes"] = os.path.getsize(blob)
+            out.append(entry)
+        return out
+
+    def _rasterise(self, spec):
+        """Pack a candidate font and parse it straight back.
+
+        Deliberately round-trips through the real blob rather than rendering from the
+        rasteriser's intermediate output: previewing from anything other than the shipped
+        bytes is how a preview and a build come to disagree.
+        """
+        full = dict(spec)
+        full.setdefault("name", "preview")
+        # A licence is required to BUILD, not to look. Gating the preview on it would
+        # mean choosing a typeface before you can see whether it is worth licensing.
+        full.setdefault("license", "(unset -- required before this can be added)")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            packed = pa.pack_font(self.root, full, self.man)
+        return packed, pv.parse_font(packed["blob"])
+
+    def font_preview(self, spec):
+        """Rasterise at the current settings and report what it costs and looks like."""
+        packed, font = self._rasterise(spec)
+
+        budget = self.project.get("budget_bytes", 262144)
+        size = len(packed["blob"])
+        blank = sum(1 for g in font["glyphs"] if not g["w"])
+
+        return {
+            "ok": True,
+            "sheet": pv.data_uri(pv.font_sheet(font, scale=4)),
+            "chars": "".join(packed["chars"]),
+            "glyph_count": font["glyph_count"],
+            "line_height": font["line_height"],
+            "baseline": font["baseline"],
+            "depth": font["depth"],
+            "bitmap_bytes": font["bitmap_bytes"],
+            "bytes": size,
+            "pct": 100.0 * size / budget,
+            # A glyph with no ink that is not a space means the threshold ate it, which
+            # is the single most common way an imported font is quietly broken.
+            "blank_glyphs": blank,
+            "glyphs": [
+                {"ch": packed["chars"][i], "w": g["w"], "h": g["h"],
+                 "advance": g["advance"], "bx": g["bearing_x"], "by": g["bearing_y"]}
+                for i, g in enumerate(font["glyphs"])
+            ],
+            "origin": {ch: packed["origin"].get(ch, "") for ch in packed["chars"]},
+        }
+
+    # ------------------------------------------------------- the preview canvas
+
+    SCREEN_W, SCREEN_H = 200, 228
+
+    def _roles(self):
+        """Role -> tile index per atlas, read from the generated header.
+
+        Same source the map canvas uses, so a preview background is drawn with the tiles
+        the build would actually place.
+        """
+        header_path = os.path.join(self.root,
+                                   self.project.get("header", "src/c/assets_gen.h"))
+        text = open(header_path).read() if os.path.exists(header_path) else ""
+        out = {}
+        for spec in self.man.get("atlas", []):
+            prefix = re.sub(r"[^A-Za-z0-9]", "_", spec["name"]).upper()
+            roles = {m.group(1).lower(): int(m.group(2)) for m in
+                     re.finditer(rf"#define {prefix}_TILE_(\w+) (\d+)", text)}
+            for k in ("px", "bytes", "count"):
+                roles.pop(k, None)
+            out[spec["name"]] = roles
+        return out
+
+    def _map_background(self, map_name, ox, oy, clear=0xC0):
+        """A screen-sized crop of a real map, drawn with real tiles.
+
+        `clear` shows through index 0, matching the device: the tilemap skips transparent
+        pixels rather than writing them, so what appears behind a tile is whatever the
+        frame was cleared to.
+        """
+        from PIL import Image
+
+        palettes = pv.parse_palettes(pv.read(os.path.join(self.res, "palettes.bin")))
+        m = next((m for m in self.maps() if m["name"] == map_name), None)
+        if not m:
+            return None
+
+        spec = next((a for a in self.man.get("atlas", []) if a["name"] == m["atlas"]),
+                    None)
+        if not spec:
+            return None
+        blob = os.path.join(self.res, spec["out"])
+        if not os.path.exists(blob):
+            return None
+
+        atlas = pv.parse_atlas(pv.read(blob))
+        roles = self._roles().get(m["atlas"], {})
+        legend = self.man.get("legend", {})
+        T = atlas["tile_px"]
+
+        img = Image.new("RGBA", (self.SCREEN_W, self.SCREEN_H),
+                        (pv.gcolor_rgb(clear) or (0, 0, 0)) + (255,))
+        first_tx, first_ty = ox // T, oy // T
+        for j in range(self.SCREEN_H // T + 2):
+            for i in range(self.SCREEN_W // T + 2):
+                tx, ty = first_tx + i, first_ty + j
+                if not (0 <= ty < len(m["rows"]) and 0 <= tx < len(m["rows"][ty])):
+                    continue
+                ch = m["rows"][ty][tx]
+                role = legend.get(ch, {}).get("tile")
+                idx = roles.get(role)
+                if idx is None or idx >= atlas["count"]:
+                    continue
+                tile = pv.tile_image(atlas, palettes, idx)
+                # Masked, so index 0 leaves the clear colour rather than punching a hole.
+                img.paste(tile, (tx * T - ox, ty * T - oy), tile)
+        return img
+
+    def font_scene(self, opts):
+        """The composited preview: real background, real box, real glyphs, real size.
+
+        The background is a choice because text fails differently depending on what is
+        behind it -- a HUD sits over gameplay and has to survive whatever tile scrolls
+        under it, while dialogue sits on a flat panel and only has to be comfortable.
+        A preview that only ever showed one of those would pass a font that fails the
+        other.
+        """
+        from PIL import Image
+
+        font = None
+        if opts.get("spec"):
+            _packed, font = self._rasterise(opts["spec"])
+        elif opts.get("font"):
+            spec = next((f for f in self.man.get("font", [])
+                         if f.get("name") == opts["font"]), None)
+            if spec:
+                blob = os.path.join(self.res,
+                                    spec.get("out", f"font_{spec['name']}.bin"))
+                if os.path.exists(blob):
+                    font = pv.parse_font(pv.read(blob))
+        if not font:
+            raise ValueError("no font to preview -- pick a source, or build first")
+
+        bg = opts.get("background", "solid")
+        img = None
+        if bg == "map" and self.built and opts.get("map"):
+            img = self._map_background(opts["map"], int(opts.get("scroll_x", 0)),
+                                       int(opts.get("scroll_y", 0)),
+                                       int(opts.get("bg_colour", 0xC0)))
+        if img is None:
+            rgb = pv.gcolor_rgb(int(opts.get("bg_colour", 0xC0))) or (0, 0, 0)
+            img = Image.new("RGBA", (self.SCREEN_W, self.SCREEN_H), rgb + (255,))
+
+        text = opts.get("text") or ""
+        pad = int(opts.get("pad", 6))
+        box = opts.get("box") or {}
+
+        if box.get("on"):
+            bx, by = int(box.get("x", 8)), int(box.get("y", 140))
+            bw, bh = int(box.get("w", 184)), int(box.get("h", 72))
+            fill = pv.gcolor_rgb(int(box.get("colour", 0xC0))) or (0, 0, 0)
+            panel = Image.new("RGBA", (bw, bh), fill + (255,))
+            img.paste(panel, (bx, by))
+            if box.get("border"):
+                edge = pv.gcolor_rgb(int(box.get("border_colour", 0xFF))) or (255,) * 3
+                px = img.load()
+                for i in range(bw):
+                    for yy in (by, by + bh - 1):
+                        if 0 <= bx + i < img.width and 0 <= yy < img.height:
+                            px[bx + i, yy] = edge + (255,)
+                for j in range(bh):
+                    for xx in (bx, bx + bw - 1):
+                        if 0 <= xx < img.width and 0 <= by + j < img.height:
+                            px[xx, by + j] = edge + (255,)
+            tx, ty, tw = bx + pad, by + pad, bw - pad * 2
+        else:
+            tx, ty = int(opts.get("x", 4)), int(opts.get("y", 4))
+            tw = self.SCREEN_W - tx * 2
+
+        ink = pv.gcolor_rgb(int(opts.get("ink", 0xFF))) or (255, 255, 255)
+        lines = pv.font_draw_wrapped(img, font, text, tx, ty + font["baseline"], tw,
+                                     ink, opts.get("align", "left"))
+
+        scale = max(1, min(4, int(opts.get("scale", 2))))
+        shown = img.resize((img.width * scale, img.height * scale), Image.NEAREST) \
+            if scale > 1 else img
+
+        return {"ok": True, "image": pv.data_uri(shown),
+                "scale": scale, "lines": lines,
+                "line_height": font["line_height"], "baseline": font["baseline"],
+                "text_height": lines * font["line_height"],
+                "overflow": bool(box.get("on")) and
+                (lines * font["line_height"] > int(box.get("h", 72)) - pad * 2)}
+
+    def add_font(self, spec):
+        """Append a [[font]] block, copying a system typeface in if that is what it is."""
+        name = spec.get("name", "")
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise ValueError("name must be lowercase letters, digits and underscores")
+        if any(f.get("name") == name for f in self.man.get("font", [])):
+            raise ValueError(f"a font named {name!r} already exists")
+        if not spec.get("license"):
+            raise ValueError("a licence is required: rasterising a typeface into the "
+                             "bundle redistributes it")
+
+        source = spec["source"]
+        if os.path.isabs(source):
+            dest_dir = os.path.join(self.root, "art", "fonts")
+            os.makedirs(dest_dir, exist_ok=True)
+            dest = os.path.join(dest_dir, os.path.basename(source))
+            if not os.path.exists(dest):
+                shutil.copy2(source, dest)
+            source = os.path.relpath(dest, self.root)
+
+        depth = int(spec.get("depth", 1))
+        lines = [
+            "", "", "[[font]]",
+            f'name = "{name}"',
+            f'source = "{source}"',
+            f"size = {int(spec.get('size', 12))}",
+            f"depth = {depth}"
+            + ("   # crisp" if depth == 1 else "   # antialiased"),
+            f"threshold = {int(spec.get('threshold', 128 if depth == 1 else 24))}",
+        ]
+        if int(spec.get("tracking", 0)):
+            lines.append(f"tracking = {int(spec['tracking'])}")
+        lines.append(f'charset = "{spec.get("charset", "auto")}"')
+        if spec.get("extra"):
+            lines.append(f'extra = "{spec["extra"]}"')
+        lines += [
+            f'license = "{spec["license"]}"',
+            f'out = "font_{name}.bin"',
+            "",
+        ]
+
+        with open(self.path, "a") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
     # ----------------------------------------------------------------- importing
 
     def sheets(self):
-        """PNGs reachable from the project, so importing does not need a file dialog."""
+        """PNGs inside the project, so importing does not need a file dialog.
+
+        Inside the project only. This used to walk two directories UP as well, which
+        offered art that a manifest could then reference as `../../somewhere` -- a
+        project that builds on this machine and nowhere else. Same reasoning as copying a
+        system typeface into `art/fonts/` rather than pointing at `/usr/share/fonts`.
+        Art from elsewhere gets copied in first; the editor will not quietly make a
+        project that only works here.
+        """
         seen, out = set(), []
-        roots = [self.root, os.path.dirname(self.root),
-                 os.path.dirname(os.path.dirname(self.root))]
-        for base in roots:
+        for base in [self.root]:
             if not os.path.isdir(base):
                 continue
             for dirpath, dirnames, files in os.walk(base):
@@ -159,7 +1046,62 @@ class Project:
                 break
         return sorted(out, key=lambda s: s["name"])[:60]
 
-    def analyse(self, rel, tile, region, max_tiles, colorkey):
+    def slice_grid(self, rel, tile, region, exclude=()):
+        """Every cell of a slice, rendered, so the author can pick what gets packed.
+
+        The strip of *kept* tiles told you what the pipeline decided. It did not let you
+        disagree with it -- and the decision that matters most for the budget is which
+        tiles are worth keeping at all, which is a judgement about the art rather than
+        arithmetic. So this returns the grid as sliced, marked up with what each cell
+        would become, and the caller can drop any of it.
+        """
+        from PIL import Image
+        path = self._safe(rel)
+        im = Image.open(path).convert("RGBA")
+        px = im.load()
+        W, H = im.size
+        rx, ry, rw, rh = region
+        rw = max(1, min(rw, W // tile - rx))
+        rh = max(1, min(rh, H // tile - ry))
+
+        # A whole large sheet is thousands of cells and as many PNGs. Capped, with the
+        # cap reported, rather than quietly hanging the browser.
+        LIMIT = 1024
+        capped = rw * rh > LIMIT
+
+        excluded = {int(e) for e in exclude}
+        cells, seen = [], {}
+        for j in range(min(rh, LIMIT // max(1, rw) + 1)):
+            for i in range(rw):
+                idx = j * rw + i
+                if idx >= LIMIT:
+                    break
+                tx, ty = rx + i, ry + j
+                buf = tuple(pa.to_gcolor8(px[tx * tile + a, ty * tile + b])
+                            for b in range(tile) for a in range(tile))
+                if not any(buf):
+                    state = "empty"
+                elif buf in seen:
+                    state = "dup"
+                else:
+                    seen[buf] = idx
+                    state = "unique"
+
+                img = Image.new("RGBA", (tile, tile), (0, 0, 0, 0))
+                ip = img.load()
+                for b in range(tile):
+                    for a in range(tile):
+                        rgb = pv.gcolor_rgb(buf[b * tile + a])
+                        if rgb:
+                            ip[a, b] = rgb + (255,)
+                cells.append({"i": idx, "x": tx, "y": ty, "state": state,
+                              "excluded": idx in excluded,
+                              "img": pv.data_uri(img.resize((tile * 2, tile * 2),
+                                                            Image.NEAREST))})
+        return {"cols": rw, "rows": rh, "cells": cells, "capped": capped,
+                "limit": LIMIT, "sheet_tiles": [W // tile, H // tile]}
+
+    def analyse(self, rel, tile, region, max_tiles, colorkey, exclude=()):
         """Price a candidate carve before it is committed.
 
         This is the number that decides a project's content budget, and it is invisible
@@ -177,9 +1119,14 @@ class Project:
         rw = max(1, min(rw, W // tile - rx))
         rh = max(1, min(rh, H // tile - ry))
 
+        excluded = {int(e) for e in exclude}
         unique, seen, empty, repaired = [], set(), 0, 0
         for ty in range(ry, ry + rh):
             for tx in range(rx, rx + rw):
+                # Same order and the same exclusion rule pack_atlas uses, so the price
+                # quoted here is the price the build charges.
+                if ((ty - ry) * rw + (tx - rx)) in excluded:
+                    continue
                 buf = tuple(pa.to_gcolor8(px[tx * tile + i, ty * tile + j], colorkey)
                             for j in range(tile) for i in range(tile))
                 if not any(buf):
@@ -229,7 +1176,27 @@ class Project:
                                            Image.NEAREST)),
         }
 
-    def add_atlas(self, name, rel, tile, region, max_tiles):
+    @staticmethod
+    def _exclude_block(exclude):
+        """Render the dropped-tile list, wrapped, with a note on what the numbers mean."""
+        idx = sorted({int(e) for e in exclude})
+        if not idx:
+            return ""
+        lines, row = [], []
+        for i in idx:
+            row.append(str(i))
+            if len(row) == 16:
+                lines.append(", ".join(row))
+                row = []
+        if row:
+            lines.append(", ".join(row))
+        body = ",\n  ".join(lines)
+        return ("# Cells dropped in the editor. Indices into the region, read left to "
+                "right,\n# top to bottom -- so they follow the region above and change "
+                "with it.\n"
+                f"exclude = [\n  {body}\n]\n")
+
+    def add_atlas(self, name, rel, tile, region, max_tiles, exclude=()):
         """Append an [[atlas]] block. Appending keeps every existing comment intact."""
         if any(a["name"] == name for a in self.man.get("atlas", [])):
             raise ValueError(f"an atlas named {name!r} already exists")
@@ -246,6 +1213,7 @@ tile = {tile}
 region = [{region[0]}, {region[1]}, {region[2]}, {region[3]}]
 max_tiles = {max_tiles}
 out = "{name}.bin"
+{self._exclude_block(exclude)}
 metatiles = "auto"
 # Roles the legend can name. Autopicked so the atlas is usable the moment it is
 # imported; replace with an explicit [atlas.semantic] table once you know which tiles
@@ -378,15 +1346,42 @@ atlases = ["{atlas}"]
 
         Anything the editor produced that the pipeline would reject must fail here,
         loudly, rather than being smoothed over. The validation is the product.
+
+        Called IN-PROCESS rather than shelled out. It used to run
+        `sys.executable pnx_assets.py`, which is correct from a source checkout and wrong
+        from a frozen binary, where sys.executable is the editor itself -- so pressing
+        Build would have relaunched the editor. Importing the pipeline is also what
+        EDITOR.md specifies, and it keeps a BuildError's message intact rather than
+        reducing it to an exit code.
         """
         pkg = os.path.join(self.root, "package.json")
-        cmd = [sys.executable, os.path.join(TOOLS, "pnx_assets.py"), self.path]
-        if os.path.exists(pkg):
-            cmd += ["--package", pkg]
-        r = subprocess.run(cmd, capture_output=True, text=True, cwd=self.root)
+        buf = io.StringIO()
+        ok = True
+
+        # The engine is staged from the editor before every build, so a project always
+        # compiles against the engine in the editor doing the compiling rather than a
+        # copy it happens to be carrying.
+        try:
+            pp.sync_framework(self.root)
+        except ValueError as e:
+            buf.write(f"engine: {e}\n")
+
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                pa.build(self.path, None, None,
+                         package=pkg if os.path.exists(pkg) else None)
+        except pa.BuildError as e:
+            ok = False
+            buf.write(f"\nasset build FAILED: {e}\n")
+        except Exception as e:                           # noqa: BLE001
+            # A crash in the pipeline is a pipeline bug, but it must not take the editor
+            # down with it -- the author would lose unsaved map edits to a traceback.
+            ok = False
+            buf.write(f"\nasset build CRASHED: {type(e).__name__}: {e}\n")
+            buf.write(traceback.format_exc())
+
         self.reload()
-        return {"ok": r.returncode == 0,
-                "output": (r.stdout or "") + (r.stderr or "")}
+        return {"ok": ok, "output": buf.getvalue()}
 
 # ------------------------------------------------------------------------- server
 
@@ -397,12 +1392,46 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 @media(prefers-color-scheme:dark){:root{--ink:#0d1017;--surface:#161a23;--line:#262c38;
   --fg:#dde3ec;--dim:#7b8798;--accent:#55aaff;--soft:#16283d;--ok:#5fd28d;--bad:#ff7a5c}}
 *{box-sizing:border-box}
-body{margin:0;height:100vh;display:flex;flex-direction:column;background:var(--ink);
+/* Shell: rail | work, with the work column stacking toolbar / content / output /
+   status. Grid rather than nested flex so the output panel can be collapsed by changing
+   one row rather than by chasing flex-basis through three ancestors. */
+body{margin:0;height:100vh;display:grid;grid-template-columns:auto 1fr;overflow:hidden;
+  background:var(--ink);
   color:var(--fg);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif}
-header{display:flex;align-items:center;gap:1rem;padding:.6rem 1rem;
-  border-bottom:1px solid var(--line);background:var(--surface)}
-h1{margin:0;font:600 .78rem/1 ui-monospace,Menlo,monospace;letter-spacing:.14em;
+#work{display:grid;grid-template-rows:auto 1fr auto auto;min-width:0;min-height:0}
+
+#rail{display:flex;flex-direction:column;gap:2px;width:62px;padding:.4rem .3rem;
+  background:var(--surface);border-right:1px solid var(--line)}
+.act{display:flex;flex-direction:column;align-items:center;gap:.15rem;padding:.5rem .2rem;
+  border:0;border-radius:6px;background:none;color:var(--dim);cursor:pointer;
+  border-left:2px solid transparent}
+.act i{font-style:normal;font-size:1.05rem;line-height:1}
+.act em{font-style:normal;font-size:.58rem;letter-spacing:.04em}
+.act:hover{background:var(--soft);color:var(--fg)}
+/* The active activity is marked by a bar as well as a colour, so it survives being
+   looked at by someone who cannot separate the two. */
+.act.on{color:var(--accent);background:var(--soft);border-left-color:var(--accent)}
+.act:disabled{opacity:.35;cursor:not-allowed;background:none}
+
+header{display:flex;align-items:center;gap:.7rem;padding:.45rem .8rem;
+  border-bottom:1px solid var(--line);background:var(--surface);min-height:2.4rem}
+header b{font:600 .72rem/1 ui-monospace,Menlo,monospace;letter-spacing:.1em;
   text-transform:uppercase;color:var(--dim)}
+#ctxbar{display:flex;align-items:center;gap:.5rem}
+
+#outpanel{display:grid;grid-template-rows:auto 1fr;border-top:1px solid var(--line);
+  background:var(--surface);max-height:34vh}
+#outpanel.hidden{grid-template-rows:auto 0}
+#outpanel.hidden #log{display:none}
+.outbar{display:flex;align-items:center;gap:.6rem;padding:.3rem .8rem}
+.outbar b{font:600 .62rem/1 ui-monospace,Menlo,monospace;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--dim)}
+.outbar span{font-size:.7rem;color:var(--dim)}
+.outbar button{padding:.15rem .5rem;font-size:.72rem}
+
+#statusbar{display:flex;align-items:center;gap:1.1rem;padding:0 .8rem;height:24px;
+  background:var(--accent);color:#fff;font:11px ui-monospace,Menlo,monospace}
+#statusbar span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 button{font:inherit;padding:.35rem .8rem;border:1px solid var(--line);border-radius:5px;
   background:var(--surface);color:var(--fg);cursor:pointer}
 button:hover{border-color:var(--accent);color:var(--accent)}
@@ -410,8 +1439,8 @@ button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 select{font:inherit;padding:.3rem .5rem;background:var(--surface);color:var(--fg);
   border:1px solid var(--line);border-radius:5px}
-main{flex:1;display:flex;min-height:0}
-aside{width:250px;border-right:1px solid var(--line);background:var(--surface);
+main{display:flex;min-height:0;min-width:0;overflow:hidden}
+aside{width:270px;flex:none;border-right:1px solid var(--line);background:var(--surface);
   overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:1.25rem}
 section h2{margin:0 0 .5rem;font:600 .68rem/1 ui-monospace,Menlo,monospace;
   letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
@@ -433,10 +1462,9 @@ canvas{image-rendering:pixelated;cursor:crosshair;border:1px solid var(--line);
 .meter{height:5px;background:var(--line);border-radius:3px;overflow:hidden}
 .meter i{display:block;height:100%;background:var(--accent)}
 small{color:var(--dim);font-size:.78rem}
-#log{max-height:150px;overflow:auto;white-space:pre-wrap;font:11px/1.45 ui-monospace,
-  Menlo,monospace;background:var(--ink);border:1px solid var(--line);border-radius:5px;
-  padding:.5rem;color:var(--dim)}
-#log.bad{color:var(--bad);border-color:var(--bad)}
+#log{margin:0;overflow:auto;white-space:pre-wrap;font:11px/1.5 ui-monospace,
+  Menlo,monospace;background:var(--ink);padding:.5rem .8rem;color:var(--dim)}
+#log.bad{color:var(--bad)}
 #log.ok{color:var(--ok)}
 kbd{font:11px ui-monospace,monospace;background:var(--soft);color:var(--accent);
   padding:.05em .35em;border-radius:3px}
@@ -468,24 +1496,187 @@ kbd{font:11px ui-monospace,monospace;background:var(--soft);color:var(--accent);
 .stats div.warn b{color:var(--bad)}
 .plate{background:var(--surface);border:1px solid var(--line);border-radius:6px;
   padding:.85rem;overflow:auto}
+/* Fonts tab. Controls left, device canvas right and sticky, so the preview stays in
+   view while a slider is dragged -- the one interaction this tab exists for. */
+.fontgrid{display:grid;grid-template-columns:minmax(260px,320px) 1fr;gap:1.25rem;
+  align-items:start}
+.fontctl section{margin-bottom:1rem}
+.fontview{display:grid;gap:1rem}
+.fields.col{display:grid;grid-template-columns:1fr;gap:.5rem}
+.fields.col label{display:grid;grid-template-columns:5.5rem 1fr;align-items:center;
+  gap:.5rem;font-size:.78rem;color:var(--dim)}
+.fields.col label.check{grid-template-columns:auto 1fr;justify-content:start}
+.fields.col input,.fields.col select,.fields.col textarea{width:100%}
+.fields.col input[type=range]{padding:0}
+.fields.col input[type=checkbox]{width:auto}
+.pair{display:flex;gap:.3rem}
+.pair input{width:100%}
+/* A colour chip beside the select rather than a coloured <option>: Chrome paints the
+   selected option's background into the closed control, which renders white ink on a
+   white swatch as an empty box. The chip shows the colour, the select stays legible. */
+.swrow{display:flex;align-items:center;gap:.35rem;min-width:0}
+.swrow i{width:1rem;height:1rem;flex:none;border:1px solid var(--line);border-radius:3px;
+  background:#000}
+.swrow select{flex:1;min-width:0}
+select.sw{font:11px ui-monospace,monospace}
+#ftext,#fdlg{width:100%;font:inherit;padding:.4rem .5rem;background:var(--surface);
+  color:var(--fg);border:1px solid var(--line);border-radius:5px;resize:vertical}
+#fdlg{margin-bottom:.4rem}
+.plate.wide img{display:block;max-width:100%;image-rendering:pixelated}
+/* Checkerboard behind the device canvas, so a preview whose background is genuinely
+   transparent is distinguishable from one that is white. */
+#fscenewrap{display:inline-block;padding:6px;border-radius:4px;
+  background:repeating-conic-gradient(var(--soft) 0% 25%,transparent 0% 50%) 50%/12px 12px}
+#fscene{display:block;image-rendering:pixelated}
+#fsheet{background:#0d1017;padding:6px;border-radius:4px}
+#fchars{display:block;margin-top:.4rem;word-break:break-all;
+  font:11px ui-monospace,monospace}
+#fdeclared{display:grid;gap:.35rem;font:11px ui-monospace,Menlo,monospace}
+#fdeclared div{display:flex;justify-content:space-between;gap:.5rem;
+  padding:.3rem .45rem;background:var(--soft);border-radius:4px}
+/* The slice grid. Cells carry their own state colour so what a tile will BECOME is
+   visible without reading a legend: kept, a duplicate that costs nothing, empty, or
+   dropped by hand. */
+#slice{display:grid;gap:2px;overflow:auto;max-height:60vh}
+#slice button{padding:0;border:2px solid transparent;border-radius:3px;background:none;
+  line-height:0;cursor:pointer;position:relative}
+#slice img{display:block;image-rendering:pixelated;width:100%;height:auto}
+#slice .unique{border-color:var(--ok)}
+#slice .dup{border-color:var(--line);opacity:.75}
+#slice .empty{border-color:transparent;opacity:.25}
+#slice .off{border-color:var(--bad);opacity:.3;filter:grayscale(1)}
+#slice button:hover{border-color:var(--accent)}
+#slnote{font-size:.72rem;color:var(--dim)}
+
+/* Sprites. The palette is the device's 64 colours laid out as an 8x8 block, so picking
+   one is a glance rather than a scroll through hex codes. */
+.pal{display:grid;grid-template-columns:repeat(8,1fr);gap:2px}
+.pal i{display:block;aspect-ratio:1;border-radius:2px;cursor:pointer;
+  border:2px solid transparent}
+.pal i.on{border-color:var(--fg)}
+.pal i.tr{background-image:repeating-conic-gradient(#888 0% 25%,#ccc 0% 50%);
+  background-size:8px 8px}
+#pxwrap,#px1wrap{display:inline-block;padding:6px;border-radius:4px;
+  background:repeating-conic-gradient(var(--soft) 0% 25%,transparent 0% 50%) 50%/12px 12px}
+#pxcv,#pxcv1{display:block;image-rendering:pixelated;cursor:crosshair}
+#pxcv1{cursor:default}
+
+/* Code. A full-height two-pane layout rather than a card, because an editor that only
+   fills part of the window is an editor nobody writes in. */
+.codegrid{display:grid;grid-template-columns:minmax(200px,270px) 1fr;height:100%}
+.codetree{border-right:1px solid var(--line);overflow:auto;padding:.6rem;
+  background:var(--surface)}
+#codelist{display:grid;gap:1px}
+#codelist button{text-align:left;font:11px ui-monospace,Menlo,monospace;
+  padding:.28rem .45rem;width:100%;border-color:transparent;background:none}
+#codelist button:hover{background:var(--soft)}
+#codelist button.on{background:var(--soft);color:var(--accent)}
+#codelist button.ro{color:var(--dim)}
+#codelist .grp{font:600 .62rem/1 ui-monospace,Menlo,monospace;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--dim);padding:.6rem .45rem .25rem}
+.codemain{display:flex;flex-direction:column;min-width:0}
+.codebar{display:flex;align-items:center;gap:.6rem;padding:.5rem .8rem;
+  border-bottom:1px solid var(--line);background:var(--surface)}
+.codebar b{font:12px ui-monospace,Menlo,monospace}
+.codebar span{font-size:.72rem;color:var(--dim)}
+.codeedit{flex:1;min-height:0;position:relative}
+/* The overlay only lines up if BOTH layers share every metric that affects wrapping and
+   glyph position: font, size, line-height, padding, tab-size, white-space. Any drift
+   here shows up as highlighting sliding away from the text further down the file. */
+#codescroll{position:absolute;inset:0;overflow:auto}
+#codehl,#codetext{margin:0;border:0;padding:.8rem 1rem;tab-size:2;
+  font:12px/1.55 ui-monospace,Menlo,Consolas,monospace;
+  white-space:pre;word-wrap:normal;overflow-wrap:normal}
+#codehl{position:absolute;inset:0;pointer-events:none;color:var(--fg);
+  background:var(--ink);min-height:100%;min-width:100%}
+#codehl code{font:inherit}
+#codetext{position:relative;display:block;width:100%;min-height:100%;outline:0;
+  resize:none;background:transparent;color:transparent;caret-color:var(--fg);
+  overflow:hidden}
+#codetext::selection{background:rgba(85,170,255,.32);color:transparent}
+#codetext[readonly]{caret-color:transparent}
+#codehl[data-ro="1"]{color:var(--dim)}
+.tk-c{color:#6b7a8d;font-style:italic}   /* comment */
+.tk-s{color:#7fc98a}                     /* string / char */
+.tk-p{color:#c084d8}                     /* preprocessor */
+.tk-k{color:#55aaff}                     /* keyword */
+.tk-t{color:#5ecfd0}                     /* type */
+.tk-n{color:#d8a657}                     /* number */
+.tk-x{color:#e0af68}                     /* a pnx / generated symbol */
+.tk-bad{color:var(--bad);text-decoration:underline wavy var(--bad)}
+@media(prefers-color-scheme:light){
+  .tk-c{color:#7a8899} .tk-s{color:#2f7d43} .tk-p{color:#8b3fa8}
+  .tk-k{color:#1f6dbf} .tk-t{color:#0f7b7d} .tk-n{color:#a35d00} .tk-x{color:#8a5a00}
+}
+#codediag{max-height:26%;overflow:auto;border-top:1px solid var(--line);
+  background:var(--surface);font:11px/1.5 ui-monospace,Menlo,monospace}
+#codediag:empty{display:none}
+#codediag div{display:flex;gap:.6rem;padding:.28rem .8rem;cursor:pointer}
+#codediag div:hover{background:var(--soft)}
+#codediag b{color:var(--bad);font-weight:600}
+#codediag i{color:var(--dim);font-style:normal;min-width:3.5rem}
+
+/* Toolchain tab. Prose gets a readable measure rather than the full window width -- it
+   is the one place in this editor a person has to actually read something. */
+.sdkwrap{display:grid;gap:1rem;max-width:52rem}
+.prose{margin:0 0 .7rem;font-size:.85rem;line-height:1.55;color:var(--dim);max-width:60ch}
+.prose b{color:var(--fg)}
+.terms{display:grid;gap:.3rem;margin:.5rem 0 .8rem}
+.terms a{display:block;padding:.45rem .6rem;background:var(--soft);border-radius:5px;
+  color:var(--accent);text-decoration:none;font:12px ui-monospace,Menlo,monospace}
+.terms a:hover{text-decoration:underline}
+label.accept{display:flex;align-items:center;gap:.5rem;font-size:.85rem;
+  margin-bottom:.7rem;cursor:pointer}
+label.accept input{width:auto}
+.row{display:flex;gap:.5rem;flex-wrap:wrap}
+button:disabled{opacity:.45;cursor:not-allowed}
+#sdklog{margin:0;max-height:340px;overflow:auto;white-space:pre-wrap;
+  font:11px/1.5 ui-monospace,Menlo,monospace;color:var(--dim)}
+#sdkstatus,#projinfo{display:grid;gap:.35rem;font:12px ui-monospace,Menlo,monospace}
+#sdkstatus .k,#projinfo .k{color:var(--dim);display:inline-block;min-width:9rem}
+#sdkstatus .yes{color:var(--ok)} #sdkstatus .no{color:var(--bad)}
+#projinfo .p{word-break:break-all}
+#recent,#pickerlist{display:grid;gap:.25rem;margin-top:.35rem}
+#pickerlist{max-height:260px;overflow:auto}
+#recent button,#pickerlist button{text-align:left;font:11px ui-monospace,Menlo,monospace;
+  padding:.35rem .5rem;width:100%}
+#pickerlist .isproj{color:var(--ok)}
+#pickernote{display:block;margin-top:.5rem}
 .plate h3{margin:0 0 .5rem;font:600 .66rem/1 ui-monospace,Menlo,monospace;
   letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
 .plate img{image-rendering:pixelated;display:block;max-width:100%}
 </style></head><body>
-<header>
-  <h1>pebblnyx editor</h1>
-  <button id="tabmaps" class="primary">Maps</button>
-  <button id="tabimport">Import</button>
-  <select id="mapsel"></select>
-  <select id="atlassel" title="tileset this map is drawn with"></select>
-  <span id="tool"></span>
+<!-- Activity rail, editor area, status bar: the shape VS Code and Rider settled on, and
+     for the reason they settled on it. Six top tabs was already crowded and every new
+     capability added a seventh; a rail scales down the side and leaves the whole width
+     to the thing being worked on. -->
+<div id="rail">
+  <button id="tabmaps" class="act on" data-t="maps"><i>▦</i><em>Maps</em></button>
+  <button id="tabpixel" class="act" data-t="pixel"><i>✎</i><em>Sprites</em></button>
+  <button id="tabfonts" class="act" data-t="fonts"><i>A</i><em>Fonts</em></button>
+  <button id="tabimport" class="act" data-t="import"><i>⇥</i><em>Import</em></button>
+  <button id="tabcode" class="act" data-t="code"><i>&lt;/&gt;</i><em>Code</em></button>
   <div style="flex:1"></div>
-  <span id="dirty"></span>
-  <button id="save">Save map</button>
-  <button id="build" class="primary">Build</button>
-</header>
+  <button id="tabsdk" class="act" data-t="sdk"><i>⚙</i><em>Settings</em></button>
+</div>
+
+<div id="work">
+  <!-- Contextual toolbar. Only what the current activity needs: a map selector belongs
+       to Maps and is noise everywhere else. -->
+  <header>
+    <b id="ctxtitle">Maps</b>
+    <span id="ctxbar">
+      <select id="mapsel"></select>
+      <select id="atlassel" title="tileset this map is drawn with"></select>
+      <span id="tool"></span>
+    </span>
+    <div style="flex:1"></div>
+    <span id="dirty"></span>
+    <button id="save">Save map</button>
+    <button id="build" class="primary">Build</button>
+  </header>
 <main>
-  <aside>
+  <aside id="side">
     <section><h2>Paint</h2><div class="tiles" id="legend"></div>
       <small id="painthint">Click to paint. <kbd>W</kbd> sets a warp, <kbd>S</kbd> the
       start.</small>
@@ -507,7 +1698,6 @@ kbd{font:11px ui-monospace,monospace;background:var(--soft);color:var(--accent);
     <section><h2>Palettes</h2><div id="pals"></div></section>
     <section><h2>Budget</h2><div class="meter"><i id="bar"></i></div>
       <small id="budget">—</small></section>
-    <section><h2>Output</h2><div id="log">Ready.</div></section>
   </aside>
   <div id="stage"><canvas id="cv"></canvas></div>
   <div id="import" style="display:none;flex:1;overflow:auto;padding:1.5rem">
@@ -524,20 +1714,317 @@ kbd{font:11px ui-monospace,monospace;background:var(--soft);color:var(--accent);
         <button id="addatlas" class="primary">Add atlas</button>
       </div>
       <div id="stats" class="stats"></div>
+      <div class="plate"><h3>Slice — click a tile to drop it</h3>
+        <div class="row" style="margin-bottom:.5rem">
+          <button id="slkeepall">Keep all</button>
+          <button id="sldropdup">Drop duplicates</button>
+          <button id="sldropempty">Drop empties</button>
+          <span id="slnote"></span>
+        </div>
+        <div id="slice"></div>
+      </div>
       <div class="plate"><h3>Sheet</h3><img id="sheetimg" alt=""></div>
       <div class="plate"><h3>Tiles kept</h3><img id="strip" alt=""></div>
     </div>
   </div>
+
+  <!-- Fonts. The layout puts the device-sized canvas next to the controls rather than
+       below them, because the whole point is watching the text change as you drag the
+       threshold -- a preview you have to scroll to is a preview you stop looking at. -->
+  <div id="fonts" style="display:none;flex:1;overflow:auto;padding:1.25rem">
+    <div class="fontgrid">
+      <div class="fontctl">
+        <section><h2>Typeface</h2>
+          <div class="fields col">
+            <label>Source<select id="fsrc"></select></label>
+            <label>Size px<input id="fsize" type="number" value="12" min="4" max="64"></label>
+            <label>Depth<select id="fdepth">
+              <option value="1">1bpp — crisp</option>
+              <option value="2">2bpp — antialiased</option>
+            </select></label>
+            <label>Threshold <b id="fthreshv">128</b>
+              <input id="fthresh" type="range" min="1" max="254" value="128"></label>
+            <label>Tracking<input id="ftrack" type="number" value="0" min="-8" max="8"></label>
+            <label>Charset<select id="fcharset">
+              <option value="auto">auto — from dialog</option>
+              <option value="ascii">ascii — all 95</option>
+            </select></label>
+            <label>Extra<input id="fextra" placeholder="0123456789/%"></label>
+          </div>
+          <small id="fnote">Threshold decides which greyscale samples become ink.
+            At small sizes it makes or breaks legibility — drag it and watch.</small>
+        </section>
+
+        <section><h2>Preview over</h2>
+          <div class="fields col">
+            <label>Background<select id="fbg">
+              <option value="solid">flat colour</option>
+              <option value="map">a real map</option>
+            </select></label>
+            <label id="fmapwrap">Map<select id="fmap"></select></label>
+            <label id="fscrollwrap">Scroll
+              <span class="pair"><input id="fsx" type="number" value="0" min="0" step="8">
+              <input id="fsy" type="number" value="0" min="0" step="8"></span></label>
+            <label>Clear<span class="swrow"><i id="fbgcsw"></i>
+              <select id="fbgc" class="sw"></select></span></label>
+            <label class="check"><input id="fbox" type="checkbox" checked> Text box</label>
+            <label id="fboxcwrap">Box fill<span class="swrow"><i id="fboxcsw"></i>
+              <select id="fboxc" class="sw"></select></span></label>
+            <label>Ink<span class="swrow"><i id="finksw"></i>
+              <select id="fink" class="sw"></select></span></label>
+            <label>Align<select id="falign">
+              <option value="left">left</option><option value="center">centre</option>
+              <option value="right">right</option>
+            </select></label>
+            <label>Zoom<select id="fscale">
+              <option value="1">1:1 — actual size</option>
+              <option value="2" selected>2x</option>
+              <option value="3">3x</option>
+              <option value="4">4x</option>
+            </select></label>
+          </div>
+        </section>
+
+        <section><h2>Text</h2>
+          <select id="fdlg"></select>
+          <textarea id="ftext" rows="3">The mines run deep, and the lamps went out weeks ago.</textarea>
+        </section>
+
+        <section><h2>Add to manifest</h2>
+          <div class="fields col">
+            <label>Name<input id="fname" placeholder="hud"></label>
+            <label>Licence<input id="flic" placeholder="SIL OFL 1.1"></label>
+          </div>
+          <small>Rasterised glyphs are redistribution even though the outlines stay
+            behind, so the licence is required rather than suggested. A system typeface
+            is copied into <code>art/fonts/</code> so the build works elsewhere.</small>
+          <button id="faddbtn" class="primary">Add font</button>
+        </section>
+      </div>
+
+      <div class="fontview">
+        <div class="plate wide"><h3>On the watch — 200&times;228</h3>
+          <div id="fscenewrap"><img id="fscene" alt=""></div>
+          <small id="fscenenote">—</small>
+        </div>
+        <div id="fstats" class="stats"></div>
+        <div class="plate wide"><h3>Glyphs</h3><img id="fsheet" alt="">
+          <small id="fchars"></small></div>
+        <div class="plate wide"><h3>Declared</h3><div id="fdeclared"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sprites: a pixel editor that paints in ARGB2222.
+       Not trying to be Aseprite. It exists so that trying an idea does not require
+       installing something else first, and so the colours on screen are the device's
+       actual 64 rather than an approximation quantised later. -->
+  <div id="pixel" style="display:none;flex:1;overflow:auto;padding:1.25rem">
+    <div class="fontgrid">
+      <div class="fontctl">
+        <section><h2>Canvas</h2>
+          <div class="fields col">
+            <label>Width<input id="pxw" type="number" value="16" min="1" max="128"></label>
+            <label>Height<input id="pxh" type="number" value="24" min="1" max="128"></label>
+            <label>Frames<input id="pxframes" type="number" value="1" min="1" max="32"
+              title="stacked vertically, which is the layout the sprite importer expects"></label>
+            <label>Zoom<input id="pxzoom" type="range" min="2" max="24" value="12"></label>
+            <label class="check"><input id="pxgrid" type="checkbox" checked> Grid</label>
+          </div>
+          <small>A sheet is frames stacked vertically — the layout
+            <code>[[sprite]] frames</code> already expects.</small>
+        </section>
+
+        <section><h2>Tool</h2>
+          <div class="row">
+            <button id="toolpen" class="primary">Pencil</button>
+            <button id="toolfill">Fill</button>
+            <button id="toolpick">Pick</button>
+            <button id="toolerase">Erase</button>
+          </div>
+          <div class="row" style="margin-top:.4rem">
+            <button id="pxundo">Undo</button>
+            <button id="pxclear">Clear</button>
+          </div>
+        </section>
+
+        <section><h2>Colour</h2>
+          <div id="pxpal" class="pal"></div>
+          <small id="pxcur">—</small>
+        </section>
+
+        <section><h2>File</h2>
+          <div class="fields col">
+            <label>Open<select id="pxopen"><option value="">—</option></select></label>
+            <label>Save as<input id="pxname" placeholder="art/hero.png"></label>
+          </div>
+          <button id="pxsave" class="primary">Save PNG</button>
+          <small id="pxnote">Saved into the project, then importable as a sprite.</small>
+        </section>
+      </div>
+
+      <div class="fontview">
+        <div class="plate wide"><h3>Canvas</h3>
+          <div id="pxwrap"><canvas id="pxcv"></canvas></div>
+        </div>
+        <div class="plate wide"><h3>Actual size</h3>
+          <div id="px1wrap"><canvas id="pxcv1"></canvas></div>
+          <small>What the watch shows. If it does not read here, it will not read there.</small>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Code: a stub IDE. A file tree and an editor, sized so the tab exists and has the
+       right shape. When M8's Alloy scripting lands, .js joins the same tree through the
+       same endpoints -- which is why this is a file tree over the project rather than
+       anything C-specific. -->
+  <div id="code" style="display:none;flex:1;overflow:hidden;padding:0">
+    <div class="codegrid">
+      <aside class="codetree"><div id="codelist"></div></aside>
+      <div class="codemain">
+        <div class="codebar">
+          <b id="codepath">no file open</b>
+          <span id="codenote"></span>
+          <span style="flex:1"></span>
+          <span id="codedirty"></span>
+          <button id="codesave" class="primary" disabled>Save</button>
+        </div>
+        <div class="codeedit">
+          <!-- The classic overlay: a highlighted <pre> behind a transparent-text
+               <textarea>. Keeps real editing behaviour -- caret, selection, undo, IME --
+               which a contenteditable reimplementation would have to rebuild badly. -->
+          <div id="codescroll">
+            <pre id="codehl" aria-hidden="true"><code></code></pre>
+            <textarea id="codetext" spellcheck="false" wrap="off"
+              placeholder="Pick a file on the left."></textarea>
+          </div>
+        </div>
+        <div id="codediag"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings: configuration rather than authoring. The toolchain lives here because it
+       is a once-ever setup step -- as a peer to Maps and Fonts it carried the same visual
+       weight as the things you use every minute. -->
+  <div id="sdk" style="display:none;flex:1;overflow:auto;padding:1.5rem">
+    <div class="sdkwrap">
+      <div class="plate wide"><h3>Project</h3>
+        <div id="projinfo">—</div>
+        <div class="row" style="margin-top:.7rem">
+          <button id="projopen">Open a folder…</button>
+          <button id="projnew">New project…</button>
+          <button id="projadopt" style="display:none">Add a .pknproj</button>
+        </div>
+        <div id="recentwrap" style="margin-top:.7rem">
+          <small>Recent</small><div id="recent"></div>
+        </div>
+      </div>
+
+      <!-- Folder picker. Server-side listing rather than a native dialog, because a
+           frozen app cannot count on one being available and a browser tab never has
+           one. Shown only while picking. -->
+      <div id="picker" class="plate wide" style="display:none">
+        <h3 id="pickertitle">Open a project</h3>
+        <div class="row" style="margin-bottom:.5rem">
+          <input id="pickerpath" style="flex:1;min-width:14rem" placeholder="path">
+          <button id="pickerup">Up</button>
+          <button id="pickergo">Go</button>
+        </div>
+        <div id="pickerlist"></div>
+        <div id="newfields" style="display:none;margin-top:.7rem">
+          <div class="fields col">
+            <label>Name<input id="newname" placeholder="My Game"></label>
+            <label>Folder<input id="newfolder" placeholder="my-game"></label>
+            <label>Author<input id="newauthor" placeholder=""></label>
+          </div>
+        </div>
+        <div class="row" style="margin-top:.7rem">
+          <button id="pickerok" class="primary">Open this folder</button>
+          <button id="pickercancel">Cancel</button>
+        </div>
+        <small id="pickernote"></small>
+      </div>
+
+      <div class="plate wide"><h3>Engine</h3>
+        <div id="engstate"></div>
+        <p class="prose" id="engprose"></p>
+        <label class="check accept"><input id="engown" type="checkbox">
+          I am a developer, I know what I am doing, and I accept responsibility for
+          modifying engine code</label>
+        <div class="row">
+          <button id="engresync" style="display:none">Discard changes and re-track</button>
+        </div>
+      </div>
+
+      <div id="sdkstate" class="plate wide"><h3>Toolchain status</h3>
+        <div id="sdkstatus">—</div></div>
+
+      <div class="plate wide"><h3>The Pebble SDK</h3>
+        <p class="prose">Authoring, previewing, validating and budgeting all work with
+        nothing installed. Producing a <code>.pbw</code> needs the Pebble SDK — about
+        767&nbsp;MB, and it carries its own ARM toolchain, so it is one install rather
+        than two.</p>
+        <p class="prose"><b>The editor does not ship the SDK and does not download it
+        directly.</b> Pebble licenses it to <em>you</em>, and the terms are explicit that
+        the licence is non-transferable and that the SDK may not be redistributed. So this
+        button drives Pebble&rsquo;s own <code>pebble</code> tool: the files go from
+        Pebble to your machine, exactly as if you had run it yourself.</p>
+
+        <div id="sdkterms" class="terms"></div>
+        <label class="check accept"><input id="sdkaccept" type="checkbox">
+          I have read and accept these terms</label>
+        <div class="row">
+          <button id="sdkinstall" class="primary" disabled>Install the SDK</button>
+          <button id="sdkrefresh">Check for updates</button>
+        </div>
+      </div>
+
+      <div class="plate wide"><h3>Output</h3><pre id="sdklog">—</pre></div>
+    </div>
+  </div>
 </main>
+
+  <!-- Output. One shared panel rather than a box inside each activity: a build result
+       is not a property of the tab you happened to be on when you pressed Build. -->
+  <section id="outpanel">
+    <div class="outbar">
+      <b>Output</b><span id="outhint"></span>
+      <div style="flex:1"></div>
+      <button id="outtoggle">Hide</button>
+    </div>
+    <pre id="log">Ready.</pre>
+  </section>
+
+  <footer id="statusbar">
+    <span id="stproject">—</span>
+    <span id="stengine"></span>
+    <span id="stbudget"></span>
+    <div style="flex:1"></div>
+    <span id="stsdk"></span>
+  </footer>
+</div>
 <script>
 const S={data:null,map:null,ch:null,mode:'paint',dirty:false,img:{},T:32};
 const $=s=>document.querySelector(s);
 
 async function load(){
   S.data=await (await fetch('/api/state')).json();
+
+  // Launched with no project -- from a dock, say. Go straight to Settings, which is
+  // where opening and creating live, rather than showing three empty authoring tabs.
+  const authoring=['tabmaps','tabimport','tabfonts','tabpixel','tabcode'];
+  if(S.data.no_project){
+    for(const id of authoring) $('#'+id).disabled=true;
+    showTab('sdk');
+    return;
+  }
+  for(const id of authoring) $('#'+id).disabled=false;
+
   $('#mapsel').innerHTML=S.data.maps.map((m,i)=>`<option value="${i}">${m.name}</option>`).join('');
   $('#atlassel').innerHTML=S.data.atlases.map(a=>`<option value="${a.name}">${a.name}</option>`).join('');
-  drawPalettes(); budget();
+  drawPalettes(); budget(); statusbar();
   selectMap(0);
 }
 
@@ -587,10 +2074,50 @@ function drawPalettes(){
     c==='transparent'?'<div class="sw clear"></div>':
     `<div class="sw" style="background:${c}" title="${c}"></div>`).join('')+'</div>').join('');
 }
-function budget(){
-  const pct=100*S.data.used/S.data.budget;
+// Budget is recomputed from UNSAVED editor state, not from the last build. Finding out
+// a map blew the cap after six hours of work is the failure this exists to prevent, so
+// the number has to move while the map is being painted.
+let estTimer=null, estLast=null;
+
+function budget(now){
+  clearTimeout(estTimer);
+  const go=async()=>{
+    // Maps are sent as they currently stand in the editor, including edits not yet
+    // saved to the manifest.
+    const maps={};
+    for(const m of (S.data.maps||[])) maps[m.name]=m.rows.join('\n');
+    let e;
+    try{
+      e=await (await fetch('/api/estimate',{method:'POST',
+        headers:{'content-type':'application/json'},
+        body:JSON.stringify({maps})})).json();
+    }catch(_){ return }
+    if(e.error) return;
+    estLast=e;
+    paintBudget(e);
+  };
+  if(now) go(); else estTimer=setTimeout(go,220);
+}
+
+function paintBudget(e){
+  const pct=e.pct;
   $('#bar').style.width=Math.min(100,pct)+'%';
-  $('#budget').textContent=`${S.data.used.toLocaleString()} B — ${pct.toFixed(1)}% of ${(S.data.budget/1024)|0}KB`;
+  $('#bar').style.background=e.over?'var(--bad)':(e.warn?'#d08b2c':'var(--accent)');
+  $('#budget').innerHTML=
+    `${e.total.toLocaleString()} B — ${pct.toFixed(1)}% of ${(e.budget/1024)|0}KB`
+    + (e.over?' <b class="bad">OVER</b>':(e.warn?' <b>near the cap</b>':''))
+    + (e.exact?'':' <small>(some assets not built yet)</small>');
+
+  const st=$('#stbudget');
+  if(st){
+    st.textContent=`${e.total.toLocaleString()} B (${pct.toFixed(1)}%)`
+      + (e.over?' OVER BUDGET':'');
+    st.style.fontWeight=e.over?'700':'';
+  }
+  // The status bar goes red the moment the cap is crossed, because that is the one
+  // signal visible from every tab.
+  const bar=$('#statusbar');
+  if(bar) bar.style.background=e.over?'var(--bad)':(e.warn?'#a8701f':'var(--accent)');
 }
 function tool(){
   $('#tool').innerHTML=S.mode==='paint'?`painting <kbd>${S.ch}</kbd>`:
@@ -677,7 +2204,7 @@ function paint(e,click){
     if(row[x]===S.ch) return;
     m.rows[y]=row.slice(0,x)+S.ch+row.slice(x+1);
   }
-  S.dirty=true; mark(); info(); tool(); draw();
+  S.dirty=true; mark(); info(); tool(); draw(); budget();
 }
 
 addEventListener('keydown',e=>{
@@ -726,30 +2253,128 @@ $('#build').onclick=async()=>{
 // ------------------------------------------------------------------ import view
 let sheets=[];
 function showTab(which){
-  const imp=which==='import';
+  const imp=which==='import', fnt=which==='fonts', maps=which==='maps',
+        sdk=which==='sdk', pix=which==='pixel', cod=which==='code';
   $('#import').style.display=imp?'block':'none';
-  $('#stage').style.display=imp?'none':'flex';
-  $('#mapsel').style.display=imp?'none':'';
-  $('#save').style.display=imp?'none':'';
-  $('#tabmaps').className=imp?'':'primary';
-  $('#tabimport').className=imp?'primary':'';
+  $('#fonts').style.display=fnt?'block':'none';
+  $('#sdk').style.display=sdk?'block':'none';
+  $('#pixel').style.display=pix?'block':'none';
+  $('#code').style.display=cod?'block':'none';
+  if(sdk) sdkStatus();
+  if(pix&&!PX.data){ pxPalette(); pxInit(+$('#pxw').value,+$('#pxh').value,1); pxLoadList() }
+  if(cod&&!$('#codelist').children.length) codeTree();
+  $('#stage').style.display=maps?'flex':'none';
+  // The map sidebar and its toolbar controls belong to Maps. Showing them elsewhere
+  // implies they apply there.
+  $('#side').style.display=maps?'':'none';
+  $('#ctxbar').style.display=maps?'':'none';
+  $('#save').style.display=maps?'':'none';
   if(imp&&!sheets.length) loadSheets();
+  if(fnt&&!fontSources.length) loadFonts();
+
+  for(const b of document.querySelectorAll('.act'))
+    b.classList.toggle('on', b.dataset.t===which);
+  $('#ctxtitle').textContent={maps:'Maps',import:'Import',fonts:'Fonts',
+    pixel:'Sprites',code:'Code',sdk:'Settings'}[which]||'';
 }
+
+function statusbar(){
+  const d=S.data||{}, e=d.engine||{}, p=d.paths||{};
+  if(d.no_project){ $('#stproject').textContent='no project open'; return }
+  $('#stproject').textContent=`${d.name} — ${p.root||''}`;
+  $('#stengine').textContent=`engine ${e.editor||'?'}`;
+  if(estLast) paintBudget(estLast);
+  // Fetched once on load rather than polled: it changes when someone installs an SDK,
+  // which is not a per-second event.
+  fetch('/api/sdk/status').then(r=>r.json()).then(s=>{
+    $('#stsdk').textContent=s.can_build?`SDK ${s.active}`:'no SDK — see Settings';
+  }).catch(()=>{});
+}
+
+$('#outtoggle').onclick=()=>{
+  const hid=$('#outpanel').classList.toggle('hidden');
+  $('#outtoggle').textContent=hid?'Show':'Hide';
+};
 $('#tabmaps').onclick=()=>showTab('maps');
 $('#tabimport').onclick=()=>showTab('import');
+$('#tabfonts').onclick=()=>showTab('fonts');
+$('#tabsdk').onclick=()=>showTab('sdk');
+$('#tabpixel').onclick=()=>showTab('pixel');
+$('#tabcode').onclick=()=>showTab('code');
 
 async function loadSheets(){
   sheets=await (await fetch('/api/sheets')).json();
   $('#sheet').innerHTML=sheets.map(s=>`<option value="${s.path}">${s.name}</option>`).join('');
-  analyse();
+  analyse(); drawSlice();
 }
+// Cells the author has dropped, as indices into the region. Reset when the region
+// changes, because the indices mean something different the moment it does.
+let IMPEX=new Set(), impRegion='';
+
+function impRegionKey(){
+  return [$('#sheet').value,$('#tile').value,$('#rx').value,$('#ry').value,
+          $('#rw').value,$('#rh').value].join('/');
+}
+
+async function drawSlice(){
+  const key=impRegionKey();
+  if(key!==impRegion){ IMPEX=new Set(); impRegion=key }
+  const body={sheet:$('#sheet').value,tile:+$('#tile').value,
+    region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
+    exclude:[...IMPEX]};
+  if(!body.sheet) return;
+  const g=await (await fetch('/api/slice',{method:'POST',
+    headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
+  if(g.error){ $('#slnote').textContent=g.error; return }
+
+  const el=$('#slice');
+  el.style.gridTemplateColumns=`repeat(${g.cols}, minmax(0, 1fr))`;
+  el.style.maxWidth=Math.min(g.cols*40,720)+'px';
+  el.innerHTML=g.cells.map(c=>
+    `<button data-i="${c.i}" class="${IMPEX.has(c.i)?'off':c.state}"
+      title="cell ${c.i} at ${c.x},${c.y} — ${IMPEX.has(c.i)?'dropped':c.state}"
+      ><img src="${c.img}" alt=""></button>`).join('');
+  for(const b of el.querySelectorAll('button'))
+    b.onclick=()=>{
+      const i=+b.dataset.i;
+      IMPEX.has(i)?IMPEX.delete(i):IMPEX.add(i);
+      drawSlice(); analyse();
+    };
+  const kept=g.cells.filter(c=>c.state==='unique'&&!IMPEX.has(c.i)).length;
+  $('#slnote').textContent=`${kept} kept of ${g.cells.length} cells`
+    +(IMPEX.size?` · ${IMPEX.size} dropped`:'')
+    +(g.capped?` · showing the first ${g.limit}`:'');
+}
+
+$('#slkeepall').onclick=()=>{ IMPEX=new Set(); drawSlice(); analyse() };
+$('#sldropdup').onclick=async()=>{
+  const g=await (await fetch('/api/slice',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({sheet:$('#sheet').value,tile:+$('#tile').value,
+      region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
+      exclude:[]})})).json();
+  // Duplicates already cost nothing -- dedup collapses them -- so this is about a
+  // shorter grid to read, not about bytes.
+  for(const c of g.cells) if(c.state==='dup') IMPEX.add(c.i);
+  drawSlice(); analyse();
+};
+$('#sldropempty').onclick=async()=>{
+  const g=await (await fetch('/api/slice',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({sheet:$('#sheet').value,tile:+$('#tile').value,
+      region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
+      exclude:[]})})).json();
+  for(const c of g.cells) if(c.state==='empty') IMPEX.add(c.i);
+  drawSlice(); analyse();
+};
+
 let pending=null;
 function analyse(){
   clearTimeout(pending);
   pending=setTimeout(async()=>{
     const body={sheet:$('#sheet').value,tile:+$('#tile').value,
       region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
-      max_tiles:+$('#maxt').value};
+      max_tiles:+$('#maxt').value,exclude:[...IMPEX]};
     if(!body.sheet) return;
     const r=await (await fetch('/api/analyse',{method:'POST',
       headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
@@ -768,7 +2393,7 @@ function analyse(){
   },180);
 }
 for(const id of ['sheet','tile','rx','ry','rw','rh','maxt'])
-  $('#'+id).addEventListener('input',analyse);
+  $('#'+id).addEventListener('input',()=>{ analyse(); drawSlice() });
 
 $('#addatlas').onclick=async()=>{
   const name=$('#aname').value.trim();
@@ -777,16 +2402,849 @@ $('#addatlas').onclick=async()=>{
     headers:{'content-type':'application/json'},
     body:JSON.stringify({name,sheet:$('#sheet').value,tile:+$('#tile').value,
       region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
-      max_tiles:+$('#maxt').value})})).json();
+      max_tiles:+$('#maxt').value,exclude:[...IMPEX]})})).json();
   const log=$('#log'); log.className=r.ok?'ok':'bad';
   log.textContent=r.ok?`Added [[atlas]] "${name}" to the manifest. Press Build.`:r.error;
+};
+
+// ------------------------------------------------------------------- fonts view
+//
+// Every pixel shown here is rendered server-side from the packed blob and sent back as
+// a PNG. Compositing in the browser would be faster but would mean two rasterisers --
+// and the moment they disagree the preview is worse than useless, because it looks
+// authoritative while being wrong.
+let fontSources=[];
+
+// ARGB2222: alpha in the top two bits, then R, G, B. Only the opaque values are worth
+// offering -- the framebuffer is opaque and text is drawn onto it, not composited under.
+function argbSwatches(){
+  const out=[];
+  for(let r=0;r<4;r++)for(let g=0;g<4;g++)for(let b=0;b<4;b++)
+    out.push({v:0xC0|(r<<4)|(g<<2)|b,
+              css:`rgb(${r*85},${g*85},${b*85})`,
+              hex:'0x'+(0xC0|(r<<4)|(g<<2)|b).toString(16).toUpperCase()});
+  return out;
+}
+function fillSwatch(sel,chip,chosen){
+  sel.innerHTML=argbSwatches().map(s=>
+    `<option value="${s.v}"${s.v===chosen?' selected':''}>${s.hex}</option>`).join('');
+  const paint=()=>{
+    const s=argbSwatches().find(s=>s.v===+sel.value);
+    if(s) $(chip).style.background=s.css;
+  };
+  sel.addEventListener('input',paint);
+  paint();
+}
+
+// Controls that only mean something in a particular mode are hidden rather than
+// disabled: a scroll offset with no map behind it is noise, not a disabled feature.
+function fontModes(){
+  const isMap=$('#fbg').value==='map';
+  $('#fmapwrap').style.display=isMap?'':'none';
+  $('#fscrollwrap').style.display=isMap?'':'none';
+  $('#fboxcwrap').style.display=$('#fbox').checked?'':'none';
+}
+
+async function loadFonts(){
+  fontSources=await (await fetch('/api/fonts')).json();
+  // Project fonts first and visually separated: referencing a system font in the
+  // manifest would build here and nowhere else, so the distinction matters.
+  const mine=fontSources.filter(f=>f.in_project), sys=fontSources.filter(f=>!f.in_project);
+  const opt=f=>`<option value="${f.in_project?f.rel:f.path}">${f.name}</option>`;
+  $('#fsrc').innerHTML=
+    (mine.length?`<optgroup label="in this project">${mine.map(opt).join('')}</optgroup>`:'')+
+    (sys.length?`<optgroup label="installed on this machine">${sys.map(opt).join('')}</optgroup>`:'');
+
+  $('#fmap').innerHTML=(S.data.maps||[]).map(m=>`<option>${m.name}</option>`).join('');
+
+  const dlg=S.data.dialog||{};
+  const pages=[];
+  for(const [k,v] of Object.entries(dlg)) v.forEach((p,i)=>pages.push([`${k} · ${i}`,p]));
+  $('#fdlg').innerHTML=`<option value="">— your own text —</option>`+
+    pages.map(([l,p])=>`<option value="${encodeURIComponent(p)}">${l}</option>`).join('');
+
+  fillSwatch($('#fbgc'),'#fbgcsw',0xC0);   // black: what a frame is usually cleared to
+  fillSwatch($('#fboxc'),'#fboxcsw',0xC0);
+  fillSwatch($('#fink'),'#finksw',0xFF);   // white
+  declared();
+  fontModes();
+  refreshFont();
+}
+
+function declared(){
+  const fonts=S.data.fonts||[];
+  $('#fdeclared').innerHTML=fonts.length?fonts.map(f=>
+    `<div><b>${f.name}</b><span>${f.size}px · ${f.depth}bpp · ${
+      f.bytes!==null?f.bytes.toLocaleString()+' B':'not built'}</span></div>`).join('')
+    :'<small>None yet.</small>';
+}
+
+function fontSpec(){
+  return {source:$('#fsrc').value,size:+$('#fsize').value,depth:+$('#fdepth').value,
+          threshold:+$('#fthresh').value,tracking:+$('#ftrack').value,
+          charset:$('#fcharset').value,extra:$('#fextra').value};
+}
+
+let fpending=null;
+function refreshFont(){
+  clearTimeout(fpending);
+  fpending=setTimeout(async()=>{
+    if(!$('#fsrc').value) return;
+    const spec=fontSpec();
+    const post=(u,b)=>fetch(u,{method:'POST',headers:{'content-type':'application/json'},
+                              body:JSON.stringify(b)}).then(r=>r.json());
+
+    const r=await post('/api/font/preview',spec);
+    if(r.error){
+      $('#fstats').innerHTML=`<div class="warn"><b>!</b><span>${r.error}</span></div>`;
+      return;
+    }
+    const cell=(v,l,warn)=>`<div class="${warn?'warn':''}"><b>${v}</b><span>${l}</span></div>`;
+    $('#fstats').innerHTML=
+      cell(r.glyph_count,'glyphs')+
+      cell(r.line_height+'px','line height')+
+      cell(r.baseline+'px','baseline')+
+      cell(r.bytes.toLocaleString(),'bytes')+
+      cell(r.pct.toFixed(2)+'%','of budget')+
+      // A glyph that rasterised to nothing and is not a space means the threshold ate
+      // it. That is the commonest way an imported font is quietly broken, so it is
+      // called out rather than left to be noticed on the watch.
+      cell(r.blank_glyphs,'blank glyphs',r.blank_glyphs>1);
+    $('#fsheet').src=r.sheet;
+    $('#fchars').textContent=`carries: ${r.chars}`;
+
+    const box=$('#fbox').checked;
+    const s=await post('/api/font/scene',{
+      spec,background:$('#fbg').value,map:$('#fmap').value,
+      scroll_x:+$('#fsx').value,scroll_y:+$('#fsy').value,
+      bg_colour:+$('#fbgc').value,ink:+$('#fink').value,
+      align:$('#falign').value,scale:+$('#fscale').value,
+      text:$('#ftext').value,x:4,y:4,
+      box:box?{on:true,x:8,y:140,w:184,h:72,colour:+$('#fboxc').value,
+               border:true,border_colour:+$('#fink').value}:{on:false}});
+    if(s.error){$('#fscenenote').textContent=s.error;return}
+    $('#fscene').src=s.image;
+    $('#fscenenote').innerHTML=
+      `${s.lines} line${s.lines===1?'':'s'} · ${s.text_height}px of text · shown at ${s.scale}x`+
+      (s.overflow?' · <b class="bad">overflows the box</b>':'');
+  },140);
+}
+
+for(const id of ['fsrc','fsize','fdepth','fthresh','ftrack','fcharset','fextra',
+                 'fbg','fmap','fsx','fsy','fbgc','fbox','fboxc','fink','falign',
+                 'fscale','ftext'])
+  $('#'+id).addEventListener('input',()=>{
+    if(id==='fthresh') $('#fthreshv').textContent=$('#fthresh').value;
+    if(id==='fdepth'){
+      // The threshold means different things at each depth: a hard cutoff at 1bpp, a
+      // black point at 2bpp. Carrying 128 across would flatten every antialiased sample
+      // and make 2bpp look identical to 1bpp at twice the bytes.
+      const two=$('#fdepth').value==='2';
+      $('#fthresh').value=two?24:128;
+      $('#fthreshv').textContent=$('#fthresh').value;
+    }
+    if(id==='fbg'||id==='fbox') fontModes();
+    refreshFont();
+  });
+
+$('#fdlg').addEventListener('change',()=>{
+  const v=$('#fdlg').value;
+  if(v){$('#ftext').value=decodeURIComponent(v); refreshFont()}
+});
+
+$('#faddbtn').onclick=async()=>{
+  const name=$('#fname').value.trim(), lic=$('#flic').value.trim();
+  if(!name){alert('Name the font first.');return}
+  if(!lic){alert('A licence is required — rasterised glyphs are redistribution.');return}
+  const r=await (await fetch('/api/font',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({...fontSpec(),name,license:lic})})).json();
+  const log=$('#log'); log.className=r.ok?'ok':'bad';
+  log.textContent=r.ok
+    ?`Added [[font]] "${name}". Add it to a scene's fonts = [...] and press Build.`
+    :r.error;
+  if(r.ok){await load(); declared()}
+};
+
+// --------------------------------------------------------------- toolchain view
+let sdkPoll=null;
+
+async function sdkStatus(remote){
+  const s=await (await fetch('/api/sdk/status'+(remote?'?remote=1':''))).json();
+  const row=(k,v,cls)=>`<div><span class="k">${k}</span> <span class="${cls||''}">${v}</span></div>`;
+
+  const d=S.data||{}, p=d.paths||{}, e=d.engine||{};
+  const pct=d.budget?(100*d.used/d.budget).toFixed(1):'0';
+  $('#projinfo').innerHTML= d.no_project
+    ? '<div>No project open. Open a folder, or create one.</div>'
+    : row('name', d.name||'—')+
+      row('folder', `<span class="p">${p.root||'—'}</span>`)+
+      row('manifest', `<span class="p">${p.manifest||'—'}</span>`)+
+      row('header', `<span class="p">${p.header||'—'}</span>`)+
+      row('budget', `${(d.used||0).toLocaleString()} / ${(d.budget||0).toLocaleString()} B (${pct}%)`)+
+      // The engine is staged from the editor at each build, so what matters is whether
+      // this project last built against a different one.
+      row('engine', e.linked
+        ? `${e.editor} (live tree, symlinked)`
+        : (e.changed
+            ? `<span class="no">built against ${e.built_against}, editor has ${e.editor}</span>`
+            : `${e.editor}${e.built_against?'':' (not built yet)'}`));
+
+  $('#projadopt').style.display=
+    (!d.no_project && d.project_file && !d.project_file.format) ? '' : 'none';
+
+  // Engine ownership. Unlocking is not just write permission: it stops the editor
+  // restaging the engine, so the project keeps its changes and stops getting fixes.
+  // Both halves of that trade are stated, because only stating the first would be a
+  // pleasant surprise followed by an unpleasant one.
+  const owned=!!e.owned;
+  $('#engstate').innerHTML=
+    row('source', e.linked?'symlinked to a live tree'
+        :(owned?'owned by this project':'staged from the editor'), owned?'no':'yes')+
+    row('version', owned?`forked from ${e.owned_from||'?'}`:(e.editor||'—'))+
+    (owned&&e.owned_at?row('since', e.owned_at):'');
+  $('#engprose').textContent = e.linked
+    ? 'This project points at a live engine tree, so edits are picked up by the next build already.'
+    : (owned
+      ? 'Restaging is off for this project. Your edits under src/c/pnx are kept and are '
+        + 'compiled into every build — and this project no longer receives engine fixes '
+        + 'from editor updates. Re-tracking discards them.'
+      : 'The engine is restaged from the editor before every build, so edits under '
+        + 'src/c/pnx would be silently overwritten. Taking ownership stops the restaging '
+        + 'and hands this project its own copy — after which it stops receiving engine '
+        + 'fixes when the editor updates.');
+  $('#engown').checked=owned;
+  $('#engown').disabled=!!e.linked;
+  $('#engresync').style.display=owned?'':'none';
+
+  const rec=await (await fetch('/api/project/recent')).json();
+  $('#recent').innerHTML=rec.recent.length
+    ? rec.recent.map(r=>`<button data-path="${r.path}">${r.name} — ${r.path}</button>`).join('')
+    : '<small>—</small>';
+  for(const b of $('#recent').querySelectorAll('button'))
+    b.onclick=()=>openProject(b.dataset.path);
+  $('#sdkstatus').innerHTML=
+    row('pebble tool', s.pebble||'not installed', s.pebble?'yes':'no')+
+    row('active SDK', s.active||'none', s.active?'yes':'no')+
+    row('installed', s.installed.length?s.installed.join(', '):'none')+
+    row('can build a .pbw', s.can_build?'yes':'no', s.can_build?'yes':'no')+
+    (s.newer?row('newer available', s.newer):'')+
+    (!s.pebble&&!s.installer
+      ? row('installer', 'none found — install uv, pipx or pip', 'no') : '');
+
+  if(!$('#sdkterms').children.length)
+    $('#sdkterms').innerHTML=s.terms.map(([t,u])=>
+      `<a href="${u}" target="_blank" rel="noopener">${t} &nearr;</a>`).join('');
+
+  // An acceptance already on record stays ticked and locked: it is a statement the user
+  // made, not a form field to toggle.
+  if(s.accepted){ $('#sdkaccept').checked=true; $('#sdkaccept').disabled=true; }
+  $('#sdkinstall').disabled=s.busy||!$('#sdkaccept').checked;
+  $('#sdkinstall').textContent=s.busy?'Installing…'
+    :(s.active?'Reinstall / update the SDK':'Install the SDK');
+  if(s.log&&s.log.trim()) $('#sdklog').textContent=s.log;
+
+  // Poll only while something is actually running.
+  if(s.busy&&!sdkPoll) sdkPoll=setInterval(()=>sdkStatus(),1500);
+  if(!s.busy&&sdkPoll){ clearInterval(sdkPoll); sdkPoll=null; }
+  return s;
+}
+
+$('#sdkaccept').onchange=async()=>{
+  if(!$('#sdkaccept').checked){ $('#sdkinstall').disabled=true; return }
+  await fetch('/api/sdk/accept',{method:'POST'});
+  $('#sdkaccept').disabled=true;
+  $('#sdkinstall').disabled=false;
+};
+
+$('#sdkinstall').onclick=async()=>{
+  $('#sdkinstall').disabled=true;
+  $('#sdklog').textContent='Starting…\n';
+  const r=await (await fetch('/api/sdk/install',{method:'POST',
+    headers:{'content-type':'application/json'},body:'{}'})).json();
+  if(r.error){ $('#sdklog').textContent=r.error; $('#sdkinstall').disabled=false; return }
+  sdkStatus();
+};
+
+$('#sdkrefresh').onclick=()=>sdkStatus(true);
+
+// ------------------------------------------------------------------ sprite editor
+//
+// Pixels are held as ARGB2222 bytes -- the device's own encoding -- not as CSS colours.
+// Painting in the target colour space means the canvas cannot show a colour the watch
+// cannot, so nothing collapses on import.
+const PX={w:16,h:24,frames:1,zoom:12,data:null,colour:0xFF,tool:'pen',undo:[]};
+
+function pxTotalH(){ return PX.h*PX.frames }
+
+function pxInit(w,h,frames){
+  PX.w=w; PX.h=h; PX.frames=frames;
+  PX.data=new Uint8Array(w*pxTotalH());   // 0 is transparent, as everywhere else
+  PX.undo=[];
+  pxDraw();
+}
+
+function pxSnapshot(){
+  PX.undo.push(PX.data.slice());
+  if(PX.undo.length>40) PX.undo.shift();   // bounded: this is a scratch tool
+}
+
+function pxDraw(){
+  const z=PX.zoom, H=pxTotalH();
+  for(const [id,scale] of [['pxcv',z],['pxcv1',1]]){
+    const cv=$('#'+id); cv.width=PX.w*scale; cv.height=H*scale;
+    const g=cv.getContext('2d'); g.imageSmoothingEnabled=false;
+    g.clearRect(0,0,cv.width,cv.height);
+    for(let y=0;y<H;y++)for(let x=0;x<PX.w;x++){
+      const v=PX.data[y*PX.w+x];
+      if(!v) continue;
+      g.fillStyle=argbCss(v);
+      g.fillRect(x*scale,y*scale,scale,scale);
+    }
+    if(scale>3&&$('#pxgrid').checked&&id==='pxcv'){
+      g.strokeStyle='rgba(128,128,128,.28)'; g.lineWidth=1;
+      for(let x=0;x<=PX.w;x++){g.beginPath();g.moveTo(x*scale+.5,0);g.lineTo(x*scale+.5,H*scale);g.stroke()}
+      for(let y=0;y<=H;y++){g.beginPath();g.moveTo(0,y*scale+.5);g.lineTo(PX.w*scale,y*scale+.5);g.stroke()}
+      // Frame boundaries drawn stronger, since that is the division the importer reads.
+      g.strokeStyle='var(--accent)'; g.strokeStyle='rgba(85,170,255,.9)'; g.lineWidth=2;
+      for(let f=1;f<PX.frames;f++){
+        g.beginPath(); g.moveTo(0,f*PX.h*scale); g.lineTo(PX.w*scale,f*PX.h*scale); g.stroke();
+      }
+    }
+  }
+}
+
+function argbCss(v){
+  const r=((v>>4)&3)*85,g=((v>>2)&3)*85,b=(v&3)*85;
+  return `rgb(${r},${g},${b})`;
+}
+
+function pxFill(x,y,target){
+  // Iterative flood fill: a recursive one blows the stack on a full 128x128 canvas.
+  if(target===PX.colour) return;
+  const H=pxTotalH(), stack=[[x,y]];
+  while(stack.length){
+    const [cx,cy]=stack.pop();
+    if(cx<0||cy<0||cx>=PX.w||cy>=H) continue;
+    const i=cy*PX.w+cx;
+    if(PX.data[i]!==target) continue;
+    PX.data[i]=PX.colour;
+    stack.push([cx+1,cy],[cx-1,cy],[cx,cy+1],[cx,cy-1]);
+  }
+}
+
+function pxAt(e){
+  const r=$('#pxcv').getBoundingClientRect();
+  return [Math.floor((e.clientX-r.left)/PX.zoom), Math.floor((e.clientY-r.top)/PX.zoom)];
+}
+
+let pxDown=false;
+function pxPaint(e,first){
+  const [x,y]=pxAt(e);
+  if(x<0||y<0||x>=PX.w||y>=pxTotalH()) return;
+  const i=y*PX.w+x;
+  if(PX.tool==='pick'){ pxSetColour(PX.data[i]); return }
+  if(first) pxSnapshot();
+  if(PX.tool==='fill') pxFill(x,y,PX.data[i]);
+  else PX.data[i]= PX.tool==='erase' ? 0 : PX.colour;
+  pxDraw();
+}
+$('#pxcv').addEventListener('mousedown',e=>{pxDown=true; pxPaint(e,true)});
+$('#pxcv').addEventListener('mousemove',e=>{if(pxDown&&PX.tool!=='fill')pxPaint(e,false)});
+addEventListener('mouseup',()=>{pxDown=false});
+
+function pxSetColour(v){
+  PX.colour=v;
+  for(const el of $('#pxpal').querySelectorAll('i'))
+    el.className=(+el.dataset.v===v?'on':'')+(+el.dataset.v===0?' tr':'');
+  $('#pxcur').textContent = v ? `0x${v.toString(16).toUpperCase()} ${argbCss(v)}`
+                              : 'transparent';
+}
+
+function pxPalette(){
+  // Transparent first, then the 64 opaque ARGB2222 values.
+  const cells=[{v:0,css:''}].concat(argbSwatches().map(s=>({v:s.v,css:s.css})));
+  $('#pxpal').innerHTML=cells.map(c=>
+    `<i data-v="${c.v}" class="${c.v?'':'tr'}" style="${c.v?`background:${c.css}`:''}"
+       title="${c.v?'0x'+c.v.toString(16).toUpperCase():'transparent'}"></i>`).join('');
+  for(const el of $('#pxpal').querySelectorAll('i'))
+    el.onclick=()=>pxSetColour(+el.dataset.v);
+  pxSetColour(0xFF);
+}
+
+for(const [id,tool] of [['toolpen','pen'],['toolfill','fill'],['toolpick','pick'],
+                        ['toolerase','erase']])
+  $('#'+id).onclick=()=>{
+    PX.tool=tool;
+    for(const t of ['toolpen','toolfill','toolpick','toolerase'])
+      $('#'+t).className = t===id ? 'primary' : '';
+  };
+
+$('#pxundo').onclick=()=>{ if(PX.undo.length){ PX.data=PX.undo.pop(); pxDraw() } };
+$('#pxclear').onclick=()=>{ pxSnapshot(); PX.data.fill(0); pxDraw() };
+for(const id of ['pxw','pxh','pxframes'])
+  $('#'+id).addEventListener('change',()=>
+    pxInit(+$('#pxw').value,+$('#pxh').value,+$('#pxframes').value));
+$('#pxzoom').addEventListener('input',()=>{PX.zoom=+$('#pxzoom').value; pxDraw()});
+$('#pxgrid').addEventListener('change',pxDraw);
+
+async function pxLoadList(){
+  const files=await (await fetch('/api/art')).json();
+  $('#pxopen').innerHTML='<option value="">—</option>'+
+    files.map(f=>`<option value="${f.path}">${f.path}</option>`).join('');
+}
+
+$('#pxopen').addEventListener('change',async()=>{
+  const path=$('#pxopen').value; if(!path) return;
+  const r=await (await fetch('/api/sprite/read',{method:'POST',
+    headers:{'content-type':'application/json'},body:JSON.stringify({path})})).json();
+  if(r.error){ $('#pxnote').textContent=r.error; return }
+  // Height is assumed to be whole frames of the current frame height where it divides
+  // cleanly -- the importer's own convention -- and one frame otherwise.
+  const frames=(PX.h && r.h % PX.h===0) ? r.h/PX.h : 1;
+  PX.w=r.w; PX.h=r.h/frames; PX.frames=frames;
+  $('#pxw').value=PX.w; $('#pxh').value=PX.h; $('#pxframes').value=frames;
+  PX.data=Uint8Array.from(r.pixels); PX.undo=[];
+  $('#pxname').value=path;
+  pxDraw();
+  $('#pxnote').textContent=`Loaded ${r.w}x${r.h}.`;
+});
+
+$('#pxsave').onclick=async()=>{
+  let path=$('#pxname').value.trim();
+  if(!path){ $('#pxnote').textContent='Give it a filename first.'; return }
+  if(!path.includes('/')) path='art/'+path;
+  const r=await (await fetch('/api/sprite/write',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({path,w:PX.w,h:pxTotalH(),pixels:Array.from(PX.data)})})).json();
+  $('#pxnote').textContent=r.error?r.error
+    :`Saved ${r.path} (${r.bytes} B). Import it from the Import tab.`;
+  if(r.ok) pxLoadList();
+};
+
+// -------------------------------------------------------------------- code editor
+//
+// Highlighting and analysis are deliberately bare: one tokenising pass and three checks.
+// Not a parser, and it does not try to be -- the value is in catching the cheap mistakes
+// before an ARM compile does, and an ARM compile is the authority on everything else.
+const CODE={path:null,clean:'',editable:false,symbols:null};
+
+const C_KEYWORDS=new Set(('if else for while do switch case default break continue return '
+ +'goto sizeof typedef struct union enum static const volatile extern inline register '
+ +'restrict auto _Static_assert').split(' '));
+const C_TYPES=new Set(('void char short int long float double signed unsigned bool '
+ +'size_t int8_t int16_t int32_t int64_t uint8_t uint16_t uint32_t uint64_t '
+ +'ptrdiff_t intptr_t uintptr_t').split(' '));
+
+const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+// One left-to-right pass. Comments and strings are consumed whole so that a keyword or
+// a brace inside them is never seen by anything downstream -- which is also what makes
+// the brace check below trustworthy.
+function cTokens(src){
+  const out=[]; let i=0, n=src.length;
+  const push=(cls,text)=>out.push({cls,text});
+  while(i<n){
+    const c=src[i], two=src.substr(i,2);
+    if(two==='/*'){ const e=src.indexOf('*/',i+2); const j=e<0?n:e+2;
+      push('tk-c',src.slice(i,j)); i=j; continue }
+    if(two==='//'){ let j=src.indexOf('\n',i); if(j<0)j=n;
+      push('tk-c',src.slice(i,j)); i=j; continue }
+    if(c==='"'||c==="'"){
+      let j=i+1;
+      while(j<n){ if(src[j]==='\\'){j+=2;continue} if(src[j]===c){j++;break}
+                  if(src[j]==='\n')break; j++ }
+      push('tk-s',src.slice(i,j)); i=j; continue;
+    }
+    if(c==='#'&&(i===0||src[i-1]==='\n')){
+      let j=src.indexOf('\n',i); if(j<0)j=n;
+      push('tk-p',src.slice(i,j)); i=j; continue;
+    }
+    if(/[A-Za-z_]/.test(c)){
+      let j=i; while(j<n&&/[A-Za-z0-9_]/.test(src[j]))j++;
+      const w=src.slice(i,j);
+      push(C_KEYWORDS.has(w)?'tk-k':C_TYPES.has(w)?'tk-t'
+           :/^(pnx|Pnx|PNX)/.test(w)?'tk-x':'', w);
+      i=j; continue;
+    }
+    if(/[0-9]/.test(c)){
+      let j=i; while(j<n&&/[0-9a-fA-FxXuUlL.]/.test(src[j]))j++;
+      push('tk-n',src.slice(i,j)); i=j; continue;
+    }
+    let j=i; while(j<n&&!/[A-Za-z0-9_#"'\\/]/.test(src[j]))j++;
+    if(j===i)j=i+1;
+    push('',src.slice(i,j)); i=j;
+  }
+  return out;
+}
+
+function highlight(){
+  const src=$('#codetext').value;
+  const bad=new Set(CODE.diagBad||[]);
+  const html=cTokens(src).map(t=>{
+    const cls=(t.cls==='tk-x'&&bad.has(t.text))?'tk-x tk-bad':t.cls;
+    return cls?`<span class="${cls}">${esc(t.text)}</span>`:esc(t.text);
+  }).join('');
+  // A trailing newline keeps the last line scrollable to, matching the textarea.
+  $('#codehl').querySelector('code').innerHTML=html+'\n';
+  $('#codehl').dataset.ro=CODE.editable?'0':'1';
+  // The textarea grows to its content so the wrapper scrolls both layers as one.
+  const ta=$('#codetext');
+  ta.style.height='auto';
+  ta.style.height=Math.max(ta.scrollHeight,$('#codescroll').clientHeight)+'px';
+}
+
+// Three checks. Balance, unterminated strings, and unknown engine symbols -- the last
+// being the one that earns its place: it catches `pnx_platform_exit` for
+// `pnx_platform_quit` in the editor rather than after a full ARM compile.
+function codeAnalyse(){
+  const src=$('#codetext').value;
+  const toks=cTokens(src);
+  const diags=[];
+  const lineOf=off=>src.slice(0,off).split('\n').length;
+
+  let off=0, depth={'(':0,'[':0,'{':0}, opens=[];
+  const close={')':'(',']':'[','}':'{'};
+  for(const t of toks){
+    if(t.cls==='tk-c'||t.cls==='tk-s'||t.cls==='tk-p'){
+      if(t.cls==='tk-s'&&t.text.length<2)
+        diags.push({line:lineOf(off),msg:'unterminated string or character literal'});
+      off+=t.text.length; continue;
+    }
+    for(let k=0;k<t.text.length;k++){
+      const ch=t.text[k];
+      if(ch in depth){ depth[ch]++; opens.push({ch,off:off+k}) }
+      else if(ch in close){
+        const want=close[ch];
+        if(depth[want]===0)
+          diags.push({line:lineOf(off+k),msg:`unmatched '${ch}'`});
+        else { depth[want]--;
+          for(let z=opens.length-1;z>=0;z--) if(opens[z].ch===want){opens.splice(z,1);break} }
+      }
+    }
+    off+=t.text.length;
+  }
+  for(const o of opens)
+    diags.push({line:lineOf(o.off),msg:`'${o.ch}' is never closed`});
+
+  const bad=[];
+  if(CODE.symbols){
+    const seen=new Set();
+    let p=0;
+    for(const t of toks){
+      if(t.cls==='tk-x'&&!CODE.symbols.has(t.text)&&!seen.has(t.text)){
+        seen.add(t.text); bad.push(t.text);
+        diags.push({line:lineOf(p),
+                    msg:`unknown engine symbol '${t.text}'`+nearest(t.text)});
+      }
+      p+=t.text.length;
+    }
+  }
+  CODE.diagBad=bad;
+
+  diags.sort((a,b)=>a.line-b.line);
+  $('#codediag').innerHTML=diags.slice(0,40).map(d=>
+    `<div data-line="${d.line}"><i>line ${d.line}</i><b>·</b><span>${esc(d.msg)}</span></div>`
+  ).join('');
+  for(const el of $('#codediag').querySelectorAll('div'))
+    el.onclick=()=>gotoLine(+el.dataset.line);
+}
+
+// Edit distance, not shared prefix. Prefix length looks reasonable and is not: every
+// `pnx_platform_*` shares thirteen characters, so `pnx_platform_exit` matched
+// `pnx_platform_audio_close` as readily as `pnx_platform_quit`. Distance ranks by how
+// wrong the name actually is, which is the question being asked.
+function editDistance(a,b,cap){
+  if(Math.abs(a.length-b.length)>cap) return cap+1;
+  let prev=Array.from({length:b.length+1},(_,i)=>i);
+  for(let i=1;i<=a.length;i++){
+    const cur=[i]; let best=i;
+    for(let j=1;j<=b.length;j++){
+      cur[j]=Math.min(prev[j]+1, cur[j-1]+1, prev[j-1]+(a[i-1]===b[j-1]?0:1));
+      if(cur[j]<best) best=cur[j];
+    }
+    if(best>cap) return cap+1;      // whole row already too far; stop early
+    prev=cur;
+  }
+  return prev[b.length];
+}
+
+function nearest(name){
+  if(!CODE.symbols) return '';
+  // A quarter of the name, capped: enough for a wrong suffix or a transposition,
+  // not enough to suggest something unrelated with confidence.
+  const cap=Math.min(5,Math.max(2,Math.floor(name.length/4)));
+  let best=null, bestD=cap+1;
+  for(const s of CODE.symbols){
+    const d=editDistance(name,s,cap);
+    if(d<bestD){ bestD=d; best=s; if(d===1) break }
+  }
+  return best?` — did you mean '${best}'?`:'';
+}
+
+function gotoLine(n){
+  const ta=$('#codetext'), lines=ta.value.split('\n');
+  let off=0; for(let i=0;i<n-1&&i<lines.length;i++) off+=lines[i].length+1;
+  ta.focus(); ta.setSelectionRange(off,off+ (lines[n-1]||'').length);
+}
+
+async function codeTree(){
+  if(!CODE.symbols){
+    try{ CODE.symbols=new Set(await (await fetch('/api/code/symbols')).json()) }
+    catch(_){ CODE.symbols=null }
+  }
+  const files=await (await fetch('/api/code/tree')).json();
+  let html='', group=null;
+  for(const f of files){
+    const g=f.engine?'engine (read-only)':f.dir;
+    if(g!==group){ html+=`<div class="grp">${g}</div>`; group=g }
+    html+=`<button data-path="${f.path}" class="${f.editable?'':'ro'}"
+      >${f.name}${f.generated?' ·gen':''}</button>`;
+  }
+  $('#codelist').innerHTML=html;
+  for(const b of $('#codelist').querySelectorAll('button'))
+    b.onclick=()=>codeOpen(b.dataset.path);
+}
+
+async function codeOpen(path){
+  if(CODE.path && $('#codetext').value!==CODE.clean &&
+     !confirm('Discard unsaved changes?')) return;
+  const r=await (await fetch('/api/code/read',{method:'POST',
+    headers:{'content-type':'application/json'},body:JSON.stringify({path})})).json();
+  if(r.error){ $('#codenote').textContent=r.error; return }
+  CODE.path=path; CODE.clean=r.text; CODE.editable=r.editable;
+  $('#codetext').value=r.text;
+  $('#codetext').readOnly=!r.editable;
+  $('#codepath').textContent=path;
+  $('#codenote').textContent=r.note||'';
+  $('#codesave').disabled=true;
+  for(const b of $('#codelist').querySelectorAll('button'))
+    b.classList.toggle('on', b.dataset.path===path);
+  codeDirty();
+  // Analyse first: highlighting reads its list of unknown symbols.
+  if(/\.(c|h)$/.test(path)){ codeAnalyse(); }
+  else { CODE.diagBad=[]; $('#codediag').innerHTML='' }
+  highlight();
+  $('#codescroll').scrollTop=0;
+}
+
+function codeDirty(){
+  const dirty=CODE.editable && $('#codetext').value!==CODE.clean;
+  $('#codedirty').textContent=dirty?'● unsaved':'';
+  $('#codesave').disabled=!dirty;
+}
+let codeTimer=null;
+$('#codetext').addEventListener('input',()=>{
+  codeDirty();
+  highlight();                       // immediate: the overlay must not lag the caret
+  clearTimeout(codeTimer);           // analysis can wait for a pause in typing
+  codeTimer=setTimeout(()=>{
+    if(/\.(c|h)$/.test(CODE.path||'')){ codeAnalyse(); highlight() }
+  },300);
+});
+$('#codetext').addEventListener('scroll',()=>{
+  // Only the wrapper scrolls, but a long line can still shift the textarea itself.
+  $('#codehl').style.transform=`translateX(${-$('#codetext').scrollLeft}px)`;
+});
+
+// Tab inserts a tab rather than leaving the field, which is the single thing that makes
+// a textarea usable for code at all.
+$('#codetext').addEventListener('keydown',e=>{
+  if(e.key==='Tab'){
+    e.preventDefault();
+    const t=e.target, s=t.selectionStart, en=t.selectionEnd;
+    t.value=t.value.slice(0,s)+'  '+t.value.slice(en);
+    t.selectionStart=t.selectionEnd=s+2;
+    codeDirty();
+  }
+  if((e.ctrlKey||e.metaKey)&&e.key==='s'){ e.preventDefault(); codeSave() }
+});
+
+async function codeSave(){
+  if(!CODE.path||!CODE.editable) return;
+  const text=$('#codetext').value;
+  const r=await (await fetch('/api/code/write',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({path:CODE.path,text})})).json();
+  if(r.error){ $('#codenote').textContent=r.error; return }
+  CODE.clean=text; codeDirty();
+  $('#codenote').textContent=`saved ${r.bytes} B`;
+}
+$('#codesave').onclick=codeSave;
+
+// ----------------------------------------------------------------- project picker
+let pickerMode='open';
+
+async function openProject(path){
+  const r=await (await fetch('/api/project/open',{method:'POST',
+    headers:{'content-type':'application/json'},body:JSON.stringify({path})})).json();
+  if(!r.ok){ $('#pickernote').textContent=r.error; return }
+  // A different project means every cached atlas, map and palette is wrong, so the
+  // simplest correct thing is to start over.
+  location.reload();
+}
+
+async function drawPicker(path){
+  const b=await (await fetch('/api/project/browse'+(path?'?path='+encodeURIComponent(path):''))).json();
+  $('#pickerpath').value=b.path;
+  $('#pickerlist').innerHTML=b.entries.length
+    ? b.entries.map(e=>`<button data-path="${e.path}" class="${e.project?'isproj':''}"
+        >${e.project?'◆':'▸'} ${e.name}</button>`).join('')
+    : '<small>(no subfolders)</small>';
+  for(const el of $('#pickerlist').querySelectorAll('button'))
+    el.onclick=()=>drawPicker(el.dataset.path);
+
+  if(pickerMode==='open'){
+    $('#pickerok').disabled=!b.is_project;
+    $('#pickernote').textContent=b.is_project
+      ? 'This folder is a project.'
+      : 'Not a project — pick a folder containing a .pknproj or an assets.toml. ◆ marks one.';
+  }else{
+    $('#pickerok').disabled=false;
+    $('#pickernote').textContent='A new folder is created inside this one.';
+  }
+  return b;
+}
+
+function showPicker(mode){
+  pickerMode=mode;
+  $('#picker').style.display='';
+  $('#pickertitle').textContent=mode==='open'?'Open a project':'New project';
+  $('#newfields').style.display=mode==='new'?'':'none';
+  $('#pickerok').textContent=mode==='open'?'Open this folder':'Create it here';
+  drawPicker((S.data&&S.data.paths&&S.data.paths.root)||null);
+}
+
+$('#projopen').onclick=()=>showPicker('open');
+$('#projnew').onclick=()=>showPicker('new');
+$('#pickercancel').onclick=()=>{$('#picker').style.display='none'};
+$('#pickergo').onclick=()=>drawPicker($('#pickerpath').value);
+$('#pickerup').onclick=async()=>{
+  const b=await (await fetch('/api/project/browse?path='+
+    encodeURIComponent($('#pickerpath').value))).json();
+  if(b.parent) drawPicker(b.parent);
+};
+
+$('#pickerok').onclick=async()=>{
+  if(pickerMode==='open'){ openProject($('#pickerpath').value); return }
+  const name=$('#newname').value.trim();
+  const folder=$('#newfolder').value.trim()||name.toLowerCase().replace(/[^a-z0-9]+/g,'-');
+  if(!name){ $('#pickernote').textContent='Name the project first.'; return }
+  const r=await (await fetch('/api/project/create',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({parent:$('#pickerpath').value,folder,name,
+                         author:$('#newauthor').value})})).json();
+  if(!r.ok){ $('#pickernote').textContent=r.error; return }
+  location.reload();
+};
+
+$('#projadopt').onclick=async()=>{
+  await fetch('/api/project/adopt',{method:'POST'});
+  location.reload();
+};
+
+async function engineOwn(on){
+  await fetch('/api/engine/own',{method:'POST',
+    headers:{'content-type':'application/json'},body:JSON.stringify({on})});
+  location.reload();
+}
+$('#engown').onchange=()=>{
+  if($('#engown').checked) return engineOwn(true);
+  $('#engown').checked=true;      // re-tracking is destructive; route it through the button
+  alert('Use "Discard changes and re-track" — going back replaces your engine copy.');
+};
+$('#engresync').onclick=()=>{
+  if(confirm('Replace src/c/pnx with the editor engine copy? Your modifications there '
+             +'are discarded.')) engineOwn(false);
 };
 
 load();
 </script></body></html>"""
 
 
-def make_handler(proj):
+TOOLCHAIN = Toolchain()
+
+
+class Session:
+    """The project currently open, and the ones opened before.
+
+    A mutable holder rather than a captured value, because the editor can now switch
+    projects without restarting -- the request handlers all read through this.
+    """
+
+    RECENT_MAX = 12
+
+    def __init__(self, proj=None):
+        self.proj = proj
+        if proj:
+            self.remember(proj.root)
+
+    def _recent_path(self):
+        return os.path.join(_config_dir(), "recent.json")
+
+    def recent(self):
+        try:
+            with open(self._recent_path()) as f:
+                paths = json.load(f)
+        except Exception:                                # noqa: BLE001
+            return []
+        # Filter as they are read: a project deleted or on an unmounted drive should
+        # quietly leave the list rather than sit there failing to open.
+        out = []
+        for p in paths:
+            if os.path.isdir(p) and pp.looks_like_project(p):
+                try:
+                    name = pp.load(p).get("name") or os.path.basename(p)
+                except Exception:                        # noqa: BLE001
+                    name = os.path.basename(p)
+                out.append({"path": p, "name": name})
+        return out
+
+    def remember(self, root):
+        root = os.path.abspath(root)
+        paths = [r["path"] for r in self.recent() if r["path"] != root]
+        paths.insert(0, root)
+        with open(self._recent_path(), "w") as f:
+            json.dump(paths[:self.RECENT_MAX], f, indent=2)
+
+    def open(self, folder):
+        proj = Project(folder)
+        self.proj = proj
+        self.remember(proj.root)
+        return proj
+
+
+def browse(path=None):
+    """Directory listing for the folder picker.
+
+    A browser cannot see the filesystem and a frozen app cannot rely on a native dialog
+    being available, so the server does the listing. Only directories: the thing being
+    chosen is a project folder.
+    """
+    path = os.path.abspath(os.path.expanduser(path or os.path.expanduser("~")))
+    if not os.path.isdir(path):
+        path = os.path.expanduser("~")
+
+    entries = []
+    try:
+        for name in sorted(os.listdir(path), key=str.lower):
+            if name.startswith("."):
+                continue
+            full = os.path.join(path, name)
+            if os.path.isdir(full):
+                entries.append({"name": name, "path": full,
+                                "project": pp.looks_like_project(full)})
+    except PermissionError:
+        return {"path": path, "parent": os.path.dirname(path), "entries": [],
+                "error": "permission denied", "is_project": False}
+
+    return {"path": path, "parent": os.path.dirname(path) if os.path.dirname(path) != path
+            else None,
+            "entries": entries, "is_project": pp.looks_like_project(path),
+            "empty": not os.listdir(path)}
+
+
+def make_handler(session):
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -803,9 +3261,34 @@ def make_handler(proj):
             if self.path == "/":
                 self._send(200, PAGE, "text/html; charset=utf-8")
             elif self.path == "/api/state":
-                self._send(200, json.dumps(proj.state()))
+                # No project open is an ordinary state, not an error: the app can be
+                # launched from a dock with no arguments. The UI shows the picker.
+                self._send(200, json.dumps(session.proj.state() if session.proj
+                                           else {"no_project": True}))
             elif self.path == "/api/sheets":
-                self._send(200, json.dumps(proj.sheets()))
+                self._send(200, json.dumps(session.proj.sheets()))
+            elif self.path == "/api/fonts":
+                self._send(200, json.dumps(session.proj.font_sources()))
+            elif self.path.startswith("/api/sdk/status"):
+                remote = "remote=1" in self.path
+                self._send(200, json.dumps(TOOLCHAIN.status(remote=remote)))
+            elif self.path.startswith("/api/project/browse"):
+                from urllib.parse import urlparse, parse_qs
+                q = parse_qs(urlparse(self.path).query)
+                self._send(200, json.dumps(browse((q.get("path") or [None])[0])))
+            elif self.path == "/api/code/tree":
+                self._send(200, json.dumps(session.proj.code_tree()))
+            elif self.path == "/api/code/symbols":
+                self._send(200, json.dumps(session.proj.code_symbols()))
+            elif self.path == "/api/art":
+                self._send(200, json.dumps(session.proj.art_files()))
+            elif self.path == "/api/project/recent":
+                self._send(200, json.dumps({
+                    "recent": session.recent(),
+                    "engine": pp.FRAMEWORK_VERSION,
+                    "have_engine": pp.framework_available(),
+                    "open": session.proj.root if session.proj else None,
+                }))
             else:
                 self._send(404, "{}")
 
@@ -813,28 +3296,107 @@ def make_handler(proj):
             n = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(n) if n else b"{}"
             try:
+                # Everything but opening and creating needs a project to act on.
+                if (not session.proj
+                        and not self.path.startswith("/api/project/")
+                        and not self.path.startswith("/api/sdk/")):
+                    self._send(200, json.dumps(
+                        {"ok": False, "error": "no project is open",
+                         "output": "no project is open"}))
+                    return
                 if self.path == "/api/map":
                     m = json.loads(raw)
-                    proj.save_map(m["name"], m["rows"], m["start"], m["warps"],
+                    session.proj.save_map(m["name"], m["rows"], m["start"], m["warps"],
                                   m.get("atlas"))
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/analyse":
                     d = json.loads(raw)
                     key = d.get("colorkey")
-                    self._send(200, json.dumps(proj.analyse(
+                    self._send(200, json.dumps(session.proj.analyse(
                         d["sheet"], int(d["tile"]), d["region"],
-                        int(d["max_tiles"]), tuple(key) if key else None)))
+                        int(d["max_tiles"]), tuple(key) if key else None,
+                        d.get("exclude", []))))
+                elif self.path == "/api/slice":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(session.proj.slice_grid(
+                        d["sheet"], int(d["tile"]), d["region"],
+                        d.get("exclude", []))))
                 elif self.path == "/api/atlas":
                     d = json.loads(raw)
-                    proj.add_atlas(d["name"], d["sheet"], int(d["tile"]),
-                                   d["region"], int(d["max_tiles"]))
+                    session.proj.add_atlas(d["name"], d["sheet"], int(d["tile"]),
+                                           d["region"], int(d["max_tiles"]),
+                                           d.get("exclude", []))
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/newmap":
                     d = json.loads(raw)
-                    proj.add_map(d["name"], int(d["w"]), int(d["h"]), d["atlas"])
+                    session.proj.add_map(d["name"], int(d["w"]), int(d["h"]), d["atlas"])
                     self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/font/preview":
+                    self._send(200, json.dumps(session.proj.font_preview(json.loads(raw))))
+                elif self.path == "/api/font/scene":
+                    self._send(200, json.dumps(session.proj.font_scene(json.loads(raw))))
+                elif self.path == "/api/font":
+                    session.proj.add_font(json.loads(raw))
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/sdk/accept":
+                    TOOLCHAIN.accept()
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/sdk/install":
+                    d = json.loads(raw) if raw.strip() else {}
+                    TOOLCHAIN.install(d.get("version", "latest"))
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/project/open":
+                    d = json.loads(raw)
+                    session.open(d["path"])
+                    self._send(200, json.dumps({"ok": True,
+                                                "root": session.proj.root}))
+                elif self.path == "/api/project/create":
+                    d = json.loads(raw)
+                    folder = os.path.join(os.path.expanduser(d["parent"]), d["folder"])
+                    pp.create(folder, d["name"], d.get("author", ""))
+                    session.open(folder)
+                    self._send(200, json.dumps({"ok": True, "root": folder}))
+                elif self.path == "/api/project/adopt":
+                    # Write a .pknproj into a folder that predates it, so an existing
+                    # project becomes a first-class one without being recreated.
+                    root = session.proj.root
+                    meta = dict(session.proj.meta)
+                    meta.setdefault("name", os.path.basename(root))
+                    meta.setdefault("manifest", os.path.basename(session.proj.path))
+                    pp.save(root, meta)
+                    session.open(root)
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/engine/own":
+                    d = json.loads(raw) if raw.strip() else {}
+                    on = bool(d.get("on", True))
+                    pp.take_engine_ownership(session.proj.root, on)
+                    if not on:
+                        # Reattaching means the editor's engine is authoritative again,
+                        # so restage immediately rather than at the next build -- the
+                        # discard should be visible now, not later.
+                        pp.sync_framework(session.proj.root)
+                    session.open(session.proj.root)
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/estimate":
+                    d = json.loads(raw) if raw.strip() else {}
+                    self._send(200, json.dumps(
+                        session.proj.estimate(d.get("maps"))))
+                elif self.path == "/api/code/read":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(session.proj.code_read(d["path"])))
+                elif self.path == "/api/code/write":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(
+                        session.proj.code_write(d["path"], d["text"])))
+                elif self.path == "/api/sprite/read":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(session.proj.sprite_read(d["path"])))
+                elif self.path == "/api/sprite/write":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(session.proj.sprite_write(
+                        d["path"], int(d["w"]), int(d["h"]), d["pixels"])))
                 elif self.path == "/api/build":
-                    self._send(200, json.dumps(proj.build()))
+                    self._send(200, json.dumps(session.proj.build()))
                 else:
                     self._send(404, "{}")
             except Exception as e:                       # noqa: BLE001
@@ -870,41 +3432,104 @@ def find_manifest():
     return found
 
 
+def open_window(url, title):
+    """Show the editor in a native window, or say why it could not.
+
+    Uses the OS's own webview -- WebKitGTK, WebView2, WKWebView -- rather than shipping a
+    browser engine. That keeps this a Python-only project and the frozen binary tens of
+    megabytes rather than hundreds, at the cost of depending on something the OS provides.
+    So it is a soft dependency: no webview means a browser tab, not a failure.
+
+    Returns True if a window was shown and has since been closed.
+    """
+    try:
+        import webview
+    except ImportError:
+        return False
+
+    try:
+        webview.create_window(title, url, width=1400, height=900, min_size=(900, 600))
+        webview.start()
+        return True
+    except Exception as e:                               # noqa: BLE001
+        # Typically a missing system webview (no WebKitGTK) or no display. Neither is
+        # worth failing over when a browser will do.
+        print(f"native window unavailable ({e}); falling back to the browser")
+        return False
+
+
+def _ensure_streams():
+    """Give stdout/stderr somewhere to go in a windowed build.
+
+    PyInstaller's --windowed mode detaches the console on Windows and macOS, which can
+    leave sys.stdout as None. Every bare print() then raises AttributeError, and because
+    there is no console the user sees an app that starts and vanishes. Costs two lines to
+    make impossible.
+    """
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name, None) is None:
+            setattr(sys, name, open(os.devnull, "w"))
+
+
 def main():
+    _ensure_streams()
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("manifest", nargs="?",
-                    help="path to assets.toml; found automatically if omitted")
+    ap.add_argument("manifest", nargs="?", metavar="PROJECT",
+                    help="a project folder or an assets.toml; "
+                         "found automatically if omitted")
     ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--browser", action="store_true",
+                    help="open a browser tab instead of a native window")
+    ap.add_argument("--no-browser", action="store_true",
+                    help="serve only; open nothing")
     args = ap.parse_args()
 
-    manifest = args.manifest
-    if not manifest:
+    target = args.manifest
+    if not target:
         found = find_manifest()
-        if not found:
-            print("no assets.toml found -- pass one:\n"
-                  "  pnx_editor.py path/to/assets.toml", file=sys.stderr)
-            return 2
-        manifest = found[0]
-        print(f"using {os.path.relpath(manifest)}"
-              + (f"  ({len(found) - 1} other project(s) found; pass a path to pick)"
-                 if len(found) > 1 else ""))
+        if found:
+            target = found[0]
+            print(f"using {os.path.relpath(target)}"
+                  + (f"  ({len(found) - 1} other project(s) found; pass a path to pick)"
+                     if len(found) > 1 else ""))
 
-    proj = Project(manifest)
-    if not proj.built:
+    # Opening with nothing is a normal state now, not an error. A distributed editor is
+    # launched from a dock or a Start menu with no arguments and no current directory
+    # worth guessing from; it should come up and offer to open or create a project.
+    proj = None
+    if target:
+        try:
+            proj = Project(target)
+        except (ValueError, OSError) as e:
+            print(f"could not open {target}: {e}", file=sys.stderr)
+
+    session = Session(proj)
+    if proj and not proj.built:
         print("note: assets are not built yet -- press Build in the editor")
+    if not proj:
+        print("no project open -- use Settings to open or create one")
 
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("127.0.0.1", args.port), make_handler(proj)) as srv:
+    with socketserver.TCPServer(("127.0.0.1", args.port), make_handler(session)) as srv:
         url = f"http://127.0.0.1:{args.port}/"
+        title = "pebblnyx"
         print(f"pebblnyx editor: {url}   (ctrl-c to stop)")
-        if not args.no_browser:
-            threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+
+        # The server runs on a thread so the window can own the main one, which is what
+        # every native UI toolkit requires.
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+
         try:
-            srv.serve_forever()
+            if args.no_browser:
+                threading.Event().wait()
+            elif args.browser or not open_window(url, title):
+                webbrowser.open(url)
+                threading.Event().wait()
         except KeyboardInterrupt:
             print("\nstopped")
+        finally:
+            srv.shutdown()
     return 0
 
 

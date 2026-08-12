@@ -221,6 +221,7 @@ static void test_target(void) {
 
 void test_assets(void);
 void test_gfx(void);
+void test_text(void);
 void test_audio(void);
 
 int main(void) {
@@ -230,6 +231,7 @@ int main(void) {
   test_arena();
   test_target();
   test_gfx();
+  test_text();
   test_assets();
   test_audio();
 

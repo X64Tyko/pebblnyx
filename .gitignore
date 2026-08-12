@@ -18,6 +18,10 @@ tools/__pycache__/
 __pycache__/
 *.py[cod]
 
+# Frozen editor binaries from tools/build_editor.py. Platform-specific and ~20MB each,
+# so they belong on a release page rather than in the history.
+dist/
+
 # Local environments and IDE state
 .venv/
 venv/

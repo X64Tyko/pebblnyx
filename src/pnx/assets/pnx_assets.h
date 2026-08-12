@@ -30,7 +30,7 @@
 
 // Every blob carries this, so a stale .bin against a newer runtime is a clean error
 // rather than garbage pixels. Bumped whenever a format changes.
-#define PNX_BLOB_VERSION 6
+#define PNX_BLOB_VERSION 7
 #define PNX_BLOB_HEADER_BYTES 8
 
 // ------------------------------------------------------------------- palettes
@@ -131,6 +131,76 @@ typedef struct {
   uint16_t entry_count;
 } PnxDialog;
 
+// ---------------------------------------------------------------------- fonts
+//
+// Glyphs are 1bpp or 2bpp, NOT the 4bpp everything else uses. Text has one colour, so
+// the four bits an atlas spends naming a palette entry would be three bits of waste per
+// pixel. 1bpp is ink or nothing; 2bpp adds two coverage levels the blitter blends
+// against whatever is already on screen.
+//
+// Every glyph is trimmed to its inked box, and positioned by a bearing from the pen and
+// from the BASELINE. Uniform cells would be simpler, but most glyphs occupy nowhere near
+// the full line box -- trimming is a wash at 12px and roughly halves a 24px face.
+//
+// Drawing lives in gfx/pnx_text.h; this is only the storage and the lookup.
+
+#define PNX_FONT_GLYPH_BYTES 8
+#define PNX_FONT_NO_GLYPH 0xFF   // codepoint map entry for a character the font lacks
+
+typedef struct {
+  const uint8_t *bitmaps;
+  const uint8_t *glyphs;     // glyph_count * PNX_FONT_GLYPH_BYTES
+  const uint8_t *map;        // one byte per codepoint in [first_cp, last_cp]
+  uint16_t glyph_count;
+  uint16_t bitmap_bytes;
+  uint8_t depth;             // 1 or 2
+  uint8_t line_height;       // ascent + descent: what to advance between lines
+  uint8_t baseline;          // ascent: top of the line box to the baseline
+  uint8_t space_advance;
+  uint8_t first_cp, last_cp;
+  uint8_t fallback;          // glyph drawn for a character the font does not carry
+} PnxFont;
+
+// One glyph's metrics, unpacked from the index. `bits` is NULL when the glyph has no ink
+// -- a space -- which the drawing loop treats as advance-only rather than as an error.
+typedef struct {
+  const uint8_t *bits;
+  uint8_t w, h;
+  uint8_t advance;
+  int8_t bearing_x;          // pen to the left edge of the bitmap
+  int8_t bearing_y;          // baseline to the TOP of the bitmap, positive upwards
+} PnxGlyph;
+
+bool pnx_font_load(PnxFont *out, uint16_t asset_id);
+
+// Never fails: an unmapped character resolves to the font's fallback glyph. A visible
+// substitute beats a silent gap, which reads as a layout bug rather than a missing
+// character.
+static inline uint8_t pnx_font_glyph_index(const PnxFont *f, char c) {
+  const uint8_t cp = (uint8_t)c;
+  if (cp < f->first_cp || cp > f->last_cp) return f->fallback;
+  const uint8_t g = f->map[cp - f->first_cp];
+  return g == PNX_FONT_NO_GLYPH ? f->fallback : g;
+}
+
+// No bounds check on `index`: the loader has already verified every map entry and every
+// bitmap offset, and this runs per character per frame.
+static inline void pnx_font_glyph(const PnxFont *f, uint8_t index, PnxGlyph *out) {
+  const uint8_t *e = f->glyphs + (uint32_t)index * PNX_FONT_GLYPH_BYTES;
+  out->w = e[2];
+  out->h = e[3];
+  out->advance = e[4];
+  out->bearing_x = (int8_t)e[5];
+  out->bearing_y = (int8_t)e[6];
+  out->bits = out->w ? f->bitmaps + (uint16_t)(e[0] | (e[1] << 8)) : NULL;
+}
+
+// Bytes per bitmap row. Rows are byte-aligned rather than a continuous bit stream, so a
+// row is indexed by multiply-and-add instead of tracked as a bit offset.
+static inline uint8_t pnx_font_row_bytes(const PnxFont *f, uint8_t w) {
+  return (uint8_t)(((uint16_t)w * f->depth + 7u) / 8u);
+}
+
 // Two arenas, because they have different lifetimes. `persistent` holds the scene table
 // and outlives everything; `scene` holds the assets a scene needs and is reset wholesale
 // at every scene boundary. Keeping them separate is what lets a scene load free its
@@ -159,8 +229,10 @@ const PnxAtlas *pnx_scene_atlas(uint8_t index);
 const PnxSprite *pnx_scene_sprite(uint8_t index);
 const PnxMap *pnx_scene_map(void);
 const PnxDialog *pnx_scene_dialog(void);
+const PnxFont *pnx_scene_font(uint8_t index);
 uint8_t pnx_scene_atlas_count(void);
 uint8_t pnx_scene_sprite_count(void);
+uint8_t pnx_scene_font_count(void);
 
 // Each returns false and leaves `out` untouched if the resource is missing, the blob is
 // the wrong type or version, or its declared dimensions do not match its actual size --

@@ -86,18 +86,247 @@ def parse_sprite(blob):
             "pixels": blob[HEADER + pad4(frames):], "frame_bytes": w * hh // 2}
 
 
-def parse_map(blob):
+MAP_INDEX_MASK = 0x03FF
+MAP_FLIP_X = 0x0400
+MAP_FLIP_Y = 0x0800
+
+
+def parse_map(blob, tile_count=0):
+    """Map format v2: u16 cells, plus an optional per-map palette remap table.
+
+    Cells are u16, not u8 -- ten bits of tile index, two flip bits, four reserved for a
+    per-cell palette. This reader was left on the v1 u8 layout when the format changed,
+    which made every rendered map past the first row garbage. `tile_count` comes from the
+    atlas and sizes the optional palette table; without it a map that carries one is
+    misread, so callers that have the atlas should pass it.
+    """
     h = parse_header(blob)
     w, hh, warps = h["a"], h["b"], h["c"]
+
     n_over = int.from_bytes(blob[HEADER:HEADER + 2], "little")
+    has_palette = blob[HEADER + 2]
     at = HEADER + 4
-    tiles = list(blob[at: at + w * hh])
-    at += w * hh
+
+    pal_table = list(blob[at: at + tile_count]) if has_palette else []
+    at += tile_count if has_palette else 0
+
+    cells = [int.from_bytes(blob[at + i * 2: at + i * 2 + 2], "little")
+             for i in range(w * hh)]
+    at += w * hh * 2
+
     over = [(blob[at + i * 3], blob[at + i * 3 + 1], blob[at + i * 3 + 2])
             for i in range(n_over)]
     at += n_over * 3
     warp_list = [tuple(blob[at + i * 5: at + i * 5 + 5]) for i in range(warps)]
-    return {"w": w, "h": hh, "tiles": tiles, "overrides": over, "warps": warp_list}
+
+    return {"w": w, "h": hh,
+            "tiles": [c & MAP_INDEX_MASK for c in cells],
+            "flips": [((c & MAP_FLIP_X) != 0, (c & MAP_FLIP_Y) != 0) for c in cells],
+            "tile_palette": pal_table,
+            "overrides": over, "warps": warp_list}
+
+
+# ----------------------------------------------------------------------------- font
+
+def parse_font(blob):
+    """PF: metrics, a glyph index, a codepoint map and a bitmap block.
+
+    Parsed rather than re-rasterised so the editor's preview draws the exact bytes that
+    would ship. Re-rasterising for preview is how a preview and a build drift apart.
+    """
+    h = parse_header(blob)
+    depth, line_height, baseline = h["a"], h["b"], h["c"]
+
+    count = int.from_bytes(blob[HEADER:HEADER + 2], "little")
+    bitmap_bytes = int.from_bytes(blob[HEADER + 2:HEADER + 4], "little")
+    first_cp, last_cp = blob[HEADER + 4], blob[HEADER + 5]
+    fallback, space_advance = blob[HEADER + 6], blob[HEADER + 7]
+
+    at = HEADER + 8
+    glyphs = []
+    for i in range(count):
+        e = blob[at + i * 8: at + i * 8 + 8]
+        glyphs.append({
+            "offset": int.from_bytes(e[:2], "little"),
+            "w": e[2], "h": e[3], "advance": e[4],
+            # Bearings are signed bytes; a negative x bearing is ordinary in italics
+            # and in some lowercase 'j'.
+            "bearing_x": e[5] - 256 if e[5] > 127 else e[5],
+            "bearing_y": e[6] - 256 if e[6] > 127 else e[6],
+        })
+    at += count * 8
+
+    cp_map = list(blob[at: at + (last_cp - first_cp + 1)])
+    at += last_cp - first_cp + 1
+
+    return {"depth": depth, "line_height": line_height, "baseline": baseline,
+            "glyph_count": count, "bitmap_bytes": bitmap_bytes,
+            "first_cp": first_cp, "last_cp": last_cp,
+            "fallback": fallback, "space_advance": space_advance,
+            "glyphs": glyphs, "map": cp_map, "bitmaps": blob[at: at + bitmap_bytes]}
+
+
+def font_glyph_index(font, ch):
+    cp = ord(ch)
+    if cp < font["first_cp"] or cp > font["last_cp"]:
+        return font["fallback"]
+    g = font["map"][cp - font["first_cp"]]
+    return font["fallback"] if g == 0xFF else g
+
+
+def glyph_levels(font, index):
+    """A glyph's coverage levels as rows, 0..(2**depth - 1)."""
+    g = font["glyphs"][index]
+    if not g["w"]:
+        return []
+    depth = font["depth"]
+    stride = (g["w"] * depth + 7) // 8
+    mask = (1 << depth) - 1
+    rows = []
+    for j in range(g["h"]):
+        base = g["offset"] + j * stride
+        row = []
+        for i in range(g["w"]):
+            bit = i * depth
+            byte = font["bitmaps"][base + (bit >> 3)]
+            row.append((byte >> (8 - depth - (bit & 7))) & mask)
+        rows.append(row)
+    return rows
+
+
+def font_text_width(font, s):
+    return sum(font["glyphs"][font_glyph_index(font, c)]["advance"]
+               for c in s if c != "\n")
+
+
+def font_wrap(font, s, width):
+    """Break `s` into lines at `width`.
+
+    **Mirrors next_line() in src/pnx/gfx/pnx_text.c and must stay in step with it** --
+    a preview that wraps differently from the runtime is worse than no preview, because
+    it looks authoritative. The same cases are asserted on both sides: test_text.c for
+    the C, test_assets.py for this.
+    """
+    lines, i, n = [], 0, len(s)
+    while i < n:
+        last_space, w, j = None, 0, i
+        while j < n:
+            if s[j] == "\n":
+                break
+            adv = font["glyphs"][font_glyph_index(font, s[j])]["advance"]
+            if width > 0 and w + adv > width and j != i:
+                break
+            if s[j] == " ":
+                last_space = j
+            w += adv
+            j += 1
+
+        if j < n and s[j] == "\n":
+            lines.append(s[i:j])
+            i = j + 1
+            continue
+        if j >= n:
+            lines.append(s[i:j])
+            break
+
+        end = last_space if last_space is not None else j
+        nxt = (last_space + 1) if last_space is not None else j
+        while nxt < n and s[nxt] == " ":
+            nxt += 1
+        lines.append(s[i:end])
+        i = nxt
+    return lines
+
+
+# The 2bpp blend, mirroring s_blend_13 / s_blend_23 in pnx_text.c. Expressed as the
+# formula the C tables were generated from, so the preview cannot drift from a typo.
+def _blend_channel(ink, dst, k):
+    return (ink * k + dst * (3 - k) + 1) // 3
+
+
+def font_draw(img, font, s, x, baseline_y, rgb):
+    """Draws `s` onto a PIL RGBA image at a baseline, exactly as the blitter would.
+
+    Levels below full coverage blend against what is already in the image, which is why
+    the preview has to composite over the real background rather than draw text on a
+    swatch and trust it.
+    """
+    put = img.load()
+    pen = x
+    ink = tuple(min(3, c // 85) for c in rgb[:3])
+
+    for ch in s:
+        if ch == "\n":
+            break
+        gi = font_glyph_index(font, ch)
+        g = font["glyphs"][gi]
+        rows = glyph_levels(font, gi)
+        top = baseline_y - g["bearing_y"]
+
+        for j, row in enumerate(rows):
+            py = top + j
+            if not 0 <= py < img.height:
+                continue
+            for i, level in enumerate(row):
+                if level == 0:
+                    continue
+                px_x = pen + g["bearing_x"] + i
+                if not 0 <= px_x < img.width:
+                    continue
+                if level == (1 << font["depth"]) - 1:
+                    put[px_x, py] = rgb + (255,)
+                    continue
+                dst = put[px_x, py]
+                dst_q = tuple(min(3, c // 85) for c in dst[:3])
+                k = level                     # depth 2: level 1 -> k=1, level 2 -> k=2
+                blended = tuple(_blend_channel(ink[c], dst_q[c], k) * 85
+                                for c in range(3))
+                put[px_x, py] = blended + (255,)
+
+        pen += g["advance"]
+    return pen - x
+
+
+def font_draw_wrapped(img, font, s, x, baseline_y, width, rgb, align="left"):
+    """Word-wrapped draw. Returns the number of lines drawn."""
+    lines = font_wrap(font, s, width)
+    for n, line in enumerate(lines):
+        lx = x
+        if align != "left":
+            lw = font_text_width(font, line)
+            lx += (width - lw) // 2 if align == "center" else (width - lw)
+        font_draw(img, font, line, lx, baseline_y + n * font["line_height"], rgb)
+    return len(lines)
+
+
+def font_sheet(font, scale=3, cols=16):
+    """The glyph atlas as a labelled grid -- the view that shows a broken glyph."""
+    cell_w = max(8, max((g["advance"] for g in font["glyphs"]), default=8) + 2)
+    cell_h = font["line_height"] + 2
+    rows = (font["glyph_count"] + cols - 1) // cols
+
+    img = Image.new("RGBA", (cols * cell_w, rows * cell_h), (0, 0, 0, 0))
+    for i in range(font["glyph_count"]):
+        ox, oy = (i % cols) * cell_w, (i // cols) * cell_h
+        cell = Image.new("RGBA", (cell_w, cell_h), (0, 0, 0, 0))
+        _draw_glyph_into(cell, font, i, 1, font["baseline"], (255, 255, 255))
+        img.paste(cell, (ox, oy))
+
+    return img.resize((img.width * scale, img.height * scale), Image.NEAREST)
+
+
+def _draw_glyph_into(img, font, index, x, baseline_y, rgb):
+    put = img.load()
+    g = font["glyphs"][index]
+    for j, row in enumerate(glyph_levels(font, index)):
+        py = baseline_y - g["bearing_y"] + j
+        if not 0 <= py < img.height:
+            continue
+        for i, level in enumerate(row):
+            px_x = x + g["bearing_x"] + i
+            if level and 0 <= px_x < img.width:
+                scale = level / ((1 << font["depth"]) - 1)
+                put[px_x, py] = tuple(int(c * scale) for c in rgb) + (255,)
 
 
 # ------------------------------------------------------------------------ rendering
@@ -360,7 +589,8 @@ def build_report(manifest_path, out_path):
     # --- maps, drawn with their real tiles
     first_atlas = next(iter(atlases.values()), None)
     for spec in man.get("map", []):
-        mp = parse_map(read(os.path.join(res, spec["out"])))
+        mp = parse_map(read(os.path.join(res, spec["out"])),
+                       first_atlas["count"] if first_atlas else 0)
         warps = ", ".join(f"({w[0]},{w[1]}) &rarr; map {w[2]} at ({w[3]},{w[4]})"
                           for w in mp["warps"]) or "none"
         H.append(f'<section><h2>Map &ldquo;{spec["name"]}&rdquo; '

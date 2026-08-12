@@ -36,12 +36,52 @@ in-proc time rose, render-wait fell by exactly as much.
 | 64 sprites 16x16, masked, + clear | 1,350–1,600 µs | 4% |
 | 725 tile blits (full-screen 16px tilemap) | 2,350 µs | 7% |
 | Computed value per pixel (pessimal) | 3,100 µs | 9% |
-| One text draw | ~4,300 µs | 12% |
+| One SDK text draw (`graphics_draw_text`) | ~4,300 µs | 12% |
 | **4bpp tilemap + sprites, full screen** | **~5,100 µs** | **14.5%** |
+| One glyph-blitter text draw | **not yet measured** | — |
 
 `LayerUpdateProc` is the **only** way to obtain a `GContext` — there is no
 `graphics_context_create()`. Rendering goes through `graphics_capture_frame_buffer()`
 plus `gbitmap_get_data_row_info()`, writing `GBitmapFormat8Bit` bytes directly.
+
+**The glyph blitter (E7) has no device number yet, and the gap in that table is
+deliberate.** The reasoning says it should be far cheaper than the SDK path — 1bpp writes
+one byte per set pixel with no palette read, against `span_4bpp`'s unpack-and-index — but
+that is an argument, not a measurement, and the M3 blit estimate was wrong by 2.4x for
+exactly this kind of reasoning. The replacement's whole justification is the 4,300 µs it
+is supposed to remove, so the number wants taking before the claim is repeated. It also
+needs a 2bpp figure, which is strictly more expensive: intermediate levels read the
+destination and blend three channels.
+
+## Font costs (E7)
+
+Measured on `examples/overworld` with Liberation Sans, glyph sets derived from the
+manifest's dialog pages:
+
+| Face | Size | Depth | Glyphs | Bitmaps | Blob |
+|---|---|---|---|---|---|
+| `hud` | 12px | 1bpp | 40 | 331 B | **757 B** |
+| `dialogue` | 16px | 2bpp | 27 | 580 B | **902 B** |
+
+Three things the numbers show:
+
+- **`charset = "auto"` is most of the saving.** The HUD face carries 40 glyphs because
+  that is what the dialog pages plus `extra` actually use. All 95 printable ASCII would
+  roughly double it for characters the game never draws.
+- **The index is a real fraction of a small font.** 8 bytes a glyph is 320 B of the HUD
+  face's 757 — bigger than a third of it. That is the price of trimming glyphs to their
+  inked box and carrying per-glyph bearings, and it is still the cheaper side of the
+  trade: uniform cells cost more in bitmap than they save in index, and the margin widens
+  with size.
+- **2bpp is not 2x.** The dialogue face is 27 glyphs at 16px against 40 at 12px, so the
+  depths are not directly comparable — but the bitmap block is 580 B for 27 antialiased
+  glyphs against 331 B for 40 crisp ones, which is roughly the doubling per glyph you
+  would expect and no worse.
+
+Engine cost of the whole feature: **+662 B in `gfx`** (the blitter, both span writers, the
+32-byte blend table, wrapping and measuring) and **+993 B in `assets`** (the loader, its
+validation, and two more scene slots). The overworld example went from 12,208 to
+**14,784 of 65,535 bytes (22.6%)**.
 
 ## Memory
 

@@ -73,6 +73,16 @@
         },
         {
           "type": "raw",
+          "name": "HUD",
+          "file": "font_hud.bin"
+        },
+        {
+          "type": "raw",
+          "name": "DIALOGUE",
+          "file": "font_dialogue.bin"
+        },
+        {
+          "type": "raw",
           "name": "SCENES",
           "file": "scenes.bin"
         }

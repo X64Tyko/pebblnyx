@@ -65,6 +65,42 @@ out = "npc.bin"
 # another 192-byte copy of the frame. The pipeline checks they really are recolours.
 variants = ["art/npc_ice.png", "art/npc_rust.png"]
 
+# ----------------------------------------------------------------------------- fonts
+
+# Two faces, because a HUD and a dialogue box want different things: the HUD needs to
+# stay out of the way and be readable at a glance, dialogue needs to be comfortable for
+# a paragraph. They are the same system with a glyph map each.
+#
+# `license` is required. Rasterising a typeface into the bundle redistributes it even
+# though the outlines stay behind, so the terms are recorded here rather than remembered.
+
+[[font]]
+name = "hud"
+source = "art/fonts/LiberationSans-Regular.ttf"
+size = 12
+depth = 1              # crisp: at 12px, antialiasing muddies more than it smooths
+threshold = 128        # the greyscale cutoff. Move it in the editor and watch stems
+                       # appear and vanish -- there is no correct value, only a legible
+                       # one for a given face at a given size.
+# Derived from the dialog pages below, so the atlas carries what the game actually says
+# and nothing else. `extra` covers runtime strings no page contains -- a damage number
+# appears in no conversation.
+charset = "auto"
+extra = "0123456789/%:"
+license = "SIL Open Font License 1.1"
+out = "font_hud.bin"
+
+[[font]]
+name = "dialogue"
+source = "art/fonts/LiberationSans-Regular.ttf"
+size = 16
+depth = 2              # antialiased: at 16px the extra coverage levels are legible
+                       # rather than muddy, and dialogue is read rather than glanced at
+threshold = 24         # at depth 2 this is the black point, not a cutoff
+charset = "auto"
+license = "SIL Open Font License 1.1"
+out = "font_dialogue.bin"
+
 # ---------------------------------------------------------------------------- legend
 
 [legend."."]
@@ -176,12 +212,16 @@ pages = ["Still here?"]
 map = "outdoor"
 atlases = ["tiles"]
 sprites = ["hero", "npc"]
+fonts = ["hud", "dialogue"]
 dialog = true
 
 [scene.cave]
 map = "cave"
 atlases = ["caveset"]
 sprites = ["hero"]
+# No dialogue face here: the cave has no conversations, and a font it never draws is
+# ~900 bytes of scene arena spent on nothing.
+fonts = ["hud"]
 
 
 [[atlas]]

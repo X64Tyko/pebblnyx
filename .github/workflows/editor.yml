@@ -1,0 +1,196 @@
+# Builds the editor for every desktop platform, and releases it on a tag.
+#
+# The editor carries the pnx engine inside it -- a project anywhere on disk builds
+# against the copy in the editor doing the building. So these artefacts are not just a
+# GUI: they are the whole authoring and compiling side of the framework, minus the Pebble
+# SDK, which cannot be redistributed and is installed from the editor's Settings tab
+# instead. See docs/EDITOR.md.
+#
+# Deliberately NOT signed or notarised. That needs an Apple Developer account and a
+# Windows code-signing certificate, neither of which exists yet; until they do, macOS
+# users need one right-click-Open and Windows users may see SmartScreen. Recorded here
+# rather than discovered on a release day.
+
+name: editor
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write        # needed by the release job; the rest only read
+
+jobs:
+  # Runs first and gates the builds. Producing installers from a tree whose tests fail
+  # is worse than producing none, because the artefact looks legitimate.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pipeline dependencies
+        run: python -m pip install --upgrade pip pillow
+
+      # tests/test_assets.py needs a real TTF to exercise the font pipeline, and it
+      # SKIPS rather than fails when it cannot find one. A suite that quietly stops
+      # testing a feature is worse than one that fails, so the font is installed
+      # explicitly rather than hoped for.
+      - name: Install a font for the rasteriser tests
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq fonts-dejavu-core
+
+      - name: Fail if the font tests would skip
+        run: |
+          python -c "
+          import sys; sys.path.insert(0, 'tests')
+          import test_assets
+          assert test_assets.TEST_TTF, 'no TTF found; the font tests would silently skip'
+          print('font tests will run against', test_assets.TEST_TTF)"
+
+      # Must come FIRST. The generated header and the .bin blobs are derived from the
+      # manifest and therefore gitignored, and tests/test_assets.c #includes the header
+      # and reads those blobs -- so on a fresh checkout the host tests do not compile
+      # until the pipeline has run.
+      - name: Examples build through the pipeline
+        run: |
+          for m in examples/*/assets.toml; do
+            echo "--- $m"
+            python tools/pnx_assets.py "$m"
+          done
+
+      - name: Host tests (framework)
+        run: make -C tests test-c
+
+      - name: Pipeline tests (asset validation)
+        run: python tests/test_assets.py
+
+      # The scaffold is what every new project starts from, so "it compiles" is a claim
+      # worth checking on every push rather than the first time someone tries it.
+      - name: Scaffold a project and build its assets
+        run: |
+          python - <<'PY'
+          import sys, tempfile, os
+          sys.path.insert(0, 'tools')
+          import pnx_project as pp, pnx_assets as pa
+          d = os.path.join(tempfile.mkdtemp(), 'ci-game')
+          pp.create(d, 'CI Game')
+          assert os.path.exists(os.path.join(d, '.pknproj'))
+          assert os.path.exists(os.path.join(d, 'src', 'c', 'pnx', 'pnx.h')), 'engine not staged'
+          pa.build(os.path.join(d, 'assets.toml'), None, None,
+                   package=os.path.join(d, 'package.json'))
+          print('scaffold builds:', d)
+          PY
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04       # oldest glibc we support; newer would not run on it
+            tag: linux-x86_64
+            artifact: '*.tar.gz'
+          - os: windows-latest
+            tag: windows-x86_64
+            artifact: '*.zip'
+          - os: macos-13           # Intel
+            tag: macos-x86_64
+            artifact: '*.dmg'
+          - os: macos-14           # Apple silicon
+            tag: macos-arm64
+            artifact: '*.dmg'
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip pyinstaller pillow
+
+      # pywebview gives the editor a native window instead of a browser tab. Its backend
+      # is per-platform, and Linux is the one that does not work out of the box: the GTK
+      # binding (PyGObject) does not survive PyInstaller cleanly and the Qt one would add
+      # ~200MB. So Linux ships the browser fallback, which is a supported path rather
+      # than a defect -- the app is still one file that needs no install.
+      - name: Install native-window backend (Windows)
+        if: runner.os == 'Windows'
+        run: python -m pip install pywebview
+
+      - name: Install native-window backend (macOS)
+        if: runner.os == 'macOS'
+        run: python -m pip install pywebview pyobjc-core pyobjc-framework-Cocoa pyobjc-framework-WebKit
+
+      - name: Build and package
+        run: python tools/build_editor.py --clean --package
+
+      # A binary that starts, serves, and reports the engine it carries. Catches the
+      # failure this whole design is exposed to: PyInstaller silently omitting the
+      # bundled engine, which would produce an editor that opens projects and cannot
+      # build one.
+      - name: Smoke test the binary
+        shell: bash
+        run: |
+          BIN=dist/pebblnyx-editor
+          [ "$RUNNER_OS" = "Windows" ] && BIN=dist/pebblnyx-editor.exe
+          "$BIN" --port 8899 --no-browser &
+          PID=$!
+          sleep 12
+          curl -sf http://127.0.0.1:8899/api/state > /dev/null || { echo "server did not start"; exit 1; }
+          curl -sf http://127.0.0.1:8899/api/project/recent > recent.json || exit 1
+          cat recent.json
+          python -c "import json;d=json.load(open('recent.json'));assert d['have_engine'],'engine missing from the bundle';print('engine',d['engine'],'OK')"
+          kill $PID || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pebblnyx-editor-${{ matrix.tag }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - run: ls -la artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          draft: true          # a human decides when it is actually published
+          generate_release_notes: true
+          body: |
+            ## pebblnyx editor
+
+            One self-contained file — no Python, no install. Pick the one for your machine:
+
+            | | |
+            |---|---|
+            | **Windows** | `windows-x86_64.zip` |
+            | **macOS** (Apple silicon) | `macos-arm64.dmg` |
+            | **macOS** (Intel) | `macos-x86_64.dmg` |
+            | **Linux** | `linux-x86_64.tar.gz` |
+
+            The **pnx engine ships inside the editor**: create a project anywhere and it
+            builds against the engine in the editor doing the building.
+
+            **The Pebble SDK is not included** and cannot be — Pebble licenses it to you
+            personally and its terms forbid redistribution. Everything except producing a
+            `.pbw` works without it; the Settings tab shows the licence and installs it
+            for you on request.
+
+            Not code-signed yet: macOS needs one right-click → Open on first launch, and
+            Windows may show a SmartScreen prompt.

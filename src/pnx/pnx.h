@@ -27,6 +27,10 @@
 #include "gfx/pnx_sprite.h"
 #endif
 
+#if PNX_USE_TEXT
+#include "gfx/pnx_text.h"
+#endif
+
 #if PNX_USE_AUDIO
 #include "audio/pnx_audio.h"
 #endif
