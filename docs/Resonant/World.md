@@ -221,6 +221,73 @@ swaps -- a content cost arriving exactly where the budget is tightest. Budget fo
 new enemy designs for the last act and take them out of the earlier zones' allowance, not on top
 of it.
 
+## The finale
+
+**Moireage steals the Cores hours before.** That is not a setback, it is the summoning -- he needed four
+and the party was carrying three. **Their loss is what causes the boss**, which is a far better causal
+chain than him acquiring them offscreen. And it means the party enters the last fight high-level and
+feeling feeble: no boosts, no transformation, all the numbers they earned and none of the power.
+
+**Runigran calls them Soulitica Cores.** The true name, lost with the rest of the history Moireage
+forged. He is older than the forgery and does not use the word "Node" at all.
+
+### Phase 1 -- toyed with
+
+He does not fight. He examines them. Nothing they do lands meaningfully.
+
+**This must not be a loss the player can fail.** "Toying" means he is not trying to kill them, so the
+phase ends on a turn count or a script beat, never on a wipe. An unwinnable fight that also kills you
+teaches the player to distrust the game.
+
+### Phase 2 -- the Cores returned
+
+**He gives them back.** Not hubris exactly -- *connoisseurship*. He designed four stones for four bearers
+against one god and has waited an age for that fight. A party without Cores is not the battle he wants,
+and he will not accept a cheap one. That costs nothing to stage and it is truer to him than scattering
+them and making the party go fetch, which would stall the finale for a dungeon segment.
+
+**Each instinctively knows which is theirs.** OPRA gravitates to one and is uneasy with it:
+
+> *"You feel so familiar…"*
+
+It is the Core Moireage carried. She is bonding with the stone of the man who destroyed her, and nobody
+in the scene knows that but the player.
+
+Equipped, they Resonate. The damage numbers become enormous -- **and it is not enough.** A few rounds
+prove it, which is the damage number system doing narrative work: the player has to see large numbers
+fail, or the next beat reads as the game cheating.
+
+### Phase 3 -- the realisation
+
+Runigran's diatribe: they are plainly not up to *wielding* the Cores. He is right, and wrong about why he
+thinks it is funny.
+
+**OPRA hears hers speak.** She is the one person present who has had a core inside her against her will
+and lived -- so she is the one who recognises a voice rather than a tool. She transforms on the spot.
+
+> **GORD:** `SOUL BOND 100%. DESTABILIZATION . . . NONE`
+
+That line is the whole game paying out. The thing that was killing Van, the thing he wanted cut out of
+him, the thing that made him fear becoming an animal -- answered by **connection**, not removal. And it
+lands on GORD, who reports state and never opinion, which makes it land harder than any person saying it.
+
+### Phase 4 -- full power, permanent
+
+The party bursts into a sustained form of their transformation. No gauge, no drain, no auto-trigger:
+**the meter is simply gone**, replaced by Soul Bond.
+
+### The question this leaves
+
+**OPRA is optional.** If she died at Node 2, who has the realisation?
+
+Handing it to Van is weak -- he has carried a Core longest and should have noticed. Kell reasoning it out
+undercuts her being wrong about the history. The strongest answer is that **without OPRA it costs
+something**: whoever is bearing two Cores is pushed to the edge of burning out, and hears one *there*.
+Same revelation, arrived at through damage instead of recognition, and it makes the branch change the
+texture of the finale rather than just its cast.
+
+**Still to decide**, and it is the last real gap in the outline.
+
 ## The facility
 
 Sector 4 of a research installation. Two zones in the slice:
