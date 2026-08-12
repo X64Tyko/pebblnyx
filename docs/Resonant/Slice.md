@@ -5,13 +5,19 @@ time and currently none of the document.
 
 ## The session constraint
 
-This is played on a wrist, in ninety-second windows, and it can be interrupted at any moment
-by a notification -- which throttles rendering to ~0.4 fps until dismissed. Two rules follow:
+**Design for interruptibility, not for brevity.** Those are different things and conflating them was
+a mistake in the first draft of this document.
 
-- **Never more than ~45 seconds between save-safe points.** Save-on-blur is viable (297 ms of
-  warning against a 106 ms save), so the game should always be in a state worth restoring.
-- **Never punish an interruption.** No timers that run while the app is covered, no fights
-  that fail because attention left. Combat is turn-based partly for this reason.
+The device can be taken off and played with two hands, which is how it is actually comfortable --
+see [`../PLATFORM.md`](../PLATFORM.md). So sessions are not inherently ninety seconds long and the
+slice does not need to be a series of ninety-second chunks. What remains true is that a notification
+can arrive at any moment and throttles rendering to ~0.4 fps until dismissed.
+
+- **Never punish an interruption.** No timers that run while the app is covered, no fight that fails
+  because attention left. ATB gauges advance on the sim tick for exactly this reason.
+- **Always be in a state worth restoring.** Save-on-blur is viable -- ~297 ms of warning against a
+  106 ms write -- so a notification never costs progress.
+- **Do not pad for short attention.** A 26-minute slice is fine, and probably short.
 
 ## Cold open
 

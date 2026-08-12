@@ -69,6 +69,7 @@ in [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md).
 ## Layout
 
 ```
+docs/PLATFORM.md      how these games are actually played: off the wrist, in two hands
 docs/GAME.md          the game this is built for, and what it demands
 docs/EDITOR.md        the visual editor: levels, assets, embedded emulator, packaging
 docs/DESIGN.md        architecture, rationale, API sketches
