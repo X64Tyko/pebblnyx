@@ -48,8 +48,11 @@ good about not resolving which dominates.
 - Corrects people. It is her primary verbal habit.
 - Her warmth arrives as concession, never as declaration: "...Fair point." "Fine. A partner.
   For now."
-- She is wrong about something at least once. Currently she never is, which makes her an
-  oracle rather than a person. **Open:** pick the thing she gets wrong. Slice-level, not deferred.
+- **The thing she is wrong about is settled, and the plot supplies it.** In Event 06B she tells Van he is
+  "the first living sample that didn't burn out." Moireage has been bearing a stone since before the
+  record was falsified. Her ten years of research rest on a history he forged, so her most confident
+  claim -- the one that makes Van feel singular -- is false, and she has no way to know it. That is the
+  correction the character needed and it costs nothing to plant, because the line is already written.
 
 ## GORD - from a mispronunciation of guard
 
@@ -84,14 +87,28 @@ accidental.
 the player gets. Then she transforms into something dark and feral: Van's fear made literal, wearing
 the face of someone he knew. She is the demonstration Kell's lucid transformation refutes.
 
-## The Client
+## Moireage -- the Client
 
-Unseen, unnamed, referenced three times. Should stay that way for the whole slice.
+Unnamed and unseen through the whole slice; referenced three times and no more.
 
-**He is wrong about what he is building.** He knows four Nodes make a god and intends to be it; what
-actually happens is that his body is the sacrifice and the Pirearch Runigran is what arrives. He is a
-means who believes he is an end, which is a more interesting antagonist than a competent one -- and it
-means he never needs a scene explaining himself, because he does not know the thing worth explaining. The final
+**He is a Vessel, and he is very old.** One of the original four bearers, a protector whose methods ran
+harder than the rest and who believed -- rightly or not -- that his people saw an animal rather than a
+guardian. He lost the will to keep suffering for them, went after the other three stones, found he could
+never approach a sealed one, and spent however long it took **erasing the history of the stones instead**.
+Everything the world believes about Resonance is his forgery. Then he withdrew to desolation with a few
+servants and began manufacturing synthetic Nodes.
+
+**He is wrong about what he is building.** He knows four combined make a god and intends to be it; what
+actually happens is that his body is the door and Runigran is what comes through. A means who believes he
+is an end -- which is a better antagonist than a competent one, and means he never needs a scene
+explaining himself, because he does not know the part worth explaining.
+
+**He is Van's mirror, and the third answer to the question Van is asking.** A bearer who accepted the
+story that he was a monster. OPRA shows what a stone does to you acutely and against your will; Moireage
+shows what it does chronically and by consent; Kell shows it does nothing of the kind. Van picks.
+
+**Voice, when he finally speaks:** not grandiose. Someone who stopped explaining himself to people a very
+long time ago. The final
 exchange -- "You think it's just one client?" -- is the hook, and it only holds if the player
 has been given nothing to guess with.
 

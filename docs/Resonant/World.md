@@ -43,15 +43,43 @@ mechanic that carries the endgame is unlocked by the character finally trusting 
 Protect that ordering in revision. Everything above works because the demonstration precedes the
 refutation and both precede the second Node.
 
+## The history, which Moireage erased
+
+**Runigran gave the stones to humanity**, and he gave them for a reason. He expected four bearers filled
+with fury and power, wars fought with them, and a summoning at the end of it -- **a four-against-one he
+designed and wanted**. The stones are not a gift and not a trap exactly. They are an invitation to a
+fight.
+
+**Humanity declined.** They separated the four, locked them apart, and used them to make life better.
+For a long time that held.
+
+**Then one bearer lost his will to suffer for his people.** His methods ran harder than the others', and
+they never looked at him as a protector -- only as a wild animal. *Or so he thought.* That clause is the
+tragedy: if they did see him and he could not perceive it, everything after rests on a misreading, and
+the truth can never reach him.
+
+He snapped, and went hunting the other three. And he learned the thing that has shaped everything since:
+**no stone can approach another that has been sealed.** He could never simply take them.
+
+So he did something slower. **He travelled, telling tales, eroding the history of the stones** until what
+remained was wrong -- until the record said three, and said that a stone weaponises a Resonant and then
+kills them. **The account everyone believes is his forgery.** It took long enough that nobody alive
+remembers otherwise.
+
+When the work was done he fled to desolation, kept a handful of servants, and started again from a new
+idea: *if they will not let me have their stones, I will make my own.*
+
+**That is the Client. His name is Moireage.**
+
 ## What the Nodes are for
 
 Three answers exist. Two of them are wrong, and the wrongness is load-bearing.
 
-**What the world believes:** a Node turns a Resonant into a weapon, and then kills them. This is the
-common account and it is *half true* -- Destabilisation is real and vessels do burn out -- which is
-exactly why nobody questions it. It is also **Van's fear, stated as fact by everyone around him**: he
-is being made into a thing and then discarded. His arc is not him overcoming a personal anxiety, it is
-him discovering the world is wrong.
+**What the world believes:** a Node turns a Resonant into a weapon, and then kills them. Half true --
+Destabilisation is real and vessels do burn out -- which is why it was believable enough to plant, and
+**Moireage planted it.** It is also **Van's fear, stated as fact by everyone around him**: he is being
+made into a thing and then discarded. His arc is not overcoming a personal anxiety, it is discovering
+that the world was lied to by the man he is chasing.
 
 **What the Client believes:** four Nodes combined make a god, and he intends to be it. He is right
 about the first half. He is the only person alive who knows it, which is why he is dangerous and why he
@@ -77,8 +105,16 @@ knew either fact.
 
 ### Four Nodes, four bearers -- and why that is not a coincidence
 
-Four characters for four Nodes is too neat as a given. It is not given: **OPRA is optional**, won or
-lost on the stun branch at Node 2.
+**Runigran designed it that way.** Four stones, four bearers, one god: the configuration he handed
+humanity in the hope of eventually facing it. So the symmetry is not the writer being tidy, it is the
+antagonist getting precisely the fight he asked for -- and the party walking into it is the completion of
+a plan older than the record.
+
+Which leaves a line worth having at the climax: what Runigran makes of humanity having used his
+invitation to build hospitals.
+
+The branch then decides whether the party meets his design or falls short of it. **OPRA is optional**,
+won or lost on the stun branch at Node 2.
 
 | Path | Bearers | The climax |
 |---|---|---|

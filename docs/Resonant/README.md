@@ -39,7 +39,8 @@ that answering early would only constrain:
 | Question | Where | Why it can wait |
 |---|---|---|
 | ~~What the Nodes are *for*~~ | `World.md` | **Settled.** The world believes they weaponise then kill a Resonant (half true, hence credible). The Client believes four make a god and he will be it (right, then wrong). Truth: his body is the sacrifice and the Pirearch Runigran is what arrives. |
-| Does anyone alive state the sacrifice truth? | `World.md` | Leaning no -- the player infers it. Nobody knowing is more frightening and no character has to carry an exposition scene. |
+| Does anyone alive state the sacrifice truth? | `World.md` | Leaning no -- the player infers it. Moireage knows the god part and not the sacrifice; nobody else has an unforged history to reason from. |
+| Runigran or Runigan? | -- | Spelled both ways so far. Docs use **Runigran**; say which and it is one find-and-replace. |
 | Does transformation stay auto-triggered in the final fight? | `World.md`, `Combat.md` | If only node-bonded transformation damages Runigran, an auto-trigger gates the fight on a meter the player does not control. Likely answer: bearing a Node changes the rules there. |
 | Is Van Subject 7? | `World.md` | Plays either way as written. Changes whether Van is *returning* to this place or arriving at it. |
 | ~~How many Nodes?~~ | `World.md` | **Settled: four, one held by the Client**, and the number erased from history so everyone says three. The party reaches ~60% holding three; the final act is taking his. |
