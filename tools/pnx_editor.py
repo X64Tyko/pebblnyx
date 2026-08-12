@@ -20,6 +20,7 @@ Usage:
 
 import argparse
 import contextlib
+import errno
 import http.server
 import io
 import json
@@ -4383,6 +4384,13 @@ def make_handler(session):
                 from urllib.parse import urlparse, parse_qs
                 q = parse_qs(urlparse(self.path).query)
                 self._send(200, json.dumps(browse((q.get("path") or [None])[0])))
+            elif self.path == "/api/ping":
+                # So a second launch can recognise the first one without guessing from
+                # the shape of a state payload.
+                self._send(200, json.dumps({"app": "pebblnyx-editor",
+                                            "version": pp.EDITOR_VERSION,
+                                            "project": session.proj.root
+                                            if session.proj else None}))
             elif self.path == "/api/update":
                 # Cached, so the start-up check and every visit to Settings do not each
                 # spend one of GitHub's 60 unauthenticated requests an hour.
@@ -4596,6 +4604,65 @@ def _ensure_streams():
             setattr(sys, name, open(os.devnull, "w"))
 
 
+def already_ours(port):
+    """True if the thing on this port is another copy of this editor.
+
+    Asked before doing anything drastic about a busy port, because the answer changes
+    what should happen: another editor means the user launched twice and wants the one
+    that is already up, while a stranger on the port means move aside quietly.
+    """
+    for path in ("/api/ping", "/api/state"):
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}{path}", timeout=1.5) as r:
+                body = json.load(r)
+        except Exception:                                # noqa: BLE001
+            continue
+        if not isinstance(body, dict):
+            continue
+        # /api/ping says so outright; older builds have no ping, so a state payload with
+        # the keys only this editor emits stands in for one.
+        if body.get("app") == "pebblnyx-editor":
+            return True
+        if "no_project" in body or {"legend", "atlases", "maps"} <= set(body):
+            return True
+    return False
+
+
+def claim_port(args, session):
+    """Handle a busy port without a traceback. Returns (server, port), or (None, None).
+
+    Two situations, and only one of them is a problem:
+
+    A second launch of an editor that is already running -- a double-click on something
+    already open -- should show the window that exists, not die at a socket bind. That is
+    what a user means by launching it again.
+
+    Anything else on the port is not ours to argue with, so the editor steps sideways to
+    the next free one and says where it went. Failing to start because port 8765 happened
+    to be taken would be an odd thing for a local tool to do.
+    """
+    if already_ours(args.port):
+        url = f"http://127.0.0.1:{args.port}/"
+        print(f"pebblnyx editor is already running at {url} -- opening that one.\n"
+              f"    (to run a second copy anyway: --port {args.port + 1})")
+        if not args.no_browser:
+            if args.browser or not open_window(url, "pebblnyx"):
+                webbrowser.open(url)
+        return None, None
+
+    for port in range(args.port + 1, args.port + 21):
+        try:
+            srv = socketserver.TCPServer(("127.0.0.1", port), make_handler(session))
+        except OSError:
+            continue
+        print(f"port {args.port} is taken by something else -- using {port} instead")
+        return srv, port
+
+    raise SystemExit(f"ports {args.port}-{args.port + 20} are all busy; "
+                     f"pass --port with one that is free")
+
+
 def main():
     _ensure_streams()
     ap = argparse.ArgumentParser(description=__doc__,
@@ -4636,7 +4703,17 @@ def main():
         print("no project open -- use Settings to open or create one")
 
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("127.0.0.1", args.port), make_handler(session)) as srv:
+    try:
+        srv = socketserver.TCPServer(("127.0.0.1", args.port), make_handler(session))
+    except OSError as e:
+        if e.errno not in (errno.EADDRINUSE, errno.EACCES):
+            raise
+        srv, port = claim_port(args, session)
+        if srv is None:
+            return 0                     # an existing editor was opened instead
+        args.port = port
+
+    with srv:
         url = f"http://127.0.0.1:{args.port}/"
         title = "pebblnyx"
         print(f"pebblnyx editor: {url}   (ctrl-c to stop)")

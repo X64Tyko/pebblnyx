@@ -49,7 +49,7 @@ FRAMEWORK_VERSION = "0.1.0"
 # nobody remembered to bump is worse than no updater -- it reports "up to date" forever --
 # so the release workflow fails the build when a tag and this string disagree, rather
 # than trusting the release checklist.
-EDITOR_VERSION = "0.1.0-beta.1"
+EDITOR_VERSION = "0.1.0-beta.2"
 
 PROJECT_FILE = ".pknproj"
 PROJECT_FORMAT = 1
