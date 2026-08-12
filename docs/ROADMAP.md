@@ -218,65 +218,55 @@ question -- mixing palettes inside one map -- and stay unbuilt until something n
 Done when: two maps share one atlas at different palettes, and the size report shows the second
 costing a palette rather than an atlas.
 
-## M4c — Orientation and screen lock
+## M4c — Landscape, and screen lock
 
-Landscape is not a cosmetic option. **Rotating the display changes what the physical buttons are for**,
-which makes whole genres available:
+Rotating the display changes what the physical buttons are FOR, which makes whole genres available:
 
-| Orientation | The three-button cluster sits | Reads as |
+| Cluster sits | Under | Reads as |
 |---|---|---|
-| Portrait | right edge, under a thumb | menus, an RPG |
-| Landscape, cluster on top | under both index fingers | **shoulder triggers** -- a shooter |
-| Landscape, cluster on bottom | under both thumbs | **flippers** -- pinball |
-| 180 | mirrored | left-handed play |
+| Right edge (portrait) | one thumb | menus, an RPG |
+| **Top edge** | both index fingers | **shoulder triggers** -- a shooter |
+| **Bottom edge** | both thumbs | **flippers** -- pinball |
 
-This only makes sense because the device is played off the wrist in two hands
-([`PLATFORM.md`](PLATFORM.md)). A wrist-mounted watch in landscape is unreadable; a handheld one is
-a tiny gamepad whose button placement the game gets to choose.
+Only possible because the device is played off the wrist in two hands
+([`PLATFORM.md`](PLATFORM.md)): a wrist-mounted watch in landscape is unreadable, a handheld one is a
+tiny gamepad whose button meaning the game chooses.
 
-### The seam already nearly supports it
+### It is a content feature, not a renderer feature
 
-`PnxRow` exists so the blitter never touches the framebuffer directly -- it asks for row `y` and gets
-a pointer plus valid column bounds. **Rotation is a change to what that returns**, not a rewrite:
+**Rotate the assets at build time, not the framebuffer at run time.** The editor presents a 228x200
+canvas, authors work in it, and the pipeline emits atlases, maps and sprites already rotated -- so the
+engine's ordinary portrait blit produces a correct landscape image. The game writes its logic in the
+same rotated frame and everything is consistent.
 
-- `PnxRow` gains a **`step`**: bytes between adjacent columns. Portrait is 1; rotated 90 degrees a
-  game-space row walks *down* the framebuffer, so step is the row pitch.
-- Span writers index `dst[i * step]` -- or walk an incrementing pointer -- which is a few instructions
-  across four writers and **zero RAM**. The alternative, rendering to an offscreen buffer and blitting
-  it rotated, costs 45,600 bytes on `emery` and a whole extra full-screen copy per frame.
-- Width and height swap; the camera and viewport follow from `pnx_target_width/height` already.
-- Touch coordinates transform in the platform layer, so nothing above it knows.
+That is **zero engine code**, where rotating at render time would have meant a `step` field on `PnxRow`,
+a multiply per pixel across four span writers, and -- the actual risk -- strided framebuffer writes
+whose cost was unmeasured. Portrait writes run sequentially along a row; rotated writes stride by the
+pitch, and on failure the fallback was a 45,600-byte offscreen buffer plus a full extra screen copy per
+frame. Pre-rotation removes the question rather than answering it.
 
-**Rectangular displays only.** The step trick needs a uniform row pitch, and round displays
-(`chalk`, `gabbro`) have per-row bounds by nature. Rotation there would want a different approach or
-a letterboxed square, and it should refuse rather than draw garbage.
+It also works on round displays for free, where the step approach could not: nothing depends on a
+uniform row pitch when the framebuffer is written the way it always was.
 
-### Screen lock
+Checks that fall out cheaply: dimensions swap so a 20x48 sprite becomes 48x20 and the 4bpp even-pixel
+rule still holds; mirror dedup and metatile quadrants are orientation-agnostic, they simply find
+different pairs; and an atlas built for landscape cannot be shared with a portrait project, which the
+pipeline should say rather than let someone discover.
 
-Two separate things, both platform-layer:
+### What still needs framework support
 
-- **Consume BACK.** It dismisses the app by default, which mid-game is a lost session. A game in play
-  should be able to hold it, with a deliberate exit path.
-- **Hold the backlight.** `light_enable` -- off-wrist play in a dim room otherwise goes dark mid-turn,
-  and the display timing out during a boss is the same failure as a crash from the player's side.
+Small, and unavoidable, because **the buttons do not rotate**:
 
-### Open, and one that must be measured
+- **Input mapping.** Physical up/select/down mean different directions once the device is held
+  sideways. Logical actions with an orientation-aware default is what `src/pnx/input/` was always for.
+- **Touch transform.** `emery` and `gabbro` report portrait coordinates; a landscape game thinks in
+  rotated ones. Four lines, in the platform layer so nothing above it knows.
+- **Screen lock**, two separate things: **consume BACK**, which otherwise dismisses the app and loses a
+  session mid-game, and **hold the backlight**, because off-wrist play in a dim room going dark
+  mid-turn is indistinguishable from a crash.
 
-- **Strided writes hurt locality.** Portrait writes run sequentially along a framebuffer row; rotated
-  writes stride by the pitch. On SRAM with no cache that is probably fine against 6x frame headroom --
-  but "probably fine" is an estimate, and this project does not ship estimates. **Measure the rotated
-  full-screen blit before committing to the step approach**; if it is bad, the offscreen buffer is the
-  fallback and it costs 45,600 bytes.
-- Which orientations to support. 180 is free once 90 works.
-- Whether input mapping is per-orientation in the framework or left to the game. Leaning framework:
-  logical actions with an orientation-aware default mapping, which is what `src/pnx/input/` was always
-  for.
-
-Opt-in behind its own flag, per the zero-cost rule -- a portrait RPG must not pay a multiply per pixel
-for a feature it never uses.
-
-Done when: one example builds in portrait and landscape from the same source, the host tests run the
-blitter at both 200x228 and 228x200, and the rotated frame cost is measured on device.
+Done when: an example builds in landscape from the same source with the orientation declared in the
+manifest, the editor previews the 228x200 canvas, and touch lands where it looks like it should.
 
 ## M5 — Save
 

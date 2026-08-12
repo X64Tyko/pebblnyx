@@ -86,7 +86,12 @@ the face of someone he knew. She is the demonstration Kell's lucid transformatio
 
 ## The Client
 
-Unseen, unnamed, referenced three times. Should stay that way for the whole slice. The final
+Unseen, unnamed, referenced three times. Should stay that way for the whole slice.
+
+**He is wrong about what he is building.** He knows four Nodes make a god and intends to be it; what
+actually happens is that his body is the sacrifice and the Pirearch Runigran is what arrives. He is a
+means who believes he is an end, which is a more interesting antagonist than a competent one -- and it
+means he never needs a scene explaining himself, because he does not know the thing worth explaining. The final
 exchange -- "You think it's just one client?" -- is the hook, and it only holds if the player
 has been given nothing to guess with.
 

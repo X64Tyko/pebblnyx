@@ -54,7 +54,9 @@ shoulder triggers, for a shooter. Rotate so it sits along the bottom and it is u
 pinball flippers. Neither reading exists on a wrist, where there is one thumb and an awkward angle.
 
 That is M4c in [`ROADMAP.md`](ROADMAP.md), and it is the clearest argument that off-wrist play is a
-platform fact worth designing around rather than a personal preference.
+platform fact worth designing around rather than a personal preference. Note that it costs no engine
+code at all: the assets are rotated at build time, so the framebuffer is written exactly as it always
+was.
 
 ## Still unverified
 

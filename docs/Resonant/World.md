@@ -43,8 +43,44 @@ mechanic that carries the endgame is unlocked by the character finally trusting 
 Protect that ordering in revision. Everything above works because the demonstration precedes the
 refutation and both precede the second Node.
 
-**Still open:** what the Nodes were originally *for*. The escalation needs the reveal prepared in
-Act I, and Act I currently plants nothing about the Client beyond three mentions. The facility
+## What the Nodes are for
+
+Three answers exist. Two of them are wrong, and the wrongness is load-bearing.
+
+**What the world believes:** a Node turns a Resonant into a weapon, and then kills them. This is the
+common account and it is *half true* -- Destabilisation is real and vessels do burn out -- which is
+exactly why nobody questions it. It is also **Van's fear, stated as fact by everyone around him**: he
+is being made into a thing and then discarded. His arc is not him overcoming a personal anxiety, it is
+him discovering the world is wrong.
+
+**What the Client believes:** four Nodes combined make a god, and he intends to be it. He is right
+about the first half. He is the only person alive who knows it, which is why he is dangerous and why he
+builds rather than chases.
+
+**What is true:** consuming four Nodes uses the consumer's body as the sacrifice. It does not elevate
+him. It **summons the Pirearch Runigran**, and he is the door it comes through.
+
+So the Client is not a god in waiting. He is a means, and he does not know it -- which makes the final
+act sharper than "stop him ascending". Either the party stops him and never learns what they prevented,
+or they arrive too late, watch him succeed, and meet what he paid for. The escalation to fighting a god
+is *caused by the antagonist's success*, not by a reveal that a bigger villain existed all along.
+
+### Seeding it
+
+A reveal only demonstrated at the climax is a twist for its own sake. The word to plant is one the
+player already has: **vessel**. GORD says `VAN RESONANCE: POSITIVE. DESIGNATION: PRIMARY VESSEL` in
+Event 05C, so the player learns that a person holding Resonance is a vessel.
+
+If a facility log later describes the four-Node configuration as a vessel too, the player has the whole
+answer and will read it as being about Van. On the second pass it means the other thing. That costs one
+line and it is the cheapest real foreshadowing available.
+
+LOG-14 already supports the weapon account -- "Subject 7 Resonance spiking... recommend termination" --
+so the misdirection is in place. What is missing is the single line that quietly contradicts it.
+
+**Still open:** whether anyone alive can state the truth before the climax, or whether the player only
+ever infers it. Leaning inference: nobody knowing is more frightening, and it means no character has to
+carry an exposition scene. The facility
 contained them; the client wants them. Neither reason is stated, and the slice is stronger
 for withholding it. But the answer should exist now, because it determines whether the client
 is a villain or a rival.
