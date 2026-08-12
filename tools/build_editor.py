@@ -249,6 +249,18 @@ case ":$PATH:" in
   *":$bin:"*) ;;
   *) echo "note: $bin is not on your PATH -- add it, or run the binary directly." ;;
 esac
+
+# Ask the thing we just installed whether it is complete. Python, Pillow and the engine
+# travel inside the binary -- nothing is installed from the system and nothing needs to
+# be -- but "it is all in there" is a claim worth checking on the machine that will run
+# it, rather than trusting the build that produced it.
+echo
+if "$bin/{name}" --selftest; then
+  :
+else
+  echo "WARNING: this build is missing something listed above. It may still start," >&2
+  echo "         but expect failures. Please report it with the lines above." >&2
+fi
 """
 
 UNINSTALL_SH = """#!/bin/sh
@@ -387,6 +399,19 @@ def main():
     if os.path.exists(out):
         mb = os.path.getsize(out) / (1024 * 1024)
         print(f"\n{out}  ({mb:.0f} MB)")
+
+        # Ask the artefact whether it is complete, rather than assuming PyInstaller
+        # collected everything. A missed hidden import produces a binary that runs and
+        # then fails the first time someone rasterises a font, which is a bug report
+        # instead of a build error. Packaging a known-broken binary is worse than failing.
+        # Flushed, or this heading lands after the child's output: the parent's stdout is
+        # block-buffered when the build is piped to a log, the child's is not.
+        print("\nverifying the bundle carries its dependencies:", flush=True)
+        check = subprocess.run([out, "--selftest"])
+        if check.returncode != 0:
+            print("the packaged editor is missing something -- not packaging it",
+                  file=sys.stderr)
+            return 1
 
     if args.package:
         produced = package(args.name)

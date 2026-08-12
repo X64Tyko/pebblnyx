@@ -403,6 +403,54 @@ class Updater:
 UPDATER = Updater()
 
 
+class Liveness:
+    """Keeps the server alive only while a UI is actually attached to it.
+
+    The native-window build has a real signal: `webview.start()` returns when the window
+    closes, and the server stops. The BROWSER build has none -- Linux ships no webview, so
+    the editor opens a tab and waits on an Event that nothing ever sets. Closing the tab
+    therefore did not close the editor: the process stayed, holding port 8765, and the
+    next launch found something already listening and refused to start. "Closed" and
+    "still running" were the same state.
+
+    So the page says it is there, every few seconds, and stops saying it when it is gone.
+
+    On close the page also sends an explicit goodbye, which only SHORTENS the window
+    rather than exiting outright -- two tabs on one editor is a normal thing to do, and
+    the second one's next heartbeat cancels the exit.
+    """
+
+    # `grace` MUST exceed the page's heartbeat interval (5s). It is the window a goodbye
+    # leaves open for a surviving tab to object -- shorter than one heartbeat and closing
+    # the second of two tabs would shut the editor down under the first one.
+    def __init__(self, timeout=25.0, grace=8.0):
+        self.timeout = timeout
+        self.grace = grace
+        self.last = time.time()
+        self.done = threading.Event()
+        self.armed = False
+
+    def touch(self):
+        self.last = time.time()
+
+    def goodbye(self):
+        self.last = min(self.last, time.time() - (self.timeout - self.grace))
+
+    def watch(self, srv):
+        """Runs on a thread; sets `done` once nothing has spoken to us in a while."""
+        while not self.done.wait(2.0):
+            if time.time() - self.last > self.timeout:
+                print("the editor was closed -- shutting down")
+                # shutdown() returns once serve_forever has stopped, so by the time the
+                # main thread closes the server the listening socket is genuinely free.
+                threading.Thread(target=srv.shutdown, daemon=True).start()
+                self.done.set()
+                return
+
+
+LIVE = Liveness()
+
+
 class Toolchain:
     """Finds, installs and keeps track of the Pebble SDK."""
 
@@ -2779,6 +2827,7 @@ async function load(){
   // Once, a moment after the editor is usable: an update check is never
   // worth delaying the first paint for.
   setTimeout(()=>updCheck(), 1500);
+  startHeartbeat();
   selectMap(0);
 }
 
@@ -3503,6 +3552,22 @@ $('#faddbtn').onclick=async()=>{
 
 // --------------------------------------------------------------- toolchain view
 let sdkPoll=null;
+
+// ----------------------------------------------------------------- heartbeat
+//
+// The server has no other way to know this page is still here. Without it, closing the
+// tab left the editor running and holding its port, so the next launch found something
+// listening and refused to start -- "closed" and "still running" looked identical.
+//
+// The goodbye goes through sendBeacon because a normal fetch is cancelled when the page
+// unloads; a beacon is queued by the browser and delivered anyway. It only shortens the
+// server's grace period, so a second tab's heartbeat can still cancel the shutdown.
+function startHeartbeat(){
+  setInterval(()=>{ fetch('/api/alive').catch(()=>{}) }, 5000);
+  addEventListener('pagehide',()=>{
+    try{ navigator.sendBeacon('/api/bye') }catch(_){}
+  });
+}
 
 // ------------------------------------------------------------------- updates
 //
@@ -4352,12 +4417,51 @@ def browse(path=None):
             "empty": not os.listdir(path)}
 
 
+# Requests run on threads now (see EditorServer), but they still touch one Project, so
+# the routing bodies are serialised exactly as they were when the server was
+# single-threaded. The lock is taken AFTER the request has been read, which is the whole
+# point: a connection that stalls mid-request blocks nothing but itself.
+REQUEST_LOCK = threading.Lock()
+
+
+class EditorServer(socketserver.ThreadingTCPServer):
+    """One thread per connection, and none of them outlive the process.
+
+    A single-threaded server was wedged permanently by one connection that never
+    completed a request -- and browsers make those routinely, opening speculative sockets
+    they may never send anything on. The accept loop blocked in readline() waiting for a
+    request line that never came, so the editor sat there listening, queueing connections
+    and serving nobody: alive, holding its port, answering nothing.
+
+    `daemon_threads` matters as much as the threading: a lingering connection thread must
+    never keep the process up after the window is closed.
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 def make_handler(session):
     class Handler(http.server.BaseHTTPRequestHandler):
+        # A stalled peer now costs one thread for this long rather than the whole editor
+        # forever. StreamRequestHandler applies it to the connection socket.
+        timeout = 30
+
         def log_message(self, *a):
             pass
 
+        def do_GET(self):
+            with REQUEST_LOCK:
+                self._route_get()
+
+        def do_POST(self):
+            with REQUEST_LOCK:
+                self._route_post()
+
         def _send(self, code, body, ctype="application/json"):
+            # Any answered request counts as the UI being present, not just the
+            # heartbeat: a long build or a big font preview must not look like silence.
+            LIVE.touch()
             data = body.encode() if isinstance(body, str) else body
             self.send_response(code)
             self.send_header("Content-Type", ctype)
@@ -4365,7 +4469,7 @@ def make_handler(session):
             self.end_headers()
             self.wfile.write(data)
 
-        def do_GET(self):
+        def _route_get(self):
             if self.path == "/":
                 self._send(200, PAGE, "text/html; charset=utf-8")
             elif self.path == "/api/state":
@@ -4384,6 +4488,9 @@ def make_handler(session):
                 from urllib.parse import urlparse, parse_qs
                 q = parse_qs(urlparse(self.path).query)
                 self._send(200, json.dumps(browse((q.get("path") or [None])[0])))
+            elif self.path == "/api/alive":
+                # The heartbeat. Cheap on purpose: it runs every few seconds forever.
+                self._send(200, "{}")
             elif self.path == "/api/ping":
                 # So a second launch can recognise the first one without guessing from
                 # the shape of a state payload.
@@ -4413,10 +4520,16 @@ def make_handler(session):
             else:
                 self._send(404, "{}")
 
-        def do_POST(self):
+        def _route_post(self):
             n = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(n) if n else b"{}"
             try:
+                # Before the project guard: a goodbye has nothing to do with a project,
+                # and an editor opened on nothing still has to be closable.
+                if self.path == "/api/bye":
+                    LIVE.goodbye()
+                    self._send(200, "{}")
+                    return
                 # Everything but opening and creating needs a project to act on.
                 if (not session.proj
                         and not self.path.startswith("/api/project/")
@@ -4653,7 +4766,7 @@ def claim_port(args, session):
 
     for port in range(args.port + 1, args.port + 21):
         try:
-            srv = socketserver.TCPServer(("127.0.0.1", port), make_handler(session))
+            srv = EditorServer(("127.0.0.1", port), make_handler(session))
         except OSError:
             continue
         print(f"port {args.port} is taken by something else -- using {port} instead")
@@ -4661,6 +4774,72 @@ def claim_port(args, session):
 
     raise SystemExit(f"ports {args.port}-{args.port + 20} are all busy; "
                      f"pass --port with one that is free")
+
+
+def selftest():
+    """Check that everything this editor needs is actually inside it.
+
+    The distributed editor is a PyInstaller bundle: CPython, Pillow, the pipeline and the
+    engine sources all travel inside one file, which is why installing it needs no Python
+    and no pip. That is a claim about a build, and PyInstaller drops things quietly -- a
+    missed hidden import produces a binary that starts, opens a project, and fails the
+    first time someone rasterises a font. Then it is a bug report, not a build error.
+
+    So the build and CI run this against the packaged artefact, and install.sh runs it
+    against what it just installed. Prints a report and returns non-zero on anything
+    missing.
+    """
+    ok = True
+    frozen = getattr(sys, "frozen", False)
+    print(f"pebblnyx editor {pp.EDITOR_VERSION}"
+          f"  ({'packaged' if frozen else 'source checkout'})")
+    print(f"  python           {sys.version.split()[0]}  [{sys.executable}]")
+
+    # Required. Each of these is something the editor cannot work without, so a failure
+    # here is a failed build rather than a degraded one.
+    for label, mod, probe in (
+        ("pillow", "PIL", lambda m: m.__version__),
+        ("pillow image", "PIL.Image", lambda m: str(m.new("RGBA", (2, 2)).size)),
+        ("pillow draw", "PIL.ImageDraw", lambda m: "ok"),
+        ("pillow fonts", "PIL.ImageFont", lambda m: "ok"),
+        ("tomllib", "tomllib", lambda m: "ok"),
+        ("pipeline", "pnx_assets", lambda m: f"blob v{m.BLOB_VERSION}"),
+        ("preview", "pnx_preview", lambda m: "ok"),
+        ("project", "pnx_project", lambda m: f"engine {m.FRAMEWORK_VERSION}"),
+        ("size report", "size_report", lambda m: f"cap {m.VIRTUAL_SIZE_LIMIT}"),
+    ):
+        try:
+            mod_obj = __import__(mod, fromlist=["*"])
+            print(f"  {label:<16} {probe(mod_obj)}")
+        except Exception as e:                           # noqa: BLE001
+            print(f"  {label:<16} MISSING -- {e}")
+            ok = False
+
+    # The engine sources, which are data rather than an import: a project builds against
+    # the copy inside the editor, so an editor without them can open a project and never
+    # build one.
+    try:
+        root = pp.framework_dir()
+        have = os.path.exists(os.path.join(root, "pnx.h"))
+        count = sum(len([f for f in fs if f.endswith((".c", ".h"))])
+                    for _d, _s, fs in os.walk(root)) if have else 0
+        print(f"  engine sources   {count} files  [{root}]" if have
+              else f"  engine sources   MISSING at {root}")
+        ok = ok and have
+    except Exception as e:                               # noqa: BLE001
+        print(f"  engine sources   MISSING -- {e}")
+        ok = False
+
+    # Optional. A missing webview is a documented fallback to a browser tab, not a fault,
+    # and Linux builds ship without one on purpose.
+    try:
+        import webview                                   # noqa: F401
+        print("  native window    available")
+    except ImportError:
+        print("  native window    not bundled (the editor opens a browser tab)")
+
+    print("SELFTEST OK" if ok else "SELFTEST FAILED")
+    return 0 if ok else 1
 
 
 def main():
@@ -4675,7 +4854,13 @@ def main():
                     help="open a browser tab instead of a native window")
     ap.add_argument("--no-browser", action="store_true",
                     help="serve only; open nothing")
+    ap.add_argument("--selftest", action="store_true",
+                    help="check that Python, Pillow, the pipeline and the engine are "
+                         "all present in this build, then exit")
     args = ap.parse_args()
+
+    if args.selftest:
+        return selftest()
 
     target = args.manifest
     if not target:
@@ -4702,9 +4887,8 @@ def main():
     if not proj:
         print("no project open -- use Settings to open or create one")
 
-    socketserver.TCPServer.allow_reuse_address = True
     try:
-        srv = socketserver.TCPServer(("127.0.0.1", args.port), make_handler(session))
+        srv = EditorServer(("127.0.0.1", args.port), make_handler(session))
     except OSError as e:
         if e.errno not in (errno.EADDRINUSE, errno.EACCES):
             raise
@@ -4724,14 +4908,23 @@ def main():
 
         try:
             if args.no_browser:
+                # Serve only: there is no UI to lose, so nothing to watch for. Scripts
+                # and tests rely on this staying up until they stop it.
                 threading.Event().wait()
             elif args.browser or not open_window(url, title):
+                # The browser path has no close event of its own, so the page keeps the
+                # server alive and its going away is what ends this wait.
                 webbrowser.open(url)
-                threading.Event().wait()
+                LIVE.armed = True
+                threading.Thread(target=LIVE.watch, args=(srv,), daemon=True).start()
+                LIVE.done.wait()
         except KeyboardInterrupt:
             print("\nstopped")
         finally:
-            srv.shutdown()
+            # shutdown() may already have run from the watchdog; it is idempotent, and
+            # server_close() -- from the `with` -- is what actually frees the port.
+            with contextlib.suppress(Exception):
+                srv.shutdown()
     return 0
 
 

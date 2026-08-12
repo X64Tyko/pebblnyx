@@ -173,6 +173,19 @@ jobs:
       - name: Build and package
         run: python tools/build_editor.py --clean --package
 
+      # Does this artefact carry everything it claims to? Python, Pillow, the pipeline and
+      # the engine sources all ship INSIDE the binary -- that is what makes installing it
+      # need no Python and no pip -- and PyInstaller drops things quietly. Checked on
+      # every platform, because a hidden import can be collected on one and missed on
+      # another. The exit code is what matters here: a --windowed build on Windows has no
+      # console to print to.
+      - name: The bundle carries its dependencies
+        shell: bash
+        run: |
+          BIN=dist/pebblnyx-editor
+          [ "$RUNNER_OS" = "Windows" ] && BIN=dist/pebblnyx-editor.exe
+          "$BIN" --selftest
+
       # A binary that starts, serves, and reports the engine it carries. Catches the
       # failure this whole design is exposed to: PyInstaller silently omitting the
       # bundled engine, which would produce an editor that opens projects and cannot
