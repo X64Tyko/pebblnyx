@@ -190,12 +190,18 @@ framework takes on must be opt-in and cost zero bytes when unused.
 
 **Resonant**, in game code:
 
-- **Flying enemies.** No framework change: `pnx_sprite_draw` already takes the draw position as an
-  argument, so an entity that hovers supplies its ground position as the sort key and its hover
-  position to the draw. `pnx_sprites_draw_sorted` is a convenience that assumes the two are the
-  same number; a game where they differ keeps its own order array and loops itself, which is about
-  fifteen lines of insertion sort. Adding a `depth` field to the framework for one game would be
-  the tail wagging the dog -- if a second game wants it, that is when it becomes a pattern.
+- **Flying enemies: two calls to `pnx_sprites_draw_sorted`, not one.** Grounded entities in one
+  array, fliers in a second, drawn after. Each layer sorts correctly within itself and fliers read
+  as being above the field. No framework change and no hand-rolled sort -- the same function, twice,
+  and `order` is scratch so one buffer serves both.
+
+  The trade: a flier occludes a grounded enemy even when the grounded one is nearer. That is wrong
+  in principle and mostly invisible in practice, because a flier hovering high enough sits above
+  the grounded sprites' tops anyway. It also buys something real -- fliers are never buried in a
+  twelve-enemy horde, which matters when they have to be tappable.
+
+  Tap-cycling then walks fliers first, then grounded, which is consistent with "cycles deeper into
+  the screen" since fliers are the visually nearest layer.
 - The Addition ring: what it means, its timing windows, its grading.
 - Battle triggers: which flag bits mean what, roster randomisation, camera placement per trigger.
 - The damage number pool -- sixteen entries, for a twelve-target AOE -- and its lifetimes.

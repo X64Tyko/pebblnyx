@@ -22,6 +22,22 @@ the save format, input backends, and lifecycle.
 - **No general-purpose scene graph.** Not enough code budget, and a tile game does not
   need one.
 
+## 1b. Tile flags are the game's vocabulary, not the framework's
+
+`pnx_map_flags` returns a byte and says nothing about what its bits mean, which is right: a game
+may want `hazard`, `water`, `ledge`, `trigger`, or may have no use for `warp` at all. Only the
+*names* are currently hardcoded, in a closed table of `solid` and `warp` shared between
+`pnx_assets.h` and the pipeline. **Those become manifest-declared.**
+
+One bit cannot be fully arbitrary. The pipeline's most valuable checks -- start position not inside
+a wall, flood-fill reachability, a door not sealed inside a building -- all need to know which flag
+blocks movement, and `pnx_map_solid` is a convenience built on the same assumption. So **bit 0 stays
+a convention meaning "blocks movement"**, nameable by the game but tagged so validation still works.
+Bits 1-7 are free and mean whatever the manifest says.
+
+That keeps the checks that catch content which does not crash but silently does nothing, while
+removing the framework's opinion about what a tile can be.
+
 ## 2. The master constraint: code size
 
 `.text + .data + .bss` must fit in **65,535 bytes**, and the game shares that budget
