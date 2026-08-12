@@ -57,6 +57,121 @@ MAGIC_FONT = b"PF"
 
 HEADER_BYTES = 8
 
+# ------------------------------------------------------------------------ orientation
+#
+# Named for where the BUTTON CLUSTER ends up, because that is the thing the author is
+# actually choosing. "landscape_left" says nothing about whether the device or the image
+# turned, and every codebase that uses it has an argument about which way it means; the
+# cluster is a physical object the author can point at.
+#
+# Portrait puts it under one thumb (a menu, an RPG). On the top edge it falls under both
+# index fingers and reads as shoulder triggers (a shooter); on the bottom edge, under both
+# thumbs, as flippers (pinball). See docs/PLATFORM.md -- this is only possible because the
+# device is played off the wrist in two hands.
+ORIENT_BUTTONS_RIGHT = 0     # portrait: the display's native orientation
+ORIENT_BUTTONS_TOP = 1       # image rotated clockwise into the framebuffer
+ORIENT_BUTTONS_BOTTOM = 2    # image rotated anticlockwise into the framebuffer
+
+ORIENTATIONS = {
+    "buttons_right": ORIENT_BUTTONS_RIGHT,
+    "buttons_top": ORIENT_BUTTONS_TOP,
+    "buttons_bottom": ORIENT_BUTTONS_BOTTOM,
+    # `portrait` is what everyone will type for the default, and it is unambiguous
+    # because there is only one of it. The landscape spellings deliberately have no
+    # alias: "landscape" alone does not say which way up, and guessing is how content
+    # ships upside down.
+    "portrait": ORIENT_BUTTONS_RIGHT,
+}
+
+ORIENT_NAMES = {ORIENT_BUTTONS_RIGHT: "buttons_right",
+                ORIENT_BUTTONS_TOP: "buttons_top",
+                ORIENT_BUTTONS_BOTTOM: "buttons_bottom"}
+
+# Which way the pen walks between glyphs, stamped into the font blob. Pre-rotation costs
+# exactly one piece of engine code, here: a glyph bitmap turned on its side still blits
+# like any other rectangle, but the next glyph is no longer to the right of it.
+#
+# It is a property of the FONT rather than of the project, both because that is where the
+# runtime needs it -- a blob that draws itself correctly cannot be paired with the wrong
+# constant -- and because the axis is the same mechanism a vertical script wants. A font
+# set top-to-bottom is ADVANCE_Y_POS with unrotated glyphs; landscape is the same field
+# with rotated ones.
+ADVANCE_X_POS = 0     # left to right: portrait, and every Latin face
+ADVANCE_Y_POS = 1     # top to bottom
+ADVANCE_Y_NEG = 2     # bottom to top
+ADVANCE_X_NEG = 3     # right to left; the format carries it, nothing emits it yet
+
+ORIENT_ADVANCE = {ORIENT_BUTTONS_RIGHT: ADVANCE_X_POS,
+                  ORIENT_BUTTONS_TOP: ADVANCE_Y_POS,
+                  ORIENT_BUTTONS_BOTTOM: ADVANCE_Y_NEG}
+
+
+def parse_orientation(value, where):
+    if value is None:
+        return ORIENT_BUTTONS_RIGHT
+    if value not in ORIENTATIONS:
+        raise BuildError(f"{where}: unknown orientation {value!r} "
+                         f"(known: {', '.join(sorted(ORIENTATIONS))})")
+    return ORIENTATIONS[value]
+
+
+def rotate_point(x, y, w, h, orient):
+    """A point in the author's frame -> the same point in the framebuffer's.
+
+    `w, h` are the dimensions of the thing being rotated, in the AUTHOR's frame.
+
+    Derivation, once, so nothing downstream has to re-do it. The author works in the frame
+    they see: ax to the right, ay down. The framebuffer never rotates -- fx, fy stay the
+    display's own axes. Holding the device so the button cluster (physically the right
+    edge) sits along the TOP means the physical +x axis now points up in the author's
+    view, which is fx = h-1-ay, fy = ax. Along the BOTTOM is the same rotation the other
+    way.
+    """
+    if orient == ORIENT_BUTTONS_TOP:
+        return h - 1 - y, x
+    if orient == ORIENT_BUTTONS_BOTTOM:
+        return y, w - 1 - x
+    return x, y
+
+
+def rotate_dims(w, h, orient):
+    return (h, w) if orient != ORIENT_BUTTONS_RIGHT else (w, h)
+
+
+def rotate_grid(buf, w, h, orient, stride=1):
+    """Rotate a row-major grid of `stride`-byte cells. Returns (buf, new_w, new_h).
+
+    One function for pixels, tiles and flag planes alike: a tilemap rotates exactly the
+    way its pixels do, which is the whole reason pre-rotation works at all. Rotate the
+    grid and rotate each cell's art, and the ordinary portrait blit puts a correct
+    landscape image on the screen.
+    """
+    if orient == ORIENT_BUTTONS_RIGHT:
+        return bytes(buf), w, h
+    nw, nh = rotate_dims(w, h, orient)
+    out = bytearray(len(buf))
+    for y in range(h):
+        for x in range(w):
+            nx, ny = rotate_point(x, y, w, h, orient)
+            src = (y * w + x) * stride
+            dst = (ny * nw + nx) * stride
+            out[dst:dst + stride] = buf[src:src + stride]
+    return bytes(out), nw, nh
+
+
+def rotate_levels(rows, orient):
+    """The same rotation over a list-of-lists, which is how glyphs are rasterised."""
+    if orient == ORIENT_BUTTONS_RIGHT or not rows:
+        return rows
+    h, w = len(rows), len(rows[0])
+    nw, nh = rotate_dims(w, h, orient)
+    out = [[0] * nw for _ in range(nh)]
+    for y in range(h):
+        for x in range(w):
+            nx, ny = rotate_point(x, y, w, h, orient)
+            out[ny][nx] = rows[y][x]
+    return out
+
 # Index 0 of every palette is transparent, following the SNES convention. Costs a slot
 # (15 usable of 16) and measured at 0.1% more bytes across five real tilesets, in
 # exchange for uniform transparency and a blitter that can reject a pixel before it ever
@@ -108,25 +223,41 @@ def load_sheet(root, name):
     return Image.open(path).convert("RGBA")
 
 
-def blob_header(magic, a=0, b=0, c=0, d=0):
-    """Common 8-byte prefix: magic[2], version, four format-specific bytes, pad.
+def blob_header(magic, a=0, b=0, c=0, d=0, orient=ORIENT_BUTTONS_RIGHT):
+    """Common 8-byte prefix: magic[2], version, four format-specific bytes, orientation.
 
     Padded to 8 rather than the 7 it needs, so that pixel data begins at an aligned
     offset. The blitter reads tile rows as words where it can, and a 7-byte header would
     make every one of those accesses unaligned.
+
+    The byte that padding left over now carries the orientation the BUILD was made at, so
+    a blob left over from a portrait build cannot be drawn sideways by a landscape one --
+    which presents as scrambled art rather than as an error.
+
+    Every blob carries it, including the ones with no geometry to rotate. A song does not
+    care which way the watch is held, but stamping it 0 would make "orientation-free" and
+    "built portrait" the same byte, and the loader could no longer tell a stale atlas from
+    a legitimate one. One manifest builds one way at a time, so the uniform stamp costs
+    nothing and the check stays exact.
     """
     return (magic + bytes([BLOB_VERSION, a & 0xFF, b & 0xFF, c & 0xFF, d & 0xFF])
-            + b"\0")
+            + bytes([orient]))
 
 
 # ---------------------------------------------------------------------------- atlas
 
-def pack_atlas(root, spec):
+def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
     """Quantise a region to GColor8 and deduplicate identical tiles.
 
     Dedup is what makes a large sheet usable: raw, the probe's 1280x1248 source is
     1560KB, past even the 1MB device ceiling. Region selection plus dedup brings it into
     range; compression alone would not, because resources are stored already packed.
+
+    Tiles are rotated as they are carved, BEFORE dedup, so that everything below this
+    line -- the mirror keys, the flip bits a map entry carries, the metatile quadrants --
+    describes the framebuffer's frame rather than the author's. Rotating afterwards would
+    leave a flip_x pair recorded for what is now a vertical mirror, which nothing would
+    notice until a tile picker started emitting those bits.
     """
     name = spec["name"]
     im = load_sheet(root, spec["sheet"])
@@ -178,7 +309,8 @@ def pack_atlas(root, spec):
             buf = bytearray(T * T)
             for j in range(T):
                 for i in range(T):
-                    buf[j * T + i] = to_gcolor8(px[tx * T + i, ty * T + j])
+                    ri, rj = rotate_point(i, j, T, T, orient)
+                    buf[rj * T + ri] = to_gcolor8(px[tx * T + i, ty * T + j])
             key = bytes(buf)
             if not any(key):
                 empty += 1
@@ -233,7 +365,11 @@ def pack_atlas(root, spec):
         for (tx, ty), base_tile in zip(origin, unique):
             for j in range(T):
                 for i in range(T):
-                    b = base_tile[j * T + i]
+                    # Walk the SHEET's frame and index the rotated tile, rather than the
+                    # other way round: any complaint below then names the pixel the author
+                    # can find in their PNG.
+                    ri, rj = rotate_point(i, j, T, T, orient)
+                    b = base_tile[rj * T + ri]
                     v = to_gcolor8(vpx[tx * T + i, ty * T + j])
                     if (b == TRANSPARENT) != (v == TRANSPARENT):
                         raise BuildError(
@@ -310,7 +446,7 @@ def build_metatiles(tiles, pal_of, T, quiet=False):
     return bank, defs
 
 
-def finish_atlas(atlas, tile_flags, shared):
+def finish_atlas(atlas, tile_flags, shared, orient=ORIENT_BUTTONS_RIGHT):
     """Palettise and pack. Called once map compilation has settled tile flags.
 
     `shared` is the running list of palettes from earlier atlases, so a later atlas
@@ -393,12 +529,12 @@ def finish_atlas(atlas, tile_flags, shared):
 
         body = (len(bank).to_bytes(2, "little") + b"\0\0"
                 + pad4(bytes(assign)) + pad4(flags) + bytes(table) + pixels)
-        atlas["blob"] = blob_header(MAGIC_ATLAS, T, len(tiles), 1) + body
+        atlas["blob"] = blob_header(MAGIC_ATLAS, T, len(tiles), 1, orient=orient) + body
         atlas["subtiles"] = len(bank)
     else:
         pixels = b"".join(pack_unit_4bpp(t, palettes[a]) for t, a in zip(tiles, assign))
         body = pad4(bytes(assign)) + pad4(flags) + pixels
-        atlas["blob"] = blob_header(MAGIC_ATLAS, T, len(tiles), 0) + body
+        atlas["blob"] = blob_header(MAGIC_ATLAS, T, len(tiles), 0, orient=orient) + body
         atlas["subtiles"] = 0
     atlas["palettes"] = palettes
     atlas["assign"] = assign
@@ -654,7 +790,14 @@ def autopick_tiles(atlas, names):
 
 # --------------------------------------------------------------------------- sprite
 
-def pack_sprite(root, spec):
+def pack_sprite(root, spec, orient=ORIENT_BUTTONS_RIGHT):
+    """Frames are validated in the author's frame and stored in the framebuffer's.
+
+    Everything that can complain -- mismatched frame sizes, a rect running off the sheet,
+    an anim naming a frame that does not exist -- runs before the rotation, so the numbers
+    in a message are the numbers in the manifest. Only the pixels and the two dimensions
+    turn over, at the end.
+    """
     name = spec["name"]
     im = load_sheet(root, spec["sheet"])
     px = im.load()
@@ -683,9 +826,15 @@ def pack_sprite(root, spec):
             raise BuildError(f"sprite {name!r}: anim {anim_name!r} points at frame "
                              f"{frame_idx}, but there are only {len(frames)}")
 
+    # A frame's PIXEL COUNT has to be even, not its width: 4bpp packing is a flat stream,
+    # two pixels to a byte, with no per-row padding. Rotation swaps the dimensions and
+    # leaves the product alone, so this holds in either orientation -- a 15x20 frame is
+    # legal portrait and stays legal at 20x15.
     if (fw * fh) % 2:
         raise BuildError(f"sprite {name!r}: {fw}x{fh} has an odd pixel count, which "
                          f"cannot pack two-per-byte at 4bpp")
+
+    frames = [rotate_grid(f, fw, fh, orient)[0] for f in frames]
 
     repaired = 0
     fixed = []
@@ -695,7 +844,9 @@ def pack_sprite(root, spec):
             repaired += 1
         fixed.append(f2)
 
-    print(f"  sprite {name}: {len(fixed)} frames of {fw}x{fh}")
+    sw, sh = rotate_dims(fw, fh, orient)
+    print(f"  sprite {name}: {len(fixed)} frames of {fw}x{fh}"
+          + (f", stored {sw}x{sh}" if (sw, sh) != (fw, fh) else ""))
     if repaired:
         print(f"    NOTE {repaired} frame(s) exceeded {PALETTE_USABLE} colours and were "
               f"reduced -- edit the art to avoid this")
@@ -717,7 +868,7 @@ def pack_sprite(root, spec):
             for j in range(h):
                 for i in range(w):
                     buf[j * w + i] = to_gcolor8(vpx[x + i, y + j], key)
-            vframes.append(reduce_colours(bytes(buf))[0])
+            vframes.append(reduce_colours(rotate_grid(buf, w, h, orient)[0])[0])
 
         # The check that makes sharing safe: same shape, any colours.
         for idx, (base_f, var_f) in enumerate(zip(fixed, vframes)):
@@ -729,11 +880,11 @@ def pack_sprite(root, spec):
                     f"Drop it from `variants` and declare it as its own sprite instead.")
         variants.append({"name": vname, "path": vpath, "frames": vframes})
 
-    return {"name": name, "w": fw, "h": fh, "frames": fixed, "variants": variants,
+    return {"name": name, "w": sw, "h": sh, "frames": fixed, "variants": variants,
             "out": spec["out"], "anim": spec.get("anim", {}), "repaired": repaired}
 
 
-def finish_sprite_with_variants(sprite, shared):
+def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT):
     """One bitmap, one palette per variant.
 
     Every frame packs against a single ORDERED palette rather than per-frame merged ones. It
@@ -775,8 +926,8 @@ def finish_sprite_with_variants(sprite, shared):
                 f"share a bitmap. Recolour without merging colours.")
         variant_slots[v["name"]] = slot(order)
 
-    sprite["blob"] = blob_header(MAGIC_SPRITE, sprite["w"], sprite["h"],
-                                 len(frames)) + pad4(bytes(assign)) + pixels
+    sprite["blob"] = blob_header(MAGIC_SPRITE, sprite["w"], sprite["h"], len(frames),
+                                 orient=orient) + pad4(bytes(assign)) + pixels
     sprite["palettes"] = [shared[base_slot]]
     sprite["assign"] = assign
     sprite["variant_slots"] = variant_slots
@@ -788,11 +939,11 @@ def finish_sprite_with_variants(sprite, shared):
     return sprite
 
 
-def finish_sprite(sprite, shared):
+def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT):
     frames = sprite["frames"]
 
     if sprite.get("variants"):
-        return finish_sprite_with_variants(sprite, shared)
+        return finish_sprite_with_variants(sprite, shared, orient)
 
     sets = [frozenset(c for c in f if c != TRANSPARENT) for f in frames]
 
@@ -807,8 +958,8 @@ def finish_sprite(sprite, shared):
     pixels = b"".join(pack_unit_4bpp(f, palettes[a]) for f, a in zip(frames, assign))
     body = pad4(bytes(assign)) + pixels
 
-    sprite["blob"] = blob_header(MAGIC_SPRITE, sprite["w"], sprite["h"],
-                                 len(frames)) + body
+    sprite["blob"] = blob_header(MAGIC_SPRITE, sprite["w"], sprite["h"], len(frames),
+                                 orient=orient) + body
     sprite["palettes"] = palettes
     sprite["assign"] = assign
     print(f"    {sprite['name']}: uses {len(set(assign))} palette(s), "
@@ -957,6 +1108,39 @@ def compile_map(spec, legend, roles, map_names):
             "flags": flags}
 
 
+def rotate_maps(maps, orient):
+    """Turn every compiled map from the author's frame into the framebuffer's.
+
+    Runs AFTER all validation, which is the point: the flood fill, the warp checks and
+    every message they produce speak in the coordinates the author typed into `rows`. A
+    map rotated before validation would report a sealed door at a position that appears
+    nowhere in the manifest.
+
+    A tilemap rotates like any other grid -- and because each tile's art was rotated as it
+    was carved, rotating the grid is the whole job. The dimensions swap, so a 32x24 map
+    becomes 24x32 and the runtime, which only ever reads w and h from the blob, is none
+    the wiser.
+    """
+    if orient == ORIENT_BUTTONS_RIGHT:
+        return
+
+    # Captured before anything moves: a warp's destination is a coordinate in ANOTHER
+    # map, and it has to be rotated by that map's dimensions, not by this one's.
+    author_dims = [(m["w"], m["h"]) for m in maps]
+
+    for m in maps:
+        w, h = m["w"], m["h"]
+        m["tiles"], nw, nh = rotate_grid(m["tiles"], w, h, orient, stride=2)
+        m["flags"], _, _ = rotate_grid(m["flags"], w, h, orient)
+        m["start"] = rotate_point(*m["start"], w, h, orient)
+        m["reachable"] = {rotate_point(x, y, w, h, orient) for x, y in m["reachable"]}
+        m["warps"] = [rotate_point(tx, ty, w, h, orient)
+                      + (dest,)
+                      + rotate_point(dtx, dty, *author_dims[dest], orient)
+                      for (tx, ty, dest, dtx, dty) in m["warps"]]
+        m["w"], m["h"] = nw, nh
+
+
 def compute_tile_flags(maps):
     """Pick each tile's default flags: whichever value it carries most often.
 
@@ -967,17 +1151,30 @@ def compute_tile_flags(maps):
     """
     tally = {}
     for m in maps:
-        for tile, flag in zip(m["tiles"], m["flags"]):
+        for i in range(len(m["flags"])):
+            # The tile plane is u16 per cell and the flag plane is u8, so they cannot be
+            # walked together: zipping the two byte strings paired each tile's LOW byte
+            # with one cell's flags and its high byte with the next cell's, which tallied
+            # every cell against the wrong neighbour. It never produced wrong pixels --
+            # finish_map decodes properly and emits an override wherever the default
+            # disagrees -- so the only symptom was maps carrying hundreds of overrides
+            # they did not need, and defaults that shifted with cell order.
+            tile = (m["tiles"][i * 2] | (m["tiles"][i * 2 + 1] << 8)) & 0x03FF
+            flag = m["flags"][i]
             tally.setdefault(tile, {}).setdefault(flag, 0)
             tally[tile][flag] += 1
 
     defaults = {}
     for tile, counts in tally.items():
-        defaults[tile] = max(counts.items(), key=lambda kv: kv[1])[0]
+        # Ties break toward the lower flag value rather than toward whichever the
+        # traversal happened to see first. Content compiles to the same bytes in either
+        # orientation only if every choice here is a function of the counts alone.
+        defaults[tile] = max(counts.items(), key=lambda kv: (kv[1], -kv[0]))[0]
     return defaults
 
 
-def finish_map(m, tile_defaults, atlas_asset, pal_table=b""):
+def finish_map(m, tile_defaults, atlas_asset, pal_table=b"",
+               orient=ORIENT_BUTTONS_RIGHT):
     """Build the map blob, replacing the flag plane with sparse overrides.
 
     `atlas_asset` is stored in the header so the runtime can find the tileset a map was
@@ -1009,7 +1206,8 @@ def finish_map(m, tile_defaults, atlas_asset, pal_table=b""):
             + bytes(pal_table)
             + m["tiles"] + bytes(overrides)
             + b"".join(bytes(x) for x in m["warps"]))
-    m["blob"] = blob_header(MAGIC_MAP, w, h, len(m["warps"]), atlas_asset) + body
+    m["blob"] = (blob_header(MAGIC_MAP, w, h, len(m["warps"]), atlas_asset,
+                             orient=orient) + body)
 
     saved = w * h - len(overrides)   # flag plane would be 1 byte/cell
     print(f"  map {m['name']}: {count} flag overrides "
@@ -1043,7 +1241,7 @@ def check_warp_destinations(maps):
 
 # --------------------------------------------------------------------------- dialog
 
-def pack_dialog(dialogs):
+def pack_dialog(dialogs, orient=ORIENT_BUTTONS_RIGHT):
     """All dialog in one blob: an offset index, then NUL-terminated pages.
 
     One resource rather than one per conversation, because a read costs ~29 us per CALL
@@ -1081,7 +1279,7 @@ def pack_dialog(dialogs):
     body += text
 
     print(f"  dialog: {len(names)} entries, {len(pages)} pages, {len(text)} bytes text")
-    blob = blob_header(MAGIC_DIALOG, len(names)) + bytes(body)
+    blob = blob_header(MAGIC_DIALOG, len(names), orient=orient) + bytes(body)
     return {"names": names, "index": index, "blob": blob}
 
 
@@ -1095,7 +1293,7 @@ SAMPLE_MAX_MS = 1500
 SAMPLE_RATE = 16000
 
 
-def pack_samples(root, specs):
+def pack_samples(root, specs, orient=ORIENT_BUTTONS_RIGHT):
     """Import small PCM effects: raw signed 8-bit mono, or a WAV we can read directly.
 
     Deliberately not a general audio importer. Long-form audio -- music beds, voice --
@@ -1138,7 +1336,7 @@ def pack_samples(root, specs):
 
         loop = int(spec.get("loop_start", 0xFFFFFFFF))
         body = (rate.to_bytes(4, "little") + loop.to_bytes(4, "little") + pcm)
-        blob = blob_header(MAGIC_SAMPLE, 0, 0, 0, 0) + body
+        blob = blob_header(MAGIC_SAMPLE, 0, 0, 0, 0, orient=orient) + body
         print(f"  sample {name}: {ms}ms, {rate}Hz, {len(pcm):,} bytes"
               + (f", loops at {loop}" if loop != 0xFFFFFFFF else ""))
         out.append({"name": name, "blob": blob, "out": f"sfx_{name}.bin", "ms": ms})
@@ -1212,7 +1410,7 @@ def pack_music_names(man):
     return [{"name": n} for n in sorted(man.get("music", {}))]
 
 
-def pack_music(specs):
+def pack_music(specs, orient=ORIENT_BUTTONS_RIGHT):
     """Compile [music.*] into pattern blobs.
 
     A row is two bytes per channel -- note and instrument -- so a 16-row four-channel
@@ -1284,7 +1482,7 @@ def pack_music(specs):
                 + bytes(inst_bytes) + pad4(bytes(order)) + bytes(pattern_bytes))
 
         blob = blob_header(MAGIC_MUSIC, len(patterns), len(order), rows_per,
-                           len(instruments)) + body
+                           len(instruments), orient=orient) + body
         print(f"  music {name}: {len(patterns)} patterns x {rows_per} rows, "
               f"{len(instruments)} instruments, {tempo}bpm, {len(blob)} bytes")
         songs.append({"name": name, "blob": blob, "out": f"music_{name}.bin"})
@@ -1444,10 +1642,16 @@ def pack_glyph_rows(rows, depth):
     return bytes(out)
 
 
-def pack_font(root, spec, man):
+def pack_font(root, spec, man, orient=ORIENT_BUTTONS_RIGHT):
     """Rasterise a TTF/OTF at a pixel size and pack it as a PF blob.
 
-    Format after the header (depth, line_height, baseline in bytes 3-5):
+    Glyph bitmaps rotate with the rest of the content, so `w` and `h` in a glyph entry are
+    the dimensions AS STORED. The metrics beside them -- advance, bearing_x, bearing_y --
+    stay typographic: along the baseline, and up from it. Keeping those two frames apart
+    is what lets pnx_text lay out a line with one set of arithmetic and blit the result
+    with another, and it is why a vertical script would need no new fields.
+
+    Format after the header (depth, line_height, baseline, advance axis in bytes 3-6):
         u16 glyph_count, u16 bitmap_bytes
         u8  first_cp, last_cp, fallback_index, space_advance
         glyph_count * 8: u16 offset, u8 w, u8 h, u8 advance, s8 bearing_x, s8 bearing_y, pad
@@ -1519,6 +1723,7 @@ def pack_font(root, spec, man):
                            "bx": 0, "by": 0})
             continue
 
+        rows = rotate_levels(rows, orient)
         w, h = len(rows[0]), len(rows)
         packed = pack_glyph_rows(rows, depth)
 
@@ -1576,7 +1781,9 @@ def pack_font(root, spec, man):
     body += bitmaps
 
     line_height = ascent + descent
-    blob = blob_header(MAGIC_FONT, depth, line_height, ascent) + bytes(body)
+    advance_axis = ORIENT_ADVANCE[orient]
+    blob = (blob_header(MAGIC_FONT, depth, line_height, ascent, advance_axis,
+                        orient=orient) + bytes(body))
 
     saved = sum(g["w"] for g in inked) and (
         len(glyphs) - len({(g["w"], g["h"], g["offset"]) for g in inked}))
@@ -1589,13 +1796,14 @@ def pack_font(root, spec, man):
             "glyphs": glyphs, "chars": chars, "origin": origin,
             "depth": depth, "size": size, "threshold": threshold,
             "tracking": tracking, "line_height": line_height, "baseline": ascent,
+            "advance_axis": advance_axis,
             "license": spec["license"], "source": spec["source"],
             "bitmap_bytes": len(bitmaps)}
 
 
 # --------------------------------------------------------------------------- scenes
 
-def build_scenes(man, asset_index, maps=()):
+def build_scenes(man, asset_index, maps=(), orient=ORIENT_BUTTONS_RIGHT):
     """Compile [scene.*] into a table of asset-id lists.
 
     A scene is the only load point the framework has, so it is the right unit to declare
@@ -1668,7 +1876,7 @@ def build_scenes(man, asset_index, maps=()):
 
     print(f"  scenes: {len(names)} declared, {len(entries)} asset references")
     return {"names": names, "index": index, "entries": entries,
-            "blob": blob_header(MAGIC_SCENES, len(names)) + bytes(body)}
+            "blob": blob_header(MAGIC_SCENES, len(names), orient=orient) + bytes(body)}
 
 
 def report_scene_budgets(scenes, sizes, palette_bytes_total):
@@ -1707,7 +1915,8 @@ def write_blob(path, blob):
 
 
 def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0,
-                    scenes=None, songs=None, samples=None, fonts=None):
+                    scenes=None, songs=None, samples=None, fonts=None,
+                    orient=ORIENT_BUTTONS_RIGHT):
     L = [
         "// GENERATED by tools/pnx_assets.py -- do not edit.",
         "//",
@@ -1717,6 +1926,13 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
         "#pragma once",
         "",
         "#include <stdint.h>",
+        "",
+        f"// Built for orientation {ORIENT_NAMES[orient]}. Every dimension and coordinate",
+        "// below is in the FRAMEBUFFER's frame, already rotated -- a map that reads 32",
+        "// wide in the manifest reports 24 here if that is what the display sees. Pass",
+        "// this to pnx_assets_expect_orientation() at start-up and a blob left over from",
+        "// a build in the other orientation is a clean refusal rather than scrambled art.",
+        f"#define PNX_ORIENTATION {orient}",
         "",
     ]
 
@@ -1901,13 +2117,20 @@ def report_budget(entries, budget):
 
 # ----------------------------------------------------------------------------- main
 
-def build(manifest_path, out_dir, header_path, preview=False, package=None):
+def build(manifest_path, out_dir, header_path, preview=False, package=None,
+          orientation=None):
     root = os.path.dirname(os.path.abspath(manifest_path))
     with open(manifest_path, "rb") as f:
         man = tomllib.load(f)
 
     project = man.get("project", {})
     budget = int(project.get("budget_bytes", DEFAULT_BUDGET))
+
+    # The override exists so one manifest can be built both ways. That is not a
+    # convenience: "the same content compiles to either orientation" is a claim about the
+    # pipeline, and a claim nobody can run is one that quietly stops being true.
+    orient = parse_orientation(orientation or project.get("orientation"),
+                               "--orientation" if orientation else "[project]")
 
     out_dir = out_dir or os.path.join(root, project.get("resources", "resources"))
     header_path = header_path or os.path.join(root, project.get("header",
@@ -1916,8 +2139,10 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
     entries = []
     blobs = []
 
-    print("building assets")
-    atlases = [pack_atlas(root, a) for a in man.get("atlas", [])]
+    print("building assets"
+          + (f" ({ORIENT_NAMES[orient]}: content rotated at build time, so the engine's "
+             f"ordinary blit draws it)" if orient != ORIENT_BUTTONS_RIGHT else ""))
+    atlases = [pack_atlas(root, a, orient) for a in man.get("atlas", [])]
 
     # Tile roles are PER ATLAS. They used to be one shared dict, which forced the
     # single-tileset restriction: two atlases both defining "wall" would collide, and a
@@ -1935,7 +2160,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
             r[role] = idx
         roles_by_atlas[atlas["name"]] = r
 
-    sprites = [pack_sprite(root, sp) for sp in man.get("sprite", [])]
+    sprites = [pack_sprite(root, sp, orient) for sp in man.get("sprite", [])]
 
     legend = parse_legend(man.get("legend", {}))
     map_specs = man.get("map", [])
@@ -1957,6 +2182,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
         m["palette"] = spec.get("palette")
         maps.append(m)
     check_warp_destinations(maps)
+    rotate_maps(maps, orient)
 
     # Tile flags live on the tileset, so each atlas takes its defaults only from the maps
     # that actually use it -- otherwise one tileset's flags would leak into another.
@@ -1989,9 +2215,9 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
     print("palettes:")
     shared = []
     for a in atlases:
-        finish_atlas(a, flags_by_atlas[a["name"]], shared)
+        finish_atlas(a, flags_by_atlas[a["name"]], shared, orient)
     for sp in sprites:
-        finish_sprite(sp, shared)
+        finish_sprite(sp, shared, orient)
 
     by_name = {a["name"]: a for a in atlases}
     for m in maps:
@@ -2006,15 +2232,15 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
                     f"such variant. It provides: {', '.join(sorted(tables)) or '(none -- add '
                     f'`variants` to the atlas)'}")
             table = tables[want]
-        finish_map(m, flags_by_atlas[m["atlas"]], atlas_asset, table)
-    palette_blob = (blob_header(MAGIC_PALETTES, len(shared))
+        finish_map(m, flags_by_atlas[m["atlas"]], atlas_asset, table, orient)
+    palette_blob = (blob_header(MAGIC_PALETTES, len(shared), orient=orient)
                     + b"".join(palette_bytes(p) for p in shared))
     print(f"  {len(shared)} palettes, {len(shared) * PALETTE_ENTRIES} B shared across "
           f"every asset -- set PNX_PALETTE_SLOTS >= {len(shared)}")
 
-    dialog = pack_dialog(dialog_specs) if dialog_specs else None
-    songs = pack_music(man.get("music", {})) if man.get("music") else []
-    samples = pack_samples(root, man.get("sample", {})) if man.get("sample") else []
+    dialog = pack_dialog(dialog_specs, orient) if dialog_specs else None
+    songs = pack_music(man.get("music", {}), orient) if man.get("music") else []
+    samples = pack_samples(root, man.get("sample", {}), orient) if man.get("sample") else []
 
     # Fonts come after dialog is known, because `charset = "auto"` derives its glyph set
     # from the dialog pages -- a font cannot be sized until the text it must render is.
@@ -2022,7 +2248,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
     font_names = [f.get("name") for f in font_specs]
     if len(set(font_names)) != len(font_names):
         raise BuildError("duplicate font names")
-    fonts = [pack_font(root, f, man) for f in font_specs]
+    fonts = [pack_font(root, f, man, orient) for f in font_specs]
 
     # Order here defines the PnxAssetId enum and the resource table, so it must match
     # generate_header's. Both walk atlases, sprites, maps, dialog in that order.
@@ -2066,7 +2292,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
                         write_blob(os.path.join(out_dir, ft["out"]), ft["blob"])))
         blobs.append((ft["name"], ft["out"]))
 
-    scenes = build_scenes(man, asset_index, maps)
+    scenes = build_scenes(man, asset_index, maps, orient)
     if scenes:
         scene_out = project.get("scenes_out", "scenes.bin")
         entries.append(("scene", "scenes",
@@ -2076,7 +2302,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
         asset_index["PNX_ASSET_SCENES_SCENES"] = len(ordered) - 1
 
     generate_header(header_path, atlases, sprites, maps, dialog, roles_by_atlas,
-                    len(shared), scenes, songs, samples, fonts)
+                    len(shared), scenes, songs, samples, fonts, orient)
     print(f"\nheader: {header_path}")
 
     if fonts:
@@ -2088,7 +2314,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
     if preview and Image is not None:
         for a in atlases:
             p = os.path.join(out_dir, f"preview_{a['name']}.png")
-            preview_atlas(a, roles_by_atlas[a["name"]], p)
+            preview_atlas(a, roles_by_atlas[a["name"]], p, orient=orient)
             print(f"preview: {p}")
 
     report_budget(entries, budget)
@@ -2102,7 +2328,14 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
     return 0
 
 
-def preview_atlas(atlas, roles, path, cols=8):
+def preview_atlas(atlas, roles, path, cols=8, orient=ORIENT_BUTTONS_RIGHT):
+    """An annotated contact sheet of the tiles, drawn the way the ARTIST drew them.
+
+    Stored tiles are rotated; the PNG they came from is not. A preview is for checking the
+    carve and the autopick against the source art, so it undoes the rotation rather than
+    asking someone to tilt their head -- the ids and roles it labels are the same either
+    way.
+    """
     tiles, T = atlas["tiles"], atlas["tile_px"]
     scale, label = 3, 10
     cell = T * scale
@@ -2115,7 +2348,8 @@ def preview_atlas(atlas, roles, path, cols=8):
         cx, cy = (idx % cols) * cell, (idx // cols) * (cell + label)
         for j in range(T):
             for i in range(T):
-                v = buf[j * T + i]
+                ri, rj = rotate_point(i, j, T, T, orient)
+                v = buf[rj * T + ri]
                 if v == TRANSPARENT:
                     continue
                 draw.rectangle([cx + i * scale, cy + j * scale,
@@ -2138,10 +2372,14 @@ def main():
                     help="also emit annotated atlas PNGs")
     ap.add_argument("--package", nargs="?", const="package.json",
                     help="rewrite pebble.resources.media in this package.json")
+    ap.add_argument("--orientation", choices=sorted(ORIENTATIONS),
+                    help="override [project] orientation: where the button cluster sits "
+                         "when the device is held to play")
     args = ap.parse_args()
 
     try:
-        return build(args.manifest, args.out, args.header, args.preview, args.package)
+        return build(args.manifest, args.out, args.header, args.preview, args.package,
+                     args.orientation)
     except BuildError as e:
         print(f"\nasset build FAILED: {e}", file=sys.stderr)
         return 1

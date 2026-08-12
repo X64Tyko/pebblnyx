@@ -12,6 +12,16 @@
 //
 //     pnx_text_draw(t, font, "HP", x, box_y + font->baseline, ink);
 //
+// **A rotated font swaps which coordinate is which.** A landscape build bakes its glyphs
+// on their side and the pen walks down a column, so for a PNX_ADVANCE_Y_* face the pen
+// starts at `y` and `x` is the baseline. (x, y) is still simply the point on the baseline
+// where the text starts, and every call below still takes it that way -- but a game that
+// positions text by adding `font->baseline` adds it to x rather than to y.
+//
+// Widths, wrap boxes and the return value are lengths along the baseline, whichever
+// direction that runs. `w` in the wrapped call is therefore measured down the screen in
+// landscape, and `h` across it.
+//
 // Colour is a GColor8 value, the same as every other draw takes. There is no palette:
 // text is one colour, and the four bits an atlas spends naming a palette entry would be
 // waste per pixel. See PnxFont in assets/pnx_assets.h for the storage format.

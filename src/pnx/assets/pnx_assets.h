@@ -20,6 +20,7 @@
 #if PNX_USE_ASSETS
 
 #include "../core/pnx_arena.h"
+#include "../core/pnx_orient.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -147,6 +148,26 @@ typedef struct {
 #define PNX_FONT_GLYPH_BYTES 8
 #define PNX_FONT_NO_GLYPH 0xFF   // codepoint map entry for a character the font lacks
 
+// Which way the pen walks between glyphs.
+//
+// A landscape build stores its glyphs turned on their side, and a turned glyph still
+// blits like any other rectangle -- but the next one is no longer to the right of it.
+// This is the whole of what pre-rotation costs the engine: one field, and the arithmetic
+// in pnx_text that reads it.
+//
+// It belongs to the FONT rather than to the project because that is where it can never be
+// wrong: a blob that knows how to draw itself cannot be paired with the wrong constant.
+// And it is the same field a vertical script needs -- Japanese set top-to-bottom is
+// ADVANCE_Y_POS with glyphs that were never rotated -- which is why it is an axis rather
+// than a bool called `landscape`.
+typedef enum {
+  PNX_ADVANCE_X_POS = 0,   // left to right: portrait, and every Latin face
+  PNX_ADVANCE_Y_POS = 1,   // top to bottom
+  PNX_ADVANCE_Y_NEG = 2,   // bottom to top
+  PNX_ADVANCE_X_NEG = 3,   // right to left; carried by the format, not yet emitted
+  PNX_ADVANCE_COUNT
+} PnxAdvanceAxis;
+
 typedef struct {
   const uint8_t *bitmaps;
   const uint8_t *glyphs;     // glyph_count * PNX_FONT_GLYPH_BYTES
@@ -159,15 +180,20 @@ typedef struct {
   uint8_t space_advance;
   uint8_t first_cp, last_cp;
   uint8_t fallback;          // glyph drawn for a character the font does not carry
+  uint8_t advance;           // PnxAdvanceAxis: which way the pen walks
 } PnxFont;
 
 // One glyph's metrics, unpacked from the index. `bits` is NULL when the glyph has no ink
 // -- a space -- which the drawing loop treats as advance-only rather than as an error.
+// `w` and `h` are the bitmap AS STORED, which a landscape build has already rotated, so
+// the blitter needs no special case. The three metrics beside them stay typographic --
+// along the baseline, and up from it -- because that is the frame line layout works in.
+// pnx_text is the one place the two frames meet.
 typedef struct {
   const uint8_t *bits;
   uint8_t w, h;
-  uint8_t advance;
-  int8_t bearing_x;          // pen to the left edge of the bitmap
+  uint8_t advance;           // along the baseline, whichever way that runs
+  int8_t bearing_x;          // pen to the START edge of the bitmap, along the baseline
   int8_t bearing_y;          // baseline to the TOP of the bitmap, positive upwards
 } PnxGlyph;
 
@@ -210,6 +236,19 @@ static inline uint8_t pnx_font_row_bytes(const PnxFont *f, uint8_t w) {
 // PNX_ASSET_RESOURCE_TABLE.
 bool pnx_assets_init(PnxArena *persistent, PnxArena *scene,
                      const uint32_t *resources, uint16_t count);
+
+// Declares which orientation this build's resources must carry. Pass the generated
+// header's PNX_ORIENTATION, AFTER pnx_assets_init -- init clears any expectation so that
+// a second init does not inherit the first one's.
+//
+// Optional, and worth one line anyway. Without it the first blob loaded sets the
+// expectation and every later blob is checked against it, which catches the mixed bundle;
+// with it, a bundle that is uniformly stale is caught too. False if the value is not an
+// orientation.
+bool pnx_assets_expect_orientation(uint8_t orientation);
+
+// What the loaded resources say they were built for, or 0xFF before anything is loaded.
+uint8_t pnx_assets_orientation(void);
 
 // ---------------------------------------------------------------------- scenes
 //

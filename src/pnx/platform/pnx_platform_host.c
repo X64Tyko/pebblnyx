@@ -153,6 +153,14 @@ void pnx_platform_run(PnxFrameFn frame, void *ctx) {
 
 void pnx_platform_quit(void) { s_quit = true; }
 
+// The host has no BACK button to swallow and no backlight to hold, so the lock is only a
+// flag here. It is still worth having: a game's own logic decides when to raise it, and
+// that logic is testable even though its effects are not.
+static bool s_screen_locked;
+
+void pnx_platform_set_screen_lock(bool locked) { s_screen_locked = locked; }
+bool pnx_platform_screen_locked(void) { return s_screen_locked; }
+
 // No text rendering on the host: it exists to test logic, and the device's font metrics
 // are not reproducible here anyway. Recorded so a test can assert a call happened.
 static char s_last_text[128];

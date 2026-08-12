@@ -181,6 +181,24 @@ bool pnx_platform_poll_event(PnxEvent *out);
 
 bool pnx_platform_has_touch(void);
 
+// ------------------------------------------------------------------- screen lock
+//
+// Two things, and a game in the middle of a session wants both:
+//
+//   BACK stops dismissing the app. The system's default is to exit, which off the wrist
+//   is one misplaced finger between a player and their session. While locked, BACK still
+//   arrives as an ordinary button event -- a game can use it -- but it no longer ends the
+//   app. Unlocked, it exits exactly as it always did.
+//
+//   The backlight is held on. A dim room and a screen that goes dark mid-turn reads as a
+//   crash, and the usual remedy -- flick your wrist -- is not available to hands holding
+//   the watch like a gamepad.
+//
+// Left off by default: an app that never unlocks is an app the player has to force-quit,
+// and that is a decision for the game, at the moments it knows it is mid-play.
+void pnx_platform_set_screen_lock(bool locked);
+bool pnx_platform_screen_locked(void);
+
 // -------------------------------------------------------------------- frame loop
 
 // Called once per rendered frame. `elapsed_ms` is measured, not assumed: the display

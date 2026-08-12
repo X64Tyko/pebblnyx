@@ -53,10 +53,16 @@ draws. Rotate so the three-button cluster sits along the top edge and it is unde
 shoulder triggers, for a shooter. Rotate so it sits along the bottom and it is under both thumbs:
 pinball flippers. Neither reading exists on a wrist, where there is one thumb and an awkward angle.
 
-That is M4c in [`ROADMAP.md`](ROADMAP.md), and it is the clearest argument that off-wrist play is a
-platform fact worth designing around rather than a personal preference. Note that it costs no engine
-code at all: the assets are rotated at build time, so the framebuffer is written exactly as it always
-was.
+That is M4c in [`ROADMAP.md`](ROADMAP.md), built, and it is the clearest argument that off-wrist play
+is a platform fact worth designing around rather than a personal preference. The assets are rotated
+at build time, so the framebuffer is written exactly as it always was -- the renderer never learns a
+game is in landscape.
+
+It cost the engine one field rather than the none this claimed. Glyphs turn with everything else, and
+a turned glyph blits like any other rectangle, but the next one is no longer to the right of it: a
+font carries an advance axis and the text layer walks it. The buttons do not rotate either, which is
+what `src/pnx/input/` addresses -- it hands a game the cluster by position as the player reads it,
+so the same menu code works whichever way the watch is held.
 
 ## Still unverified
 

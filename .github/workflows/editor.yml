@@ -63,6 +63,24 @@ jobs:
             python tools/pnx_assets.py "$m"
           done
 
+      # M4c's claim is that ONE manifest compiles to either orientation -- the content is
+      # rotated at build time, not the framebuffer at run time. tests/test_assets.py holds
+      # the pipeline to that on a synthetic manifest; this holds it to the real example,
+      # whose art, maps, sprites and fonts are the things that actually turn.
+      #
+      # Into a scratch directory, so the landscape blobs cannot be left behind for the
+      # host tests to read as if they were the portrait ones.
+      - name: Examples build in landscape too
+        run: |
+          for m in examples/*/assets.toml; do
+            for o in buttons_top buttons_bottom; do
+              echo "--- $m ($o)"
+              d="$(mktemp -d)"
+              python tools/pnx_assets.py "$m" --orientation "$o" \
+                     --out "$d/res" --header "$d/gen.h"
+            done
+          done
+
       - name: Host tests (framework)
         run: make -C tests test-c
 
@@ -98,10 +116,20 @@ jobs:
           - os: windows-latest
             tag: windows-x86_64
             artifact: '*.zip'
-          - os: macos-13           # Intel
+          # Oldest GA macOS image, for the same reason ubuntu-22.04 is pinned above: a
+          # binary built against a newer SDK will not run on an older OS, and the point of
+          # these artefacts is that someone can download and run one.
+          #
+          # NOT macos-13/macos-14. macos-13 was RETIRED and a job asking for it is never
+          # assigned a runner -- it does not fail, it sits queued until GitHub's 24-hour
+          # timeout, which also means `release` (needs: build) never runs and a tag
+          # produces nothing. macos-14 still works but is marked deprecated, so it is the
+          # next one to go the same way. Check labels against
+          # https://github.com/actions/runner-images#available-images before changing.
+          - os: macos-15-intel     # Intel
             tag: macos-x86_64
             artifact: '*.dmg'
-          - os: macos-14           # Apple silicon
+          - os: macos-15           # Apple silicon
             tag: macos-arm64
             artifact: '*.dmg'
 

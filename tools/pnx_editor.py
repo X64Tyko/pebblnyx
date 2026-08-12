@@ -264,6 +264,23 @@ class Project:
 
     # ---------------------------------------------------------------- rendering
 
+    def _upright(self, img):
+        """A tile from a built blob, turned back the way the artist drew it.
+
+        Blobs in a landscape project are stored rotated -- that is the whole mechanism --
+        but the editor is where content is AUTHORED, and an author comparing a tile grid
+        against their PNG should not have to tilt their head. Everything the editor shows
+        is in the author's frame; only the .bin is in the framebuffer's.
+        """
+        # rotate() turns anticlockwise, and `expand` keeps the pixels rather than
+        # cropping them to the original box -- which for a square tile is the same thing,
+        # and for anything else is the difference between a preview and a bug report.
+        if self.orientation == pa.ORIENT_BUTTONS_TOP:
+            return img.rotate(90, expand=True)         # baked clockwise, so undo it
+        if self.orientation == pa.ORIENT_BUTTONS_BOTTOM:
+            return img.rotate(-90, expand=True)
+        return img
+
     def atlases(self):
         """Every atlas, with its own role table and rendered tiles.
 
@@ -299,7 +316,7 @@ class Project:
                 "name": name,
                 "count": atlas["count"],
                 "roles": roles,
-                "tiles": [pv.data_uri(pv.tile_image(atlas, palettes, i, 2))
+                "tiles": [pv.data_uri(self._upright(pv.tile_image(atlas, palettes, i, 2)))
                           for i in range(atlas["count"])],
             })
         return out
@@ -349,6 +366,11 @@ class Project:
             "dialog": {k: v.get("pages", [])
                        for k, v in self.man.get("dialog", {}).items()},
             "scenes": list(self.man.get("scene", {})),
+            # The canvas the author is working on, which is the device's display turned
+            # if the project is landscape. Sent as dimensions rather than as a flag so
+            # the page never has to know which way round that is.
+            "orientation": pa.ORIENT_NAMES[self.orientation],
+            "screen": [self.SCREEN_W, self.SCREEN_H],
             "budget": self.project.get("budget_bytes", 262144),
             "used": sum(os.path.getsize(os.path.join(self.res, f))
                         for f in os.listdir(self.res) if f.endswith(".bin"))
@@ -824,8 +846,61 @@ class Project:
         }
 
     # ------------------------------------------------------- the preview canvas
+    #
+    # emery's display is 200x228 and never rotates. A landscape project is one whose
+    # content is baked turned, so the author is looking at a 228x200 canvas -- and a
+    # preview that showed them the portrait one would be previewing the wrong thing.
 
-    SCREEN_W, SCREEN_H = 200, 228
+    DISPLAY_W, DISPLAY_H = 200, 228
+
+    @property
+    def orientation(self):
+        return pa.parse_orientation(self.project.get("orientation"), "[project]")
+
+    @property
+    def landscape(self):
+        return self.orientation != pa.ORIENT_BUTTONS_RIGHT
+
+    @property
+    def SCREEN_W(self):
+        return self.DISPLAY_H if self.landscape else self.DISPLAY_W
+
+    @property
+    def SCREEN_H(self):
+        return self.DISPLAY_W if self.landscape else self.DISPLAY_H
+
+    def set_orientation(self, value):
+        """Rewrite `orientation` inside [project], creating it if it is not there.
+
+        Edited in place rather than appended, which every other writer here does: an
+        appended key lands in whatever table happens to be last in the file, and a
+        `orientation` under [[font]] is ignored silently by the pipeline and by the
+        author reading their own manifest back.
+        """
+        if value not in pa.ORIENTATIONS:
+            raise ValueError(f"unknown orientation {value!r}")
+
+        lines = open(self.path).read().split("\n")
+        start = next((i for i, l in enumerate(lines)
+                      if l.strip() == "[project]"), None)
+        if start is None:
+            raise ValueError("this manifest has no [project] table")
+
+        end = next((i for i in range(start + 1, len(lines))
+                    if lines[i].lstrip().startswith("[")), len(lines))
+
+        for i in range(start + 1, end):
+            if re.match(r"\s*orientation\s*=", lines[i]):
+                lines[i] = f'orientation = "{value}"'
+                break
+        else:
+            lines.insert(start + 1, f'orientation = "{value}"')
+            lines.insert(start + 1,
+                         "# Where the button cluster sits when the watch is held to play.")
+
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
 
     def _roles(self):
         """Role -> tile index per atlas, read from the generated header.
@@ -886,7 +961,7 @@ class Project:
                 idx = roles.get(role)
                 if idx is None or idx >= atlas["count"]:
                     continue
-                tile = pv.tile_image(atlas, palettes, idx)
+                tile = self._upright(pv.tile_image(atlas, palettes, idx))
                 # Masked, so index 0 leaves the clear colour rather than punching a hole.
                 img.paste(tile, (tx * T - ox, ty * T - oy), tile)
         return img
@@ -1696,6 +1771,17 @@ button:disabled{opacity:.45;cursor:not-allowed}
       <small>Press <kbd>W</kbd>, click a tile, then choose where it leads.</small>
     </section>
     <section><h2>Palettes</h2><div id="pals"></div></section>
+    <!-- Orientation is a project-wide content decision, not a view setting: it changes
+         what the pipeline BAKES. Named for where the button cluster ends up, because
+         that is what the choice is really about -- under one thumb it is a menu, along
+         the top edge it is shoulder triggers, along the bottom it is flippers. -->
+    <section><h2>Orientation</h2>
+      <select id="orient">
+        <option value="portrait">Portrait — cluster right, one thumb</option>
+        <option value="buttons_top">Landscape — cluster top, triggers</option>
+        <option value="buttons_bottom">Landscape — cluster bottom, flippers</option>
+      </select>
+      <small id="orientnote">—</small></section>
     <section><h2>Budget</h2><div class="meter"><i id="bar"></i></div>
       <small id="budget">—</small></section>
   </aside>
@@ -1803,7 +1889,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
       </div>
 
       <div class="fontview">
-        <div class="plate wide"><h3>On the watch — 200&times;228</h3>
+        <div class="plate wide"><h3 id="fscenetitle">On the watch — 200&times;228</h3>
           <div id="fscenewrap"><img id="fscene" alt=""></div>
           <small id="fscenenote">—</small>
         </div>
@@ -2024,7 +2110,7 @@ async function load(){
 
   $('#mapsel').innerHTML=S.data.maps.map((m,i)=>`<option value="${i}">${m.name}</option>`).join('');
   $('#atlassel').innerHTML=S.data.atlases.map(a=>`<option value="${a.name}">${a.name}</option>`).join('');
-  drawPalettes(); budget(); statusbar();
+  drawPalettes(); budget(); statusbar(); orientation();
   selectMap(0);
 }
 
@@ -2078,6 +2164,21 @@ function drawPalettes(){
 // a map blew the cap after six hours of work is the failure this exists to prevent, so
 // the number has to move while the map is being painted.
 let estTimer=null, estLast=null;
+
+// The canvas the author is working on, and the reason it is that shape. Dimensions come
+// from the server rather than being derived here, so there is one place that knows the
+// display is 200x228 and which way round a landscape project turns it.
+function orientation(){
+  const o=S.data.orientation==='buttons_right'?'portrait':S.data.orientation;
+  $('#orient').value=o;
+  const [w,h]=S.data.screen;
+  $('#orientnote').textContent=o==='portrait'
+    ? `${w}×${h} canvas. Content is baked as drawn.`
+    : `${w}×${h} canvas. Art, maps and glyphs are baked turned, so the watch draws them `
+      +`the ordinary way round.`;
+  const plate=$('#fscenetitle');
+  if(plate) plate.innerHTML=`On the watch — ${w}&times;${h}`;
+}
 
 function budget(now){
   clearTimeout(estTimer);
@@ -2240,6 +2341,21 @@ $('#newmap').onclick=async()=>{
   $('#nmname').value='';
   await load();
   const i=S.data.maps.findIndex(m=>m.name===name);
+  $('#mapsel').value=i; selectMap(i);
+};
+// Changing this changes what the pipeline BAKES -- every atlas, sprite, map and glyph
+// comes out turned -- so the resources on disk are stale the moment it is picked. Saying
+// so beats letting someone wonder why the preview and the watch disagree.
+$('#orient').onchange=async()=>{
+  const r=await (await fetch('/api/orientation',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({orientation:$('#orient').value})})).json();
+  const log=$('#log'); log.className=r.ok?'ok':'bad';
+  if(!r.ok){log.textContent=r.error;return}
+  log.textContent='Orientation set. Press Build — every asset is baked turned, so the '
+                 +'resources on disk are now stale.';
+  const keep=S.map&&S.map.name; await load();
+  const i=Math.max(0,S.data.maps.findIndex(m=>m.name===keep));
   $('#mapsel').value=i; selectMap(i);
 };
 $('#build').onclick=async()=>{
@@ -3337,6 +3453,9 @@ def make_handler(session):
                     self._send(200, json.dumps(session.proj.font_scene(json.loads(raw))))
                 elif self.path == "/api/font":
                     session.proj.add_font(json.loads(raw))
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/orientation":
+                    session.proj.set_orientation(json.loads(raw)["orientation"])
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/sdk/accept":
                     TOOLCHAIN.accept()

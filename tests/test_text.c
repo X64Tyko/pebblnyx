@@ -75,8 +75,8 @@ static uint8_t *build_font_blob(size_t *out_len, uint8_t depth, uint8_t version)
   b[o++] = depth;
   b[o++] = 8;              // line_height
   b[o++] = 6;              // baseline
-  b[o++] = 0;              // flags
-  b[o++] = 0;              // pad
+  b[o++] = 0;              // advance axis: left to right
+  b[o++] = 0;              // orientation: buttons right
 
   b[o++] = FONT_GLYPHS; b[o++] = 0;
   b[o++] = (uint8_t)bitmap_bytes; b[o++] = 0;
@@ -133,6 +133,251 @@ static int ink_count(PnxTarget *t, uint8_t background) {
 }
 
 #define INK 0xFF
+
+// ------------------------------------------------------------- rotated fonts (M4c)
+//
+// A landscape build bakes its glyphs on their side and stamps an advance axis into the
+// font, so the pen walks down a column instead of across a row. The claim worth testing
+// is not "some pixels appear" -- it is that a rotated font draws the SAME IMAGE, turned:
+// every pixel of the portrait render lands where the rotation says it should, including
+// the ones alignment and line stacking put there.
+//
+// So each case here renders twice. Once with the portrait font, into a virtual author
+// canvas of ROT_W x ROT_H; once with the rotated font, at the rotated origin. Then every
+// pixel in the window is compared through the same mapping the pipeline uses. A sign
+// error in a bearing, a line stacking the wrong way, or an off-by-one on a glyph's far
+// edge all fail this, and none of them would fail a test that counted ink.
+//
+// The canvas is a window inside the host's 200x228 target rather than a target of its
+// own: only the coordinate mapping matters, and both orientations have to fit somewhere.
+
+#define ROT_W 40      // author canvas: wider than tall, which is the point of landscape
+#define ROT_H 30
+
+// The one glyph, deliberately asymmetric under BOTH mirrors and under transposition. A
+// solid block -- which is what the font above uses -- cannot tell a clockwise rotation
+// from an anticlockwise one, and would pass every arrangement of these tests.
+#define ROT_GW 3
+#define ROT_GH 4
+static const char *const ROT_GLYPH[ROT_GH] = {
+  "##.",
+  "#..",
+  "##.",
+  "#.#",
+};
+
+#define ROT_ADVANCE 5
+#define ROT_BEARING_X 1
+#define ROT_BEARING_Y 5
+#define ROT_LINE_HEIGHT 9
+#define ROT_BASELINE 7
+
+// Author (ax, ay) -> framebuffer (fx, fy), for a canvas of w x h. The C twin of
+// rotate_point in tools/pnx_assets.py: if these two ever disagree, content is baked one
+// way and drawn the other.
+static void rot_point(int ax, int ay, int w, int h, uint8_t axis, int *fx, int *fy) {
+  if (axis == PNX_ADVANCE_Y_POS)      { *fx = h - 1 - ay; *fy = ax; }
+  else if (axis == PNX_ADVANCE_Y_NEG) { *fx = ay;         *fy = w - 1 - ax; }
+  else                                { *fx = ax;         *fy = ay; }
+}
+
+// Packs the glyph, rotated to match the axis, MSB-first one row at a time -- the same
+// layout pack_glyph_rows emits.
+static size_t pack_rot_glyph(uint8_t axis, uint8_t *out, uint8_t *out_w, uint8_t *out_h) {
+  const int rotated = (axis == PNX_ADVANCE_Y_POS || axis == PNX_ADVANCE_Y_NEG);
+  const int w = rotated ? ROT_GH : ROT_GW;
+  const int h = rotated ? ROT_GW : ROT_GH;
+  const size_t stride = (size_t)((w + 7) / 8);
+
+  memset(out, 0, stride * (size_t)h);
+  for (int gy = 0; gy < ROT_GH; gy++) {
+    for (int gx = 0; gx < ROT_GW; gx++) {
+      if (ROT_GLYPH[gy][gx] != '#') continue;
+      int x = gx, y = gy;
+      rot_point(gx, gy, ROT_GW, ROT_GH, axis, &x, &y);
+      out[(size_t)y * stride + (size_t)(x >> 3)] |= (uint8_t)(0x80u >> (x & 7));
+    }
+  }
+
+  *out_w = (uint8_t)w;
+  *out_h = (uint8_t)h;
+  return stride * (size_t)h;
+}
+
+// One glyph at codepoint 'A', plus a space, so wrapping has something to break on.
+static uint8_t *build_rot_font(size_t *out_len, uint8_t axis) {
+  uint8_t bits[16];
+  uint8_t gw = 0, gh = 0;
+  const size_t bitmap_bytes = pack_rot_glyph(axis, bits, &gw, &gh);
+
+  const size_t glyphs = 2;
+  const size_t index_bytes = glyphs * PNX_FONT_GLYPH_BYTES;
+  const size_t map_bytes = 'A' - ' ' + 1;
+  const size_t len = PNX_BLOB_HEADER_BYTES + 8 + index_bytes + map_bytes + bitmap_bytes;
+
+  uint8_t *b = calloc(1, len);
+  size_t o = 0;
+
+  b[o++] = 'P'; b[o++] = 'F';
+  b[o++] = PNX_BLOB_VERSION;
+  b[o++] = 1;                    // depth
+  b[o++] = ROT_LINE_HEIGHT;
+  b[o++] = ROT_BASELINE;
+  b[o++] = axis;
+  b[o++] = 0;                    // orientation: the stamp is checked elsewhere
+
+  b[o++] = (uint8_t)glyphs; b[o++] = 0;
+  b[o++] = (uint8_t)bitmap_bytes; b[o++] = 0;
+  b[o++] = ' '; b[o++] = 'A';
+  b[o++] = 1;                    // fallback: the inked glyph
+  b[o++] = ROT_ADVANCE;          // space_advance
+
+  const uint8_t index[2][PNX_FONT_GLYPH_BYTES] = {
+    { 0, 0, 0, 0, ROT_ADVANCE, 0, 0, 0 },                              // ' '
+    { 0, 0, gw, gh, ROT_ADVANCE, ROT_BEARING_X, ROT_BEARING_Y, 0 },    // 'A'
+  };
+  memcpy(b + o, index, index_bytes);
+  o += index_bytes;
+
+  for (size_t i = 0; i < map_bytes; i++) b[o + i] = PNX_FONT_NO_GLYPH;
+  b[o] = 0;                      // ' '
+  b[o + map_bytes - 1] = 1;      // 'A'
+  o += map_bytes;
+
+  memcpy(b + o, bits, bitmap_bytes);
+
+  *out_len = len;
+  return b;
+}
+
+// Every pixel of the author canvas, compared through the rotation. `snapshot` holds the
+// portrait render; the target holds the rotated one.
+static int windows_match(const uint8_t *snapshot, PnxTarget *t, uint8_t axis) {
+  int mismatches = 0;
+  for (int ay = 0; ay < ROT_H; ay++) {
+    for (int ax = 0; ax < ROT_W; ax++) {
+      int fx = 0, fy = 0;
+      rot_point(ax, ay, ROT_W, ROT_H, axis, &fx, &fy);
+      const uint8_t want = snapshot[(size_t)ay * ROT_W + (size_t)ax];
+      const uint8_t got = px(t, (int16_t)fx, (int16_t)fy);
+      if (want != got) {
+        if (mismatches < 4) {
+          printf("    author (%d,%d) -> fb (%d,%d): want %02X got %02X\n",
+                 ax, ay, fx, fy, want, got);
+        }
+        mismatches++;
+      }
+    }
+  }
+  return mismatches;
+}
+
+static void snapshot_window(PnxTarget *t, uint8_t *out) {
+  for (int ay = 0; ay < ROT_H; ay++) {
+    for (int ax = 0; ax < ROT_W; ax++) {
+      out[(size_t)ay * ROT_W + (size_t)ax] = px(t, (int16_t)ax, (int16_t)ay);
+    }
+  }
+}
+
+static void test_rotated_fonts(void) {
+  static uint32_t resources[4];
+  for (uint32_t i = 0; i < 4; i++) resources[i] = i + 600;
+
+  PnxArena persistent, scene;
+  pnx_arena_init(&persistent, "rot-persistent", 1024, 4);
+  pnx_arena_init(&scene, "rot-scene", 8192, 4);
+  pnx_assets_init(&persistent, &scene, resources, 4);
+
+  size_t len = 0;
+  uint8_t *flat = build_rot_font(&len, PNX_ADVANCE_X_POS);
+  install_blob(resources[0], "build/test_font_rot_x.bin", flat, len);
+
+  PnxFont portrait;
+  T_CHECK(pnx_font_load(&portrait, 0));
+  T_CHECK_EQ(portrait.advance, PNX_ADVANCE_X_POS);
+
+  static uint8_t snapshot[ROT_W * ROT_H];
+  PnxTarget *t = pnx_host_target();
+
+  // Both landscape orientations. They are not each other's mirror -- one rotates the
+  // content clockwise and the other anticlockwise -- so passing one says nothing about
+  // the other, which is exactly why both are here.
+  const uint8_t axes[2] = { PNX_ADVANCE_Y_POS, PNX_ADVANCE_Y_NEG };
+  for (int i = 0; i < 2; i++) {
+    const uint8_t axis = axes[i];
+    char path[64];
+    snprintf(path, sizeof(path), "build/test_font_rot_%u.bin", axis);
+
+    size_t rlen = 0;
+    uint8_t *rot = build_rot_font(&rlen, axis);
+    install_blob(resources[1 + i], path, rot, rlen);
+
+    PnxFont turned;
+    T_CHECK(pnx_font_load(&turned, (uint16_t)(1 + i)));
+    T_CHECK_EQ(turned.advance, axis);
+
+    // The bitmap is the same glyph on its side, so the stored dimensions swap while the
+    // metrics beside them -- advance, both bearings -- do not.
+    PnxGlyph pg, rg;
+    pnx_font_glyph(&portrait, pnx_font_glyph_index(&portrait, 'A'), &pg);
+    pnx_font_glyph(&turned, pnx_font_glyph_index(&turned, 'A'), &rg);
+    T_CHECK_EQ(rg.w, pg.h);
+    T_CHECK_EQ(rg.h, pg.w);
+    T_CHECK_EQ(rg.advance, pg.advance);
+    T_CHECK_EQ(rg.bearing_x, pg.bearing_x);
+    T_CHECK_EQ(rg.bearing_y, pg.bearing_y);
+
+    const int ax0 = 4, base_ay = 12;
+    int fx = 0, fy = 0;
+    rot_point(ax0, base_ay, ROT_W, ROT_H, axis, &fx, &fy);
+
+    // --- one line
+    pnx_host_reset();
+    const int16_t flat_adv = pnx_text_draw(t, &portrait, "AA A", ax0, base_ay, INK);
+    snapshot_window(t, snapshot);
+
+    pnx_host_reset();
+    const int16_t turned_adv = pnx_text_draw(t, &turned, "AA A", fx, fy, INK);
+    T_CHECK_EQ(turned_adv, flat_adv);       // a length, never negative
+    T_CHECK_EQ(windows_match(snapshot, t, axis), 0);
+
+    // --- wrapped and centred, which is where line stacking and alignment show up. Both
+    //     run along the baseline, so both have a direction to get wrong.
+    pnx_host_reset();
+    const int16_t flat_lines = pnx_text_draw_wrapped(t, &portrait, "AA AA", ax0, base_ay,
+                                                     12, 0, INK, PNX_ALIGN_CENTER);
+    snapshot_window(t, snapshot);
+    T_CHECK_EQ(flat_lines, 2);
+
+    pnx_host_reset();
+    const int16_t turned_lines = pnx_text_draw_wrapped(t, &turned, "AA AA", fx, fy,
+                                                       12, 0, INK, PNX_ALIGN_CENTER);
+    T_CHECK_EQ(turned_lines, flat_lines);
+    T_CHECK_EQ(windows_match(snapshot, t, axis), 0);
+
+    // --- the box bound cuts the same line off whichever way lines stack
+    pnx_host_reset();
+    T_CHECK_EQ(pnx_text_draw_wrapped(t, &turned, "AA AA", fx, fy, 12,
+                                     ROT_LINE_HEIGHT, INK, PNX_ALIGN_LEFT), 1);
+
+    free(rot);
+  }
+
+  // An axis the format does not define is a refusal, not a font drawn sideways by
+  // accident: the byte is new, so a blob from an older pipeline could carry anything.
+  {
+    PnxFont bad;
+    flat[6] = PNX_ADVANCE_COUNT;
+    install_blob(resources[3], "build/test_font_rot_bad.bin", flat, len);
+    T_CHECK(!pnx_font_load(&bad, 3));
+    flat[6] = PNX_ADVANCE_X_POS;
+  }
+
+  free(flat);
+  pnx_arena_destroy(&scene);
+  pnx_arena_destroy(&persistent);
+}
 
 void test_text(void) {
   printf("text\n");
@@ -398,4 +643,6 @@ void test_text(void) {
   free(blob);
   pnx_arena_destroy(&scene);
   pnx_arena_destroy(&persistent);
+
+  test_rotated_fonts();
 }

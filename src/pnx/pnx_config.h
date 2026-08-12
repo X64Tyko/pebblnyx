@@ -39,6 +39,14 @@
 #define PNX_USE_SEQUENCER 1
 #endif
 
+// Button edges, hold times, and the orientation-aware cluster mapping. A game that reads
+// pnx_platform_poll_event itself and does its own bookkeeping can turn this off; one in
+// landscape almost certainly should not, since it is the only thing that knows the
+// buttons did not rotate with the content.
+#ifndef PNX_USE_INPUT
+#define PNX_USE_INPUT 1
+#endif
+
 #ifndef PNX_USE_SAVE
 #define PNX_USE_SAVE 1
 #endif

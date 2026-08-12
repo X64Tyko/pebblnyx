@@ -76,14 +76,80 @@ static void span_2bpp(uint8_t *row_base, int32_t x, const uint8_t *line,
   }
 }
 
-// One glyph at a pen position. `y` is the baseline; the bitmap's top row sits
-// bearing_y above it.
+// ---------------------------------------------------------------------- direction
+//
+// Layout happens in the font's own frame -- advances along the baseline, line_height
+// across it -- and lands in the framebuffer's. For a portrait face the two are the same
+// frame and every one of these is the identity; for a landscape build, whose glyphs were
+// rotated when they were baked, the pen runs down a column and lines stack sideways.
+//
+// Kept as three small functions rather than a matrix because that is all it is: two unit
+// vectors and a corner. A matrix would cost multiplies per glyph to express the same
+// four cases, and a switch on a value that never changes within a string predicts
+// perfectly.
+
+// True when the pen runs down a column, which is every landscape build and would be a
+// vertical script.
+static inline bool axis_vertical(uint8_t axis) {
+  return axis == PNX_ADVANCE_Y_POS || axis == PNX_ADVANCE_Y_NEG;
+}
+
+// Which way the pen moves between glyphs, along its own axis.
+static inline int32_t pen_sign(uint8_t axis) {
+  return (axis == PNX_ADVANCE_Y_NEG || axis == PNX_ADVANCE_X_NEG) ? -1 : 1;
+}
+
+// Which way successive lines stack, across the baseline. Only one case runs backwards:
+// with the pen going down a column, "below the baseline" is towards smaller x.
+static inline int32_t base_sign(uint8_t axis) {
+  return axis == PNX_ADVANCE_Y_POS ? -1 : 1;
+}
+
+// A caller's (x, y) is a point in the framebuffer either way. Which of the two is the pen
+// and which is the baseline depends on the axis, and that is the whole of the conversion.
+static inline void split_origin(uint8_t axis, int32_t x, int32_t y,
+                                int32_t *pen, int32_t *base) {
+  if (axis_vertical(axis)) { *pen = y; *base = x; }
+  else                     { *pen = x; *base = y; }
+}
+
+// Top-left corner of a glyph's STORED bitmap, from a pen position on the baseline.
+//
+// `pen` runs along the baseline and `base` is the baseline's own coordinate on the other
+// axis -- so for a portrait font they are x and y, and for a rotated one they are y and
+// x. Where the bitmap runs backwards from the pen, its extent comes off the corner: that
+// is the -1 in each of the rotated cases, which is the difference between a glyph sitting
+// on the baseline and one hanging off the wrong side of it.
+static inline void glyph_origin(uint8_t axis, const PnxGlyph *g, int32_t pen,
+                                int32_t base, int32_t *out_x, int32_t *out_y) {
+  switch (axis) {
+    case PNX_ADVANCE_Y_POS:
+      *out_x = base + g->bearing_y - g->w + 1;
+      *out_y = pen + g->bearing_x;
+      break;
+    case PNX_ADVANCE_Y_NEG:
+      *out_x = base - g->bearing_y;
+      *out_y = pen - g->bearing_x - g->h + 1;
+      break;
+    case PNX_ADVANCE_X_NEG:
+      *out_x = pen - g->bearing_x - g->w + 1;
+      *out_y = base - g->bearing_y;
+      break;
+    default:
+      *out_x = pen + g->bearing_x;
+      *out_y = base - g->bearing_y;
+      break;
+  }
+}
+
+// One glyph at a pen position. `pen` is along the baseline and `base` is across it: x and
+// y respectively for a portrait font, the other way round for a rotated one.
 static void draw_glyph(PnxTarget *t, const PnxFont *f, const PnxGlyph *g,
-                       int32_t pen_x, int32_t baseline_y, uint8_t colour) {
+                       int32_t pen, int32_t base, uint8_t colour) {
   if (!g->bits) return;                             // a space: advance only
 
-  const int32_t x = pen_x + g->bearing_x;
-  const int32_t y = baseline_y - g->bearing_y;
+  int32_t x, y;
+  glyph_origin(f->advance, g, pen, base, &x, &y);
   const int16_t th = pnx_target_height(t);
   const uint8_t stride = pnx_font_row_bytes(f, g->w);
 
@@ -198,14 +264,20 @@ int16_t pnx_text_draw(PnxTarget *t, const PnxFont *f, const char *s,
                       int32_t x, int32_t y, uint8_t colour) {
   if (!t || !f || !s) return 0;
 
-  int32_t pen = x;
+  const int32_t step = pen_sign(f->advance);
+  int32_t pen, base;
+  split_origin(f->advance, x, y, &pen, &base);
+
+  const int32_t start = pen;
   for (const char *p = s; *p && *p != '\n'; p++) {
     PnxGlyph g;
     pnx_font_glyph(f, pnx_font_glyph_index(f, *p), &g);
-    draw_glyph(t, f, &g, pen, y, colour);
-    pen += g.advance;
+    draw_glyph(t, f, &g, pen, base, colour);
+    pen += step * g.advance;
   }
-  return (int16_t)(pen - x);
+  // The advance CONSUMED, which is a length and never negative -- a caller chaining a
+  // value after a label adds it to whichever coordinate its own text runs along.
+  return (int16_t)((pen - start) * step);
 }
 
 int16_t pnx_text_draw_wrapped(PnxTarget *t, const PnxFont *f, const char *s,
@@ -213,32 +285,41 @@ int16_t pnx_text_draw_wrapped(PnxTarget *t, const PnxFont *f, const char *s,
                               uint8_t colour, PnxTextAlign align) {
   if (!t || !f || !s) return 0;
 
+  const int32_t step = pen_sign(f->advance);
+  const int32_t across = base_sign(f->advance);
+
   int16_t drawn = 0;
-  int32_t baseline = y;
+  int32_t pen_origin, baseline;
+  split_origin(f->advance, x, y, &pen_origin, &baseline);
+  const int32_t first_baseline = baseline;
 
   for (const char *p = s; *p; ) {
     const PnxLineBreak br = next_line(f, p, w);
 
     // `h` bounds the box from the first baseline, so a caller sizing a dialogue box by
-    // pnx_text_height_wrapped gets exactly the lines it measured.
-    if (h > 0 && baseline - y >= h) break;
+    // pnx_text_height_wrapped gets exactly the lines it measured. Measured along the
+    // stacking direction, which is what makes the bound mean the same thing when lines
+    // stack towards smaller coordinates.
+    if (h > 0 && (baseline - first_baseline) * across >= h) break;
 
-    int32_t lx = x;
+    int32_t start = pen_origin;
     if (align != PNX_ALIGN_LEFT) {
       const int16_t lw = width_range(f, p, br.end);
-      lx += (align == PNX_ALIGN_CENTER) ? (w - lw) / 2 : (w - lw);
+      const int16_t slack = (align == PNX_ALIGN_CENTER) ? (int16_t)((w - lw) / 2)
+                                                        : (int16_t)(w - lw);
+      start += step * slack;
     }
 
-    int32_t pen = lx;
+    int32_t pen = start;
     for (const char *c = p; c < br.end; c++) {
       PnxGlyph g;
       pnx_font_glyph(f, pnx_font_glyph_index(f, *c), &g);
       draw_glyph(t, f, &g, pen, baseline, colour);
-      pen += g.advance;
+      pen += step * g.advance;
     }
 
     drawn++;
-    baseline += f->line_height;
+    baseline += across * f->line_height;
     if (br.next == p) break;
     p = br.next;
   }

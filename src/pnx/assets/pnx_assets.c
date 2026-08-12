@@ -23,6 +23,10 @@ static PnxArena *s_persistent;
 static const uint8_t *s_scene_table;
 static uint8_t s_scene_count;
 
+// 0 is a real orientation, so "nobody has said yet" needs a value of its own.
+#define PNX_ORIENT_UNSET 0xFF
+static uint8_t s_orientation = PNX_ORIENT_UNSET;
+
 static PnxAtlas s_atlases[PNX_SCENE_MAX_ATLASES];
 static uint16_t s_atlas_asset[PNX_SCENE_MAX_ATLASES];
 static PnxSprite s_sprites[PNX_SCENE_MAX_SPRITES];
@@ -49,8 +53,19 @@ bool pnx_assets_init(PnxArena *persistent, PnxArena *scene,
   s_bytes_loaded = 0;
   s_palettes = NULL;
   s_palette_count = 0;
+  // Cleared here rather than left standing, so a second init starts from no expectation
+  // instead of inheriting one. Which is why the expectation is set AFTER init.
+  s_orientation = PNX_ORIENT_UNSET;
   return true;
 }
+
+bool pnx_assets_expect_orientation(uint8_t orientation) {
+  if (orientation >= PNX_ORIENT_COUNT) return false;
+  s_orientation = orientation;
+  return true;
+}
+
+uint8_t pnx_assets_orientation(void) { return s_orientation; }
 
 // ---------------------------------------------------------------------- palettes
 
@@ -143,6 +158,26 @@ static const uint8_t *load_blob_4(uint16_t asset_id, const char *magic,
   if (buf[2] != PNX_BLOB_VERSION) {
     pnx_log("asset %u: format v%u, runtime expects v%u -- rebuild assets",
             asset_id, buf[2], PNX_BLOB_VERSION);
+    return NULL;
+  }
+
+  // Orientation, checked here because this is the one door every blob comes through.
+  //
+  // Content is rotated at build time, so a portrait atlas in a landscape bundle is not a
+  // mismatch the renderer could ever notice -- it is simply a picture lying on its side,
+  // and a map whose walls are in the wrong places. That is a debugging session; this is
+  // one comparison.
+  //
+  // Without an explicit expectation the first blob loaded sets it, which still catches
+  // the case that actually happens: a rebuild in the other orientation that left one
+  // stale resource behind. Call pnx_assets_expect_orientation(PNX_ORIENTATION) at
+  // start-up -- the generated header defines it -- and even a uniformly stale bundle is
+  // refused.
+  if (s_orientation == PNX_ORIENT_UNSET) {
+    s_orientation = buf[7];
+  } else if (buf[7] != s_orientation) {
+    pnx_log("asset %u: built for orientation %u, project is %u -- stale resource, "
+            "rebuild assets", asset_id, buf[7], s_orientation);
     return NULL;
   }
 
@@ -369,11 +404,17 @@ bool pnx_dialog_load(PnxDialog *out, uint16_t asset_id) {
 }
 
 bool pnx_font_load(PnxFont *out, uint16_t asset_id) {
-  uint8_t depth = 0, line_height = 0, baseline = 0;
+  uint8_t depth = 0, line_height = 0, baseline = 0, advance = 0;
   size_t payload = 0;
-  const uint8_t *data = load_blob(asset_id, "PF", &depth, &line_height, &baseline,
-                                  &payload);
+  const uint8_t *data = load_blob_4(asset_id, "PF", &depth, &line_height, &baseline,
+                                    &advance, &payload);
   if (!data) return false;
+
+  if (advance >= PNX_ADVANCE_COUNT) {
+    pnx_log("font %u: advance axis %u, expected 0-%u", asset_id, advance,
+            PNX_ADVANCE_COUNT - 1);
+    return false;
+  }
 
   // u16 glyph_count, u16 bitmap_bytes, u8 first_cp, last_cp, fallback, space_advance.
   if (payload < 8) {
@@ -423,6 +464,7 @@ bool pnx_font_load(PnxFont *out, uint16_t asset_id) {
   out->first_cp = first_cp;
   out->last_cp = last_cp;
   out->fallback = fallback;
+  out->advance = advance;
 
   // Both tables are validated once, here, so the blitter can index them per pixel with
   // no checks at all -- the same bargain pnx_atlas_load makes with palette slots. An

@@ -1,9 +1,10 @@
 # Roadmap
 
-Current state: **M0-M3 complete**, editor E1 usable (maps, transitions, asset
-import, multi-atlas). No emulator is possible for PT2 -- see EDITOR.md. M4 (audio) next. `platform`, `core`, `assets` and
-`gfx` exist, run on device, and are covered by 182 host checks. The editor track (E1)
-is next.
+Current state: **M0-M4c complete**, editor E1 usable (maps, transitions, asset
+import, multi-atlas). No emulator is possible for PT2 -- see EDITOR.md. M5 (save) next.
+`platform`, `core`, `assets`, `gfx`, `audio` and `input` exist, run on device, and are
+covered by 435 host checks plus 84 pipeline checks. Audio and landscape are both still
+waiting on device confirmation.
 
 The ordering principle: a framework with no consumer gets the abstractions wrong in
 ways nobody discovers until someone tries to use it. PGE (the 2014 Pebble game engine)
@@ -204,7 +205,7 @@ Outstanding: device confirmation that music and effects run together without und
 under real load. The case that would break it is a frame arriving seconds late while a
 notification covers the app -- host tests cover the arithmetic, hardware has the last word.
 
-## M4b — Content reuse: per-map palette remap
+## M4b — Content reuse: per-map palette remap — **DONE**
 
 Reusing an atlas with a different palette saves **~12,000 bytes per zone** for the cost of a palette,
 which is the largest content lever the framework can offer. A map carries a small array remapping the
@@ -218,7 +219,10 @@ question -- mixing palettes inside one map -- and stay unbuilt until something n
 Done when: two maps share one atlas at different palettes, and the size report shows the second
 costing a palette rather than an atlas.
 
-## M4c — Landscape, and screen lock
+**Result.** The overworld's cave shares the base tileset at `dungeon_ice`: 44 bytes of remap
+table in the map against 5,632 for a second copy of the atlas.
+
+## M4c — Landscape, and screen lock — **DONE** (pending device confirmation)
 
 Rotating the display changes what the physical buttons are FOR, which makes whole genres available:
 
@@ -259,14 +263,60 @@ Small, and unavoidable, because **the buttons do not rotate**:
 
 - **Input mapping.** Physical up/select/down mean different directions once the device is held
   sideways. Logical actions with an orientation-aware default is what `src/pnx/input/` was always for.
-- **Touch transform.** `emery` and `gabbro` report portrait coordinates; a landscape game thinks in
-  rotated ones. Four lines, in the platform layer so nothing above it knows.
 - **Screen lock**, two separate things: **consume BACK**, which otherwise dismisses the app and loses a
   session mid-game, and **hold the backlight**, because off-wrist play in a dim room going dark
   mid-turn is indistinguishable from a crash.
 
 Done when: an example builds in landscape from the same source with the orientation declared in the
 manifest, the editor previews the 228x200 canvas, and touch lands where it looks like it should.
+
+### Result
+
+`orientation` in `[project]`, named for where the **button cluster** ends up rather than which way
+something turned: `portrait` (`buttons_right`), `buttons_top`, `buttons_bottom`. `landscape_left` was
+rejected as a name -- every codebase that uses it ends up arguing about whether the device or the
+image is what rotated, and the cluster is a physical object an author can point at. A
+`--orientation` override builds one manifest either way, which is how the claim below is tested
+rather than asserted.
+
+**Cost to the engine: one field.** Not zero, as this section originally promised. Glyphs rotate with
+everything else, and a glyph on its side still blits like any other rectangle -- but the next glyph
+is no longer to the right of it. So a font blob carries an advance axis and `pnx_text` walks it. That
+turned out to be the better shape anyway: the same field is what a vertical script needs, so
+Japanese set top-to-bottom is `PNX_ADVANCE_Y_POS` with glyphs that were never rotated.
+
+**The touch transform was not needed, and would have been wrong.** It was specified on the
+assumption that a landscape game thinks in rotated coordinates. It does not: pre-rotation means the
+game draws, moves and collides in the framebuffer's frame like any other, and the device already
+reports touches in exactly that frame. Rotating them would land a tap where the pixel is not. The
+author's 228x200 frame exists at build time and in the editor, and nowhere at run time.
+`tests/test_input.c` paints a pixel, reports a touch at its coordinates and checks the two agree.
+
+**Every blob is stamped** with the orientation it was baked at -- including songs and palettes, which
+have no geometry. Stamping only the geometric ones would make "orientation-free" and "built portrait"
+the same byte, and the loader could no longer tell a stale atlas from a legitimate sample. The check
+lives in `load_blob_4`, the one door every blob comes through: the first blob sets the expectation,
+and `pnx_assets_expect_orientation(PNX_ORIENTATION)` at start-up catches a uniformly stale bundle too.
+
+**A bug fell out of the invariance check.** "The same manifest compiles to the same content, turned"
+did not hold: maps came out 60 bytes larger in landscape. `compute_tile_flags` was walking the u16
+tile plane and the u8 flag plane with one `zip`, pairing each tile's low byte with one cell's flags
+and its high byte with the next cell's -- so the flag defaults were computed from a scrambled tally
+that depended on the order cells were visited. It never produced wrong pixels, because `finish_map`
+decodes properly and emits an override wherever the default disagrees. It just emitted a great many
+more of them than it needed to. Fixed, and the overworld's maps fell from **3,267 to 2,388 bytes**,
+27% of that category, in a project whose largest content lever is worth 12,000. Ties in the tally now
+break toward the lower flag value rather than toward whichever cell was seen first, because content
+compiles to the same bytes in either orientation only if every choice is a function of the counts.
+
+Input landed as `pnx_input`: edges, hold times measured from the event's own delivery stamp, and the
+cluster addressed **by position as the player reads it** rather than by physical button. `buttons_top`
+and `buttons_bottom` are not each other's mirror -- the watch turned the other way puts the
+physically-DOWN button under the left hand -- so a menu written once reads the same in all three.
+
+Outstanding: device confirmation. Everything here is checked on a host, and a host cannot tell you
+that a landscape screen is readable in the hand, that the backlight hold survives a notification, or
+that swallowing BACK feels like protection rather than a trap.
 
 ## M5 — Save
 

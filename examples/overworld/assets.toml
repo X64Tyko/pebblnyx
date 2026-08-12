@@ -11,6 +11,24 @@
 name = "overworld"
 resources = "resources"
 header = "src/c/assets_gen.h"
+
+# Where the button cluster sits when the watch is held to play, which is what decides
+# whether the display is portrait or landscape. Named for the cluster rather than for a
+# rotation because that is the thing being chosen: under one thumb it reads as a menu
+# column, along the top edge as shoulder triggers, along the bottom as flippers.
+#
+#   portrait | buttons_right   the display's own orientation, and the default
+#   buttons_top                landscape, cluster under both index fingers
+#   buttons_bottom             landscape, cluster under both thumbs
+#
+# Content is rotated at BUILD time -- atlases, sprites, maps and glyphs all come out
+# turned, so the engine's ordinary blit draws a correct landscape screen and no game code
+# changes. Try it without editing this line:
+#
+#     ../../tools/pnx_assets.py assets.toml --orientation buttons_top
+#
+# The buttons do NOT rotate, which is what src/pnx/input/ is for. See docs/ROADMAP.md, M4c.
+orientation = "portrait"
 # The appstore rejects bundles over 256KB of resources. The device's hard cap is 1MB,
 # but shipping is the constraint that actually binds.
 budget_bytes = 262144

@@ -44,6 +44,7 @@ static PnxPostFrameFn s_post_fn;
 static void *s_frame_ctx;
 static uint32_t s_last_frame_ms;
 static bool s_quit;
+static bool s_screen_locked;
 
 static PnxEvent s_events[EVENT_QUEUE_LEN];
 static uint8_t s_ev_head, s_ev_count;
@@ -228,12 +229,27 @@ static void raw_up(ClickRecognizerRef r, void *c) {
   push_event(PNX_EVENT_BUTTON_UP, 0, 0, map_button(click_recognizer_get_button_id(r)));
 }
 
+// BACK, which the system would otherwise handle for us by dismissing the app.
+//
+// Subscribing it at all takes that behaviour away, so this handler owes the default back:
+// unlocked, a release exits, exactly as it did before. Locked, it does not -- and the
+// event still reaches the queue either way, so a game can use BACK as a gesture of its
+// own while it holds the lock.
+//
+// The press is where nothing happens deliberately. Exiting on the release means a game
+// that wants to grab BACK on the way down still can.
+static void back_up(ClickRecognizerRef r, void *c) {
+  push_event(PNX_EVENT_BUTTON_UP, 0, 0, PNX_BUTTON_BACK);
+  if (!s_screen_locked) pnx_platform_quit();
+}
+
 static void click_config(void *context) {
   // Raw press/release only. Interpretation -- clicks, holds, double-taps -- belongs to
   // the input module, not here, so a game can define its own gestures.
   window_raw_click_subscribe(BUTTON_ID_UP, raw_down, raw_up, NULL);
   window_raw_click_subscribe(BUTTON_ID_SELECT, raw_down, raw_up, NULL);
   window_raw_click_subscribe(BUTTON_ID_DOWN, raw_down, raw_up, NULL);
+  window_raw_click_subscribe(BUTTON_ID_BACK, raw_down, back_up, NULL);
 }
 
 static void touch_handler(const TouchEvent *event, void *context) {
@@ -345,6 +361,19 @@ void pnx_platform_run(PnxFrameFn frame, void *ctx) {
 
 void pnx_platform_quit(void) {
   s_quit = true;
+}
+
+void pnx_platform_set_screen_lock(bool locked) {
+  s_screen_locked = locked;
+  // The backlight half. light_enable(true) holds it on until it is released, rather than
+  // the timed flash light_enable_interaction gives -- a game played off the wrist in a dim
+  // room going dark mid-turn is indistinguishable from a crash, and the player's hands are
+  // on the buttons, not shaking the watch.
+  light_enable(locked);
+}
+
+bool pnx_platform_screen_locked(void) {
+  return s_screen_locked;
 }
 
 #endif  // !PNX_PLATFORM_HOST

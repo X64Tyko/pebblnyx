@@ -189,6 +189,134 @@ def maps(body):
     return {"maps": body}
 
 
+# ------------------------------------------------------------------- orientation
+#
+# M4c rotates content at BUILD time, so the engine's ordinary portrait blit draws a
+# landscape screen. That makes these tests the only place the rotation is ever checked:
+# there is no runtime code to catch it later, which is the point of the design and the
+# reason the pipeline has to be held to it here.
+#
+# The claim under test is not "landscape builds". It is that the same manifest produces
+# the SAME CONTENT, turned -- so every check below compares two builds of one manifest
+# rather than asserting numbers someone typed in.
+
+SPRITE_TALL = '''
+    [[sprite]]
+    name = "guy"
+    sheet = "sheet.png"
+    frames = [[0, 0, 8, 16]]
+    out = "guy.bin"
+'''
+
+
+def build_at(root, orientation, **overrides):
+    """Builds the standard manifest at one orientation into its own directory."""
+    path = manifest(root, **overrides)
+    out = os.path.join(root, "out_" + orientation)
+    with contextlib.redirect_stdout(io.StringIO()):
+        pnx_assets.build(path, out, os.path.join(out, "gen.h"), orientation=orientation)
+    return out
+
+
+def read_blob(out_dir, name):
+    with open(os.path.join(out_dir, name), "rb") as f:
+        return f.read()
+
+
+def defines(out_dir):
+    """The generated header as a dict, so a test can name a symbol rather than a line."""
+    found = {}
+    with open(os.path.join(out_dir, "gen.h")) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) == 3 and parts[0] == "#define" and parts[2].lstrip("-").isdigit():
+                found[parts[1]] = int(parts[2])
+    return found
+
+
+def check(label, cond):
+    global checks, failures
+    checks += 1
+    if not cond:
+        print(f"  FAIL {label}")
+        failures += 1
+
+
+def check_orientation():
+    """One manifest, three orientations, compared against each other."""
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+
+        builds = {name: build_at(root, name, sprite=SPRITE_TALL)
+                  for name in ("portrait", "buttons_top", "buttons_bottom")}
+        want = {"portrait": pnx_assets.ORIENT_BUTTONS_RIGHT,
+                "buttons_top": pnx_assets.ORIENT_BUTTONS_TOP,
+                "buttons_bottom": pnx_assets.ORIENT_BUTTONS_BOTTOM}
+
+        # --- every blob is stamped, including the ones with no geometry. A song stamped
+        #     0 in a landscape build would make "orientation-free" and "stale portrait"
+        #     the same byte, and the runtime could no longer tell them apart.
+        for name, out in builds.items():
+            for f in sorted(os.listdir(out)):
+                if not f.endswith(".bin"):
+                    continue
+                check(f"{f} stamped {name}", read_blob(out, f)[7] == want[name])
+
+        flat = builds["portrait"]
+        for name in ("buttons_top", "buttons_bottom"):
+            out, orient = builds[name], want[name]
+
+            # --- dimensions swap, in the blob header and in the generated header
+            fm, rm = read_blob(flat, "a.bin"), read_blob(out, "a.bin")
+            check(f"{name}: map w/h swap", (rm[3], rm[4]) == (fm[4], fm[3]))
+
+            fd, rd = defines(flat), defines(out)
+            check(f"{name}: header map dims swap",
+                  (rd["MAP_A_W"], rd["MAP_A_H"]) == (fd["MAP_A_H"], fd["MAP_A_W"]))
+            check(f"{name}: header sprite dims swap",
+                  (rd["GUY_W"], rd["GUY_H"]) == (fd["GUY_H"], fd["GUY_W"]))
+            check(f"{name}: orientation reaches the header",
+                  rd["PNX_ORIENTATION"] == orient)
+
+            # --- the start position is rotated by the same transform as the grid it
+            #     indexes. A map turned without its coordinates puts the player in a wall.
+            sx, sy = pnx_assets.rotate_point(fd["MAP_A_START_X"], fd["MAP_A_START_Y"],
+                                             fd["MAP_A_W"], fd["MAP_A_H"], orient)
+            check(f"{name}: start rotates with the map",
+                  (rd["MAP_A_START_X"], rd["MAP_A_START_Y"]) == (sx, sy))
+
+            # --- the tile plane IS the portrait one, rotated. Header is 8 bytes, then
+            #     u16 override count, a palette-table flag and its pad, then w*h u16 cells.
+            w, h = fm[3], fm[4]
+            body = 8 + 4
+            cells = w * h * 2
+            turned, _, _ = pnx_assets.rotate_grid(fm[body:body + cells], w, h, orient,
+                                                  stride=2)
+            check(f"{name}: tile plane is the portrait plane rotated",
+                  turned == rm[body:body + cells])
+
+            # --- and it costs nothing. Rotation permutes cells, so a map that changes
+            #     size between orientations means a choice somewhere depends on the order
+            #     cells were visited -- which is what the flag-default tally used to do.
+            check(f"{name}: map costs the same bytes", len(rm) == len(fm))
+            check(f"{name}: sprite costs the same bytes",
+                  len(read_blob(out, "guy.bin")) == len(read_blob(flat, "guy.bin")))
+
+    # --- a misspelling is a build failure, not a silent portrait build
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        global checks, failures
+        checks += 1
+        try:
+            build_at(root, "landscape")
+            print("  FAIL unknown orientation: expected failure, but the build SUCCEEDED")
+            failures += 1
+        except pnx_assets.BuildError as e:
+            if "orientation" not in str(e).lower():
+                print(f"  FAIL unknown orientation: message did not name it: {e}")
+                failures += 1
+
+
 # ------------------------------------------------------------------------- fonts
 
 import shutil as _shutil                                   # noqa: E402
@@ -285,6 +413,10 @@ def main():
     print("asset pipeline validation")
 
     expect_ok("valid manifest builds")
+
+    # --- orientation. Runs early because everything after it assumes the portrait build
+    # it has been comparing against is the one the rest of these tests describe.
+    check_orientation()
 
     # --- map geometry
     expect_fail("ragged rows", "ragged", **maps('''
@@ -697,6 +829,38 @@ def main():
 
         expect_fail("font at an invalid depth", "depth must be", _extra=_font,
                     dialog=DIALOG, font=FONT_OK.replace("size = 12", "size = 12\ndepth = 4"))
+
+        # --- glyphs rotate with everything else, and the blob says which way the pen
+        #     then walks. Without the axis the glyphs would be correct and the line
+        #     would still come out as a stack of characters in one place.
+        axis_of = {"portrait": pnx_assets.ADVANCE_X_POS,
+                   "buttons_top": pnx_assets.ADVANCE_Y_POS,
+                   "buttons_bottom": pnx_assets.ADVANCE_Y_NEG}
+        flat_glyphs = None
+        for name, axis in axis_of.items():
+            with tempfile.TemporaryDirectory() as root:
+                make_sheet(os.path.join(root, "sheet.png"))
+                _font(root)
+                out = build_at(root, name, dialog=DIALOG, font=FONT_OK)
+                b = read_blob(out, "hud.bin")
+
+            check(f"font advance axis is {name}'s", b[6] == axis)
+
+            # Glyph entries: u16 offset, w, h, advance, bearing_x, bearing_y, pad.
+            count = b[8] | (b[9] << 8)
+            entries = [b[16 + i * pnx_assets.FONT_GLYPH_ENTRY:][:6] for i in range(count)]
+            if name == "portrait":
+                flat_glyphs = entries
+                continue
+
+            check(f"{name}: same glyph count", len(entries) == len(flat_glyphs))
+            check(f"{name}: glyph bitmaps are on their side",
+                  all((r[2], r[3]) == (f[3], f[2]) for r, f in zip(entries, flat_glyphs)))
+            # Metrics are typographic -- along the baseline and up from it -- so they do
+            # NOT turn with the pixels. Rotating these as well would move every glyph off
+            # its own baseline.
+            check(f"{name}: metrics stay typographic",
+                  all(r[4:6] == f[4:6] for r, f in zip(entries, flat_glyphs)))
 
         expect_fail("duplicate font names", "duplicate font", _extra=_font,
                     dialog=DIALOG, font=FONT_OK + FONT_OK.replace('out = "hud.bin"',

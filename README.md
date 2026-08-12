@@ -21,11 +21,11 @@ wrong by more than 2x.
 
 | | |
 |---|---|
-| Smallest complete game | 6,392 of 65,535 static bytes (9.8%) — 2,468 (3.8%) with diagnostics off |
-| Playable slice | 13,356 static (20.4%), 22,469 of 262,144 resource bytes (8.6%) |
-| Runtime memory | 13,356 static + 117,716 bytes of heap, of one 128KB slot |
+| Smallest complete game | 6,452 of 65,535 static bytes (9.8%) — 2,528 (3.9%) with diagnostics off |
+| Playable slice | 15,157 of 65,535 static bytes (23.1%), 19,239 of 262,144 resource bytes (7.3%) |
+| Runtime memory | 15,157 static + 115,915 bytes of heap, of one 128KB slot |
 | Frame cost | ~5,100 µs of ~35,000 available, holding the 26.8fps ceiling |
-| Tests | 240 host checks + 22 pipeline-validation tests |
+| Tests | 435 host checks + 84 pipeline-validation tests |
 
 ---
 
@@ -82,11 +82,11 @@ src/pnx/core/         fixed point, arenas, containers, diagnostics
 src/pnx/assets/       handle-based asset registry
 src/pnx/gfx/          blitter with X/Y flip, camera, tilemap, sprites with depth sort
 src/pnx/audio/        software mixer over a streamed PCM buffer
-src/pnx/input/        swappable input backends (planned)
+src/pnx/input/        button edges, hold times, orientation-aware cluster mapping
 src/pnx/save/         chunk-packed persistence (planned)
 src/pnx/app/          fixed-timestep loop, scene stack, lifecycle (planned)
 
-tests/                240 host checks, run with a normal compiler
+tests/                435 host checks, run with a normal compiler
 tools/pnx_assets.py   the asset pipeline: manifest -> blobs + generated header
 tools/pnx_editor.py   visual editor: maps, transitions, asset import, build
 tools/pnx_preview.py  renders the shipped blobs as an HTML report
@@ -151,7 +151,7 @@ has an answer.
 To check what a module actually costs, turn it off:
 
 ```sh
-PNX_DEFINES=PNX_USE_DIAGNOSTICS=0 pebble build   # 6,392 B -> 2,468 B
+PNX_DEFINES=PNX_USE_DIAGNOSTICS=0 pebble build   # 6,452 B -> 2,528 B
 ```
 
 A game project reaches the framework through a symlink at `src/c/pnx`, which keeps every

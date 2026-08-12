@@ -31,6 +31,10 @@
 #include "gfx/pnx_text.h"
 #endif
 
+#if PNX_USE_INPUT
+#include "input/pnx_input.h"
+#endif
+
 #if PNX_USE_AUDIO
 #include "audio/pnx_audio.h"
 #endif
