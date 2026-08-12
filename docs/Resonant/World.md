@@ -14,27 +14,65 @@ Rules, as the slice establishes them:
 - Constructs can detect Resonance and classify by it -- GRD reads Van positive, Mage negative.
 - Resonance is *stored* in Nodes and Vessels are the mobile form.
 
-**Deferred (post-slice), and load-bearing for the full game:** what the Nodes were *for*. The facility
+**Now urgent rather than deferred:** what the Nodes were *for*, and what the Client is. The 60%
+escalation from "stop a mob boss" to "fight a god" only lands if the reveal has been prepared, and
+preparation has to start in Act I. What the Nodes were *for*. The facility
 contained them; the client wants them. Neither reason is stated, and the slice is stronger
 for withholding it. But the answer should exist now, because it determines whether the client
 is a villain or a rival.
 
 ## The Nodes
 
-Six, named in Event 08:
+**Three**, not six. Three nodes with a minor quest between each, then a final line once all three
+cores are held -- which lands at roughly the **60% mark**, where the story stops being about a
+contract.
 
-| Node | First impression | Notes |
+| | Node | Between it and the next |
 |---|---|---|
-| **Crystal Peaks** | first destination, 3 days | forge access, the tutorial-completion zone |
-| **Sunken City** | drowned | |
-| **Ashen Forest** | burned and still burning | |
-| **Forgotten Coast** | | |
-| **Iron Keep** | | fortified -- someone holds it |
-| **The Pit** | "people don't come back" | last, hardest, and the Mage's joke lands on it |
+| 1 | **Crystal Peaks** | the forge, and learning gear matters |
+| 2 | **Iron Keep** -- fortified, someone holds it | **balancing the Resonance** |
+| 3 | **The Pit** -- "people don't come back" | the final act's antagonist takes shape |
 
-Six named locations is a lot of promised content. **Recommend the full game deliver four and
-merge two**, or make one of them a place the player is beaten to -- arriving at a stripped
-Node is a better story beat than a sixth dungeon and costs one map instead of a region.
+The three tangent destinations are the other places GORD names: **Sunken City**, **Ashen Forest**,
+**Forgotten Coast**. Six locations either way, but only three of them are nodes -- which keeps every
+name in the outro doing work and costs nothing.
+
+Three fits the budget where six did not. The slice measured ~77,000 bytes for two zones, ~39,000 of
+which is shared across the whole game (fonts, music, samples, UI, dialogue). Marginal cost is about
+one atlas per zone, so seven zones lands near **150-170KB of 262KB**. Six nodes plus their tangents
+would have been eleven zones and overrun.
+
+## The arc, and what drives it
+
+**Destabilisation is the early-game engine.** Van is not on a quest; he is trying to get the thing
+out of him before it kills him. Everything in Act I follows from that, and it means the plot needs
+no external call to adventure at all -- the inciting incident is already inside him.
+
+That gives the power curve a shape most JRPGs have to fake:
+
+| | Resonance is | Instability |
+|---|---|---|
+| **Act I** | a dangerous emergency button, Van only | drops only at Nodes -- scarce and tense |
+| **After node 2** | balanceable, and transferable to any party member | manageable, once the tangent teaches how |
+| **After node 3 (~60%)** | all three transform, freely | mastered; the cost is no longer the story |
+
+**The tension to watch:** in Act I the player's most exciting mechanic makes their stated goal
+worse. That is good drama and a real risk -- players may simply never transform, and then the
+mechanic that carries the endgame goes unlearned. The Damper item exists as the early stopgap for
+exactly this, and the forced transformation at Event 07 exists so the player has felt it before
+having to choose it. Worth watching in playtest rather than designing around now.
+
+**Free transfer at node 2** is the strongest idea here. Once the collected shards temporarily
+stabilise the node, it can pass between party members -- so the player chooses who becomes powerful,
+which is a real tactical decision, and it costs one variable. It also quietly undercuts the
+chosen-one framing: Van was never special, he was holding it. Consistent with "I didn't know I was
+a battery."
+
+**The escalation risk.** A massive boost at 60% is the standard way to trivialise the last 40%. The
+final act's encounters have to be a step change, which means new silhouettes rather than palette
+swaps -- a content cost arriving exactly where the budget is tightest. Budget four to six genuinely
+new enemy designs for the last act and take them out of the earlier zones' allowance, not on top
+of it.
 
 ## The facility
 

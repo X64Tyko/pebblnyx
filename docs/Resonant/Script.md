@@ -203,7 +203,7 @@ bool flag_gear_check = false;       // For tutorial tease
     - **VAN:** "It wants out. I can feel it." (28)
     - **GRD:** "VESSEL STABILITY: 34%. RECALIBRATION REQUIRED. SEEK ADDITIONAL NODES." (74)
     - **VAN:** "Nodes? More of these things?" (31)
-    - **MAGE:** "Six. Scattered across the continent. If OPR's client finds them first…" (77)
+    - **MAGE:** "Three. Scattered across the continent. If OPR's client finds them first…" (79)
     - **VAN:** "Then we'd better get there first." (32)
     - **MAGE:** "We? You're still trusting me?" (29)
     - **VAN:** "Trust? No. But you know things I don't. That makes you useful." (62)
@@ -218,7 +218,7 @@ bool flag_gear_check = false;       // For tutorial tease
 - **Trigger:** Post-fade scene
 - **Condition:** `flag_boss_defeated`
 - **Script:**
-    - **GRD:** "NODE LOCATIONS: CRYSTAL PEAKS, SUNKEN CITY, ASHEN FOREST, FORGOTTEN COAST, IRON KEEP, THE PIT." (106)
+    - **GRD:** "NODE LOCATIONS: CRYSTAL PEAKS, IRON KEEP, THE PIT." (52)
     - **VAN:** "The Pit. People don't come back from there." (44)
     - **MAGE:** "Good thing you're not people anymore." (39)
     - **VAN:** "…Point. Where's the nearest?" (32)

@@ -165,8 +165,9 @@ twelve enemy types for the price of four.
 
 ## Resonance
 
-Van's Vessel state. Fills as he takes and deals damage; spending it transforms him for a limited
-number of turns -- higher stats, an altered Addition set, Resonance-only techs. Entering it raises
+Van's Vessel state at first, and any party member's after node 2 -- the collected shards stabilise
+the node enough to pass between them, so the player chooses who becomes powerful. Fills as the
+holder takes and deals damage; spending it transforms them for a limited number of turns -- higher stats, an altered Addition set, Resonance-only techs. Entering it raises
 Instability, which persists between fights and is only reduced at Nodes, so the player is spending
 story-health for combat power.
 

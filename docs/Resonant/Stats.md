@@ -83,6 +83,8 @@ Both must be winnable; see `Slice.md`.
 
 ## Open questions
 
-- Instability's fail state and Precision are both deferred; see `README.md`.
+- Precision is deferred; see `README.md`. Instability is settled -- it is the Act I motivation
+  rather than a fail state, reduced only at Nodes until the second tangent quest teaches balancing.
+  See `World.md`.
 - Enemy stats are not tabulated yet and should live in the manifest, so the pipeline can
   validate them and the editor can show them.

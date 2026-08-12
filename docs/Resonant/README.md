@@ -38,10 +38,10 @@ that answering early would only constrain:
 
 | Question | Where | Why it can wait |
 |---|---|---|
-| What the Nodes were *for* | `World.md` | The slice is stronger withholding it. But it decides whether the client is a villain or a rival, so it wants answering before Act II is written. |
+| What the Nodes were *for*, and who the Client is | `World.md` | **Promoted to urgent.** The slice still withholds it, but the 60% escalation from "stop a mob boss" to "fight a god" only lands if the reveal was prepared, and preparation starts in Act I. |
 | Is Van Subject 7? | `World.md` | Plays either way as written. Changes whether Van is *returning* to this place or arriving at it. |
-| Six Nodes, or four? | `World.md` | Budget says six do not fit at slice density. A stripped Node the player arrives at too late is a better beat than a sixth dungeon. |
-| Can Instability reach a fail state? | `Combat.md`, `Stats.md` | The slice only needs it to visibly rise. If it never threatens the player, the mechanic is a lie -- but that lie is only exposed over a full game. |
+| ~~Six Nodes, or four?~~ | `World.md` | **Settled: three**, with a tangent quest between each and a final line at ~60%. Seven zones lands near 150-170KB of 262KB; six nodes would have been eleven. |
+| ~~Can Instability reach a fail state?~~ | `Combat.md`, `Stats.md` | **Settled: no fail state needed.** It is Act I's motivation -- Van wants it out of him -- so it drives the plot instead of punishing the player. Reduced only at Nodes until the second tangent teaches balancing. |
 | Forge: a place or a portable tool? | `Gear.md` | A place gives Crystal Peaks a reason to be a hub; a tool suits ninety-second sessions. The slice has neither. |
 | Do combos cost both turns? | `Combat.md` | One initiating and pulling the other in is more exciting and much harder to telegraph on this screen. |
 | Does Precision earn its place? | `Stats.md` | It makes the timing window buyable. Simplest answer is to leave it out of the slice and decide later. |
