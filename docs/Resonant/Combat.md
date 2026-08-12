@@ -109,8 +109,13 @@ rather than the player's:
   this beat.
 
 **Cost worth stating:** an optional fourth character is a sprite set with variants, an Addition type,
-and a branch-aware line in every subsequent scene. The bytes are trivial; the authoring and the
-testing of two paths are not. That is the real price of the branch and it should be paid on purpose.
+and a branch-aware line in every subsequent scene. The bytes are trivial; the authoring and the testing
+of two paths are not. That is the real price of the branch and it should be paid on purpose.
+
+**And the branch pays off at the climax, not just in the party menu.** There are four Nodes and, if OPRA
+lives, four bearers. If she does not, someone carries two -- enormous power at enormous Destabilisation,
+which is this game's central mechanic arriving at its maximum cost in its final scene. See
+[`World.md`](World.md). That is what keeps a competent use of stun at Node 2 from being a footnote.
 
 ## Techs and combos
 

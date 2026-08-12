@@ -65,6 +65,38 @@ act sharper than "stop him ascending". Either the party stops him and never lear
 or they arrive too late, watch him succeed, and meet what he paid for. The escalation to fighting a god
 is *caused by the antagonist's success*, not by a reveal that a bigger villain existed all along.
 
+### The Nodes are also the only weapon
+
+**His body is consumed, not the stones.** They survive the ritual, which means the thing that summoned
+Runigran is the only thing that can put it down. Conventional damage does nothing; only a node-bonded
+transformation lands. The endgame therefore *forces* the mechanic the whole game has been teaching,
+rather than introducing a final-boss gimmick.
+
+It also makes the Client doubly tragic. He assembled the weapon that kills what he summoned, and never
+knew either fact.
+
+### Four Nodes, four bearers -- and why that is not a coincidence
+
+Four characters for four Nodes is too neat as a given. It is not given: **OPRA is optional**, won or
+lost on the stun branch at Node 2.
+
+| Path | Bearers | The climax |
+|---|---|---|
+| OPRA saved | four for four | the symmetry completes -- **earned** |
+| OPRA lost | three for four | **someone bears two** |
+
+Bearing two Nodes is enormous power and enormous Destabilisation, which puts the game's central
+mechanic at its maximum cost in its final scene. So the tidy version is the *reward* for using stun
+competently hours earlier, and the default version is harder, sadder and still winnable. That is what
+stops the four-for-four symmetry reading as contrivance -- it is a consequence of play rather than a
+fact of the setting.
+
+**Open, and a real fork:** if only transformation damages Runigran and transformation auto-triggers off
+a meter, the fight is gated on something the player does not control, which risks reading as passive.
+The likely answer is that bearing a Node changes the rules in that fight -- sustained, or
+player-triggered -- because the situation is genuinely different. But that is a decision, not an
+obvious call.
+
 ### Seeding it
 
 A reveal only demonstrated at the climax is a twist for its own sake. The word to plant is one the
