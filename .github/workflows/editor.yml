@@ -81,6 +81,24 @@ jobs:
             done
           done
 
+      # The editor compares its own version against release tags to decide whether an
+      # update exists. A tag that disagrees with the code is therefore not a cosmetic
+      # mistake: ship v0.2.0 with EDITOR_VERSION still 0.1.0 and every running copy is
+      # told it is up to date, permanently. Cheaper to fail here than to find out never.
+      - name: Tag and EDITOR_VERSION agree
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          python - <<'PY'
+          import os, sys
+          sys.path.insert(0, 'tools')
+          from pnx_project import EDITOR_VERSION
+          tag = os.environ['GITHUB_REF_NAME'].lstrip('v')
+          if tag != EDITOR_VERSION:
+              sys.exit(f"tag {tag!r} != EDITOR_VERSION {EDITOR_VERSION!r} "
+                       f"-- bump tools/pnx_project.py before tagging")
+          print(f"tag and EDITOR_VERSION agree: {tag}")
+          PY
+
       - name: Host tests (framework)
         run: make -C tests test-c
 

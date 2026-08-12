@@ -24,14 +24,19 @@ import http.server
 import io
 import json
 import os
+import platform
 import re
 import shutil
 import socketserver
 import subprocess
 import sys
+import tarfile
+import tempfile
 import threading
+import time
 import tomllib
 import traceback
+import urllib.request
 import webbrowser
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -73,6 +78,328 @@ def _config_dir():
     path = os.path.join(base, "pebblnyx")
     os.makedirs(path, exist_ok=True)
     return path
+
+
+# ------------------------------------------------------------------------ updates
+#
+# The editor ships as a file someone downloaded once. Without this, a fix reaches them
+# only if they think to look at a releases page they may never have seen -- so in practice
+# everyone runs whatever they first installed, forever.
+
+UPDATE_REPO = "X64Tyko/pebblnyx"
+UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPO}/releases"
+
+# Which asset belongs to which machine. Matched on the platform tag the release workflow
+# puts in every filename, and ordered: on Windows the installer is preferred over the
+# portable zip, because someone clicking "Install" wants the wizard.
+UPDATE_ASSETS = {
+    ("Windows", "x86_64"): ["-windows-x86_64-setup.exe", "-windows-x86_64.zip"],
+    ("Darwin", "arm64"): ["-macos-arm64.dmg"],
+    ("Darwin", "x86_64"): ["-macos-x86_64.dmg"],
+    ("Linux", "x86_64"): ["-linux-x86_64.tar.gz"],
+}
+
+
+def parse_version(text):
+    """`v0.2.0-beta.3` -> ((0, 2, 0), (0, 'beta', 3)) for ordering.
+
+    Semver's rule, and it is the one that matters here: a prerelease sorts BELOW the
+    release it leads to, so 0.2.0 beats 0.2.0-beta.3 while 0.2.0-beta.3 beats 0.2.0-beta.2.
+    A release with no suffix gets a leading 1 against the prerelease's 0, which is what
+    makes that comparison fall out of a plain tuple compare.
+    """
+    text = (text or "").strip().lstrip("vV")
+    base, _, pre = text.partition("-")
+    nums = []
+    for part in base.split("."):
+        nums.append(int(part) if part.isdigit() else 0)
+    while len(nums) < 3:
+        nums.append(0)
+
+    if not pre:
+        return tuple(nums[:3]), (1,)
+
+    # Numeric identifiers compare numerically, everything else as text -- so beta.10 is
+    # after beta.9 rather than before it, which a plain string compare gets wrong.
+    parts = [int(p) if p.isdigit() else p for p in pre.split(".")]
+    return tuple(nums[:3]), tuple([0] + parts)
+
+
+def newer(candidate, current):
+    """True when `candidate` is a version worth offering to someone on `current`."""
+    try:
+        a, b = parse_version(candidate), parse_version(current)
+    except Exception:                                    # noqa: BLE001
+        return False
+    # Mixed types inside the prerelease tuple (3 vs 'beta') raise rather than mis-order.
+    try:
+        return a > b
+    except TypeError:
+        return a[0] > b[0]
+
+
+class Updater:
+    """Checks for, downloads and applies a new editor build.
+
+    Deliberately three separate steps with the user between each one. A silent background
+    update is how a tool changes under someone mid-session, and this one carries the
+    engine their project compiles against -- so an upgrade is a decision, not a surprise.
+    """
+
+    def __init__(self):
+        self.current = pp.EDITOR_VERSION
+        self._cache = None          # (checked_at, payload)
+        self._lock = threading.Lock()
+        self.progress = None        # (downloaded, total) while a download runs
+        self.downloaded = None      # path to the verified asset, once it is here
+        self.busy = False
+        self.error = None
+
+    def target(self):
+        """The asset names this machine can use, most preferred first."""
+        system = platform.system()
+        arch = {"AMD64": "x86_64", "x86_64": "x86_64",
+                "arm64": "arm64", "aarch64": "arm64"}.get(platform.machine(),
+                                                          platform.machine())
+        return UPDATE_ASSETS.get((system, arch), [])
+
+    def check(self, force=False):
+        """Latest release this machine can install, and whether it beats what is running.
+
+        Cached for an hour. The check runs on a timer at start-up and on every visit to
+        Settings, and GitHub rate-limits unauthenticated callers to 60 requests an hour --
+        which is a limit a user could reach by clicking around.
+        """
+        with self._lock:
+            if self._cache and not force and time.time() - self._cache[0] < 3600:
+                return self._cache[1]
+
+        out = {"current": self.current, "checked": True, "available": False}
+        try:
+            req = urllib.request.Request(
+                UPDATE_API + "?per_page=10",
+                headers={"Accept": "application/vnd.github+json",
+                         "User-Agent": f"pebblnyx-editor/{self.current}"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                releases = json.load(r)
+        except Exception as e:                           # noqa: BLE001
+            # Offline is the common case, not an error worth a dialog: the editor works
+            # perfectly well without ever reaching GitHub.
+            out.update({"checked": False, "why": f"could not reach GitHub: {e}"})
+            with self._lock:
+                self._cache = (time.time(), out)
+            return out
+
+        # Someone already running a prerelease is told about prereleases; someone on a
+        # stable build is not dragged onto a beta by an update prompt.
+        want_pre = len(parse_version(self.current)[1]) > 1
+        wanted = self.target()
+
+        best = None
+        for rel in releases:
+            if rel.get("draft"):
+                continue
+            if rel.get("prerelease") and not want_pre:
+                continue
+            tag = rel.get("tag_name", "")
+            if not newer(tag, self.current):
+                continue
+            asset = self._pick(rel.get("assets", []), wanted)
+            if not asset:
+                continue                                 # nothing for this machine
+            if best is None or newer(tag, best[0].get("tag_name", "")):
+                best = (rel, asset)
+
+        if best:
+            rel, asset = best
+            out.update({
+                "available": True,
+                "version": rel.get("tag_name", "").lstrip("vV"),
+                "tag": rel.get("tag_name"),
+                "notes": (rel.get("body") or "").strip(),
+                "url": rel.get("html_url"),
+                "prerelease": bool(rel.get("prerelease")),
+                "asset": {"name": asset["name"], "bytes": asset.get("size", 0),
+                          "url": asset["browser_download_url"]},
+            })
+        with self._lock:
+            self._cache = (time.time(), out)
+        return out
+
+    @staticmethod
+    def _pick(assets, wanted):
+        for suffix in wanted:
+            for a in assets:
+                if a.get("name", "").endswith(suffix):
+                    return a
+        return None
+
+    # ------------------------------------------------------------------ download
+    #
+    # On a thread, because the editor's server handles one request at a time: a 30 MB
+    # download inside a handler would freeze the whole UI, including the progress polls
+    # meant to show it moving.
+
+    def start_download(self):
+        if self.busy:
+            return {"ok": True, "started": False, "already": True}
+        self.busy = True
+        self.error = None
+        self.progress = (0, 0)
+        threading.Thread(target=self._download_worker, daemon=True).start()
+        return {"ok": True, "started": True}
+
+    def _download_worker(self):
+        try:
+            r = self.download()
+            if not r.get("ok"):
+                self.error = r.get("error")
+        finally:
+            self.busy = False
+
+    def state(self):
+        got, total = self.progress or (0, 0)
+        return {"busy": self.busy, "got": got, "total": total,
+                "pct": (100.0 * got / total) if total else 0,
+                "error": self.error,
+                "ready": bool(self.downloaded and os.path.exists(self.downloaded)),
+                "file": os.path.basename(self.downloaded) if self.downloaded else None}
+
+    def download(self):
+        """Fetch the asset for this machine into a temp file, and check what arrived.
+
+        Only ever from the release the check found, on the repo named in this file --
+        never a URL handed in from the page, which would turn "check for updates" into
+        "download anything anyone can reach the local server with".
+        """
+        info = self.check()
+        if not info.get("available"):
+            return {"ok": False, "error": "nothing to download"}
+        asset = info["asset"]
+        if not asset["url"].startswith(f"https://github.com/{UPDATE_REPO}/releases/"):
+            return {"ok": False, "error": f"unexpected asset host: {asset['url']}"}
+
+        dest_dir = os.path.join(tempfile.gettempdir(), "pebblnyx-update")
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, asset["name"])
+
+        try:
+            req = urllib.request.Request(
+                asset["url"],
+                headers={"User-Agent": f"pebblnyx-editor/{self.current}"})
+            # Written beside the target and renamed at the end, so an interrupted download
+            # cannot leave a truncated file that looks like a complete one.
+            part = dest + ".part"
+            with urllib.request.urlopen(req, timeout=30) as r, open(part, "wb") as f:
+                total = int(r.headers.get("Content-Length") or asset["bytes"] or 0)
+                got = 0
+                while True:
+                    chunk = r.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    got += len(chunk)
+                    self.progress = (got, total)
+            if total and got != total:
+                os.remove(part)
+                self.progress = None
+                return {"ok": False,
+                        "error": f"short download: {got} of {total} bytes"}
+            os.replace(part, dest)
+        except Exception as e:                           # noqa: BLE001
+            self.progress = None
+            return {"ok": False, "error": f"download failed: {e}"}
+
+        self.progress = None
+        self.downloaded = dest
+        return {"ok": True, "path": dest, "bytes": os.path.getsize(dest),
+                "name": asset["name"], "version": info["version"]}
+
+    # --------------------------------------------------------------------- apply
+    #
+    # Three platforms, three different meanings of "install", and only one of them can be
+    # done to a running program.
+
+    def apply(self):
+        """Install what was downloaded. Returns what the user has to do next.
+
+        Nothing here restarts the editor for the user. Losing an unsaved map to an
+        automatic relaunch would be a worse bug than the one being fixed.
+        """
+        if not self.downloaded or not os.path.exists(self.downloaded):
+            return {"ok": False, "error": "nothing downloaded yet"}
+
+        system = platform.system()
+        try:
+            if system == "Windows":
+                # A running .exe cannot be replaced on Windows, so the installer does it:
+                # it waits for this process to exit, which it can because it is a separate
+                # process. Launch it and step aside.
+                os.startfile(self.downloaded)            # noqa: S606
+                return {"ok": True, "action": "installer",
+                        "message": "The installer is open. Close the editor and let it "
+                                   "replace this version."}
+
+            if system == "Darwin":
+                # A .app cannot sensibly replace itself while running either, and a
+                # scripted copy into /Applications is how an install ends up half-done.
+                subprocess.run(["open", self.downloaded], check=False)
+                return {"ok": True, "action": "dmg",
+                        "message": "The disk image is open. Drag the app into "
+                                   "Applications, replacing the old one, then reopen it."}
+
+            return self._apply_linux()
+        except Exception as e:                           # noqa: BLE001
+            return {"ok": False, "error": f"could not start the install: {e}"}
+
+    def _apply_linux(self):
+        """Swap the binary in place, keeping the old one until the new one has run.
+
+        Linux is the one platform where a running executable can be replaced: the kernel
+        holds the inode this process is executing, so renaming a new file over the path
+        affects only the NEXT launch. Rename rather than write-in-place for exactly that
+        reason -- an open file rewritten under a running process is how you get a
+        SIGBUS instead of an upgrade.
+        """
+        running = os.path.realpath(sys.executable if getattr(sys, "frozen", False)
+                                   else sys.argv[0])
+        if not getattr(sys, "frozen", False):
+            return {"ok": False,
+                    "error": "this is a source checkout, not a packaged build -- "
+                             "`git pull` instead"}
+
+        staging = os.path.join(os.path.dirname(self.downloaded), "unpacked")
+        shutil.rmtree(staging, ignore_errors=True)
+        os.makedirs(staging)
+        with tarfile.open(self.downloaded, "r:gz") as t:
+            t.extractall(staging)                        # noqa: S202
+
+        found = None
+        for base, _dirs, files in os.walk(staging):
+            for f in files:
+                if f == os.path.basename(running) or f == "pebblnyx-editor":
+                    found = os.path.join(base, f)
+                    break
+        if not found:
+            return {"ok": False, "error": "the archive did not contain the binary"}
+
+        try:
+            backup = running + ".old"
+            os.replace(running, backup)                  # keep it: this is the rollback
+            shutil.copy2(found, running)
+            os.chmod(running, 0o755)
+        except PermissionError:
+            return {"ok": False,
+                    "error": f"no permission to replace {running} -- if it lives "
+                             f"somewhere system-wide, move it under your home directory "
+                             f"or reinstall from the .tar.gz"}
+
+        return {"ok": True, "action": "replaced",
+                "message": f"Replaced {running}. Restart the editor to run the new "
+                           f"version; the old one is kept as {os.path.basename(backup)}."}
+
+
+UPDATER = Updater()
 
 
 class Toolchain:
@@ -319,6 +646,10 @@ class Project:
             out.append({
                 "name": name,
                 "count": atlas["count"],
+                # The editor draws tiles at whatever zoom it likes; the DEVICE draws them
+                # at this size, which is what turns a screen in pixels into a frame in
+                # tiles for the camera overlay.
+                "tile": atlas["tile_px"],
                 "roles": roles,
                 "tiles": [pv.data_uri(self._upright(pv.tile_image(atlas, palettes, i, 2)))
                           for i in range(atlas["count"])],
@@ -769,6 +1100,94 @@ class Project:
                     })
         out.sort(key=lambda e: (e["engine"], e["dir"], e["name"]))
         return out
+
+    # -------------------------------------------------------------------- linting
+    #
+    # A real compiler, not a heuristic. The in-page analysis catches unbalanced brackets
+    # and unknown `pnx_*` names, which is genuinely useful while typing -- but it cannot
+    # know that a call has the wrong argument count, and it will never say "did you mean
+    # pnx_platform_quit". A host `cc -fsyntax-only` says both, in a tenth of a second,
+    # and it is the same seam the framework's own host tests rely on: nothing above the
+    # platform layer includes <pebble.h>, so game code compiles on a laptop.
+    #
+    # The alternative is finding out from a full ARM build, which needs the SDK and takes
+    # long enough that people stop running it.
+
+    LINT_TIMEOUT = 8
+
+    @staticmethod
+    def _compiler():
+        for name in ("cc", "clang", "gcc"):
+            found = shutil.which(name)
+            if found:
+                return found
+        return None
+
+    def code_lint(self, rel):
+        """Syntax-check one file against the engine, and return diagnostics."""
+        try:
+            path = self._safe(rel)
+        except ValueError as e:
+            return {"ok": False, "why": str(e)}
+        if not path.endswith((".c", ".h")):
+            return {"ok": False, "why": "only C sources are checked"}
+
+        cc = self._compiler()
+        if not cc:
+            return {"ok": False,
+                    "why": "no C compiler on PATH -- install one to get real diagnostics"}
+
+        cmd = [cc, "-fsyntax-only", "-std=c11", "-Wall", "-Wextra",
+               "-Wno-unused-parameter",
+               # The host half of the platform seam. Without it the SDK headers would be
+               # wanted, and they are not here.
+               "-DPNX_PLATFORM_HOST",
+               # The generated header only defines this when it can include the SDK's
+               # resource ids, which do not exist on a host. A stub keeps the file
+               # compiling so the diagnostics are about the code someone wrote.
+               "-DPNX_ASSET_RESOURCE_TABLE={0}",
+               "-I", os.path.join(self.root, "src", "c"),
+               "-I", self.root]
+        if path.endswith(".h"):
+            cmd += ["-x", "c"]                   # a header is not a translation unit
+        cmd.append(path)
+
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=self.LINT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "why": f"the compiler did not finish in "
+                                        f"{self.LINT_TIMEOUT}s"}
+        except Exception as e:                           # noqa: BLE001
+            return {"ok": False, "why": f"could not run {os.path.basename(cc)}: {e}"}
+
+        # `file:line:col: level: message`, and only for THIS file: an error inside an
+        # engine header is a real diagnostic but it is not something the author can act
+        # on here, so it is reported without a line to jump to.
+        out = []
+        pattern = re.compile(r"^(.*?):(\d+):(?:(\d+):)?\s*(error|warning|note):\s*(.*)$")
+        for line in (r.stderr or "").splitlines():
+            m = pattern.match(line)
+            if not m:
+                continue
+            where, ln, col, level, msg = m.groups()
+            if level == "note":
+                # Notes belong to the diagnostic above them -- "did you mean X" is the
+                # useful half of an implicit-declaration error.
+                if out:
+                    out[-1]["note"] = msg
+                continue
+            try:
+                here = os.path.samefile(where, path)
+            except OSError:
+                here = False                     # a path the compiler invented, or gone
+            out.append({"line": int(ln) if here else 0,
+                        "col": int(col or 0), "level": level, "msg": msg,
+                        "file": os.path.relpath(where, self.root)
+                        if os.path.exists(where) else where})
+
+        return {"ok": True, "compiler": os.path.basename(cc), "diags": out,
+                "clean": not out}
 
     def _engine_owned(self):
         try:
@@ -1614,7 +2033,24 @@ body{margin:0;height:100vh;display:grid;grid-template-columns:auto 1fr;overflow:
 /* Rows: toolbar, budget strip, the work itself, output, status. The 1fr has to name the
    work row explicitly -- adding a child without updating this handed the spare height to
    whatever landed in the 1fr slot. */
-#work{display:grid;grid-template-rows:auto auto 1fr auto auto;min-width:0;min-height:0}
+/* Column flex, NOT a grid with a positional row template.
+   The template named the flexible row by position, so it depended on how many children
+   happened to exist -- and one of them (the update banner) is display:none most of the
+   time, which removes it as a grid item and shifts every row after it. That handed the
+   1fr to the output panel and squeezed the editor into a hundred pixels. Flex asks the
+   child which one grows, so hiding a sibling cannot move it. */
+#work{display:flex;flex-direction:column;min-width:0;min-height:0}
+#work>header,#updbanner,#budgetbar,#outpanel,#statusbar{flex:0 0 auto}
+#work>main{flex:1 1 auto}
+/* The update banner. Accent-coloured rather than warning-coloured: a new version is good
+   news, not a problem, and colouring it like a failure trains people to dismiss it. */
+#updbanner{display:flex;align-items:center;gap:.6rem;padding:.35rem .9rem;
+  background:color-mix(in srgb,var(--accent) 18%,var(--bg));
+  border-bottom:1px solid var(--line);font-size:.82rem}
+#updbanner button{padding:.15rem .55rem;font-size:.78rem}
+#updbannerhide{background:none;border:none;color:var(--dim);cursor:pointer}
+#updbody{max-height:16rem;overflow:auto;white-space:pre-wrap;font-size:.78rem;
+  background:var(--ink);padding:.6rem .8rem;border-radius:4px;margin:.7rem 0 0}
 
 #rail{display:flex;flex-direction:column;gap:2px;width:62px;padding:.4rem .3rem;
   background:var(--surface);border-right:1px solid var(--line)}
@@ -1808,6 +2244,11 @@ select.sw{font:11px ui-monospace,monospace}
 #codelist button:hover{background:var(--soft)}
 #codelist button.on{background:var(--soft);color:var(--accent)}
 #codelist button.ro{color:var(--dim)}
+.cdir{font:600 11px ui-monospace,Menlo,monospace;color:var(--fg);cursor:pointer;
+  padding:.18rem .4rem;user-select:none;white-space:nowrap}
+.cdir:hover{background:var(--soft)}
+.cdir.ro{color:var(--dim);font-weight:500}
+.cdir small{opacity:.6;font-weight:400}
 #codelist .grp{font:600 .62rem/1 ui-monospace,Menlo,monospace;letter-spacing:.1em;
   text-transform:uppercase;color:var(--dim);padding:.6rem .45rem .25rem}
 .codemain{display:flex;flex-direction:column;min-width:0}
@@ -1850,6 +2291,10 @@ select.sw{font:11px ui-monospace,monospace}
 #codediag div{display:flex;gap:.6rem;padding:.28rem .8rem;cursor:pointer}
 #codediag div:hover{background:var(--soft)}
 #codediag b{color:var(--bad);font-weight:600}
+#codediag b.cc{color:var(--bad)}
+#codediag b.warn{color:#d08b2c}
+#codediag b.edit{color:var(--dim)}
+#codediag .note span{color:var(--dim)}
 #codediag i{color:var(--dim);font-style:normal;min-width:3.5rem}
 
 /* Toolchain tab. Prose gets a readable measure rather than the full window width -- it
@@ -1918,6 +2363,14 @@ button:disabled{opacity:.45;cursor:not-allowed}
        naming nothing, RAM fails as a malloc returning NULL mid-scene, and persist fails
        on a watch in front of a player. None of those tell you WHICH edit did it, and by
        then the edit is hours old -- so the numbers live here rather than behind a tab. -->
+  <!-- One line, only when there is something to say. An update banner that is always
+       present is a banner nobody reads. -->
+  <div id="updbanner" style="display:none">
+    <span id="updbannertext"></span>
+    <button id="updbannergo">Update…</button>
+    <button id="updbannerhide" title="not now">✕</button>
+  </div>
+
   <div id="budgetbar">
     <div class="bcell" id="bc-res">
       <div class="bhead"><span>Resources</span><b id="bv-res">—</b></div>
@@ -1953,6 +2406,11 @@ button:disabled{opacity:.45;cursor:not-allowed}
         <input id="nmh" type="number" value="16" min="3" max="255" title="height">
         <button id="newmap">＋ Map</button>
       </div>
+    </section>
+    <!-- What the watch actually shows of this map. Drag the blue grip to move it. -->
+    <section><h2>Camera</h2>
+      <label class="mini"><input id="camon" type="checkbox" checked> show device frame</label>
+      <small id="caminfo">—</small>
     </section>
     <section><h2>Transitions</h2><div id="warps"></div>
       <div class="mini">
@@ -2186,6 +2644,22 @@ button:disabled{opacity:.45;cursor:not-allowed}
        weight as the things you use every minute. -->
   <div id="sdk" style="display:none;flex:1;overflow:auto;padding:1.5rem">
     <div class="sdkwrap">
+      <!-- Updates. The editor is a file someone downloaded once; without this, a fix
+           reaches them only if they think to check a releases page they may never have
+           seen. Three steps with the user between each, deliberately: this binary carries
+           the engine their project compiles against, so an upgrade is a decision. -->
+      <div class="plate wide"><h3>Version</h3>
+        <div id="updinfo">—</div>
+        <div class="row" style="margin-top:.7rem">
+          <button id="updcheck">Check for updates</button>
+          <button id="upddl" class="primary" style="display:none">Download</button>
+          <button id="updapply" class="primary" style="display:none">Install</button>
+          <button id="updnotes" style="display:none">Release notes</button>
+        </div>
+        <div id="updbar" class="meter" style="display:none;margin-top:.6rem">
+          <i id="updfill"></i></div>
+        <pre id="updbody" style="display:none"></pre>
+      </div>
       <div class="plate wide"><h3>Project</h3>
         <div id="projinfo">—</div>
         <div class="row" style="margin-top:.7rem">
@@ -2301,6 +2775,9 @@ async function load(){
   $('#mapsel').innerHTML=S.data.maps.map((m,i)=>`<option value="${i}">${m.name}</option>`).join('');
   $('#atlassel').innerHTML=S.data.atlases.map(a=>`<option value="${a.name}">${a.name}</option>`).join('');
   drawPalettes(); budget(); statusbar(); orientation();
+  // Once, a moment after the editor is usable: an update check is never
+  // worth delaying the first paint for.
+  setTimeout(()=>updCheck(), 1500);
   selectMap(0);
 }
 
@@ -2479,8 +2956,19 @@ function tool(){
 function selectMap(i){
   S.map=JSON.parse(JSON.stringify(S.data.maps[i]));
   $('#atlassel').value=S.map.atlas||'';
+  // The frame starts where the player does, which is the section an author is most
+  // likely to want to look at first.
+  if(!S.cam) S.cam={on:$('#camon').checked, x:0, y:0};
+  const r=camRect();
+  S.cam.x=Math.max(0,(S.map.start[0]+0.5)*S.T-r.w/2);
+  S.cam.y=Math.max(0,(S.map.start[1]+0.5)*S.T-r.h/2);
   S.dirty=false; mark(); drawLegend(); renderWarps(); warpForm(null); info(); draw();
+  camInfo();
 }
+$('#camon').onchange=e=>{
+  if(!S.cam) S.cam={on:true,x:0,y:0};
+  S.cam.on=e.target.checked; draw(); camInfo();
+};
 $('#atlassel').onchange=e=>{
   S.map.atlas=e.target.value;
   S.dirty=true; mark(); drawLegend(); info(); draw();
@@ -2536,10 +3024,81 @@ function draw(){
   g.strokeRect(m.start[0]*T+1,m.start[1]*T+1,T-2,T-2);
   g.strokeStyle='#e0913f';
   for(const w of m.warps) g.strokeRect(w.at[0]*T+1,w.at[1]*T+1,T-2,T-2);
+  drawCamera(g,cv);
 }
 
-$('#cv').addEventListener('mousedown',e=>paint(e,true));
-$('#cv').addEventListener('mousemove',e=>{if(e.buttons)paint(e,false)});
+// The device viewport, drawn over the map.
+//
+// A map is authored at whatever zoom fits the window; the watch shows 200x228 pixels of
+// it. Those are not the same picture, and the gap is where "this room feels open" turns
+// into a room the player sees a fifth of. Everything outside the frame is dimmed rather
+// than hidden, because the point is to judge a section against its surroundings.
+function camRect(){
+  const a=atlas(), tile=(a&&a.tile)||16, scale=S.T/tile;
+  const [sw,sh]=(S.data.screen||[200,228]);
+  return {w:sw*scale, h:sh*scale, tile, scale};
+}
+
+function drawCamera(g,cv){
+  if(!S.cam||!S.cam.on) return;
+  const r=camRect();
+  const x=Math.max(0,Math.min(S.cam.x, Math.max(0,cv.width-r.w)));
+  const y=Math.max(0,Math.min(S.cam.y, Math.max(0,cv.height-r.h)));
+  S.cam.x=x; S.cam.y=y;
+
+  g.save();
+  g.fillStyle='rgba(0,0,0,.55)';
+  g.fillRect(0,0,cv.width,y);
+  g.fillRect(0,y+r.h,cv.width,cv.height-(y+r.h));
+  g.fillRect(0,y,x,r.h);
+  g.fillRect(x+r.w,y,cv.width-(x+r.w),r.h);
+
+  g.strokeStyle='#7fd1ff'; g.lineWidth=2;
+  g.strokeRect(x+1,y+1,r.w-2,r.h-2);
+  // Grab handle, so dragging the frame and painting inside it stay different gestures.
+  g.fillStyle='#7fd1ff';
+  g.fillRect(x,y,CAM_GRIP,CAM_GRIP);
+  g.restore();
+}
+
+const CAM_GRIP=14;
+
+function camHit(px,py){
+  if(!S.cam||!S.cam.on) return false;
+  return px>=S.cam.x && px<=S.cam.x+CAM_GRIP && py>=S.cam.y && py<=S.cam.y+CAM_GRIP;
+}
+
+function camInfo(){
+  const r=camRect(), [sw,sh]=(S.data.screen||[200,228]);
+  const tx=(S.cam.x/S.T), ty=(S.cam.y/S.T);
+  $('#caminfo').innerHTML=S.cam.on
+    ? `${sw}×${sh} px — ${(r.w/S.T).toFixed(1)}×${(r.h/S.T).toFixed(1)} tiles at `
+      +`${r.tile}px · top-left tile ${tx.toFixed(1)}, ${ty.toFixed(1)}`
+    : 'hidden';
+}
+
+// The camera grip is checked before painting: a drag that starts on it moves the frame,
+// and anything else paints. Two gestures on one canvas, told apart by where the drag
+// STARTED rather than by a mode -- switching modes to nudge a viewport is the kind of
+// friction that means nobody nudges it.
+let camDrag=null;
+
+$('#cv').addEventListener('mousedown',e=>{
+  const r=e.target.getBoundingClientRect();
+  const px=e.clientX-r.left, py=e.clientY-r.top;
+  if(camHit(px,py)){ camDrag={dx:px-S.cam.x, dy:py-S.cam.y}; e.preventDefault(); return }
+  paint(e,true);
+});
+addEventListener('mousemove',e=>{
+  if(!camDrag) return;
+  const cv=$('#cv'), r=cv.getBoundingClientRect();
+  S.cam.x=e.clientX-r.left-camDrag.dx;
+  S.cam.y=e.clientY-r.top-camDrag.dy;
+  draw(); camInfo();
+});
+addEventListener('mouseup',()=>{ camDrag=null });
+
+$('#cv').addEventListener('mousemove',e=>{if(e.buttons&&!camDrag)paint(e,false)});
 function paint(e,click){
   const r=e.target.getBoundingClientRect();
   const x=Math.floor((e.clientX-r.left)/S.T), y=Math.floor((e.clientY-r.top)/S.T);
@@ -2631,7 +3190,7 @@ function showTab(which){
   $('#sdk').style.display=sdk?'block':'none';
   $('#pixel').style.display=pix?'block':'none';
   $('#code').style.display=cod?'block':'none';
-  if(sdk) sdkStatus();
+  if(sdk){ sdkStatus(); updCheck() }
   if(pix&&!PX.data){ pxPalette(); pxInit(+$('#pxw').value,+$('#pxh').value,1); pxLoadList() }
   if(cod&&!$('#codelist').children.length) codeTree();
   $('#stage').style.display=maps?'flex':'none';
@@ -2943,6 +3502,95 @@ $('#faddbtn').onclick=async()=>{
 
 // --------------------------------------------------------------- toolchain view
 let sdkPoll=null;
+
+// ------------------------------------------------------------------- updates
+//
+// Check, download, install: three steps, each one the user's. The editor carries the
+// engine a project compiles against, so an upgrade that happened by itself would change
+// what a build produces without anyone asking for it.
+
+let UPD=null, updPoll=null;
+
+function updRender(){
+  const u=UPD||{};
+  const info=$('#updinfo');
+  if(!u.checked){
+    info.innerHTML=`<div><span class="k">running</span> <b>${u.current||'—'}</b></div>`
+      +`<small>${u.why||'not checked yet'}</small>`;
+  }else if(!u.available){
+    info.innerHTML=`<div><span class="k">running</span> <b>${u.current}</b></div>`
+      +`<small>up to date</small>`;
+  }else{
+    info.innerHTML=`<div><span class="k">running</span> <b>${u.current}</b></div>`
+      +`<div><span class="k">available</span> <b>${u.version}`
+      +`${u.prerelease?' <small>(prerelease)</small>':''}</b></div>`
+      +`<small>${u.asset.name} — ${(u.asset.bytes/1048576).toFixed(0)} MB</small>`;
+  }
+  $('#upddl').style.display=u.available&&!(u.dl&&u.dl.ready)?'':'none';
+  $('#updapply').style.display=(u.dl&&u.dl.ready)?'':'none';
+  $('#updnotes').style.display=u.available&&u.notes?'':'none';
+
+  // The banner is the only part of this that goes looking for attention, so it appears
+  // once per version and stays gone once dismissed.
+  const show=u.available&&sessionStorage.getItem('updhide')!==u.version;
+  $('#updbanner').style.display=show?'flex':'none';
+  if(show){
+    $('#updbannertext').innerHTML=
+      `<b>${u.version}</b> is available — you are running ${u.current}.`;
+  }
+}
+
+async function updCheck(force){
+  try{
+    UPD=await (await fetch('/api/update'+(force?'/check':''),
+      {method:force?'POST':'GET'})).json();
+  }catch(_){ return }
+  UPD.dl=await (await fetch('/api/update/progress')).json();
+  updRender();
+}
+
+function updWatch(){
+  clearInterval(updPoll);
+  updPoll=setInterval(async()=>{
+    const d=await (await fetch('/api/update/progress')).json();
+    UPD.dl=d;
+    $('#updbar').style.display=d.busy?'':'none';
+    $('#updfill').style.width=(d.pct||0)+'%';
+    if(!d.busy){
+      clearInterval(updPoll);
+      $('#updbar').style.display='none';
+      if(d.error){
+        $('#updinfo').innerHTML+=`<small class="bad">${d.error}</small>`;
+      }
+      updRender();
+    }
+  },400);
+}
+
+$('#updcheck').onclick=()=>updCheck(true);
+$('#upddl').onclick=async()=>{
+  await fetch('/api/update/download',{method:'POST'});
+  $('#updbar').style.display=''; updWatch();
+};
+$('#updapply').onclick=async()=>{
+  const r=await (await fetch('/api/update/apply',{method:'POST'})).json();
+  const log=$('#log'); log.className=r.ok?'ok':'bad';
+  log.textContent=r.ok?r.message:r.error;
+  // Its own block: appended inline it ran straight on from the asset size above it,
+  // which read as one sentence about a file rather than a result.
+  $('#updinfo').innerHTML+=`<div style="margin-top:.4rem"><small class="${r.ok?'':'bad'}">`
+    +`${r.ok?r.message:r.error}</small></div>`;
+};
+$('#updnotes').onclick=()=>{
+  const b=$('#updbody');
+  b.style.display=b.style.display==='none'?'':'none';
+  b.textContent=(UPD&&UPD.notes)||'';
+};
+$('#updbannergo').onclick=()=>{ showTab('sdk'); $('#updbanner').style.display='none' };
+$('#updbannerhide').onclick=()=>{
+  if(UPD&&UPD.version) sessionStorage.setItem('updhide',UPD.version);
+  $('#updbanner').style.display='none';
+};
 
 async function sdkStatus(remote){
   const s=await (await fetch('/api/sdk/status'+(remote?'?remote=1':''))).json();
@@ -3322,11 +3970,45 @@ function codeAnalyse(){
   CODE.diagBad=bad;
 
   diags.sort((a,b)=>a.line-b.line);
-  $('#codediag').innerHTML=diags.slice(0,40).map(d=>
-    `<div data-line="${d.line}"><i>line ${d.line}</i><b>·</b><span>${esc(d.msg)}</span></div>`
-  ).join('');
-  for(const el of $('#codediag').querySelectorAll('div'))
-    el.onclick=()=>gotoLine(+el.dataset.line);
+  CODE.quick=diags;
+  paintDiags();
+}
+
+// The compiler's diagnostics and the in-page ones share a panel, tagged by where they
+// came from. They answer different questions -- the page checks what you are typing right
+// now, the compiler checks what the file MEANS -- and merging them without saying which
+// is which would make a stale compiler result look live.
+function paintDiags(){
+  const quick=(CODE.quick||[]).map(d=>({...d, src:'edit'}));
+  const cc=(CODE.cc||[]).map(d=>({...d, src:d.level==='warning'?'warn':'cc'}));
+  const all=[...cc, ...quick].sort((a,b)=>(a.line||0)-(b.line||0));
+
+  $('#codediag').innerHTML=(CODE.ccnote?`<div class="note"><i></i><span>`
+      +`${esc(CODE.ccnote)}</span></div>`:'')
+    + all.slice(0,60).map(d=>
+      `<div data-line="${d.line||0}"><i>${d.line?'line '+d.line:'—'}</i>`
+      +`<b class="${d.src}">${d.src==='cc'?'error':(d.src==='warn'?'warn':'·')}</b>`
+      +`<span>${esc(d.msg)}${d.note?' — '+esc(d.note):''}</span></div>`).join('');
+
+  for(const el of $('#codediag').querySelectorAll('div[data-line]'))
+    el.onclick=()=>{ const n=+el.dataset.line; if(n) gotoLine(n) };
+}
+
+// The compiler runs on the SAVED file, so it runs after a save and on open -- not on
+// every keystroke, which would compile a file mid-word and report nonsense.
+async function codeLint(){
+  if(!CODE.path||!/\.(c|h)$/.test(CODE.path)){ CODE.cc=[]; CODE.ccnote=''; return }
+  let r;
+  try{
+    r=await (await fetch('/api/code/lint',{method:'POST',
+      headers:{'content-type':'application/json'},
+      body:JSON.stringify({path:CODE.path})})).json();
+  }catch(_){ return }
+  CODE.cc=r.ok?r.diags:[];
+  CODE.ccnote=r.ok
+    ? (r.clean?`${r.compiler}: no complaints`:'')
+    : r.why;
+  paintDiags();
 }
 
 // Edit distance, not shared prefix. Prefix length looks reasonable and is not: every
@@ -3367,22 +4049,67 @@ function gotoLine(n){
   ta.focus(); ta.setSelectionRange(off,off+ (lines[n-1]||'').length);
 }
 
+// A real tree, not a flat list under directory headings. `src/c/pnx` alone is seven
+// directories deep in places, and a flat list makes a project's own two files look like
+// part of the engine. Collapsed state is kept per folder, and the engine subtree starts
+// closed: it is read-only, it is the biggest thing here, and it is not what someone
+// opened the tab to edit.
+const CODEOPEN=new Set(['src','src/c']);
+
+function codeNest(files){
+  const root={dirs:new Map(), files:[]};
+  for(const f of files){
+    let node=root;
+    const parts=f.path.replace(/\\/g,'/').split('/');
+    const name=parts.pop();
+    let sofar='';
+    for(const p of parts){
+      sofar=sofar?sofar+'/'+p:p;
+      if(!node.dirs.has(p)) node.dirs.set(p,{dirs:new Map(),files:[],path:sofar});
+      node=node.dirs.get(p);
+    }
+    node.files.push({...f,name});
+  }
+  return root;
+}
+
+function codeRender(node, depth){
+  let html='';
+  for(const [name,dir] of [...node.dirs.entries()].sort((a,b)=>a[0].localeCompare(b[0]))){
+    const open=CODEOPEN.has(dir.path);
+    const engine=dir.path.startsWith('src/c/pnx');
+    html+=`<div class="cdir${engine?' ro':''}" data-dir="${dir.path}"
+      style="padding-left:${depth*.7}rem">${open?'▾':'▸'} ${name}`
+      +`${engine&&depth<3?' <small>engine</small>':''}</div>`;
+    if(open) html+=codeRender(dir, depth+1);
+  }
+  for(const f of node.files.sort((a,b)=>a.name.localeCompare(b.name))){
+    html+=`<button data-path="${f.path}" class="${f.editable?'':'ro'}"
+      style="padding-left:${depth*.7+.85}rem">${f.name}`
+      +`${f.generated?' <small>gen</small>':''}</button>`;
+  }
+  return html;
+}
+
 async function codeTree(){
   if(!CODE.symbols){
     try{ CODE.symbols=new Set(await (await fetch('/api/code/symbols')).json()) }
     catch(_){ CODE.symbols=null }
   }
-  const files=await (await fetch('/api/code/tree')).json();
-  let html='', group=null;
-  for(const f of files){
-    const g=f.engine?'engine (read-only)':f.dir;
-    if(g!==group){ html+=`<div class="grp">${g}</div>`; group=g }
-    html+=`<button data-path="${f.path}" class="${f.editable?'':'ro'}"
-      >${f.name}${f.generated?' ·gen':''}</button>`;
-  }
-  $('#codelist').innerHTML=html;
+  if(!CODE.files) CODE.files=await (await fetch('/api/code/tree')).json();
+
+  $('#codelist').innerHTML=codeRender(codeNest(CODE.files), 0);
   for(const b of $('#codelist').querySelectorAll('button'))
     b.onclick=()=>codeOpen(b.dataset.path);
+  for(const d of $('#codelist').querySelectorAll('.cdir'))
+    d.onclick=()=>{
+      const p=d.dataset.dir;
+      CODEOPEN.has(p)?CODEOPEN.delete(p):CODEOPEN.add(p);
+      codeTree();
+      if(CODE.path)
+        for(const b of $('#codelist').querySelectorAll('button'))
+          b.classList.toggle('on', b.dataset.path===CODE.path);
+    };
 }
 
 async function codeOpen(path){
@@ -3401,8 +4128,8 @@ async function codeOpen(path){
     b.classList.toggle('on', b.dataset.path===path);
   codeDirty();
   // Analyse first: highlighting reads its list of unknown symbols.
-  if(/\.(c|h)$/.test(path)){ codeAnalyse(); }
-  else { CODE.diagBad=[]; $('#codediag').innerHTML='' }
+  if(/\.(c|h)$/.test(path)){ codeAnalyse(); codeLint(); }
+  else { CODE.diagBad=[]; CODE.cc=[]; CODE.quick=[]; CODE.ccnote=''; paintDiags() }
   highlight();
   $('#codescroll').scrollTop=0;
 }
@@ -3448,6 +4175,7 @@ async function codeSave(){
   if(r.error){ $('#codenote').textContent=r.error; return }
   CODE.clean=text; codeDirty();
   $('#codenote').textContent=`saved ${r.bytes} B`;
+  codeLint();          // the compiler reads the file, so this is when it can say anything
 }
 $('#codesave').onclick=codeSave;
 
@@ -3655,6 +4383,12 @@ def make_handler(session):
                 from urllib.parse import urlparse, parse_qs
                 q = parse_qs(urlparse(self.path).query)
                 self._send(200, json.dumps(browse((q.get("path") or [None])[0])))
+            elif self.path == "/api/update":
+                # Cached, so the start-up check and every visit to Settings do not each
+                # spend one of GitHub's 60 unauthenticated requests an hour.
+                self._send(200, json.dumps(UPDATER.check()))
+            elif self.path == "/api/update/progress":
+                self._send(200, json.dumps(UPDATER.state()))
             elif self.path == "/api/code/tree":
                 self._send(200, json.dumps(session.proj.code_tree()))
             elif self.path == "/api/code/symbols":
@@ -3720,6 +4454,12 @@ def make_handler(session):
                 elif self.path == "/api/orientation":
                     session.proj.set_orientation(json.loads(raw)["orientation"])
                     self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/update/check":
+                    self._send(200, json.dumps(UPDATER.check(force=True)))
+                elif self.path == "/api/update/download":
+                    self._send(200, json.dumps(UPDATER.start_download()))
+                elif self.path == "/api/update/apply":
+                    self._send(200, json.dumps(UPDATER.apply()))
                 elif self.path == "/api/sdk/accept":
                     TOOLCHAIN.accept()
                     self._send(200, json.dumps({"ok": True}))
@@ -3766,6 +4506,9 @@ def make_handler(session):
                 elif self.path == "/api/code/read":
                     d = json.loads(raw)
                     self._send(200, json.dumps(session.proj.code_read(d["path"])))
+                elif self.path == "/api/code/lint":
+                    self._send(200, json.dumps(
+                        session.proj.code_lint(json.loads(raw)["path"])))
                 elif self.path == "/api/code/write":
                     d = json.loads(raw)
                     self._send(200, json.dumps(

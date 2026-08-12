@@ -40,6 +40,17 @@ import sys
 # Separate from PNX_BLOB_VERSION, which is about the asset format rather than the code.
 FRAMEWORK_VERSION = "0.1.0"
 
+# What the SHIPPED EDITOR calls itself, and the thing the updater compares against a
+# release tag. Separate from FRAMEWORK_VERSION because they answer different questions:
+# the framework version tells a project which engine it was authored against, this one
+# tells a running binary whether a newer binary exists.
+#
+# It must equal the git tag, minus the `v`. An updater that compares against a number
+# nobody remembered to bump is worse than no updater -- it reports "up to date" forever --
+# so the release workflow fails the build when a tag and this string disagree, rather
+# than trusting the release checklist.
+EDITOR_VERSION = "0.1.0-beta.1"
+
 PROJECT_FILE = ".pknproj"
 PROJECT_FORMAT = 1
 
