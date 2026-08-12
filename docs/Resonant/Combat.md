@@ -184,13 +184,18 @@ framework takes on must be opt-in and cost zero bytes when unused.
 
 | | Why it is general |
 |---|---|
-| **`z` on `PnxSpriteInstance`** | The sprite model anchors at feet and sorts by `y`, using one number as both world depth and screen position. That conflation breaks for anything off the ground -- a jump, a projectile, a platform, a hover. Resonant's fliers did not create this, they exposed it. Sort by `y`, draw at `y - z`. |
 | **Glyph blitting** | Every game needs text, and the SDK's text calls cannot run inside the framebuffer capture window, which is where we draw. ~74 glyphs at 6x12 4bpp is ~2,664 B; proportional spacing adds a 74-byte width table and buys ~15% more per page. |
 | **Circle and annulus spans** | An ordinary drawing primitive. Behind its own compile-time flag, since a tile game may never draw one. |
 | **Manifest-declared tile flag names** | The flag byte is already generic and read generically; only the *names* are hardcoded to `solid` and `warp`. Every game wants its own. Pipeline work, not engine. |
 
 **Resonant**, in game code:
 
+- **Flying enemies.** No framework change: `pnx_sprite_draw` already takes the draw position as an
+  argument, so an entity that hovers supplies its ground position as the sort key and its hover
+  position to the draw. `pnx_sprites_draw_sorted` is a convenience that assumes the two are the
+  same number; a game where they differ keeps its own order array and loops itself, which is about
+  fifteen lines of insertion sort. Adding a `depth` field to the framework for one game would be
+  the tail wagging the dog -- if a second game wants it, that is when it becomes a pattern.
 - The Addition ring: what it means, its timing windows, its grading.
 - Battle triggers: which flag bits mean what, roster randomisation, camera placement per trigger.
 - The damage number pool -- sixteen entries, for a twelve-target AOE -- and its lifetimes.
