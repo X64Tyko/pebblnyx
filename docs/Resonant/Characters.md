@@ -83,9 +83,12 @@ has been given nothing to guess with.
 
 ## Dialogue budget note
 
-A line over roughly **110 characters** will not fit one screenful and splits across pages,
-which changes pacing whether or not it was intended. Several V1 lines exceed this: the ward
-explanation (154), the Mage's ten-years speech (112), the node list (106). Splitting them is
-fine -- but split them *deliberately*, at the beat, rather than wherever the renderer breaks.
+**Measured from the battle mockups: a page holds about 87 characters** -- ~29 per line at 6.2px
+average, three lines in a 64px box. The earlier 110 estimate was 26% too generous.
 
-**The 110 figure needs measuring** against the actual font and dialogue box, not trusting.
+Against 87, **8 of 107 dialogue lines need two pages** and none need three; the median line is 50
+characters. So the script is in good shape, but those eight should be split *deliberately, at the
+beat*, rather than wherever the renderer wraps. The longest is Kell's ward explanation at 145.
+
+Proportional spacing would buy roughly 15% more per page for a 74-byte width table, which would
+clear several of the eight.
