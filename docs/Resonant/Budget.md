@@ -44,7 +44,9 @@ and for the outro without noticing -- while a dozen combat sound effects would h
 | **Total** | | **~77,000** |
 
 **About 30% of the appstore budget**, leaving room for roughly three more zones of the same
-density. The full game's six Nodes do not fit at this density, which is the number that should
+density. Note the direction this arithmetic runs: it is for choosing what to *cut*, never for
+deciding what to plan. Content added late to fill a gap reads as rushed; content cut from an
+over-planned whole leaves the rest coherent, so cut whole units rather than thinning everything. The full game's six Nodes do not fit at this density, which is the number that should
 drive the recommendation in `World.md` to deliver four Nodes rather than six.
 
 Art figures are estimates and marked as such. They should be replaced with pipeline output as
@@ -86,6 +88,23 @@ carved regions used so far it has declined, correctly. Worth re-checking once re
 exist, since full sheets measured 1.96x reuse against 1.19x on a 64-tile carve.
 
 **Sequenced music over recorded.** Already covered, and it is a 10x difference.
+
+**Zone recolouring, which is the largest lever of all.** Reusing an atlas with a different palette
+saves the whole atlas -- ~12,000 bytes for the cost of a palette. That is a 50x return against a
+recoloured sprite's 36x, and it applies per zone rather than per character. It needs a **per-map
+palette remap**, not the four reserved per-cell bits: the map carries a small array mapping the
+atlas's palette slots to actual slots, so an atlas using four palettes costs four bytes in the map
+and one extra indirection per tile blit. Per-cell overrides stay unbuilt until something genuinely
+mixes palettes inside one map.
+
+Reuse atlases across *different maps*; reuse a *map* only for an actual revisit. Same tileset with a
+new layout reads as a related place, where the same layout in new colours reads as cheap.
+
+**Enemy pools weighted by story progress and level.** Backtracking to a level-5 zone at level 20
+shifts the weights toward what was waiting there, with familiar low-level enemies still appearing
+occasionally. Pure content data -- no engine work -- and it pairs with palette-swapped enemies:
+a "corrupted" variant of a known silhouette reads as *this place has gone wrong* rather than as a
+new place, which is the cheap version of the corruption beat.
 
 ## What to watch
 

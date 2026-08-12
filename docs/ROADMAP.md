@@ -204,6 +204,20 @@ Outstanding: device confirmation that music and effects run together without und
 under real load. The case that would break it is a frame arriving seconds late while a
 notification covers the app -- host tests cover the arithmetic, hardware has the last word.
 
+## M4b — Content reuse: per-map palette remap
+
+Reusing an atlas with a different palette saves **~12,000 bytes per zone** for the cost of a palette,
+which is the largest content lever the framework can offer. A map carries a small array remapping the
+atlas's palette slots to actual slots -- four bytes for a four-palette atlas, one extra indirection in
+`pnx_tilemap_draw`, and the pipeline builds the variant palettes with the `Ordered` machinery sprite
+variants already use.
+
+**Not** the four reserved per-cell palette bits in the u16 map entry. Those answer a different
+question -- mixing palettes inside one map -- and stay unbuilt until something needs it.
+
+Done when: two maps share one atlas at different palettes, and the size report shows the second
+costing a palette rather than an atlas.
+
 ## M5 — Save
 
 - Chunk packing into 256-byte units, minimum key count

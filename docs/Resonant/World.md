@@ -14,9 +14,37 @@ Rules, as the slice establishes them:
 - Constructs can detect Resonance and classify by it -- GRD reads Van positive, Mage negative.
 - Resonance is *stored* in Nodes and Vessels are the mobile form.
 
-**Now urgent rather than deferred:** what the Nodes were *for*, and what the Client is. The 60%
-escalation from "stop a mob boss" to "fight a god" only lands if the reveal has been prepared, and
-preparation has to start in Act I. What the Nodes were *for*. The facility
+## The Client, and the synthetic Nodes
+
+**Powerful, and mortal.** He holds ties to knowledge of the Nodes that everyone else has lost, and
+what that knowledge says is the premise of the endgame: **all three Nodes combined, in one
+transformation, is godhood.** So he is a rival with a plan, not a villain with a grudge.
+
+Which is why losing the first Node to Van does not make him chase. **He has been engineering
+synthetic Nodes** -- an answer, not a pursuit -- and that single decision does most of the work here.
+It gives him agency between appearances, explains how he escalates without holding the real
+articles, and means the party is always racing a parallel programme rather than being hunted.
+
+**At Node 2, OPRA is waiting, carrying a synthetic Node. She is a little odd.**
+
+The fight happens **before** the party takes the second Node, which is what earns it. They hold one;
+she holds one that should not work. Then she transforms into something dark and feral.
+
+That is the strongest structural beat in the outline, because it is the answer to Van's arc rather
+than a set-piece next to it. Van's fear is becoming a mindless violent thing. **OPRA becomes exactly
+that, in front of him** -- his fear made literal, wearing the face of someone he knew. The synthetic
+Node is what does it to her, and "a little odd" beforehand is the warning the player is given.
+
+Then Kell takes the burden and transforms lucid: present, herself, talking to him. The refutation
+arrives immediately after the demonstration, and Van understands that what sickened him was fear of
+an unknown power rather than the power itself. **Show the fear, then disprove it** -- and the
+mechanic that carries the endgame is unlocked by the character finally trusting it.
+
+Protect that ordering in revision. Everything above works because the demonstration precedes the
+refutation and both precede the second Node.
+
+**Still open:** what the Nodes were originally *for*. The escalation needs the reveal prepared in
+Act I, and Act I currently plants nothing about the Client beyond three mentions. The facility
 contained them; the client wants them. Neither reason is stated, and the slice is stronger
 for withholding it. But the answer should exist now, because it determines whether the client
 is a villain or a rival.
@@ -42,6 +70,13 @@ which is shared across the whole game (fonts, music, samples, UI, dialogue). Mar
 one atlas per zone, so seven zones lands near **150-170KB of 262KB**. Six nodes plus their tangents
 would have been eleven zones and overrun.
 
+## Plan big, then cut whole units
+
+The budget arithmetic below is for *choosing what to cut*, never for deciding what to plan. Content
+added late to fill a gap reads as rushed and out of place; content cut from an over-planned whole
+leaves the rest coherent. So plan the full shape and, if it does not fit, **remove entire units -- a
+tangent quest, a zone -- rather than thinning everything toward the middle.**
+
 ## The arc, and what drives it
 
 **Destabilisation is the early-game engine.** Van is not on a quest; he is trying to get the thing
@@ -50,17 +85,16 @@ no external call to adventure at all -- the inciting incident is already inside 
 
 That gives the power curve a shape most JRPGs have to fake:
 
-| | Resonance is | Instability |
+| | Transformation | Node balance |
 |---|---|---|
-| **Act I** | a dangerous emergency button, Van only | drops only at Nodes -- scarce and tense |
-| **After node 2** | balanceable, and transferable to any party member | manageable, once the tangent teaches how |
-| **After node 3 (~60%)** | all three transform, freely | mastered; the cost is no longer the story |
+| **Act I** | frequent, brief, feeble -- and Van cannot refuse it | low: fills fast, drains fast |
+| **After node 2** | transferable; whoever holds the node transforms | rising, once the tangent teaches balancing |
+| **After node 3 (~60%)** | rare, sustained, decisive, all three | high: the cost stops being the story |
 
-**The tension to watch:** in Act I the player's most exciting mechanic makes their stated goal
-worse. That is good drama and a real risk -- players may simply never transform, and then the
-mechanic that carries the endgame goes unlearned. The Damper item exists as the early stopgap for
-exactly this, and the forced transformation at Event 07 exists so the player has felt it before
-having to choose it. Worth watching in playtest rather than designing around now.
+**The risk I flagged is gone, and the auto-trigger is why.** I had worried that Act I's most
+exciting mechanic making Van's goal worse would mean players never engaged with it. But
+Destabilisation triggers *automatically* at full -- the player has no opt-out, so the mechanic
+teaches itself in the first hour and the character's reluctance is free to be purely narrative.
 
 **Free transfer at node 2** is the strongest idea here. Once the collected shards temporarily
 stabilise the node, it can pass between party members -- so the player chooses who becomes powerful,

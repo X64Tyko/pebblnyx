@@ -163,16 +163,38 @@ twelve enemy types for the price of four.
 | Security construct | the GORD encounter | 05C |
 | Containment core (Class-7) | boss | 07 |
 
-## Resonance
+## Resonance and Destabilisation
 
-Van's Vessel state at first, and any party member's after node 2 -- the collected shards stabilise
-the node enough to pass between them, so the player chooses who becomes powerful. Fills as the
-holder takes and deals damage; spending it transforms them for a limited number of turns -- higher stats, an altered Addition set, Resonance-only techs. Entering it raises
-Instability, which persists between fights and is only reduced at Nodes, so the player is spending
-story-health for combat power.
+Built like FFIX's Trance, not like a resource the player spends.
 
-**Deferred (post-slice):** whether Instability can reach a fail state. The slice only needs it to
-visibly rise.
+**Destabilisation fills as the holder takes and deals damage, and triggers automatically on their
+turn when it maxes.** The player does not choose to transform; it happens. That single decision
+removes the risk that would otherwise sink the mechanic -- if entering it were a choice with a cost,
+Act I Van would never take it and the player would arrive at the endgame never having learned the
+thing the endgame is built on.
+
+It also makes farming a legitimate strategy rather than an exploit. A hard boss is easier if you walk
+in at 90%, so grinding the corridor outside is the player *reading the system correctly*. FFIX
+players did exactly this and it is worth protecting, not patching.
+
+**Node balance is the progression axis**, earned from Nodes and from the second tangent quest:
+
+| Balance | Fill rate | Duration | Power |
+|---|---|---|---|
+| Low (Act I) | fast | short | weak |
+| High (late) | slow | long | **large** |
+
+Low balance is a twitchy, frequent, feeble transformation -- which is exactly how it should feel while
+Van still fears it. High balance is rare, sustained and decisive. The numbers move in opposite
+directions on purpose: the mechanic gets *less* frequent and *more* meaningful, so the late game does
+not degenerate into permanent transformation.
+
+**Van hates it.** He experiences it as becoming a mindless violent thing, and the auto-trigger means
+he cannot decline. That is the character's problem, not a stat penalty -- there is no meter punishing
+the player for something the plot requires. See [`World.md`](World.md) for how the arc resolves it.
+
+After node 2 the shards stabilise the node enough to pass between party members, so the holder is a
+choice. Whoever holds it is whoever transforms.
 
 ## What this needs built, and where it belongs
 

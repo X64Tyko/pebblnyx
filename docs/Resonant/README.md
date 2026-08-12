@@ -38,7 +38,7 @@ that answering early would only constrain:
 
 | Question | Where | Why it can wait |
 |---|---|---|
-| What the Nodes were *for*, and who the Client is | `World.md` | **Promoted to urgent.** The slice still withholds it, but the 60% escalation from "stop a mob boss" to "fight a god" only lands if the reveal was prepared, and preparation starts in Act I. |
+| What the Nodes were originally *for* | `World.md` | Still open. The Client is settled -- powerful, mortal, holding lost knowledge, engineering synthetic Nodes -- but Act I plants nothing about him beyond three mentions, and the 60% escalation needs preparation. |
 | Is Van Subject 7? | `World.md` | Plays either way as written. Changes whether Van is *returning* to this place or arriving at it. |
 | ~~Six Nodes, or four?~~ | `World.md` | **Settled: three**, with a tangent quest between each and a final line at ~60%. Seven zones lands near 150-170KB of 262KB; six nodes would have been eleven. |
 | ~~Can Instability reach a fail state?~~ | `Combat.md`, `Stats.md` | **Settled: no fail state needed.** It is Act I's motivation -- Van wants it out of him -- so it drives the plot instead of punishing the player. Reduced only at Nodes until the second tangent teaches balancing. |

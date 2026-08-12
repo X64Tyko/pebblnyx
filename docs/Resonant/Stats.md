@@ -18,8 +18,8 @@ typedef struct {
   uint8_t  insulation;     // Resonance/tech defence
   uint8_t  speed;          // initiative order
   uint8_t  precision;      // widens the Addition window
-  uint8_t  resonance;      // transformation meter, 0..100
-  uint8_t  instability;    // persistent cost of transforming, 0..100
+  uint8_t  destab;         // Trance-style gauge; auto-triggers at 100
+  uint8_t  balance;        // Node balance: governs fill rate, duration and power
   uint32_t xp;
 } Actor;                   // 20 bytes
 ```
@@ -39,8 +39,8 @@ goes, so choose them for clarity.** Art is where it goes.
 | **Speed** | turn order; ties break toward the player |
 | **Precision** | +1 ms of Addition window per 4 points, capped at +37 ms (one frame) |
 | **Focus** | spent on techs; refunded by Guard, gained by landing Additions |
-| **Resonance** | fills in combat; spent to transform |
-| **Instability** | rises when transforming; reduced only at Nodes |
+| **Destabilisation** | fills from damage dealt and taken; **transforms automatically at 100** |
+| **Balance** | earned from Nodes and the balancing quest; slower fill, longer duration, more power |
 
 **Precision deserves scrutiny.** It makes a stat out of the timing window, which risks
 making the skill expression buyable. The cap of one frame is deliberate -- it should feel
@@ -55,8 +55,9 @@ All integer, all 32-bit. No division by a runtime value where a shift will do.
 physical damage  = max(1, (power * mult / 16) - ward / 2)
 tech damage      = max(1, (charge * mult / 16) - insulation / 2)
 addition step    = base damage * step_index / 2, +25% on a perfect
-resonance gain   = damage_taken / 4 + damage_dealt / 8
-instability gain = 6 per transformation, +2 per turn held
+destab gain      = (damage_taken / 4 + damage_dealt / 8) * (16 - balance / 16) / 8
+destab drain     = 4 per turn at balance 0, falling to 1 at balance 255
+transform power  = mult 16 + balance / 8
 ```
 
 `mult` is the weapon or tech multiplier in sixteenths, so a 1.5x weapon is `mult = 24`. Powers
@@ -83,8 +84,9 @@ Both must be winnable; see `Slice.md`.
 
 ## Open questions
 
-- Precision is deferred; see `README.md`. Instability is settled -- it is the Act I motivation
-  rather than a fail state, reduced only at Nodes until the second tangent quest teaches balancing.
-  See `World.md`.
+- Precision is deferred; see `README.md`. Destabilisation is settled: a Trance-style gauge that
+  auto-triggers at 100, with Node balance moving fill rate down and duration and power up. There is
+  no fail state and no penalty meter -- Van's objection to it is characterisation, not a stat. See
+  `World.md`.
 - Enemy stats are not tabulated yet and should live in the manifest, so the pipeline can
   validate them and the editor can show them.

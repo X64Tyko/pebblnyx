@@ -25,6 +25,11 @@ flippancy is a working style, not a lack of understanding.
 **Arc across the slice.** Contractor -> unwilling cargo -> someone who chooses the next job.
 The last beat only works if he is never shown *wanting* purpose beforehand.
 
+**Arc across the game.** He experiences Destabilisation as becoming a mindless violent thing, and the
+auto-trigger means he cannot decline it. That resolves when OPRA transforms in front of him and
+becomes precisely what he fears -- then Kell takes the burden and transforms *lucid*, present and
+herself. The fear is shown, then disproved. What sickened him was not the power.
+
 ## Kell
 
 **Tag:** `KELL` | **Role:** support, AoE, doors
@@ -74,6 +79,10 @@ accidental.
 - Familiar with Van in a way nobody else is. Uses his name.
 - Speaks in contract terms: closed, client, loose ends, delivery method.
 - Never raises her voice until the last line, where she does: "Scrap it all. Kill them!"
+
+**At Node 2 she carries a synthetic Node**, and she is *a little odd* before the fight -- the warning
+the player gets. Then she transforms into something dark and feral: Van's fear made literal, wearing
+the face of someone he knew. She is the demonstration Kell's lucid transformation refutes.
 
 ## The Client
 
