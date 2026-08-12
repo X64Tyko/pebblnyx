@@ -22,6 +22,32 @@ the save format, input backends, and lifecycle.
 - **No general-purpose scene graph.** Not enough code budget, and a tile game does not
   need one.
 
+## 1a. Validation: strict, with a declared escape
+
+The pipeline fails builds on content that cannot work, because a content bug on a watch does not
+crash -- it presents as nothing happening, with a binary that looks fine. That only holds while the
+errors are trustworthy. **A check that reports correct content as broken gets silenced wholesale,
+and then it protects nothing.**
+
+Static analysis cannot see game state. A room sealed behind a button-operated door is unreachable
+at build time and correct at runtime, and no amount of flood filling will discover the button. The
+answer is not to weaken the check into a warning that nobody reads. It is to give it **a declared
+escape**: the author states the intent once, in the content, and it is never raised again.
+
+    warps = [{ at = [12, 9], to = ["vault", 4, 4], gated = true }]
+
+Three properties make this work, and they are the pattern for every check of this shape:
+
+- **The acknowledgement lives on the declaration**, not in a side file. It cannot outlive what it
+  describes -- move the warp and it travels along, delete the warp and it is gone. There is no
+  fingerprint to maintain and nothing that goes stale invisibly.
+- **It is content, so it is in git**, where a reviewer sees the claim next to the thing claimed.
+- **The stale direction is reported**: `gated` on a warp that turns out to be reachable usually
+  means the gate was removed, so the build says so without failing.
+
+Given an escape, strictness is correct rather than merely tolerable -- an unreachable, undeclared
+warp is unambiguously either a bug or an undocumented design, and both want the author's attention.
+
 ## 1b. Tile flags are the game's vocabulary, not the framework's
 
 `pnx_map_flags` returns a byte and says nothing about what its bits mean, which is right: a game

@@ -268,6 +268,35 @@ def main():
         """
     '''))
 
+    # The escape hatch is what makes strictness correct. A room behind a button-operated door is
+    # content a static flood fill cannot help calling broken, so `gated = true` states the intent
+    # once, travels with the warp declaration, and is not raised again. Without it the check would
+    # eventually be silenced wholesale -- which costs more than the check ever saved.
+    expect_ok("gated warp is accepted without warning", **maps('''
+        [[map]]
+        name = "a"
+        out = "a.bin"
+        start = [1, 1]
+        warps = [{ at = [4, 3], to = ["b", 1, 1], gated = true }]
+        rows = """
+        ######
+        #..###
+        #..###
+        ####D#
+        ######
+        """
+
+        [[map]]
+        name = "b"
+        out = "b.bin"
+        start = [1, 1]
+        rows = """
+        ####
+        #..#
+        ####
+        """
+    '''))
+
     expect_fail("warp not on a warp-flagged tile", "warp' flag", **maps('''
         [[map]]
         name = "a"

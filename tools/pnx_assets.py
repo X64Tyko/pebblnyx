@@ -791,9 +791,22 @@ def compile_map(spec, legend, roles, map_names):
     if flags[sy * w + sx] & FLAG_SOLID:
         raise BuildError(f"map {name!r}: start {(sx, sy)} is inside a solid tile")
 
-    # Flood fill from the start over walkable tiles. A door drawn inside a sealed
-    # building is unreachable, its warp can never fire, and nothing about the binary
-    # looks wrong -- it just silently does not work.
+    # Flood fill from the start over walkable tiles.
+    #
+    # An unreachable warp fails the build, but `gated = true` on the warp declares that it is
+    # reachable only through game state -- a button-operated door, a destructible wall, a bridge
+    # that appears -- and silences it permanently.
+    #
+    # The declaration is what makes strictness correct. A static flood fill cannot see a button,
+    # so without an escape hatch the check calls correct content broken, and a check that cries
+    # wolf gets silenced wholesale. With one, the author states intent once and it is recorded in
+    # the content, in git, where a reviewer sees it.
+    #
+    # And because the acknowledgement is attached to the warp declaration rather than kept in a
+    # side file, it cannot outlive what it describes: move the warp and it travels along, delete
+    # the warp and it is gone. There is no fingerprint to maintain and nothing to go stale
+    # silently -- the one stale case, `gated` on a warp that turns out to be reachable, is
+    # reported, because it usually means the gate was removed.
     reachable = set()
     stack = [(sx, sy)]
     while stack:
@@ -818,9 +831,21 @@ def compile_map(spec, legend, roles, map_names):
             raise BuildError(f"map {name!r}: warp at {(tx, ty)} sits on a tile with no "
                              f"'warp' flag -- the player would walk over it and nothing "
                              f"would happen")
-        if (tx, ty) not in reachable:
-            raise BuildError(f"map {name!r}: warp at {(tx, ty)} is UNREACHABLE from "
-                             f"start {(sx, sy)} -- it is sealed off by solid tiles")
+        if flags[ty * w + tx] & FLAG_SOLID:
+            raise BuildError(f"map {name!r}: warp at {(tx, ty)} is on a SOLID tile -- the "
+                             f"player can never stand on it, so it can never fire. No runtime "
+                             f"state fixes this; move the warp to a walkable tile.")
+
+        gated = bool(wp.get("gated", False))
+        if (tx, ty) not in reachable and not gated:
+            raise BuildError(
+                f"map {name!r}: warp at {(tx, ty)} is UNREACHABLE from start {(sx, sy)} -- it is "
+                f"sealed off by solid tiles, so it can never fire and the build will look fine. "
+                f"If that is deliberate -- a gate, a secret door, a wall the game opens -- add "
+                f"`gated = true` to the warp and this will not be raised again.")
+        if (tx, ty) in reachable and gated:
+            print(f"    NOTE map {name}: warp at {(tx, ty)} is marked `gated` but IS reachable "
+                  f"from the start. Harmless, but the gate may have been removed.")
         if dest_name not in map_names:
             raise BuildError(f"map {name!r}: warp targets unknown map {dest_name!r} "
                              f"(known: {', '.join(map_names)})")
@@ -829,6 +854,8 @@ def compile_map(spec, legend, roles, map_names):
     print(f"  map {name}: {w}x{h}, {len(warps)} warps, "
           f"{len(reachable)}/{walkable} tiles reachable"
           + (f", {sealed} sealed off" if sealed else ""))
+
+
 
     # The blob is built later by finish_map, once tile flag defaults are known.
     return {"name": name, "w": w, "h": h, "start": (sx, sy), "tiles": bytes(tiles),

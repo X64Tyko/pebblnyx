@@ -160,8 +160,13 @@ source file inside the project tree where waf can resolve it. See
 The pipeline **fails the build on content that cannot work** — a warp on a tile that
 triggers nothing, a door sealed inside a wall, a destination inside a wall or in a closed
 pocket. That matters because content bugs do not crash on a watch; they present as nothing
-happening, with a binary that looks perfectly fine. There are 22 tests asserting the build
+happening, with a binary that looks perfectly fine. There are 23 tests asserting the build
 does fail, and that the message names the actual problem.
+
+Checks that game state can legitimately contradict take a **declared escape** rather than being
+softened into warnings — `gated = true` on a warp says "reachable only once the game opens it",
+and it is never raised again. The acknowledgement lives on the declaration, so it cannot outlive
+what it describes. See [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## Provenance
 
