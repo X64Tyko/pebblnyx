@@ -1,19 +1,18 @@
 # Roadmap
 
-Current state: **M0-M4c complete**, editor E1 usable (maps, transitions, asset
-import, multi-atlas). No emulator is possible for PT2 -- see EDITOR.md. M5 (save) next.
-`platform`, `core`, `assets`, `gfx`, `audio` and `input` exist, run on device, and are
-covered by 435 host checks plus 84 pipeline checks. Audio and landscape are both still
-waiting on device confirmation.
+Current state: **M0-M4c complete**, editor through E14, shipped as
+[v0.1.0-beta.1](https://github.com/X64Tyko/pebblnyx/releases/tag/v0.1.0-beta.1) —
+installers for Linux, Windows and both macOS architectures, engine inside. M5 (save)
+next. `platform`, `core`, `assets`, `gfx`, `audio` and `input` run on device and are
+covered by 435 host checks plus 84 pipeline checks. Audio and landscape still want
+hardware confirmation. No emulator is possible for PT2 — see [`EDITOR.md`](EDITOR.md).
 
-The ordering principle: a framework with no consumer gets the abstractions wrong in
-ways nobody discovers until someone tries to use it. PGE (the 2014 Pebble game engine)
-failed partly this way — its animation path reallocated a bitmap from a resource on
-every frame change, and its shipped example divided by zero on startup. Nobody noticed
-because nobody built on it.
-
-So **a real game is built alongside the framework from M3 onward**, as its first
-consumer. Every API gets exercised before it is published.
+The ordering principle: a framework with no consumer gets the abstractions wrong in ways
+nobody discovers until someone tries to use it. PGE (the 2014 Pebble game engine) failed
+partly this way — its animation path reallocated a bitmap from a resource on every frame
+change, and its shipped example divided by zero on startup. Nobody noticed because nobody
+built on it. So **a real game is built alongside the framework from M3 onward**, and every
+API is exercised before it is published.
 
 ---
 
@@ -21,13 +20,8 @@ consumer. Every API gets exercised before it is published.
 
 Driven by [`GAME.md`](GAME.md): Legend of Dragoon's Addition system needs timed input
 during an attack, and that is the one mechanic this hardware is worst at. Frames are
-37.33 ms and cannot be shortened, and end-to-end input latency is **≥37 ms by
-construction, likely ~74 ms** but never actually measured.
-
-- Measure real touch-to-pixel and button-to-pixel latency
-- Test whether a 2–3 frame (74–111 ms) timing window is playable
-- Compare tap-timed against held-timed input
-- Try a leading visual cue, so the player anticipates rather than reacts
+37.33 ms and cannot be shortened, so end-to-end latency is **≥37 ms by construction** —
+and had never been measured.
 
 **Result: viable.** Tap spread 31 ms, systematic lag +27 ms; ±74 ms window hits 100%,
 ±37 ms hits 75%. Touch has half the lag of buttons. Reaction cues are usable but worse —
@@ -51,52 +45,38 @@ Extract `platform` and `core` from the probes; establish the machinery that keep
 - Host test harness compiling `core` natively — 76 checks, no dependencies
 
 **Result.** Verified on device: the example runs, reports `touch=1`, and exits with
-`Still allocated <0B>` — the platform layer's teardown leaks nothing. Critically, the
-startup log written from `main()` *survived*, which is the deferred ring doing the one
-job it exists for.
+`Still allocated <0B>`. The startup log written from `main()` *survived*, which is the
+deferred ring doing the one job it exists for.
 
-The empty example costs **6,392 bytes of 65,535 (9.8%)**; with diagnostics
-off, **2,468 (3.8%)**, which verifies the zero-cost claim rather than asserting it. The
-size report paid for itself immediately by exposing 754 bytes of `__udivmoddi4` pulled in
-by one `uint64_t` division in the formatter. Findings in
-[`MEASUREMENTS.md`](MEASUREMENTS.md).
-
-Deferred to the milestone that first needs them, rather than guessed at now: resources,
-persist and speaker are not yet in the seam.
+The empty example costs **6,452 bytes of 65,535 (9.8%)**, or **2,528 (3.9%)** with
+diagnostics off — which verifies the zero-cost claim rather than asserting it. The size
+report paid for itself immediately by exposing 754 bytes of `__udivmoddi4` pulled in by one
+`uint64_t` division in the formatter. Findings in [`MEASUREMENTS.md`](MEASUREMENTS.md).
 
 ## M2 — Assets — **DONE**
 
 Generalise the probe's pipeline into a reusable tool.
 
-- Manifest is now **external TOML** the game owns, not a Python dict inside the tool.
-  TOML because manifests carry real knowledge in their comments and JSON cannot hold
-  one — and because the editor will need to read and write this file
+- Manifest is **external TOML** the game owns, not a Python dict inside the tool: manifests
+  carry real knowledge in their comments, JSON cannot hold one, and the editor has to read
+  and write this file
 - Quantisation to `GColor8`, tile dedup, colour-key handling
-- Generated header: handles, counts, tile roles, dialog ids. No number in it is
-  something a human should ever type into game code
-- **Validation that fails the build**, with **22 tests asserting that it does** — and
-  asserting the message names the actual problem, since an error saying only "invalid
-  manifest" leaves the author as stuck as silence
+- Generated header of handles, counts, tile roles and dialog ids — no number in it is
+  something a human should type into game code
+- **Validation that fails the build**, with tests asserting that it does *and* that the
+  message names the actual problem, since "invalid manifest" leaves an author as stuck as
+  silence
 - **256KB appstore budget enforcement** with a per-category breakdown
-- **`package.json` resource list generated from the manifest**, closing a duplication
-  that would otherwise fail silently: a blob built but not declared is simply absent
-  from the bundle, with no build-time complaint
+- **`package.json` resource list generated from the manifest**, closing a duplication that
+  fails silently: a blob built but not declared is simply absent from the bundle
 - Runtime: handle-based registry, bulk residency, scene load/unload — **904 bytes**
 - Platform seam grew resource reads, its first extension since M1
-- **Map format v2**: tile flags moved to a per-tileset table with sparse overrides,
-  cutting map size 49% and recovering 8.7% of the content budget at RPG scale
+- **Map format v2**: tile flags moved to a per-tileset table with sparse overrides, cutting
+  map size 49% and recovering 8.7% of the content budget at RPG scale
 
 **Result.** The probe's content builds through the new pipeline and every payload is
-**byte-identical** to what the probe produced — which is the acceptance criterion met
-provably rather than by inspection. The runtime is exercised by 124 host checks reading
-those same blobs, and the `examples/overworld` app links at 8,792 of 65,535 bytes
-(13.4%).
-
-Not yet run on hardware: the example builds and its data is verified on the host, but
-nothing has confirmed the pixels on a watch.
-
-Audio samples and fonts are in the schema's shape but not implemented — they land with
-M4 and M3 respectively, when there is something to consume them.
+**byte-identical** to what the probe produced — the acceptance criterion met provably
+rather than by inspection. `examples/overworld` linked at 8,792 of 65,535 bytes (13.4%).
 
 ## M3 — Graphics + first game skeleton — **DONE**
 
@@ -104,56 +84,46 @@ M4 and M3 respectively, when there is something to consume them.
 changing it later means changing the pipeline, the runtime, the editor and the art.
 
 - **Device-independent source, device-specific build.** Art stays full colour in the
-  manifest; quantisation to a named target happens at build time. Pixel data is an index
-  and never changes, so a future screen with more than ARGB2222's 64 colours rebuilds the
-  same sources into richer palettes with no re-authoring. The editor previews truthfully
-  by running the same quantiser.
-- **Quantise first, then derive palettes.** Measured on one tileset: palettes taken from
-  full-colour source need 97 tables and force 7% of tiles through lossy reduction;
-  taken after device quantisation, 32 tables and nothing lost. The device's colour space
-  is the best compressor available and it is free.
-- **Palette generation is a greedy merge**: place each tile's colour set into the first
-  palette whose union still fits. Losslessly takes 391 palettes down to 37 across five
-  real tilesets, 8-25 per sheet. Merging, not deduping, is what makes the count sane.
-- **SNES convention: index 0 transparent in every palette.** Costs 348 bytes (0.1%) and
-  makes the blitter reject a transparent pixel before it reads the palette.
-- **Atlases are small and semantic** — cave env, hero, grassland, furniture — not one per
-  source sheet. Related tiles share colours, so each needs few palettes. Extra atlases
-  cost an 8-byte header and one ~29 us read.
-- **4bpp is the only depth.** A tile over 15 colours is repaired by merging its nearest
-  pair and reported, not accommodated with a second format. Fires on 0.5% of real tiles.
-  One depth means one blitter loop, no split point, no second palette kind.
-- **Palettes are their own asset**, loaded before atlases and sprites, which carry
-  indices rather than colours. Shared across the project: 2 palettes / 40 bytes for the
-  whole example.
+  manifest and is quantised to a named target at build time. Pixel data is an index, so a
+  future screen with more than ARGB2222's 64 colours rebuilds the same sources into richer
+  palettes with no re-authoring, and the editor previews truthfully by running the same
+  quantiser.
+- **Quantise first, then derive palettes.** On one tileset: palettes taken from full-colour
+  source need 97 tables and push 7% of tiles through lossy reduction; taken after device
+  quantisation, 32 tables and nothing lost. The device's colour space is the best
+  compressor available and it is free.
+- **Palette generation is a greedy merge** — each tile's colour set into the first palette
+  whose union still fits. Losslessly: 391 palettes down to 37 across five real tilesets,
+  8-25 per sheet. Merging, not deduping, is what makes the count sane.
+- **Index 0 is transparent in every palette**, SNES-style. Costs 348 bytes (0.1%) and lets
+  the blitter reject a pixel before it reads the palette.
+- **Atlases are small and semantic** — cave env, hero, grassland — not one per source sheet.
+  Related tiles share colours, so each needs few palettes, and an extra atlas costs an
+  8-byte header and one ~29 µs read.
+- **4bpp is the only depth.** A tile over 15 colours has its nearest pair merged and is
+  reported, not accommodated with a second format; that fires on 0.5% of real tiles. One
+  depth means one blitter loop and no second palette kind.
+- **Palettes are their own asset**, loaded before the atlases and sprites that index them.
+  Shared project-wide: 2 palettes, 40 bytes, for the whole example.
 - **Content will not fit whole tilesets.** Five full sheets are 111% of budget at the best
-  encoding; the practical ceiling is ~2,000 tiles before sprites, maps, dialog or audio.
-  Regions and `max_tiles` are mandatory, not optional, and the budget report should make
-  that obvious early.
-- **Transparency and partial alpha are ordinary palette entries.** `GColor8` defines four
-  alpha levels but the SDK ships nothing using the middle two, and honours them only via
-  `GCompOpSet`. Irrelevant to us: we write the framebuffer directly and are the
-  compositor. Blending is a 64-entry LUT shared across R/G/B; atlases flag whether any
-  entry is non-opaque so opaque art keeps a straight indexed copy.
-- **Palettes derived, never authored.** Variants remap by *source colour*, not index, so
-  adding art cannot silently recolour the wrong thing. Palette is a draw-call parameter,
-  which keeps per-entity swaps at 16 bytes a variant.
-- **Measure the blit** before locking the format. Two loops (4bpp, 6bpp) against the two
-  measured reference points: 2,350 µs to copy a full screen of tiles, 3,100 µs to compute
-  every pixel. An interpolation until confirmed.
-- **Metatiles implemented.** Pipeline splits tiles into deduplicated 8x8 quadrants;
-  loader parses the layout; the tilemap draws through a paired-row blit that walks 16
-  rows spanning two quadrants rather than issuing four 8x8 blits, which would have
-  doubled the per-row cost that dominates. Measured 1.72x on five real tilesets, 1.19x on
-  a small hand-picked region -- so the pipeline sizes both layouts and picks. Original
-  note follows:
-- **Metatiles were opt-in.** An independent ~2.7x that multiplies with the depth saving,
-  but it changes how art is authored, so it is a `metatiles = true` a project turns on.
-  The pipeline should report what a tileset would save either way; both layouts supported.
-- Tilemap with smooth scrolling and camera clamping
-- Sprites with transparency, mirroring, feet-anchored positioning, depth sort
-- Text through the narrow platform hook
-- **Game starts here**: a walkable scene using only framework APIs
+  encoding, and the practical ceiling is ~2,000 tiles before sprites, maps, dialog or audio.
+  Regions and `max_tiles` are mandatory.
+- **Transparency is an ordinary palette entry.** `GColor8` has four alpha levels, but the
+  SDK ships nothing using the middle two and honours them only through `GCompOpSet` --
+  irrelevant here, since we write the framebuffer and *are* the compositor. Blending is a
+  64-entry LUT shared across R/G/B, and atlases flag whether any entry is non-opaque so
+  opaque art keeps a straight indexed copy.
+- **Palettes are derived, never authored.** Variants remap by *source colour* rather than
+  index, so adding art cannot silently recolour the wrong thing, and a per-entity swap
+  stays a 16-byte draw-call parameter.
+- **Metatiles**: tiles split into deduplicated 8x8 quadrants, drawn by a paired-row blit
+  that walks 16 rows spanning two quadrants rather than issuing four 8x8 blits, which would
+  have doubled the per-row cost that dominates. 1.72x on five real tilesets against 1.19x on
+  a small hand-picked region -- so the pipeline sizes both layouts and picks, rather than
+  making it a preference.
+- Tilemap with smooth scrolling and camera clamping; sprites with transparency, mirroring,
+  feet-anchored positioning and depth sort; text through the narrow platform hook.
+- **Game starts here**: a walkable scene using only framework APIs.
 
 **Result.** The overworld example is a walkable scene with **no drawing code of its own**
 — tilemap, sprites, camera and text all come from the framework. Verified on device: both
@@ -207,20 +177,17 @@ notification covers the app -- host tests cover the arithmetic, hardware has the
 
 ## M4b — Content reuse: per-map palette remap — **DONE**
 
-Reusing an atlas with a different palette saves **~12,000 bytes per zone** for the cost of a palette,
-which is the largest content lever the framework can offer. A map carries a small array remapping the
-atlas's palette slots to actual slots -- four bytes for a four-palette atlas, one extra indirection in
-`pnx_tilemap_draw`, and the pipeline builds the variant palettes with the `Ordered` machinery sprite
-variants already use.
+Reusing an atlas at a different palette saves **~12,000 bytes per zone** for the cost of a palette,
+the largest content lever the framework can offer. A map carries an array remapping the atlas's
+palette slots to actual ones -- four bytes for a four-palette atlas, one extra indirection in
+`pnx_tilemap_draw`, and the variant palettes come from the `Ordered` machinery sprite variants
+already use.
 
-**Not** the four reserved per-cell palette bits in the u16 map entry. Those answer a different
-question -- mixing palettes inside one map -- and stay unbuilt until something needs it.
+**Not** the four reserved per-cell palette bits in the u16 map entry: those answer a different
+question -- mixing palettes *inside* one map -- and stay unbuilt until something needs it.
 
-Done when: two maps share one atlas at different palettes, and the size report shows the second
-costing a palette rather than an atlas.
-
-**Result.** The overworld's cave shares the base tileset at `dungeon_ice`: 44 bytes of remap
-table in the map against 5,632 for a second copy of the atlas.
+**Result.** The overworld's cave shares the base tileset at `dungeon_ice`: 44 bytes of remap table
+against 5,632 for a second copy of the atlas.
 
 ## M4c — Landscape, and screen lock — **DONE** (pending device confirmation)
 
@@ -236,87 +203,48 @@ Only possible because the device is played off the wrist in two hands
 ([`PLATFORM.md`](PLATFORM.md)): a wrist-mounted watch in landscape is unreadable, a handheld one is a
 tiny gamepad whose button meaning the game chooses.
 
-### It is a content feature, not a renderer feature
+**Rotate the assets at build time, not the framebuffer at run time.** The pipeline emits atlases,
+maps, sprites and glyphs already turned, so the engine's ordinary portrait blit produces a correct
+landscape image. Rotating at render time would have meant a `step` field on `PnxRow`, a multiply per
+pixel across four span writers, and -- the actual risk -- strided framebuffer writes whose cost was
+never measured, with a 45,600-byte offscreen buffer as the fallback. Pre-rotation removes the
+question instead of answering it, and works on a round display for free.
 
-**Rotate the assets at build time, not the framebuffer at run time.** The editor presents a 228x200
-canvas, authors work in it, and the pipeline emits atlases, maps and sprites already rotated -- so the
-engine's ordinary portrait blit produces a correct landscape image. The game writes its logic in the
-same rotated frame and everything is consistent.
+**Result.** `orientation` in `[project]`: `portrait` (`buttons_right`), `buttons_top`,
+`buttons_bottom`, named for where the cluster ends up rather than which way something turned --
+`landscape_left` only starts an argument about whether the device or the image rotated. A
+`--orientation` override builds one manifest either way, so "the same content compiles to either
+orientation" is tested rather than asserted.
 
-That is **zero engine code**, where rotating at render time would have meant a `step` field on `PnxRow`,
-a multiply per pixel across four span writers, and -- the actual risk -- strided framebuffer writes
-whose cost was unmeasured. Portrait writes run sequentially along a row; rotated writes stride by the
-pitch, and on failure the fallback was a 45,600-byte offscreen buffer plus a full extra screen copy per
-frame. Pre-rotation removes the question rather than answering it.
+- **Cost to the engine: one field, not the zero this promised.** Glyphs turn with everything else,
+  and a turned glyph blits like any other rectangle -- but the next one is no longer to its right.
+  So a font carries an advance axis and `pnx_text` walks it. The better shape anyway: it is what a
+  vertical script needs, so Japanese set top-to-bottom is the same field with unrotated glyphs.
+- **The touch transform was not needed and would have been wrong.** It assumed a landscape game
+  thinks in rotated coordinates; pre-rotation means it draws and collides in the framebuffer's
+  frame, which is the frame the device already reports touches in. Rotating them lands a tap where
+  the pixel is not. `tests/test_input.c` paints a pixel and checks a touch at those coordinates
+  names it.
+- **Every blob is stamped**, songs and palettes included. Stamping only geometry would make
+  "orientation-free" and "built portrait" the same byte, and a stale atlas indistinguishable from a
+  legitimate sample. Checked in `load_blob_4`, the one door every blob comes through.
+- **`pnx_input` addresses the cluster by position as the player reads it**, because the buttons do
+  not rotate. `buttons_top` and `buttons_bottom` are not mirrors -- turned the other way, the
+  physically-DOWN button falls under the left hand -- so one menu reads correctly in all three.
+- **Screen lock**: BACK stops dismissing the app while still reaching the game as an event, and the
+  backlight is held, because going dark mid-turn off the wrist reads as a crash.
 
-It also works on round displays for free, where the step approach could not: nothing depends on a
-uniform row pitch when the framebuffer is written the way it always was.
+**A bug fell out of the invariance check.** Maps came out 60 bytes larger in landscape, which
+rotation cannot cause. `compute_tile_flags` walked the u16 tile plane and the u8 flag plane with one
+`zip`, pairing each tile's low byte with one cell's flags and its high byte with the next cell's --
+so flag defaults came from a scrambled tally that depended on cell order. Never wrong pixels, since
+`finish_map` decodes properly and overrides every disagreement; just hundreds of overrides it did
+not need. Fixed: the overworld's maps fell **3,267 → 2,388 bytes**, and ties now break toward the
+lower flag value rather than toward whichever cell was seen first.
 
-Checks that fall out cheaply: dimensions swap so a 20x48 sprite becomes 48x20 and the 4bpp even-pixel
-rule still holds; mirror dedup and metatile quadrants are orientation-agnostic, they simply find
-different pairs; and an atlas built for landscape cannot be shared with a portrait project, which the
-pipeline should say rather than let someone discover.
-
-### What still needs framework support
-
-Small, and unavoidable, because **the buttons do not rotate**:
-
-- **Input mapping.** Physical up/select/down mean different directions once the device is held
-  sideways. Logical actions with an orientation-aware default is what `src/pnx/input/` was always for.
-- **Screen lock**, two separate things: **consume BACK**, which otherwise dismisses the app and loses a
-  session mid-game, and **hold the backlight**, because off-wrist play in a dim room going dark
-  mid-turn is indistinguishable from a crash.
-
-Done when: an example builds in landscape from the same source with the orientation declared in the
-manifest, the editor previews the 228x200 canvas, and touch lands where it looks like it should.
-
-### Result
-
-`orientation` in `[project]`, named for where the **button cluster** ends up rather than which way
-something turned: `portrait` (`buttons_right`), `buttons_top`, `buttons_bottom`. `landscape_left` was
-rejected as a name -- every codebase that uses it ends up arguing about whether the device or the
-image is what rotated, and the cluster is a physical object an author can point at. A
-`--orientation` override builds one manifest either way, which is how the claim below is tested
-rather than asserted.
-
-**Cost to the engine: one field.** Not zero, as this section originally promised. Glyphs rotate with
-everything else, and a glyph on its side still blits like any other rectangle -- but the next glyph
-is no longer to the right of it. So a font blob carries an advance axis and `pnx_text` walks it. That
-turned out to be the better shape anyway: the same field is what a vertical script needs, so
-Japanese set top-to-bottom is `PNX_ADVANCE_Y_POS` with glyphs that were never rotated.
-
-**The touch transform was not needed, and would have been wrong.** It was specified on the
-assumption that a landscape game thinks in rotated coordinates. It does not: pre-rotation means the
-game draws, moves and collides in the framebuffer's frame like any other, and the device already
-reports touches in exactly that frame. Rotating them would land a tap where the pixel is not. The
-author's 228x200 frame exists at build time and in the editor, and nowhere at run time.
-`tests/test_input.c` paints a pixel, reports a touch at its coordinates and checks the two agree.
-
-**Every blob is stamped** with the orientation it was baked at -- including songs and palettes, which
-have no geometry. Stamping only the geometric ones would make "orientation-free" and "built portrait"
-the same byte, and the loader could no longer tell a stale atlas from a legitimate sample. The check
-lives in `load_blob_4`, the one door every blob comes through: the first blob sets the expectation,
-and `pnx_assets_expect_orientation(PNX_ORIENTATION)` at start-up catches a uniformly stale bundle too.
-
-**A bug fell out of the invariance check.** "The same manifest compiles to the same content, turned"
-did not hold: maps came out 60 bytes larger in landscape. `compute_tile_flags` was walking the u16
-tile plane and the u8 flag plane with one `zip`, pairing each tile's low byte with one cell's flags
-and its high byte with the next cell's -- so the flag defaults were computed from a scrambled tally
-that depended on the order cells were visited. It never produced wrong pixels, because `finish_map`
-decodes properly and emits an override wherever the default disagrees. It just emitted a great many
-more of them than it needed to. Fixed, and the overworld's maps fell from **3,267 to 2,388 bytes**,
-27% of that category, in a project whose largest content lever is worth 12,000. Ties in the tally now
-break toward the lower flag value rather than toward whichever cell was seen first, because content
-compiles to the same bytes in either orientation only if every choice is a function of the counts.
-
-Input landed as `pnx_input`: edges, hold times measured from the event's own delivery stamp, and the
-cluster addressed **by position as the player reads it** rather than by physical button. `buttons_top`
-and `buttons_bottom` are not each other's mirror -- the watch turned the other way puts the
-physically-DOWN button under the left hand -- so a menu written once reads the same in all three.
-
-Outstanding: device confirmation. Everything here is checked on a host, and a host cannot tell you
-that a landscape screen is readable in the hand, that the backlight hold survives a notification, or
-that swallowing BACK feels like protection rather than a trap.
+Outstanding: device confirmation. A host cannot tell you whether a landscape screen is readable in
+the hand, whether the backlight hold survives a notification, or whether swallowing BACK feels like
+protection or a trap.
 
 ## M5 — Save
 
@@ -460,12 +388,10 @@ Done when: one game source with no `#if` in it, one build, one `.pbw`, running o
 
 ## Editor track (parallel)
 
-A visual editor for levels, assets, testing and packaging — see
-[`EDITOR.md`](EDITOR.md) for the architecture and the reasoning.
-
-It runs **alongside** the engine milestones rather than after them, because it is a GUI
-over the asset manifest and therefore depends on M2's schema rather than on any runtime
-code. Staged so each piece is independently useful:
+A visual editor for levels, assets, testing and packaging — architecture and reasoning in
+[`EDITOR.md`](EDITOR.md). It runs **alongside** the engine milestones rather than after
+them, because it is a GUI over the asset manifest and depends on M2's schema rather than on
+any runtime code. Staged so each piece is independently useful:
 
 | | | Depends on | Land it |
 |---|---|---|---|
@@ -479,24 +405,19 @@ code. Staged so each piece is independently useful:
 | **E8** | One-file editor executable with a native window | E1 | **DONE** |
 | **E9** | Settings tab: detect the Pebble SDK, show its licence, install it on request | E8 | **DONE** |
 | **E10** | Open any project folder; `.pknproj`; the engine ships in the editor and stages into a build | E8 | **DONE** |
-| **E11** | Release CI: tested builds for Linux, Windows, macOS x86_64 and arm64 | E10 | **DONE** |
+| **E11** | Release CI: tested builds and installers for Linux, Windows, macOS x86_64 and arm64 | E10 | **DONE** |
 | **E12** | Sprite editor painting in ARGB2222; code editor over the project tree (stubs) | E10 | **DONE** |
 | **E13** | IDE shell: activity rail, contextual toolbar, shared output panel, status bar | E12 | **DONE** |
 | **E14** | Live budget while editing; per-tile import selection; opt-in engine editing; C highlighting and symbol checking | E13 | **DONE** |
 
 **E7 exists because a font is the one asset a person cannot author by hand at this scale.** At
-6x12 most typefaces are illegible -- hinting dominates at small sizes, and a pixel font designed
-for it beats a scaled Helvetica outright. So the editor has to *show* the rasterisation at the
-target size before it is committed, not just accept a file. Two things fall out of that: the glyph
-set should be derived from the content the pipeline already reads, with a manifest override for
-runtime strings like damage numbers that appear in no dialogue; and font licensing needs a note,
-since shipping rasterised glyphs is redistribution even when the outlines stay behind.
+6x12 most typefaces are illegible -- hinting dominates at small sizes -- so the editor has to
+*show* the rasterisation at target size before it is committed rather than just accept a file.
 
-**Result.** Text is an ordinary asset now: `[[font]]` in the manifest, a `PF` blob, and a glyph
-blitter in `gfx` that draws during the frame like a sprite. The old path went through the SDK and
-cost **~4.3 ms a draw, 12% of the frame** -- and could only run *after* the framebuffer was
-released, so nothing could ever be drawn over text. The SDK hook stays for now as an escape hatch
-and comes out in the M6/M7 cleanup.
+**Result.** Text is an ordinary asset: `[[font]]` in the manifest, a `PF` blob, and a glyph blitter
+in `gfx` that draws during the frame like a sprite. The old path went through the SDK at **~4.3 ms
+a draw, 12% of the frame**, and could only run *after* the framebuffer was released, so nothing
+could ever be drawn over text. The SDK hook stays as an escape hatch until the M6/M7 cleanup.
 
 - **Depth is per font.** `depth = 1` is crisp; `depth = 2` is antialiased over three coverage
   levels, blended against the destination through a 32-byte ARGB2222 table. The HUD stays sharp
@@ -523,9 +444,18 @@ Costs on the overworld example: HUD 12px 1bpp **757 B / 40 glyphs**, dialogue 16
 one byte per set pixel with no palette read -- but that is reasoning, not a number, and the whole
 justification for this work is a measurement. It wants timing on a watch before the claim is made.
 
-**E8** falls out of the same goal: the editor is now one ~20 MB executable with a native window,
-so using it needs no Python, no Pillow and no terminal. It drives the OS's own webview rather than
+**E8** falls out of the same goal: the editor is one ~20 MB executable with a native window, so
+using it needs no Python, no Pillow and no terminal. It drives the OS's own webview rather than
 bundling Chromium.
+
+**E11 ships that executable in the form each platform expects to install from** — an Inno Setup
+wizard on Windows (per-user, so no UAC prompt an unsigned installer has no business asking for), a
+`.dmg` containing the `.app` beside an `/Applications` symlink, and a `.tar.gz` on Linux with a
+`.desktop` entry and an `install.sh` that writes two files under `$HOME`. First public build:
+[v0.1.0-beta.1](https://github.com/X64Tyko/pebblnyx/releases/tag/v0.1.0-beta.1). Runner labels are
+pinned to the oldest GA image, and macOS taught us why that needs watching: a retired label is
+never scheduled, so the job does not fail, it queues until GitHub's 24-hour timeout while the
+release job waits on it forever.
 
 **E9 answers the rest of it, and the licence decided the design.** The Pebble Developer License
 grants a **non-transferable, non-sublicensable** licence *to the user* and §5(f) prohibits
