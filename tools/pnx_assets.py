@@ -44,7 +44,7 @@ FLAG_NAMES = {"solid": FLAG_SOLID, "warp": FLAG_WARP}
 # Blob format versions. A mismatch between a stale .bin and a newer runtime is exactly
 # the kind of failure that presents as garbage pixels rather than an error, so every
 # blob is tagged and the runtime checks.
-BLOB_VERSION = 5
+BLOB_VERSION = 6
 MAGIC_ATLAS = b"PA"
 MAGIC_SPRITE = b"PS"
 MAGIC_MAP = b"PM"
@@ -151,6 +151,7 @@ def pack_atlas(root, spec):
     # and the blitter reads the source backwards. Symmetric art is common enough that this
     # is the cheapest tile saving available: two bits against 128 bytes at 4bpp 16x16.
     unique, seen, empty, mirrored = [], {}, 0, 0
+    origin = []          # sheet position each unique tile was first seen at
     for ty in range(ry, ry + rh):
         for tx in range(rx, rx + rw):
             buf = bytearray(T * T)
@@ -169,6 +170,7 @@ def pack_atlas(root, spec):
                 continue
             idx = len(unique)
             unique.append(key)
+            origin.append((tx, ty))
             # The true orientation is registered first so it always wins a later exact
             # match; mirrors only claim keys nothing else has taken.
             seen[key] = (idx, 0)
@@ -192,7 +194,44 @@ def pack_atlas(root, spec):
             repaired += 1
         fixed.append(t2)
 
+    # Palette variants: the same tileset recoloured. Read each variant at the SAME sheet
+    # positions the unique tiles came from, so no second dedup pass can disagree with the first.
+    variants = []
+    for vpath in spec.get("variants", []):
+        vname = os.path.splitext(os.path.basename(vpath))[0]
+        vim = load_sheet(root, vpath)
+        if vim.size != im.size:
+            raise BuildError(f"atlas {name!r}: variant {vpath!r} is {vim.size[0]}x{vim.size[1]} "
+                             f"but the base sheet is {sheet_w}x{sheet_h} -- a palette variant must "
+                             f"share the base's layout exactly")
+        vpx = vim.load()
+        bijection = {}
+        for (tx, ty), base_tile in zip(origin, unique):
+            for j in range(T):
+                for i in range(T):
+                    b = base_tile[j * T + i]
+                    v = to_gcolor8(vpx[tx * T + i, ty * T + j])
+                    if (b == TRANSPARENT) != (v == TRANSPARENT):
+                        raise BuildError(
+                            f"atlas {name!r}: variant {vpath!r} differs in TRANSPARENCY at sheet "
+                            f"tile {(tx, ty)} pixel {(i, j)}. A palette variant may change any "
+                            f"colour but must not move a pixel or change what is see-through.")
+                    if b == TRANSPARENT:
+                        continue
+                    if bijection.setdefault(b, v) != v:
+                        raise BuildError(
+                            f"atlas {name!r}: variant {vpath!r} is not a consistent recolour -- "
+                            f"base colour 0x{b:02X} maps to both 0x{bijection[b]:02X} and "
+                            f"0x{v:02X}. Recolour by mapping each colour to exactly one other.")
+        if len(set(bijection.values())) != len(bijection):
+            raise BuildError(f"atlas {name!r}: variant {vpath!r} merges two base colours into one, "
+                             f"so it cannot share the base's pixel data. Keep the recolour "
+                             f"one-to-one.")
+        variants.append({"name": vname, "map": bijection})
+
     print(f"  atlas {name}: {rw*rh} considered, {empty} empty, {len(fixed)} unique")
+    for v in variants:
+        print(f"    palette variant {v['name']}: {len(v['map'])} colours remapped")
     if mirrored:
         saved = mirrored * (T * T // 2)
         print(f"    {mirrored} tile(s) matched a mirror of another and were dropped "
@@ -205,7 +244,8 @@ def pack_atlas(root, spec):
             # Default OFF, not "auto": the runtime cannot read the metatile layout yet,
             # and a default that emits blobs the loader rejects is worse than no
             # feature at all. Flip to "auto" when pnx_atlas_load understands it.
-            "repaired": repaired, "metatiles": spec.get("metatiles", False)}
+            "repaired": repaired, "metatiles": spec.get("metatiles", False),
+            "variants": variants}
 
 
 def build_metatiles(tiles, pal_of, T, quiet=False):
@@ -338,6 +378,36 @@ def finish_atlas(atlas, tile_flags, shared):
         atlas["subtiles"] = 0
     atlas["palettes"] = palettes
     atlas["assign"] = assign
+
+    # A palette variant becomes an ORDERED palette per palette the atlas uses, whose k-th entry
+    # is the recolour of the base's k-th entry. Ordered matters: an ordinary palette is a set that
+    # palette_bytes sorts and pack_unit_4bpp indexes by the same sort, and two recolours sort
+    # differently. Pinning position is what lets the variant share the base's pixel data, which is
+    # the entire saving -- ~12,000 bytes of atlas for a handful of palette entries.
+    atlas["variant_tables"] = {}
+    for v in atlas.get("variants", []):
+        table = bytearray()
+        remap = {}
+        for slot in assign:
+            if slot in remap:
+                continue
+            base_order = sorted(shared[slot]) if not isinstance(shared[slot], Ordered) \
+                         else list(shared[slot])
+            recoloured = Ordered(v["map"].get(c, c) for c in base_order)
+            for i, p in enumerate(shared):
+                if isinstance(p, Ordered) and tuple(p) == tuple(recoloured):
+                    remap[slot] = i
+                    break
+            else:
+                shared.append(recoloured)
+                remap[slot] = len(shared) - 1
+        for slot in assign:
+            table.append(remap[slot])
+        atlas["variant_tables"][v["name"]] = bytes(table)
+        print(f"    variant {v['name']}: {len(set(remap.values()))} palette(s), "
+              f"{len(table)} B per map that uses it (against {len(tiles) * (T*T//2):,} B "
+              f"for a second atlas)")
+
     print(f"    {atlas['name']}: uses {len(set(assign))} palette(s), "
           f"{len(palettes) - before} new to the project")
     return atlas
@@ -883,7 +953,7 @@ def compute_tile_flags(maps):
     return defaults
 
 
-def finish_map(m, tile_defaults, atlas_asset):
+def finish_map(m, tile_defaults, atlas_asset, pal_table=b""):
     """Build the map blob, replacing the flag plane with sparse overrides.
 
     `atlas_asset` is stored in the header so the runtime can find the tileset a map was
@@ -907,7 +977,12 @@ def finish_map(m, tile_defaults, atlas_asset):
         raise BuildError(f"map {m['name']!r}: {count} flag overrides exceeds the u16 "
                          f"limit -- the tile flag defaults must be badly chosen")
 
-    body = (count.to_bytes(2, "little") + b"\0\0"
+    # A palette table, when present, is one byte per atlas tile naming the palette slot to use
+    # instead of the atlas's own. That is 44 bytes for the cave tileset against ~5,600 for a second
+    # copy of the atlas -- the whole point of recolouring rather than re-authoring. Byte 2 says
+    # whether it is there; its length is the atlas's tile count, which the runtime already knows.
+    body = (count.to_bytes(2, "little") + bytes([1 if pal_table else 0, 0])
+            + bytes(pal_table)
             + m["tiles"] + bytes(overrides)
             + b"".join(bytes(x) for x in m["warps"]))
     m["blob"] = blob_header(MAGIC_MAP, w, h, len(m["warps"]), atlas_asset) + body
@@ -1528,6 +1603,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
                              f"(known: {', '.join(sorted(roles_by_atlas))})")
         m = compile_map(spec, legend, roles_by_atlas[which], map_names)
         m["atlas"] = which
+        m["palette"] = spec.get("palette")
         maps.append(m)
     check_warp_destinations(maps)
 
@@ -1553,18 +1629,32 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None):
                   sorted(man.get("sample", {}))])
     asset_index = {h: i for i, h in enumerate(ordered)}
 
-    for m in maps:
-        atlas_asset = asset_index[f"PNX_ASSET_ATLAS_{c_ident(m['atlas'])}"]
-        finish_map(m, flags_by_atlas[m["atlas"]], atlas_asset)
-
     # One running palette list across every asset, so a later atlas or sprite reuses or
     # extends what earlier ones built. Sharing is discovered, never declared.
+    #
+    # Atlases finish BEFORE maps now: a map that names a palette variant needs the table the
+    # atlas builds while assigning palettes, so the order is a dependency rather than a habit.
     print("palettes:")
     shared = []
     for a in atlases:
         finish_atlas(a, flags_by_atlas[a["name"]], shared)
     for sp in sprites:
         finish_sprite(sp, shared)
+
+    by_name = {a["name"]: a for a in atlases}
+    for m in maps:
+        atlas_asset = asset_index[f"PNX_ASSET_ATLAS_{c_ident(m['atlas'])}"]
+        want = m.get("palette")
+        table = b""
+        if want:
+            tables = by_name[m["atlas"]].get("variant_tables", {})
+            if want not in tables:
+                raise BuildError(
+                    f"map {m['name']!r}: palette = {want!r}, but atlas {m['atlas']!r} declares no "
+                    f"such variant. It provides: {', '.join(sorted(tables)) or '(none -- add '
+                    f'`variants` to the atlas)'}")
+            table = tables[want]
+        finish_map(m, flags_by_atlas[m["atlas"]], atlas_asset, table)
     palette_blob = (blob_header(MAGIC_PALETTES, len(shared))
                     + b"".join(palette_bytes(p) for p in shared))
     print(f"  {len(shared)} palettes, {len(shared) * PALETTE_ENTRIES} B shared across "

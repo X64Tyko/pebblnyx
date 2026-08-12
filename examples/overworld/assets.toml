@@ -125,6 +125,7 @@ rows = """
 [[map]]
 name = "cave"
 atlas = "caveset"
+palette = "dungeon_ice"
 out = "map_cave.bin"
 start = [12, 13]
 # Destinations land one tile clear of the far door, so arriving does not immediately
@@ -191,6 +192,9 @@ tile = 16
 region = [0, 0, 10, 6]
 max_tiles = 128
 out = "caveset.bin"
+# The same tileset recoloured. Costs a few palettes plus 44 bytes in each map that uses it,
+# against ~5,600 bytes for a second copy of the atlas.
+variants = ["art/dungeon_ice.png"]
 metatiles = "auto"
 # Roles the legend can name. Autopicked so the atlas is usable the moment it is
 # imported; replace with an explicit [atlas.semantic] table once you know which tiles

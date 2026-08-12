@@ -475,6 +475,31 @@ only the pipeline made the runtime guard refuse every blob, which is correct beh
 host test then continued past the failed load and segfaulted on a NULL palette table, which
 reads as a code bug and is not one.
 
+## Palette variants: one atlas, many zones
+
+Measured on the example's cave tileset:
+
+| | Bytes |
+|---|---|
+| A second copy of the atlas | **5,632** |
+| The variant instead: palette table in the map | **44** |
+| Plus one new shared palette | 16 |
+| Code, in `pnx_tilemap_draw` | **44** |
+
+**128x**, and it is the largest content lever in the pipeline. A map optionally carries one byte per
+atlas tile naming the palette slot to use instead of the atlas's own; the pixel data is the atlas's
+either way. One branch and one index per tile blit.
+
+Positional palette order is what makes it work. An ordinary palette is a set that `palette_bytes`
+sorts and `pack_unit_4bpp` indexes by the same sort -- so two recolours sort differently and would
+pack to different pixel data, sharing nothing. Variant palettes are `Ordered`, pinning index k to
+entry k, and `merge_palettes` leaves them alone: merging one would reorder it and silently remap
+every pixel of every zone using it.
+
+The pipeline refuses a variant that is not a consistent recolour -- a moved pixel, a change in what is
+transparent, one base colour mapping to two, or two base colours flattened into one. Each of those
+would corrupt shared pixel data rather than merely look wrong.
+
 ## Asset pipeline (M2)
 
 The probe's content through the new pipeline, `examples/overworld`:

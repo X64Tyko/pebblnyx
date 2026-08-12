@@ -292,14 +292,15 @@ bool pnx_map_load(PnxMap *out, uint16_t asset_id, const PnxAtlas *atlas) {
   const uint8_t *data = load_blob(asset_id, "PM", &w, &h, &warps, &payload);
   if (!data) return false;
 
-  // u16 override_count, u16 reserved, then tiles, overrides, warps.
+  // u16 override_count, u8 has_palette, u8 pad, [palette table], tiles, overrides, warps.
   if (payload < 4) return false;
   const uint16_t overrides = (uint16_t)(data[0] | (data[1] << 8));
+  const size_t pal_bytes = data[2] ? atlas->tile_count : 0;
 
   // Two bytes per cell: u16 entries carrying tile index, flips and a reserved palette
   // field. The blob version guards a stale .bin against this reader.
   const size_t cells = (size_t)w * h * 2u;
-  const size_t expected = 4 + cells + (size_t)overrides * 3
+  const size_t expected = 4 + pal_bytes + cells + (size_t)overrides * 3
                           + (size_t)warps * sizeof(PnxWarp);
   if (w == 0 || h == 0 || payload != expected) {
     pnx_log("map %u: %ux%u, %u overrides, %u warps needs %u bytes, blob has %u",
@@ -307,12 +308,13 @@ bool pnx_map_load(PnxMap *out, uint16_t asset_id, const PnxAtlas *atlas) {
     return false;
   }
 
-  out->tiles = data + 4;
-  out->overrides = data + 4 + cells;
+  out->tile_palette = pal_bytes ? data + 4 : NULL;
+  out->tiles = data + 4 + pal_bytes;
+  out->overrides = data + 4 + pal_bytes + cells;
   out->override_count = overrides;
   // PnxWarp is five u8 fields, so it has no padding and maps directly onto the packed
   // bytes the pipeline writes. _Static_assert below keeps that true.
-  out->warps = (const PnxWarp *)(data + 4 + cells + (size_t)overrides * 3);
+  out->warps = (const PnxWarp *)(data + 4 + pal_bytes + cells + (size_t)overrides * 3);
   out->tile_flags = atlas->tile_flags;
   out->tile_count = atlas->tile_count;
   out->w = w;

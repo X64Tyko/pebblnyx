@@ -36,8 +36,12 @@ void pnx_tilemap_draw(const PnxMap *map, const PnxAtlas *atlas,
         // flips for metatiled atlases for that reason.
         pnx_blit_metatile(target, atlas, id, sx, sy);
       } else {
-        pnx_blit_4bpp(target, pnx_atlas_tile(atlas, (uint8_t)id),
-                      pnx_atlas_tile_palette(atlas, (uint8_t)id),
+        // One branch and one index for a recoloured zone. The map's table, when it has one,
+        // names a different palette slot per tile; the pixel data is the atlas's either way.
+        const PnxPalette *pal =
+            map->tile_palette ? pnx_palette(map->tile_palette[id])
+                              : pnx_atlas_tile_palette(atlas, (uint8_t)id);
+        pnx_blit_4bpp(target, pnx_atlas_tile(atlas, (uint8_t)id), pal,
                       sx, sy, (int16_t)T, (int16_t)T, flip);
       }
     }

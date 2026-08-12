@@ -30,7 +30,7 @@
 
 // Every blob carries this, so a stale .bin against a newer runtime is a clean error
 // rather than garbage pixels. Bumped whenever a format changes.
-#define PNX_BLOB_VERSION 5
+#define PNX_BLOB_VERSION 6
 #define PNX_BLOB_HEADER_BYTES 8
 
 // ------------------------------------------------------------------- palettes
@@ -111,6 +111,11 @@ typedef struct {
 typedef struct {
   const uint8_t *tiles;       // w * h atlas indices
   const uint8_t *tile_flags;  // borrowed from the atlas; NOT owned
+
+  // Optional palette variant: tile_count bytes naming the palette slot to use instead of the
+  // atlas's own, so one atlas serves several recoloured zones. NULL means use the atlas's.
+  // 44 bytes for the cave tileset against ~5,600 for a second copy of it.
+  const uint8_t *tile_palette;
   const uint8_t *overrides;   // override_count * 3 bytes: x, y, flags
   const PnxWarp *warps;
   uint16_t override_count;

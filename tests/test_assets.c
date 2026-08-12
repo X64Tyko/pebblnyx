@@ -249,6 +249,28 @@ void test_assets(void) {
 
   PnxMap cave;
   A_CHECK(pnx_map_load(&cave, A_CAVE, &caveset));
+
+  // --- palette variant: one atlas, a recoloured zone
+  //
+  // The map carries a palette slot per atlas tile, so the pixel data is the atlas's and only the
+  // colours differ. Asserting the table exists is not enough -- a table identical to the atlas's
+  // own would pass that and save nothing, so the test requires it to actually differ.
+  A_CHECK(cave.tile_palette != NULL);
+  if (cave.tile_palette) {
+    int differing = 0;
+    for (uint16_t i = 0; i < caveset.tile_count; i++) {
+      if (cave.tile_palette[i] != caveset.tile_palette[i]) differing++;
+    }
+    A_CHECK(differing > 0);
+
+    // Every slot must resolve, or a recoloured tile draws through a NULL palette.
+    for (uint16_t i = 0; i < caveset.tile_count; i++) {
+      if (pnx_palette(cave.tile_palette[i]) == NULL) { A_CHECK(false); break; }
+    }
+  }
+
+  // The outdoor map declares no variant, so it must fall through to the atlas's own palettes.
+  A_CHECK(outdoor.tile_palette == NULL);
   A_CHECK_EQ(cave.w, MAP_CAVE_W);
   A_CHECK_EQ(cave.h, MAP_CAVE_H);
 
