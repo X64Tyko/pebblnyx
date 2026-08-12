@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pnx_preview as pv                                    # noqa: E402
 import pnx_assets as pa                                     # noqa: E402
 import pnx_project as pp                                    # noqa: E402
+import size_report as sr                                    # noqa: E402
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 
@@ -252,6 +253,9 @@ class Project:
                 self.meta = pp.load(self.root)
             except ValueError:
                 self.meta = {"name": None, "manifest": os.path.basename(self.path)}
+        # ((elf, mtime), report). Reading an ELF costs two subprocesses, and the budget
+        # panel repaints while a map is being painted.
+        self._app_cache = None
         self.reload()
 
     def reload(self):
@@ -375,6 +379,8 @@ class Project:
             "used": sum(os.path.getsize(os.path.join(self.res, f))
                         for f in os.listdir(self.res) if f.endswith(".bin"))
             if self.built else 0,
+            "app": self.app_size(),
+            "save": self.save_size(),
         }
 
     def code_symbols(self):
@@ -502,6 +508,134 @@ class Project:
         except Exception:                                # noqa: BLE001
             return 0
 
+    # ------------------------------------------------------------------ app size
+    #
+    # The OTHER budget, and the one that fails worse.
+    #
+    # A project spends against two unrelated ceilings. Resources -- the .bin blobs -- are
+    # capped at 262,144 bytes by the appstore. The app BINARY is capped at 65,535, because
+    # `virtual_size` in the Pebble app header is a uint16; exceed it and the SDK fails with
+    # `struct.error: 'H' format requires 0 <= number <= 65535` and no mention of what
+    # overflowed. Showing one number labelled "Budget" invited reading the comfortable one
+    # as though it covered both.
+    #
+    # It can only be MEASURED, never predicted: it comes from the linked ELF, so it needs
+    # an SDK build that the editor cannot yet run itself. Unknown is therefore a real
+    # answer here, and is reported as one rather than as a zero.
+
+    # App RAM per platform, read from the SDK's own table (see docs/ROADMAP.md, M9).
+    # Everything a Pebble app owns lives in this one slot: code, rodata, statics AND the
+    # heap, which is why "how much is left" is the number worth showing rather than the
+    # static size alone.
+    APP_RAM = {"emery": 131072, "gabbro": 131072, "flint": 65536, "basalt": 65536,
+               "chalk": 65536, "diorite": 65536, "aplite": 24576}
+
+    def _elf_path(self):
+        """The most recently linked ELF under build/, whichever platform it is for."""
+        found = []
+        for base, _dirs, files in os.walk(os.path.join(self.root, "build")):
+            for f in files:
+                if f.endswith(".elf"):
+                    p = os.path.join(base, f)
+                    found.append((os.path.getmtime(p), p))
+        return max(found)[1] if found else None
+
+    def _newest_source(self):
+        """Newest mtime among the project's own C sources and its generated header.
+
+        The app figure is the one number here that cannot update as you work: it comes
+        from a linker, and the editor cannot run one. So the next best thing is knowing
+        when to stop trusting it -- anything newer than the ELF means the number on screen
+        describes a binary that no longer exists.
+
+        The generated header counts. Adding a map changes no C a person wrote, but it
+        changes `assets_gen.h`, and a binary linked before that does not know the map is
+        there. Which means an asset build marks the app stale -- correctly, and often,
+        until the editor can run a Pebble build itself.
+        """
+        newest = 0.0
+        for base, dirs, files in os.walk(os.path.join(self.root, "src")):
+            dirs[:] = [d for d in dirs if d not in ("build", "__pycache__")]
+            for f in files:
+                if f.endswith((".c", ".h")):
+                    newest = max(newest, os.path.getmtime(os.path.join(base, f)))
+        return newest
+
+    def app_size(self):
+        """Static bytes from the last SDK build, against the uint16 ceiling.
+
+        Cached on the ELF's mtime: this shells out to `nm` and `readelf`, and the panel
+        that shows it repaints on every keystroke of a map edit.
+        """
+        elf = self._elf_path()
+        if not elf:
+            return {"known": False,
+                    "why": "no build yet — run a Pebble build to measure the app",
+                    "limit": sr.VIRTUAL_SIZE_LIMIT}
+
+        stamp = os.path.getmtime(elf)
+        if self._app_cache and self._app_cache[0] == (elf, stamp):
+            return self._app_cache[1]
+
+        nm, readelf = sr.find_tool("arm-none-eabi-nm"), sr.find_tool("arm-none-eabi-readelf")
+        if not nm or not readelf:
+            out = {"known": False,
+                   "why": "the SDK's ARM tools are not installed, so the ELF cannot be read",
+                   "limit": sr.VIRTUAL_SIZE_LIMIT}
+            self._app_cache = ((elf, stamp), out)
+            return out
+
+        try:
+            rows = sr.parse_symbols(nm, elf)
+            alloc, sections = sr.allocated_size(readelf, elf)
+            report = sr.build_report(rows, sr.VIRTUAL_SIZE_LIMIT, alloc, sections)
+        except Exception as e:                           # noqa: BLE001
+            out = {"known": False, "why": f"could not read {os.path.basename(elf)}: {e}",
+                   "limit": sr.VIRTUAL_SIZE_LIMIT}
+            self._app_cache = ((elf, stamp), out)
+            return out
+
+        used = report["allocated"]
+        limit = report["limit"]
+        # Modules, biggest first, so the panel can say WHERE the bytes went. The engine's
+        # own subsystems are the interesting rows: a game usually cannot shrink `core`,
+        # but it can turn a module off in pnx_config.h.
+        modules = sorted(((name, m["total"]) for name, m in report["modules"].items()),
+                         key=lambda kv: -kv[1])
+        platform = os.path.basename(os.path.dirname(elf))
+        slot = self.APP_RAM.get(platform)
+        out = {
+            "known": True,
+            "used": used,
+            "limit": limit,
+            "pct": 100.0 * used / limit if limit else 0,
+            "over": used > limit,
+            "warn": used > limit * 0.9,
+            "mutable": report["total"]["ram"],     # data + bss
+            "platform": platform,
+            "slot": slot,
+            # What is left for the heap, which is what an arena is sized against. Static
+            # and heap come out of the same slot, so every byte of code is a byte an
+            # arena cannot have.
+            "heap": (slot - used) if slot else None,
+            "modules": [{"name": n, "bytes": b} for n, b in modules],
+            "elf": os.path.relpath(elf, self.root),
+            "built": stamp,
+            "stale": self._newest_source() > stamp,
+        }
+        self._app_cache = ((elf, stamp), out)
+        return out
+
+    def save_size(self):
+        """Persistent storage. Nothing to measure until M5 builds the save format.
+
+        Present as a cell from the start, because an empty slot with a name is how a
+        budget stays visible before it is spendable -- and because persist is the one
+        ceiling that cannot be discovered by a build failing. It fails on a watch, on a
+        write, in front of a player.
+        """
+        return {"known": False, "why": "save lands with M5"}
+
     def estimate(self, overrides=None):
         """Current resource cost, per category, without running the pipeline.
 
@@ -563,7 +697,11 @@ class Project:
                 "budget": budget, "pct": 100.0 * total / budget if budget else 0,
                 "over": total > budget, "exact": exact,
                 # Warn before the cliff, not at it: at 90% one more zone is the problem.
-                "warn": total > budget * 0.9}
+                "warn": total > budget * 0.9,
+                # The app binary rides along, because the two ceilings are spent against
+                # by the same edits and reading only one of them is how a project
+                # discovers the other at link time.
+                "app": self.app_size(), "save": self.save_size()}
 
     # ---------------------------------------------------------------------- code
     #
@@ -1473,7 +1611,10 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 body{margin:0;height:100vh;display:grid;grid-template-columns:auto 1fr;overflow:hidden;
   background:var(--ink);
   color:var(--fg);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif}
-#work{display:grid;grid-template-rows:auto 1fr auto auto;min-width:0;min-height:0}
+/* Rows: toolbar, budget strip, the work itself, output, status. The 1fr has to name the
+   work row explicitly -- adding a child without updating this handed the spare height to
+   whatever landed in the 1fr slot. */
+#work{display:grid;grid-template-rows:auto auto 1fr auto auto;min-width:0;min-height:0}
 
 #rail{display:flex;flex-direction:column;gap:2px;width:62px;padding:.4rem .3rem;
   background:var(--surface);border-right:1px solid var(--line)}
@@ -1536,6 +1677,26 @@ canvas{image-rendering:pixelated;cursor:crosshair;border:1px solid var(--line);
 .row{display:flex;gap:.4rem;align-items:center}
 .meter{height:5px;background:var(--line);border-radius:3px;overflow:hidden}
 .meter i{display:block;height:100%;background:var(--accent)}
+.meter.unknown i{background:repeating-linear-gradient(90deg,var(--line) 0 6px,
+  transparent 6px 12px);width:100%}
+
+/* The global budget strip. Four equal cells so no ceiling looks more important than
+   another, and a full-width band so it is impossible to work without it in view. */
+#budgetbar{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;
+  background:var(--line);border-bottom:1px solid var(--line);flex:0 0 auto}
+.bcell{background:var(--bg);padding:.45rem .9rem .5rem;display:flex;
+  flex-direction:column;gap:.25rem;min-width:0}
+.bhead{display:flex;justify-content:space-between;align-items:baseline;gap:.5rem}
+.bhead span{font-size:.72rem;letter-spacing:.04em;text-transform:uppercase;
+  color:var(--dim)}
+.bhead b{font-size:.86rem;font-variant-numeric:tabular-nums}
+.bcell small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:.72rem}
+/* Over budget is not a shade of the same colour: the cell changes ground, because this
+   has to be noticeable from across a room and while looking at something else. */
+.bcell.over{background:color-mix(in srgb,var(--bad) 22%,var(--bg))}
+.bcell.over .bhead b{color:var(--bad);font-weight:700}
+.bcell.warnb .bhead b{color:#d08b2c}
+.bcell.stale .bhead b{opacity:.55}
 small{color:var(--dim);font-size:.78rem}
 #log{margin:0;overflow:auto;white-space:pre-wrap;font:11px/1.5 ui-monospace,
   Menlo,monospace;background:var(--ink);padding:.5rem .8rem;color:var(--dim)}
@@ -1750,6 +1911,35 @@ button:disabled{opacity:.45;cursor:not-allowed}
     <button id="save">Save map</button>
     <button id="build" class="primary">Build</button>
   </header>
+
+  <!-- The budgets, on every page, above whatever is being worked on.
+       Four ceilings, spent against by different work and discovered at different times.
+       Resources fail at the appstore, the binary fails at the linker with a struct.error
+       naming nothing, RAM fails as a malloc returning NULL mid-scene, and persist fails
+       on a watch in front of a player. None of those tell you WHICH edit did it, and by
+       then the edit is hours old -- so the numbers live here rather than behind a tab. -->
+  <div id="budgetbar">
+    <div class="bcell" id="bc-res">
+      <div class="bhead"><span>Resources</span><b id="bv-res">—</b></div>
+      <div class="meter"><i id="bm-res"></i></div>
+      <small id="bn-res">—</small>
+    </div>
+    <div class="bcell" id="bc-app">
+      <div class="bhead"><span>App binary</span><b id="bv-app">—</b></div>
+      <div class="meter"><i id="bm-app"></i></div>
+      <small id="bn-app">—</small>
+    </div>
+    <div class="bcell" id="bc-ram">
+      <div class="bhead"><span>RAM</span><b id="bv-ram">—</b></div>
+      <div class="meter"><i id="bm-ram"></i></div>
+      <small id="bn-ram">—</small>
+    </div>
+    <div class="bcell" id="bc-save">
+      <div class="bhead"><span>Save</span><b id="bv-save">—</b></div>
+      <div class="meter"><i id="bm-save"></i></div>
+      <small id="bn-save">—</small>
+    </div>
+  </div>
 <main>
   <aside id="side">
     <section><h2>Paint</h2><div class="tiles" id="legend"></div>
@@ -1782,8 +1972,8 @@ button:disabled{opacity:.45;cursor:not-allowed}
         <option value="buttons_bottom">Landscape — cluster bottom, flippers</option>
       </select>
       <small id="orientnote">—</small></section>
-    <section><h2>Budget</h2><div class="meter"><i id="bar"></i></div>
-      <small id="budget">—</small></section>
+    <!-- The budgets used to live here, in the Maps sidebar, where four of the five tabs
+         could not see them. They are now the strip above every page. -->
   </aside>
   <div id="stage"><canvas id="cv"></canvas></div>
   <div id="import" style="display:none;flex:1;overflow:auto;padding:1.5rem">
@@ -2200,25 +2390,87 @@ function budget(now){
   if(now) go(); else estTimer=setTimeout(go,220);
 }
 
+// Exact bytes in the headline, rounded KB only in the supporting note. Every one of these
+// ceilings is a cliff rather than a slope -- 65,535 is a uint16, not a guideline -- and
+// "64 KB / 64 KB" cannot tell you whether you are 2 bytes under it or 40 over.
+const B=n=>n.toLocaleString();
+const KB=n=>n>=10240?`${(n/1024).toFixed(0)} KB`:`${n.toLocaleString()} B`;
+
+// One cell of the strip. `pct` null means nothing has measured it -- which is drawn as a
+// striped bar rather than an empty one, because an empty bar reads as "plenty of room"
+// when what it means is "nobody knows".
+function paintCell(id, value, pct, note, state){
+  const cell=$('#bc-'+id), bar=$('#bm-'+id);
+  cell.classList.toggle('over', state==='over');
+  cell.classList.toggle('warnb', state==='warn');
+  cell.classList.toggle('stale', state==='stale'||pct===null);
+  bar.parentElement.classList.toggle('unknown', pct===null);
+  bar.style.width=(pct===null?100:Math.min(100,pct))+'%';
+  // Cleared rather than set when nothing is known, so the stripe defined in CSS shows
+  // through: an inline colour would win, and a full solid bar reads as "100% spent",
+  // which is the opposite of what an unmeasured cell means.
+  bar.style.background=pct===null?'':
+    (state==='over'?'var(--bad)':(state==='warn'?'#d08b2c':'var(--accent)'));
+  $('#bv-'+id).textContent=value;
+  $('#bn-'+id).innerHTML=note;
+}
+
 function paintBudget(e){
-  const pct=e.pct;
-  $('#bar').style.width=Math.min(100,pct)+'%';
-  $('#bar').style.background=e.over?'var(--bad)':(e.warn?'#d08b2c':'var(--accent)');
-  $('#budget').innerHTML=
-    `${e.total.toLocaleString()} B — ${pct.toFixed(1)}% of ${(e.budget/1024)|0}KB`
-    + (e.over?' <b class="bad">OVER</b>':(e.warn?' <b>near the cap</b>':''))
-    + (e.exact?'':' <small>(some assets not built yet)</small>');
+  // --- resources. The only one of the four that moves as you paint, which is why the
+  //     estimate is recomputed from unsaved rows rather than read off disk.
+  paintCell('res', `${B(e.total)} / ${B(e.budget)} B`, e.pct,
+    `${e.pct.toFixed(1)}% of the appstore cap`
+    + (e.exact?'':' · <b>some assets not built yet</b>'),
+    e.over?'over':(e.warn?'warn':''));
+
+  const a=e.app||{};
+  if(!a.known){
+    paintCell('app', 'not measured', null,
+      `${a.why||'no build yet'} · ceiling 65,535 B`, '');
+    paintCell('ram', 'not measured', null, 'measured from the linked binary', '');
+  }else{
+    paintCell('app', `${B(a.used)} / ${B(a.limit)} B`, a.pct,
+      a.stale
+        ? '<b>stale — sources or assets changed since this build</b>'
+        : `${a.pct.toFixed(1)}%`
+          + ((a.modules||[])[0]
+             ? ` · largest ${a.modules[0].name} ${KB(a.modules[0].bytes)}` : ''),
+      a.over?'over':(a.warn?'warn':(a.stale?'stale':'')));
+
+    // RAM is the heap left over, not the static size again: code, rodata, statics and
+    // the heap all come out of one slot, so every byte of binary is a byte an arena
+    // cannot have. That is the number an author sizes a scene against.
+    if(a.slot){
+      const usedPct=100*a.used/a.slot;
+      paintCell('ram', `${B(a.heap)} B free`, usedPct,
+        `heap left of the ${KB(a.slot)} ${a.platform} slot · ${B(a.mutable)} B `
+        + `mutable statics`,
+        a.heap<16384?'warn':'');
+    }else{
+      paintCell('ram', KB(a.mutable), null, 'mutable statics; slot size unknown', '');
+    }
+  }
+
+  const s=e.save||{};
+  paintCell('save', s.known?`${B(s.used)} / ${B(s.limit)} B`:'—',
+    s.known?s.pct:null, s.known?'persisted per launch':(s.why||'not built yet'), '');
+
+  // The status bar carries whichever ceiling is in the most trouble, since it is the one
+  // signal that survives a collapsed strip and there is room for one number.
+  const appPct=a.known?a.pct:0;
+  const worst=appPct>e.pct
+    ? {label:'app', used:a.used, pct:appPct, over:a.over, warn:a.warn}
+    : {label:'resources', used:e.total, pct:e.pct, over:e.over, warn:e.warn};
 
   const st=$('#stbudget');
   if(st){
-    st.textContent=`${e.total.toLocaleString()} B (${pct.toFixed(1)}%)`
-      + (e.over?' OVER BUDGET':'');
-    st.style.fontWeight=e.over?'700':'';
+    st.textContent=`${worst.label} ${KB(worst.used)} (${worst.pct.toFixed(1)}%)`
+      + (worst.over?' OVER BUDGET':'');
+    st.style.fontWeight=worst.over?'700':'';
   }
-  // The status bar goes red the moment the cap is crossed, because that is the one
-  // signal visible from every tab.
   const bar=$('#statusbar');
-  if(bar) bar.style.background=e.over?'var(--bad)':(e.warn?'#a8701f':'var(--accent)');
+  if(bar) bar.style.background=worst.over?'var(--bad)':
+    (worst.warn?'#a8701f':'var(--accent)');
 }
 function tool(){
   $('#tool').innerHTML=S.mode==='paint'?`painting <kbd>${S.ch}</kbd>`:
@@ -2365,6 +2617,9 @@ $('#build').onclick=async()=>{
   if(r.ok){ const keep=S.map.name; await load();
     const i=S.data.maps.findIndex(m=>m.name===keep);
     $('#mapsel').value=i; selectMap(i); }
+  // A build is when the estimate stops being an estimate: every blob it guessed at now
+  // exists on disk. Repaint immediately rather than on the next keystroke.
+  budget(true);
 };
 // ------------------------------------------------------------------ import view
 let sheets=[];
@@ -2387,6 +2642,10 @@ function showTab(which){
   $('#save').style.display=maps?'':'none';
   if(imp&&!sheets.length) loadSheets();
   if(fnt&&!fontSources.length) loadFonts();
+  // The strip spans every tab, so it re-reads on arrival: importing an atlas or adding a
+  // font spends the same budget a map edit does, and a number that only refreshed while
+  // painting would be a number nobody could trust anywhere else.
+  budget(true);
 
   for(const b of document.querySelectorAll('.act'))
     b.classList.toggle('on', b.dataset.t===which);
@@ -2697,7 +2956,11 @@ async function sdkStatus(remote){
       row('folder', `<span class="p">${p.root||'—'}</span>`)+
       row('manifest', `<span class="p">${p.manifest||'—'}</span>`)+
       row('header', `<span class="p">${p.header||'—'}</span>`)+
-      row('budget', `${(d.used||0).toLocaleString()} / ${(d.budget||0).toLocaleString()} B (${pct}%)`)+
+      row('resources', `${(d.used||0).toLocaleString()} / ${(d.budget||0).toLocaleString()} B (${pct}%)`)+
+      row('app binary', d.app&&d.app.known
+        ? `${d.app.used.toLocaleString()} / ${d.app.limit.toLocaleString()} B `
+          + `(${d.app.pct.toFixed(1)}%)`
+        : `<span class="dim">${(d.app&&d.app.why)||'not measured'}</span>`)+
       // The engine is staged from the editor at each build, so what matters is whether
       // this project last built against a different one.
       row('engine', e.linked
