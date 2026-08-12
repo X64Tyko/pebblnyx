@@ -175,6 +175,18 @@ for Linux, Windows, macOS Intel and macOS Apple silicon, and drafts a GitHub Rel
 - **The smoke test asserts the engine is in the bundle**, which is the failure this design
   is exposed to: PyInstaller silently omitting the added data would ship an editor that
   opens projects and cannot build one.
+- **Pinned to the oldest GA runner images**, not `-latest`: a binary built against a newer
+  OS will not run on an older one. It is also how a retired label bites — a job asking for
+  a removed image is never scheduled, so it does not fail, it queues until GitHub's
+  24-hour timeout, and `release` (which needs it) never runs at all.
+
+**What each platform actually receives.** The binary is self-contained either way; this is
+about the gesture after the download, which is where "run a Python script" used to be:
+
+| Windows | `-setup.exe` from Inno Setup — Start menu entry, optional desktop shortcut, uninstaller. `PrivilegesRequired=lowest`, so it installs under `%LOCALAPPDATA%` with no UAC prompt at all: an unsigned installer demanding administrator rights is the exact shape of the thing people are told not to run. A `.zip` of the bare `.exe` ships alongside for anyone who keeps tools in a folder. |
+|---|---|
+| macOS | `.dmg` whose window holds the `.app` beside a symlink to `/Applications`, so the drag is obvious. It used to contain the bare `.app`, which invites running it from the read-only mounted volume — and those failures look like bugs in the app. |
+| Linux | `.tar.gz` extracting to a folder: the binary, a `.desktop` entry, `install.sh` and `uninstall.sh`. No one Linux installer format fits — a `.deb` excludes Arch, an AppImage wants FUSE — so what ships is the binary plus a script that writes two files under `$HOME` and one that removes them. Root is never needed. |
 
 Not signed or notarised — that needs an Apple Developer account and a Windows
 code-signing certificate. Until then macOS wants one right-click → Open and Windows may

@@ -112,10 +112,8 @@ jobs:
         include:
           - os: ubuntu-22.04       # oldest glibc we support; newer would not run on it
             tag: linux-x86_64
-            artifact: '*.tar.gz'
           - os: windows-latest
             tag: windows-x86_64
-            artifact: '*.zip'
           # Oldest GA macOS image, for the same reason ubuntu-22.04 is pinned above: a
           # binary built against a newer SDK will not run on an older OS, and the point of
           # these artefacts is that someone can download and run one.
@@ -128,10 +126,8 @@ jobs:
           # https://github.com/actions/runner-images#available-images before changing.
           - os: macos-15-intel     # Intel
             tag: macos-x86_64
-            artifact: '*.dmg'
           - os: macos-15           # Apple silicon
             tag: macos-arm64
-            artifact: '*.dmg'
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -177,16 +173,26 @@ jobs:
           python -c "import json;d=json.load(open('recent.json'));assert d['have_engine'],'engine missing from the bundle';print('engine',d['engine'],'OK')"
           kill $PID || true
 
+      # Everything packaged carries the platform tag in its name -- `pebblnyx-editor-
+      # linux-x86_64.tar.gz`, `-windows-x86_64-setup.exe` -- while the raw PyInstaller
+      # output does not. So one glob collects the deliverables per platform and leaves
+      # the loose binary and the .app behind, without the matrix having to list the
+      # extensions each platform happens to produce.
       - uses: actions/upload-artifact@v4
         with:
           name: pebblnyx-editor-${{ matrix.tag }}
-          path: dist/${{ matrix.artifact }}
+          path: dist/pebblnyx-editor-*
           if-no-files-found: error
 
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    # A tag with a suffix -- v0.1.0-beta.1, v0.2.0-rc.2 -- is a prerelease. Derived from
+    # the tag rather than set by hand, because the one time it is set by hand is the time
+    # a beta goes out looking like a stable release.
+    env:
+      PRERELEASE: ${{ contains(github.ref_name, '-') }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -199,18 +205,21 @@ jobs:
         with:
           files: artifacts/*
           draft: true          # a human decides when it is actually published
+          prerelease: ${{ env.PRERELEASE == 'true' }}
           generate_release_notes: true
           body: |
             ## pebblnyx editor
 
-            One self-contained file — no Python, no install. Pick the one for your machine:
+            Download one file for your machine and run it. No Python, no pip, nothing to
+            set up.
 
-            | | |
-            |---|---|
-            | **Windows** | `windows-x86_64.zip` |
-            | **macOS** (Apple silicon) | `macos-arm64.dmg` |
-            | **macOS** (Intel) | `macos-x86_64.dmg` |
-            | **Linux** | `linux-x86_64.tar.gz` |
+            | | | |
+            |---|---|---|
+            | **Windows** | `windows-x86_64-setup.exe` | installer — Start menu entry, no admin rights needed |
+            | | `windows-x86_64.zip` | or the bare .exe, if you prefer it portable |
+            | **macOS** (Apple silicon) | `macos-arm64.dmg` | open it, drag the app into Applications |
+            | **macOS** (Intel) | `macos-x86_64.dmg` | same |
+            | **Linux** | `linux-x86_64.tar.gz` | extract, then `./pebblnyx-editor` — or `./install.sh` to add it to your menu |
 
             The **pnx engine ships inside the editor**: create a project anywhere and it
             builds against the engine in the editor doing the building.
@@ -221,4 +230,5 @@ jobs:
             for you on request.
 
             Not code-signed yet: macOS needs one right-click → Open on first launch, and
-            Windows may show a SmartScreen prompt.
+            Windows may show a SmartScreen prompt. Nothing here asks for administrator
+            rights — the Windows installer writes only under your user profile.
