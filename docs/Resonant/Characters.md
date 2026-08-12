@@ -46,7 +46,7 @@ good about not resolving which dominates.
 - She is wrong about something at least once. Currently she never is, which makes her an
   oracle rather than a person. **Open:** pick the thing she gets wrong. Slice-level, not deferred.
 
-## GRD
+## GORD - from a mispronunciation of guard
 
 **Tag:** `GRD` | **Role:** tank, joins 05C
 
@@ -61,7 +61,7 @@ situation.
 - **Never becomes funny on purpose.** "ACKNOWLEDGED." after "Don't shoot the wizard" works
   because GRD is not making a joke.
 
-## OPR
+## OPRA - female handler, OPRA is her call sign because her voice has a musical quality.
 
 **Tag:** `OPR` | **Role:** antagonist, escapes the slice
 
@@ -73,7 +73,7 @@ accidental.
 **Voice rules**
 - Familiar with Van in a way nobody else is. Uses his name.
 - Speaks in contract terms: closed, client, loose ends, delivery method.
-- Never raises his voice until the last line, where he does: "Scrap it all. Kill them!"
+- Never raises her voice until the last line, where she does: "Scrap it all. Kill them!"
 
 ## The Client
 
