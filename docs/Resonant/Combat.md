@@ -86,6 +86,32 @@ Draw the ring, do not store it. A contracting annulus is two circle spans per ro
 bytes of code, **zero resource bytes**, and it scales to `gabbro`'s 260x260 for free, where
 pre-rendered rings would be 2KB+ and locked to one screen size.
 
+## Stun
+
+Stunning a target **stops its ATB gauge from building**. Early on that is simply free damage, which
+makes it worth learning in the first hour without anything explaining why it matters later.
+
+It matters later because it is the crux of the game's one real branch.
+
+**The OPRA fight has two outcomes.** She is carrying a synthetic Node. If the party can stun her
+regularly enough to destroy the crystal, she survives it and becomes an **optional fourth party
+member**. If they cannot, she is destroyed along with it.
+
+Three requirements for that to be a choice rather than a coin toss, all of them the designer's job
+rather than the player's:
+
+- **The crystal must be visibly a target.** Its own HP bar, not ability-gated. A branch the player
+  cannot see is not a branch.
+- **Kell must say so, mid-fight.** One line naming the crystal, once the fight has been running long
+  enough that the player is looking for a lever.
+- **Regular stunning, not flawless.** The bar is "used the mechanic competently", not "played
+  perfectly". Losing an optional character to a mechanic nobody told you about is the worst version of
+  this beat.
+
+**Cost worth stating:** an optional fourth character is a sprite set with variants, an Addition type,
+and a branch-aware line in every subsequent scene. The bytes are trivial; the authoring and the
+testing of two paths are not. That is the real price of the branch and it should be paid on purpose.
+
 ## Techs and combos
 
 Single-character techs cost Focus; combos fire when two characters both have Focus and compatible

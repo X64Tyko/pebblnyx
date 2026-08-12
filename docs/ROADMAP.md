@@ -375,7 +375,7 @@ code. Staged so each piece is independently useful:
 | **E4** | Asset import: sheet slicing, colour key, quantisation and dedup preview | E1 | when the pain justifies it |
 | **E5** | Package button: validate, build, enforce budget, emit `.pbw` | E1 | with E3 |
 | **E6** | Music editor: tracker view over the sequencer model | M4 | last |
-| **E7** | Font import: drop a TTF, rasterise glyphs at a chosen pixel size, preview legibility, emit an atlas plus width table | E4 | with the first text work |
+| **E7** | Font import: drop a TTF, rasterise glyphs at a chosen pixel size, preview legibility, emit an atlas plus width table. **Multiple fonts** -- a small one for the HUD, a larger one for dialogue -- are the same system with a glyph map each, so plan for N from the start rather than retrofitting | E4 | with the first text work |
 
 **E7 exists because a font is the one asset a person cannot author by hand at this scale.** At
 6x12 most typefaces are illegible -- hinting dominates at small sizes, and a pixel font designed

@@ -40,7 +40,7 @@ that answering early would only constrain:
 |---|---|---|
 | What the Nodes were originally *for* | `World.md` | Still open. The Client is settled -- powerful, mortal, holding lost knowledge, engineering synthetic Nodes -- but Act I plants nothing about him beyond three mentions, and the 60% escalation needs preparation. |
 | Is Van Subject 7? | `World.md` | Plays either way as written. Changes whether Van is *returning* to this place or arriving at it. |
-| ~~Six Nodes, or four?~~ | `World.md` | **Settled: three**, with a tangent quest between each and a final line at ~60%. Seven zones lands near 150-170KB of 262KB; six nodes would have been eleven. |
+| ~~How many Nodes?~~ | `World.md` | **Settled: four, one held by the Client**, and the number erased from history so everyone says three. The party reaches ~60% holding three; the final act is taking his. |
 | ~~Can Instability reach a fail state?~~ | `Combat.md`, `Stats.md` | **Settled: no fail state needed.** It is Act I's motivation -- Van wants it out of him -- so it drives the plot instead of punishing the player. Reduced only at Nodes until the second tangent teaches balancing. |
 | Forge: a place or a portable tool? | `Gear.md` | A place gives Crystal Peaks a reason to be a hub; a tool suits ninety-second sessions. The slice has neither. |
 | Do combos cost both turns? | `Combat.md` | One initiating and pulling the other in is more exciting and much harder to telegraph on this screen. |

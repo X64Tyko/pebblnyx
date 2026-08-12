@@ -51,24 +51,33 @@ is a villain or a rival.
 
 ## The Nodes
 
-**Three**, not six. Three nodes with a minor quest between each, then a final line once all three
-cores are held -- which lands at roughly the **60% mark**, where the story stops being about a
-contract.
+**Four**, and that number has been deliberately erased from history. Everyone who talks about them
+says three, because three is all the record retains.
 
-| | Node | Between it and the next |
+**The Client holds the fourth.** The party cannot collect them all, which is what gives the final act
+a concrete objective instead of just escalation -- they reach ~60% holding three, and the last stretch
+is about taking his. That is not revealed until after the second tangent quest; before then the
+missing fourth reads as an inconsistency in the record rather than as a person.
+
+**Nobody knows where the three are.** GORD offers three places they *could* have been sited, from
+memory that predates the collapse. He is guessing from architecture and old logistics, not reciting
+coordinates -- so searching is real, and arriving somewhere to find nothing is a beat available for
+free.
+
+| | Candidate site | Between it and the next |
 |---|---|---|
 | 1 | **Crystal Peaks** | the forge, and learning gear matters |
 | 2 | **Iron Keep** -- fortified, someone holds it | **balancing the Resonance** |
 | 3 | **The Pit** -- "people don't come back" | the final act's antagonist takes shape |
+| 4 | *held by the Client* | the endgame |
 
-The three tangent destinations are the other places GORD names: **Sunken City**, **Ashen Forest**,
-**Forgotten Coast**. Six locations either way, but only three of them are nodes -- which keeps every
-name in the outro doing work and costs nothing.
+The three tangent destinations are the other places in the outro: **Sunken City**, **Ashen Forest**,
+**Forgotten Coast**.
 
-Three fits the budget where six did not. The slice measured ~77,000 bytes for two zones, ~39,000 of
-which is shared across the whole game (fonts, music, samples, UI, dialogue). Marginal cost is about
-one atlas per zone, so seven zones lands near **150-170KB of 262KB**. Six nodes plus their tangents
-would have been eleven zones and overrun.
+Three searchable sites plus their tangents plus a final zone is about seven zones. The slice measured
+~77,000 bytes for two, ~39,000 of it shared across the whole game, so marginal cost is roughly one
+atlas per zone: seven lands near **150-170KB of 262KB** before zone recolouring, which brings it down
+further.
 
 ## Plan big, then cut whole units
 

@@ -13,28 +13,54 @@ by a notification -- which throttles rendering to ~0.4 fps until dismissed. Two 
 - **Never punish an interruption.** No timers that run while the app is covered, no fights
   that fail because attention left. Combat is turn-based partly for this reason.
 
-## Cold open -- currently missing entirely
+## Cold open
 
-Event 01 opens on "Always a complication," which is a reaction to something the player has not
-seen. Before it, three beats are needed and none exist:
+**Beat 0a -- The contract, as a conversation.** Text over black, but not a data dump: Van and OPRA
+talking. The player meets her as a handler doing a handler's job, which is the entire point -- when
+she turns up at the vault it should land as *"god damn it"* rather than *"who is this?"*. A betrayal by
+a stranger is a plot event; a betrayal by the voice that briefed you is a story one.
 
-**Beat 0a -- The contract.** One screen, before any map. Not a cutscene: text over black, the
-contract itself. Job, location, payment, one clause that sounds routine and is not.
+Clause 9 arrives in dialogue rather than on a form, so it reads as her being brusque instead of as
+foreshadowing. ~20 seconds.
 
-> `RETRIEVAL CONTRACT -- SECTOR 4`
-> `TARGET: VAULT CORE ("RELIC")`
-> `PAY: 400 SCRAP ON DELIVERY`
-> `HANDLER: OPR`
-> `CLAUSE 9: NO INDEPENDENT ANALYSIS OF THE TARGET.`
+**Beat 0b -- Arrival and movement.** Van outside the facility. Walking, one prompt, no enemies. ~20s.
 
-Clause 9 is the whole plot, stated in the first ten seconds, and it will read as boilerplate.
-That is the point.
+**Beat 0c -- One fleeing drone.** The combat tutorial: a single drone running away. It cannot hurt him,
+so the player learns movement, attack and the Addition ring with no pressure and no way to lose.
 
-**Beat 0b -- Arrival and movement tutorial.** Van outside the facility. Player learns to walk.
-No enemies, no text beyond a prompt. ~20 seconds.
+Ordering matters here and it was wrong before. The tutorial has to come **before** the rescue, so the
+player enters the Mage encounter competent and gets to feel like they saved someone -- rather than
+blundering through a rescue while still working out which button attacks.
 
-**Beat 0c -- The complication.** The drones are already inside, and already fighting something.
-*Then* "Always a complication," and Event 01 proceeds. The line now has an antecedent.
+**Beat 0d -- Guaranteed level, and a new ability.** Van levels from that first kill, on rails, and
+learns an ability immediately.
+
+## Escort, not rescue
+
+The Mage encounter is restructured. Kell is working the ward on the **ruins door** and cannot fight
+while casting, so Van holds the line against arriving drones -- and the ability he just learned is
+exactly what makes it manageable. Teaching a thing and then immediately needing it is worth more than
+any tooltip.
+
+**Kell must not be killable.** An escort that can fail in the first two minutes, on a character the
+player does not control, is the worst possible introduction. Drones reaching her **interrupt the cast
+and extend the fight** instead. Pressure without punishment.
+
+The **sanctum door** later repeats the motif with the difference doing the work: same barrier, but a
+mini-boss stands in front of it, so Kell fights *first* and only starts casting once it is down. The
+player has already learned what the barrier means, so the variation reads immediately.
+
+## Failure
+
+Death returns the party to the **last save point**. Points sit near anything that matters -- before a
+boss, at a zone entrance, after a long stretch of story.
+
+**That needs two saves, not one.** Save-on-blur exists for the lifecycle (~297 ms of warning against a
+106 ms write, and persist costs ~7 ms a call regardless of size), and it records *where you were* so a
+notification never loses progress. The checkpoint records *where you retry*. They are different data
+and both are needed -- collapsing them would either make blur a checkpoint, letting a player suspend
+mid-boss and retry from there, or make death lose everything since the last point including the
+inventory.
 
 ## Beat map
 
@@ -43,10 +69,11 @@ visible -- currently the slice is dialogue-heavy and this is where that shows.
 
 | # | Beat | Kind | Time | Teaches |
 |---|---|---|---|---|
-| 0a | The contract | text | 0:10 | premise |
+| 0a | The contract, with OPRA | text | 0:20 | premise, and OPRA |
 | 0b | Arrival | walk | 0:20 | movement |
-| 0c | Complication | script | 0:05 | -- |
-| 01 | Drone encounter | **combat** | 1:30 | attack, Additions |
+| 0c | One fleeing drone | **combat** | 1:00 | attack, the ring, no pressure |
+| 0d | Level up, new ability | script | 0:15 | progression exists |
+| 01 | Hold the line for Kell | **combat** | 2:00 | the new ability, escort pressure |
 | -- | Approach the ward | walk, 1 optional pickup | 0:40 | exploration is rewarded |
 | 02 | Meet the Mage | dialogue | 1:00 | party, doors gate progress |
 | -- | Ruins, first branch | walk, 2 encounters avoidable | 1:30 | encounters can be dodged |
@@ -66,7 +93,7 @@ visible -- currently the slice is dialogue-heavy and this is where that shows.
 | 07B | Realization | dialogue | 0:40 | -- |
 | 08 | New contract | dialogue | 0:50 | the hook |
 
-**Total: ~23 minutes**, of which ~10:30 is combat and ~6:00 is dialogue. That ratio is
+**Total: ~26 minutes**, and still on the short side, of which ~10:30 is combat and ~6:00 is dialogue. That ratio is
 defensible for a story slice but it is the thing to watch: cut dialogue before cutting
 exploration, because exploration is what makes the dialogue feel earned.
 
@@ -123,7 +150,6 @@ rewarded, not required.
 ## What still needs writing
 
 - The optional pickups: two are referenced above and neither exists in `Script.md`.
-- Failure. Nothing says what happens when the party dies.
 - The Mage's combat entry -- she joins in dialogue at 02 but her first fight is 04.
   **Open:** is she in the party for the walk between, and does she fight the avoidable
   encounters there?

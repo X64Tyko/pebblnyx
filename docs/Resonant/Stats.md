@@ -18,6 +18,7 @@ typedef struct {
   uint8_t  insulation;     // Resonance/tech defence
   uint8_t  speed;          // initiative order
   uint8_t  precision;      // widens the Addition window
+  uint8_t  stun;           // turns of frozen ATB remaining
   uint8_t  destab;         // Trance-style gauge; auto-triggers at 100
   uint8_t  balance;        // Node balance: governs fill rate, duration and power
   uint32_t xp;
@@ -41,6 +42,7 @@ goes, so choose them for clarity.** Art is where it goes.
 | **Focus** | spent on techs; refunded by Guard, gained by landing Additions |
 | **Destabilisation** | fills from damage dealt and taken; **transforms automatically at 100** |
 | **Balance** | earned from Nodes and the balancing quest; slower fill, longer duration, more power |
+| **Stun** | turns of frozen ATB remaining. Free damage early; the OPRA branch depends on it |
 
 **Precision deserves scrutiny.** It makes a stat out of the timing window, which risks
 making the skill expression buyable. The cap of one frame is deliberate -- it should feel

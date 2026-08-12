@@ -22,6 +22,33 @@ bool flag_gear_check = false;       // For tutorial tease
 
 ---
 
+## Ia. COLD OPEN
+
+### Beat 0a: The Contract (Text over black)
+- **Trigger:** New game
+- **Script:**
+    - *(No map. Text over black.)*
+    - **OPR:** "Sector 4. In and out. The client wants the vault core." (52)
+    - **VAN:** "And the client is?" (18)
+    - **OPR:** "Paying. Which is the only part that concerns either of us." (58)
+    - **VAN:** "It concerns me when a job has a clause nine." (44)
+    - **OPR:** "Clause nine says don't poke it. You're not paid to be curious, Van." (67)
+    - **VAN:** "I'm not curious. I'm careful." (29)
+    - **OPR:** "You're late. Move." (19)
+- **Post-Script:** Fade to the facility exterior. Clause 9 is now planted, in her voice, and reads
+  as brusqueness rather than foreshadowing.
+
+---
+
+### Beat 0c: The Fleeing Drone (Combat Tutorial)
+- **Trigger:** Spatial box outside the ruins
+- **Script:**
+    - **VAN:** "Scavenger. Running." (20)
+- **Post-Script:** One drone, fleeing, unable to damage Van. Teaches movement, attack and the
+  Addition ring with no way to lose. Van levels on the kill and learns one ability.
+
+---
+
 ## II. ACT I: Outer Ruins (Atlas: `ATLAS_OUTER_RUINS`)
 
 ### Event 01: The Hook (Combat Tutorial)
