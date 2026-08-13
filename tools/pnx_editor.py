@@ -4769,25 +4769,6 @@ APP_BROWSERS = ("google-chrome-stable", "google-chrome", "chromium", "chromium-b
                 "vivaldi", "opera")
 
 
-def window_profile_dir():
-    """A private browser profile for the editor's window.
-
-    Not optional, and not about privacy: launching a Chromium that is ALREADY RUNNING
-    hands the URL to the existing process and returns immediately, which the editor would
-    read as the window having been closed a moment after opening. Its own profile makes it
-    its own process, which is what gives a real close event.
-
-    Kept between runs, so the window remembers its size and position.
-    """
-    if platform.system() == "Windows":
-        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    elif platform.system() == "Darwin":
-        base = os.path.expanduser("~/Library/Caches")
-    else:
-        base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return os.path.join(base, "pebblnyx", "window")
-
-
 def open_app_window(url):
     """A chromeless window from a browser that is already installed.
 
@@ -4795,34 +4776,54 @@ def open_app_window(url):
     distro-specific and fragile, and Qt's WebEngine is Chromium again at ~200MB, against a
     binary that is currently 20. Both to render a page the machine can already render.
 
-    Returns True once the window has been closed, False if none could be opened.
+    **It uses the user's OWN browser profile, deliberately.** An earlier version passed
+    `--user-data-dir` to get a private profile, because a Chromium that is already running
+    hands the URL to the existing process and exits, and this wanted a process of its own
+    to wait on. That took down a compositor: a fresh profile has no GPU preferences, so
+    Chromium re-probes and can settle on a different device than the browser the user
+    normally runs -- and on a hybrid Intel + NVIDIA machine the compositor then cannot
+    import its buffers. Hyprland aborted inside Mesa, in `dri_create_fence_fd`, right
+    after `eglCreateImageKHR ... EGL_BAD_MATCH: createImageFromDmaBufs failed`, and took
+    the session with it.
+
+    The abort is a driver-and-compositor bug rather than ours, but the trigger was ours,
+    and an editor has no business being able to end someone's session. Reusing the profile
+    means the window renders exactly the way that user's browser already renders, which is
+    a configuration their machine has been surviving all day.
+
+    Waiting on the process is what that costs, and it costs nothing: the page's heartbeat
+    already tells the server when the UI is gone, which is what closes the editor now.
+
+    Returns "closed" once a window we owned has been closed, "handed" when the browser
+    passed the URL to an instance already running -- a window is open, but not ours to
+    watch -- or None when no window could be opened at all.
     """
     exe = next((p for p in (shutil.which(b) for b in APP_BROWSERS) if p), None)
     if not exe:
-        return False
+        return None
 
-    profile = window_profile_dir()
-    os.makedirs(profile, exist_ok=True)
-    cmd = [exe, f"--app={url}", f"--user-data-dir={profile}",
-           "--window-size=1400,900", "--no-first-run", "--no-default-browser-check"]
+    cmd = [exe, f"--app={url}", "--window-size=1400,900",
+           "--no-first-run", "--no-default-browser-check"]
 
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)
     except OSError as e:
         print(f"could not open a window with {os.path.basename(exe)} ({e})")
-        return False
+        return None
 
-    # A browser that rejects the flags exits at once, and treating that as "the user
-    # closed the window" would quit the editor a second after starting it.
+    name = os.path.basename(exe)
+    # An immediate exit means one of two things: the URL went to a browser that was
+    # already running, or the flags were rejected. Both leave nothing to wait on, and
+    # treating either as "the user closed the window" would quit a second after starting.
     time.sleep(1.5)
     if proc.poll() is not None:
-        print(f"{os.path.basename(exe)} would not open a window; using a browser tab")
-        return False
+        print(f"window: {name} --app  (close it to quit)")
+        return "handed"
 
-    print(f"window: {os.path.basename(exe)} --app  (close it to quit)")
+    print(f"window: {name} --app  (close it to quit)")
     proc.wait()
-    return True
+    return "closed"
 
 
 def open_window(url, title):
@@ -4849,10 +4850,11 @@ def open_window(url, title):
 
     if webview is not None:
         try:
+            logging.getLogger("pywebview").setLevel(logging.CRITICAL)
             webview.create_window(title, url, width=1400, height=900,
                                   min_size=(900, 600))
             webview.start()
-            return True
+            return "closed"
         except Exception as e:                           # noqa: BLE001
             # Typically a missing system webview or no display. Worth one line, then try
             # the next thing rather than dropping straight to a tab.
@@ -5068,13 +5070,20 @@ def main():
                 # Serve only: there is no UI to lose, so nothing to watch for. Scripts
                 # and tests rely on this staying up until they stop it.
                 threading.Event().wait()
-            elif args.browser or not open_window(url, title):
-                # The browser path has no close event of its own, so the page keeps the
-                # server alive and its going away is what ends this wait.
-                webbrowser.open(url)
-                LIVE.armed = True
-                threading.Thread(target=LIVE.watch, args=(srv,), daemon=True).start()
-                LIVE.done.wait()
+            else:
+                shown = None if args.browser else open_window(url, title)
+                if shown is None:
+                    webbrowser.open(url)
+
+                # "closed" is the only case already finished: a window we owned, which
+                # the user shut. A tab, or a window opened by a browser that was already
+                # running, leaves a UI out there that we cannot watch directly -- so the
+                # page's heartbeat is what tells us when it has gone.
+                if shown != "closed":
+                    LIVE.armed = True
+                    threading.Thread(target=LIVE.watch, args=(srv,),
+                                     daemon=True).start()
+                    LIVE.done.wait()
         except KeyboardInterrupt:
             print("\nstopped")
         finally:

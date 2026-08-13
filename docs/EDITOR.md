@@ -180,6 +180,27 @@ for Linux, Windows, macOS Intel and macOS Apple silicon, and drafts a GitHub Rel
   a removed image is never scheduled, so it does not fail, it queues until GitHub's
   24-hour timeout, and `release` (which needs it) never runs at all.
 
+**The window, and a crash worth recording.** Windows and macOS get a real webview through
+pywebview. Linux gets neither — PyGObject through PyInstaller is distro-specific, and Qt's
+WebEngine is Chromium again at ~200MB against a 20MB binary — so it opens a Chromium in
+`--app` mode instead: a window with no browser furniture, from something already installed.
+
+The first version of that passed `--user-data-dir` to get a private profile, because a
+Chromium that is already running hands the URL over and exits, and the editor wanted a
+process of its own to wait on. **It crashed a compositor.** A fresh profile has no GPU
+preferences, so Chromium re-probes and can settle on a different device than the browser
+that user normally runs; on a hybrid Intel + NVIDIA machine the compositor then could not
+import its buffers, and Hyprland aborted inside Mesa's `dri_create_fence_fd` immediately
+after `eglCreateImageKHR ... EGL_BAD_MATCH: createImageFromDmaBufs failed`, taking the
+session with it.
+
+The abort is a driver-and-compositor bug rather than the editor's. The *trigger* was the
+editor's, and a content tool has no business being able to end someone's session — so it
+reuses the user's own browser profile now, rendering the way their browser already renders.
+Waiting on the process is what that costs, and it costs nothing, because the page's
+heartbeat already reports when the UI is gone. `--browser` remains for anyone who wants a
+plain tab.
+
 **What each platform actually receives.** The binary is self-contained either way; this is
 about the gesture after the download, which is where "run a Python script" used to be:
 
