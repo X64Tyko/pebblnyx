@@ -707,10 +707,12 @@ def check_worldtiles():
         m = built["a.bin"]
         total = m["cols"] * m["rows"]
         check("a 200x200 map holds more WorldTiles than slots", total > m["wt_slots"])
-        # A 200x228 screen at 16px tiles touches at most 2 WorldTiles of 16 cells per
-        # axis, plus one of margin on each side: 4x4.
-        check("the resident pool covers the screen with a margin on each side",
-              m["wt_slots"] == 16)
+        # The pool is exactly the window the pipeline sized it for -- asserted against
+        # worldtile_window rather than a number, because the WorldTile size is now chosen
+        # per map and a hardcoded 16 would only be testing today's choice.
+        win = pnx_assets.worldtile_window(m["tile_px"], m["worldtile"])
+        check("the resident pool is the window, margin included",
+              m["wt_slots"] == win[0] * win[1])
         whole_plane = m["w"] * m["h"] * 2
         check("streaming a 200x200 map costs a pool, not the whole 80 KB plane",
               m["wt_slots"] * m["wt_slot_bytes"] < whole_plane // 8)
@@ -730,9 +732,13 @@ def check_worldtiles():
 {rows}
 """
         '''
-        streamed = build_maps(root, **{"maps": spec.format(extra="", rows=rows)})["a.bin"]
-        whole = build_maps(root, **{"maps": spec.format(extra="resident = true",
-                                                        rows=rows)})["a.bin"]
+        # `worldtile` pinned on both, so the only thing that differs is `resident`. Left to
+        # itself the pipeline picks a DIFFERENT size for each -- smaller for streaming,
+        # bigger for held whole -- which is correct and is checked separately below.
+        pin = "worldtile = 16\n            "
+        streamed = build_maps(root, **{"maps": spec.format(extra=pin, rows=rows)})["a.bin"]
+        whole = build_maps(root, **{"maps": spec.format(
+            extra=pin + "resident = true", rows=rows)})["a.bin"]
         total = streamed["cols"] * streamed["rows"]
         check("without `resident` a large map streams", streamed["wt_slots"] < total)
         check("`resident = true` takes a slot per WorldTile", whole["wt_slots"] == total)
@@ -741,6 +747,39 @@ def check_worldtiles():
         check("holding it whole costs several times the pool",
               whole["wt_slots"] * whole["wt_slot_bytes"]
               > 3 * streamed["wt_slots"] * streamed["wt_slot_bytes"])
+
+    # --- the auto size depends on WHICH MODE the map is in, and pulls opposite ways.
+    #     A streaming map holds a fixed number of WorldTiles, so a bigger one means a
+    #     bigger margin ring of world nobody can see; a map held whole has no ring, so
+    #     bigger means fewer per-tile headers. One rule, two answers.
+    stream_pick, stream_bytes, _ = pnx_assets.pick_worldtile("m", 192, 192, 16, False)
+    whole_pick, whole_bytes, _ = pnx_assets.pick_worldtile("m", 192, 192, 16, True)
+    check("streaming picks a smaller WorldTile than holding whole",
+          stream_pick < whole_pick)
+    check("the streaming choice beats the held-whole one at streaming",
+          stream_bytes < pnx_assets.worldtile_resident_bytes(192, 192, 16, whole_pick))
+    # And the reverse comparison does not even exist: at the streaming size this map has
+    # 576 WorldTiles, more slots than the format can address, so holding it whole at that
+    # size is not a more expensive option -- it is not an option.
+    check("the streaming choice cannot be held whole at all",
+          pnx_assets.worldtile_resident_bytes(192, 192, 16, stream_pick, True) is None)
+
+    # Asking to hold a big world whole at a SMALL WorldTile size wants more slots than the
+    # format can address, and says so. (Left to itself the auto pick avoids this by
+    # choosing a bigger size -- at 32 even a 255x255 map is only 8x8 WorldTiles, so the
+    # "no size works" branch in pick_worldtile is unreachable while dimensions are u8.)
+    expect_fail("holding a big world whole at a small WorldTile size", "has to stream",
+                **maps('''
+        [[map]]
+        name = "a"
+        out = "a.bin"
+        worldtile = 8
+        resident = true
+        start = [1, 1]
+        rows = """
+''' + "\n".join(["#" * 200] + ["#" + "." * 198 + "#"] * 198 + ["#" * 200]) + '''
+"""
+    '''))
 
     # --- worldtile size is a power of two, because the runtime shifts rather than divides
     expect_fail("worldtile must be a power of two", "power of two", **maps('''

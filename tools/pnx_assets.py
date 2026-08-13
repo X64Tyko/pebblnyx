@@ -61,6 +61,21 @@ MAGIC_BANK = b"PK"
 
 HEADER_BYTES = 8
 
+# Two different ceilings, both spelled 256, and confusing them is easy:
+#
+#   MAX_RESOURCES_SIZE_APPSTORE  0x40000  256 KB of BYTES in the whole .pbpack -- a
+#                                         warning, and what `budget_bytes` defaults to
+#   MAX_RESOURCES_SIZE           0x100000   1 MB of bytes -- the hard error
+#   pbpack table_size                 256   resource ENTRIES, whatever they weigh
+#
+# Read from the SDK's own pebble_sdk_platform.py and pbpack.py rather than recalled. The
+# entry count is the one that started mattering with WorldTile banks: a map is now a
+# resource plus a bank per few WorldTiles, so a project of large maps runs out of entries
+# long before it runs out of bytes.
+PBPACK_MAX_RESOURCES = 256
+RESOURCE_BYTES_APPSTORE = 0x40000
+RESOURCE_BYTES_HARD = 0x100000
+
 # ------------------------------------------------------------------------- worldtiles
 #
 # A map is stored as a grid of WorldTiles -- square blocks of map CELLS that are the unit
@@ -102,6 +117,71 @@ SCREEN_W, SCREEN_H = 200, 228
 # moment the tile becomes visible. Per side rather than per axis because the player can
 # walk either way and the streamer has no velocity to lean on.
 WORLDTILE_MARGIN = 1
+
+
+# What one resident WorldTile costs beyond its cells: the PnxWorldTile descriptor in the
+# slot array. Approximate, and only used to compare sizes against each other -- being a few
+# bytes out cannot change which size wins, because the term it competes with is quadratic.
+WORLDTILE_SLOT_OVERHEAD = 20
+
+
+def worldtile_resident_bytes(w, h, tile_px, worldtile, resident=False):
+    """What a map would hold resident at this WorldTile size, or None if it cannot.
+
+    Three terms, and they pull in different directions, which is the whole reason this is
+    picked by arithmetic rather than by a default:
+
+      the pool     slots * (cells + header) -- grows as the SQUARE of the size
+      descriptors  one per slot -- so it follows the pool
+      the lookup   one byte per WorldTile in the whole MAP -- grows as the size shrinks
+
+    **Which way the answer goes depends on whether the map streams.** A streaming map holds
+    a fixed number of WorldTiles -- the view plus a margin ring -- so a bigger WorldTile
+    means a bigger ring holding world nobody can see, and the pool dominates: smaller wins
+    until the lookup catches up. A map held whole has no ring at all, every term scales with
+    the count, and bigger wins because there are fewer per-tile headers and descriptors.
+
+    On a 200x228 screen at 16px tiles: streaming wants 8 and 16 costs twice as much; held
+    whole wants 16 and 8 costs 14% more. One rule, two answers, both right for their mode.
+    """
+    cols = (w + worldtile - 1) // worldtile
+    rows = (h + worldtile - 1) // worldtile
+    n = cols * rows
+    if resident:
+        # A slot per WorldTile, and the slot index is a byte.
+        if n > 255:
+            return None
+        slots = n
+    else:
+        win = worldtile_window(tile_px, worldtile)
+        slots = min(n, win[0] * win[1])
+    slot_bytes = (4 + worldtile * worldtile * 2 + 3) & ~3
+    return slots * (slot_bytes + WORLDTILE_SLOT_OVERHEAD) + n
+
+
+def pick_worldtile(name, w, h, tile_px, resident=False):
+    """The WorldTile size with the smallest resident cost, and what it beat.
+
+    Sized rather than defaulted, for the same reason the pipeline measures both atlas
+    layouts and picks: the answer depends on the screen, the map and whether it streams, a
+    default is right for one shape of content and quietly wrong for the rest, and the
+    arithmetic is free.
+    """
+    scored = []
+    for s in (4, 8, 16, 32):
+        if not WORLDTILE_MIN <= s <= WORLDTILE_MAX:
+            continue
+        cost = worldtile_resident_bytes(w, h, tile_px, s, resident)
+        if cost is not None:
+            scored.append((cost, s))
+    if not scored:
+        raise BuildError(
+            f"map {name!r}: {w}x{h} cannot be held whole at any WorldTile size -- the "
+            f"largest, {WORLDTILE_MAX}, still needs more than the 255 slots the format can "
+            f"address. A map this size is one that has to stream; drop `resident`.")
+    scored.sort()
+    best_bytes, best = scored[0]
+    return best, best_bytes, max(b for b, _ in scored)
 
 
 def worldtile_window(tile_px, worldtile):
@@ -1635,6 +1715,8 @@ def finish_map(m, flags_by_atlas, atlas_assets, atlas_bytes, pal_table=b"",
     held = "all resident" if wt_slots == n else f"{wt_slots} of {n} resident"
     print(f"  map {m['name']}: {cols}x{rows} WorldTiles of {worldtile} ({held}), "
           f"{override_total} flag overrides ({saved} bytes saved over a per-cell plane)")
+    if m.get("worldtile_note"):
+        print(f"    worldtile {m['worldtile_note']}")
     if len(banks) > 1:
         biggest = max(len(b) for b in banks)
         print(f"    {len(banks)} banks of {per_bank} WorldTiles, largest {biggest:,} B "
@@ -2676,6 +2758,29 @@ def report_budget(entries, budget):
     bar = min(40, int(40 * total / budget))
     print(f"\n  [{'#' * bar}{'.' * (40 - bar)}] {total} / {budget} B ({pct:.1f}%)")
 
+    # The budget above is the APPSTORE threshold, which is what shipping is limited by --
+    # but it is not the device's ceiling, and reporting only the tighter number makes the
+    # real one look four times closer than it is. Both, so a decision to go past 256KB is
+    # a decision rather than an accident.
+    if budget <= RESOURCE_BYTES_APPSTORE < RESOURCE_BYTES_HARD:
+        print(f"  {'':<8}{'':<{width}}   appstore {RESOURCE_BYTES_APPSTORE:,} B, "
+              f"device ceiling {RESOURCE_BYTES_HARD:,} B "
+              f"({100.0 * total / RESOURCE_BYTES_HARD:.0f}% of the latter)")
+
+    # The other ceiling, and it is a different KIND of thing: a .pbpack holds at most 256
+    # resource ENTRIES, whatever they weigh. That never mattered while an asset was a
+    # tileset or a song, and started mattering the moment a map became one resource plus a
+    # bank per few WorldTiles -- a project of large maps runs out of entries long before it
+    # runs out of bytes. Exceeding it is a bare traceback out of the SDK's packer.
+    print(f"  {len(entries)} of {PBPACK_MAX_RESOURCES} resource entries "
+          f"({100.0 * len(entries) / PBPACK_MAX_RESOURCES:.0f}%)")
+    if len(entries) > PBPACK_MAX_RESOURCES:
+        banks = sum(1 for kind, _n, _s in entries if kind == "bank")
+        raise BuildError(
+            f"{len(entries)} resources exceeds the {PBPACK_MAX_RESOURCES} a .pbpack can "
+            f"hold, {banks} of them WorldTile banks. Raise `bank_bytes` on the largest "
+            f"maps -- it trades entries back for seek time -- or carve fewer maps.")
+
     if total > budget:
         raise BuildError(f"resources exceed the {budget} byte budget by "
                          f"{total - budget} bytes")
@@ -2748,12 +2853,27 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
         m["palette"] = spec.get("palette")
         m["tile_px"] = tile_px[names[0]]
 
-        wt = int(spec.get("worldtile", WORLDTILE_DEFAULT))
+        # "auto" is the default and picks by arithmetic; a number forces it. Same bargain
+        # the atlas `metatiles` key offers, and for the same reason -- the cheapest size
+        # depends on the screen, so a constant is right for one shape of content and
+        # quietly wrong for the rest.
+        want_wt = spec.get("worldtile", "auto")
+        held = bool(spec.get("resident", False))
+        if want_wt == "auto":
+            wt, best, worst = pick_worldtile(spec["name"], m["w"], m["h"], m["tile_px"],
+                                             held)
+            m["worldtile_note"] = (f"auto {wt}: {best:,} B against {worst:,} B at the "
+                                   f"worst size, {'held whole' if held else 'streaming'}"
+                                   ) if worst > best else None
+        else:
+            wt = int(want_wt)
+            m["worldtile_note"] = None
         if not WORLDTILE_MIN <= wt <= WORLDTILE_MAX or wt & (wt - 1):
             raise BuildError(
                 f"map {spec['name']!r}: worldtile = {wt} must be a power of two between "
-                f"{WORLDTILE_MIN} and {WORLDTILE_MAX}. The runtime finds a cell's WorldTile "
-                f"by shifting, not dividing, which is what makes it free per drawn tile.")
+                f"{WORLDTILE_MIN} and {WORLDTILE_MAX}, or \"auto\". The runtime finds a "
+                f"cell's WorldTile by shifting, not dividing, which is what makes it free "
+                f"per drawn tile.")
         m["worldtile"] = wt
 
         slots = spec.get("atlas_slots")

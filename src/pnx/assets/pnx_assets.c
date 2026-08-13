@@ -567,7 +567,8 @@ bool pnx_map_load(PnxMap *out, uint16_t asset_id) {
     // tiles are consecutive at both ends and the run loader can take the whole thing --
     // which on a 144-WorldTile map is 18 reads instead of 144, and 18 seeks instead of
     // 144 into a resource where the seek is what costs.
-    const uint16_t per_bank = (uint16_t)(1u << out->bank_shift);
+    uint16_t per_bank = (uint16_t)(1u << out->bank_shift);
+    if (per_bank > PNX_MAP_MAX_RUN) per_bank = PNX_MAP_MAX_RUN;
     for (uint16_t i = 0; i < n; i += per_bank) {
       const uint16_t run = (n - i) < per_bank ? (uint16_t)(n - i) : per_bank;
       if (!worldtile_load_run(out, i, (uint8_t)i, (uint8_t)run)) {
@@ -722,9 +723,11 @@ static bool worldtile_accept(PnxMap *m, uint32_t i, uint8_t slot) {
 //
 // The caller guarantees the run stays inside one bank and inside the slot array.
 static bool worldtile_load_run(PnxMap *m, uint32_t first, uint8_t slot, uint8_t count) {
-  uint8_t pinned[PNX_MAP_STREAM_BUDGET > 16 ? PNX_MAP_STREAM_BUDGET : 16];
-  const uint8_t max_run = (uint8_t)(sizeof(pinned));
-  if (count > max_run) count = max_run;
+  // Sized independently of the stream budget, which counts READS and says nothing about
+  // how many WorldTiles one carries. A bank can hold up to 128 of them at the smallest
+  // WorldTile size, and the caller loops rather than this growing a 128-byte frame.
+  uint8_t pinned[PNX_MAP_MAX_RUN];
+  if (count > PNX_MAP_MAX_RUN) count = PNX_MAP_MAX_RUN;
 
   for (uint8_t k = 0; k < count; k++) {
     if (worldtile_pin(m, first + k, &pinned[k])) continue;
@@ -838,12 +841,12 @@ static uint8_t stream_window(PnxMap *m, int32_t x, int32_t y, int32_t w, int32_t
       while (wx + run <= x1
              && m->wt_slot[first + run] == PNX_MAP_NO_SLOT
              && ((first + run) >> m->bank_shift) == (first >> m->bank_shift)
-             && (uint32_t)run < per_bank) {
+             && (uint32_t)run < per_bank
+             && run < PNX_MAP_MAX_RUN) {
         run++;
       }
 
       if (budget == 0) { missing += (uint8_t)run; wx += run; continue; }
-      if (run > budget) run = budget;
 
       // Consecutive free slots for a consecutive run, because the read lands in one
       // stretch of pool memory. Shrinking rather than failing: a fragmented pool still
@@ -876,7 +879,7 @@ static uint8_t stream_window(PnxMap *m, int32_t x, int32_t y, int32_t w, int32_t
         wx++;
         continue;
       }
-      budget = (uint8_t)(budget > run ? budget - run : 0);
+      budget--;                     // one READ, however many WorldTiles it carried
       wx += run;
     }
   }

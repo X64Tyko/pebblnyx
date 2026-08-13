@@ -7,7 +7,40 @@ cross-checked against the PebbleOS source where a mechanism mattered.
 Numbers marked **(replicated)** were reproduced across separate runs and can be
 trusted tightly. Anything else is a single measurement.
 
+## The numbers, in one place
+
+The figures that get looked up. Each links to the section that derives it and says what it
+cost to find out.
+
+| | | |
+|---|---|---|
+| Frame period | **37.33 ms**, fixed — 26.8 fps | [pacing](#frame-pacing) |
+| Free CPU per frame | **~35 ms** | [pacing](#frame-pacing) |
+| Full screen of 4bpp tiles + sprites | **~5.1 ms** after rework, was 7.4 | [render](#render-cost-full-screen-200x228--45600-px) |
+| App RAM / static cap | 128 KB heap, **64 KB** statics | [memory](#memory) |
+| App binary ceiling | **65,535 B** — a u16 that fails obscurely | [memory](#memory) |
+| Resource bytes | 256 KB appstore, **1 MB** device | [memory](#memory) |
+| Resource entries | **256** per `.pbpack` | [memory](#memory) |
+| Flash read | **cost scales with OFFSET**, not length | [flash](#flash--resource-reads) |
+| Persist write | **~7 ms per call**, any size | [persist](#persist-writes-are-116x-slower-than-reads-replicated-3-runs) |
+| Throttled when covered | **~0.4 fps**, not suspended | [lifecycle](#lifecycle-throttled-not-suspended) |
+| Button latency | +27 ms systematic, 31 ms spread | [input](#input-timing-m0-spike) |
+| Touch latency | half of buttons | [input](#input-timing-m0-spike) |
+| Tile encoding | 16x16, 4bpp, metatiles at scale | [tiles](#tile-encoding-16x16-with-metatiles-measured-against-the-alternatives) |
+| Framework baseline | **6,452 B** empty, 2,528 without diagnostics | [baseline](#baseline-framework-cost-m1-examplesempty) |
+| Audio | batch API unusable; **stream and mix** | [audio](#audio) |
+
+**Five places the estimate was wrong**, which is the argument for measuring at all: 4bpp
+decode is 2.5x an 8bpp copy rather than near parity; a full screen cost 7,400 µs against an
+estimated 2,350; the batch audio API costs ~94 ms a submission; metatiles pay 1.72x at scale
+but 1.19x on a small carve; and a ranged flash read is O(offset), which made a map load 279x
+its predicted cost.
+
 ---
+
+# Platform
+
+*What the hardware does, and what it refuses to do.*
 
 ## Frame pacing
 
@@ -53,36 +86,6 @@ is supposed to remove, so the number wants taking before the claim is repeated. 
 needs a 2bpp figure, which is strictly more expensive: intermediate levels read the
 destination and blend three channels.
 
-## Font costs (E7)
-
-Measured on `examples/overworld` with Liberation Sans, glyph sets derived from the
-manifest's dialog pages:
-
-| Face | Size | Depth | Glyphs | Bitmaps | Blob |
-|---|---|---|---|---|---|
-| `hud` | 12px | 1bpp | 40 | 331 B | **757 B** |
-| `dialogue` | 16px | 2bpp | 27 | 580 B | **902 B** |
-
-Three things the numbers show:
-
-- **`charset = "auto"` is most of the saving.** The HUD face carries 40 glyphs because
-  that is what the dialog pages plus `extra` actually use. All 95 printable ASCII would
-  roughly double it for characters the game never draws.
-- **The index is a real fraction of a small font.** 8 bytes a glyph is 320 B of the HUD
-  face's 757 — bigger than a third of it. That is the price of trimming glyphs to their
-  inked box and carrying per-glyph bearings, and it is still the cheaper side of the
-  trade: uniform cells cost more in bitmap than they save in index, and the margin widens
-  with size.
-- **2bpp is not 2x.** The dialogue face is 27 glyphs at 16px against 40 at 12px, so the
-  depths are not directly comparable — but the bitmap block is 580 B for 27 antialiased
-  glyphs against 331 B for 40 crisp ones, which is roughly the doubling per glyph you
-  would expect and no worse.
-
-Engine cost of the whole feature: **+662 B in `gfx`** (the blitter, both span writers, the
-32-byte blend table, wrapping and measuring) and **+993 B in `assets`** (the loader, its
-validation, and two more scene slots). The overworld example went from 12,208 to
-**14,784 of 65,535 bytes (22.6%)**.
-
 ## Memory
 
 | Budget | Limit |
@@ -92,7 +95,17 @@ validation, and two more scene slots). The overworld example went from 12,208 to
 | Heap available to a small app | ~121,000 bytes |
 | Resources — hard cap | 1,048,576 bytes |
 | Resources — appstore cap | **262,144 bytes** |
+| Resources — **entries** | **256** per `.pbpack` |
 | Persist quota | 1,048,576 bytes, **256 bytes per key** |
+
+**Three of those are spelled 256 and mean different things**, which is easy to trip over.
+The appstore cap is 256 KB of bytes across the whole pack and only warns; the hard error is
+at 1 MB (`report_memory_usage.py` stats the pack file, so neither is per-resource); and the
+pack's table holds 256 *entries* whatever they weigh (`pbpack.py`, `table_size = 768 if
+is_system else 256`). Reporting only the appstore figure makes the real ceiling look four
+times closer than it is. The entry count went from irrelevant to binding when a map became
+one resource plus a bank per few WorldTiles — a project of large maps runs out of entries
+long before bytes, and overflowing it is a bare traceback out of the SDK's packer.
 
 The 64KB figure is the one that constrains design. `MAX_APP_MEMORY_SIZE` is 128KB, but
 the app header stores virtual size — defined as `.text + .data + .bss` — in a
@@ -105,29 +118,11 @@ input, save — was **8,140 bytes of `.text`**.
 
 The framebuffer is not in the app's budget; the compositor owns it.
 
-## Entity layout: it does not matter
-
-Three layouts, three kernels, 64–2048 entities, working sets to ~114KB. ns/entity at
-n=1536, 52-byte → 64-byte stride:
-
-| Kernel | AoS | SoA | Pointer table (shuffled) |
-|---|---|---|---|
-| all channels | **209 → 237** | 251 → 251 | 222 → 217 |
-| position only | 134 → 131 | 160 → 158 | 153 → 143 |
-| stream one field | **50 → 38** | 38 → 38 | 54 → 46 |
-
-Everything within ~1.5x. **Pointer chasing was the fastest on the wide kernel.**
-On-chip SRAM has near-flat access cost — no DRAM means no ~200-cycle miss penalty for
-locality to win back.
-
-Cache-line padding is a trade with a sign that depends on access width: +24% on a
-single-field sweep, **−13%** on an all-channel one, 23% more RAM either way.
-
-**Methodology warning.** Two earlier conclusions here were *reversed* once measured
-properly. Effects are 5–25%, small enough that any uncontrolled variable swamps them.
-A/B inside one session with a control that should not change.
-
 ## Flash / resource reads
+
+**A ranged read costs by where it STARTS, not by how much it moves.**
+`resource_load_byte_range` streams from the front of the resource on every call, so the
+same read is cheap near the top of a blob and expensive near the bottom.
 
 | Pattern | Throughput | µs/call |
 |---|---|---|
@@ -135,100 +130,52 @@ A/B inside one session with a control that should not change.
 | 256 sequential 64B calls | 2,048 KB/s | 30 |
 | 256 **scattered** 64B calls | 2,204 KB/s | 28 |
 
-Fits `cost ≈ 29 µs + bytes ÷ 33 MB/s` almost exactly. Two conclusions:
+Within a small resource that looks like `cost ≈ 29 µs + bytes ÷ 33 MB/s`, and **call count
+dominates** — the same bytes cost 15x more through small calls — with **no locality
+penalty**, scattered being marginally *faster* than sequential. Reading 128KB (larger than
+any cache) gave ~18.6 MB/s against ~36 MB/s for a repeated 16KB block, so ~18–19 MB/s is
+real throughput and the higher figure was cache-inflated.
 
-**Call count dominates** — the same bytes cost 15x more through small calls.
-**There is no locality penalty** — scattered was marginally *faster* than sequential.
+That model is a **special case**. It was probed over a 16KB resource, where every offset is
+small enough for the seek to vanish into per-call noise. Over a 75KB one it is wrong by up
+to 279x, and wrong in a way that grows with depth:
 
-Reading 128KB (larger than any on-chip cache) gave ~18.6 MB/s versus ~36 MB/s for a
-repeatedly-read 16KB block, so **~18–19 MB/s is real flash throughput** and the higher
-figure was cache-inflated. Cold vs warm showed no systematic difference at 128KB.
+| Load (192x192 map, `examples/worldtiles`) | Bytes | Calls | Predicted | **Actual** |
+|---|---|---|---|---|
+| 9 WorldTiles at the map's origin | 13,281 | 16 | 0.9 ms | **46 ms** |
+| 16 WorldTiles at tile 142,52 | 22,563 | 19 | 1.2 ms | **305 ms** |
+| all 144 WorldTiles | 96,108 | 148 | 7.2 ms | **1,984 ms** |
 
-### What this makes streamable, and what it does not
+The same 16-tile window costs 46 ms near the origin and 305 ms two thirds of the way in —
+1.7x the bytes, the same call count, 6.6x the time. Neither a per-call constant nor a
+throughput figure can produce that. Fitting `cost ≈ Σ offsetᵢ ÷ T` gives T ≈ 2.8 MB/s and
+reproduces every row within 2x.
 
-The same two numbers answer both questions, and they answer them differently depending on
-the unit. Derived from `29 µs + bytes ÷ 33 MB/s`, against a 37.33 ms frame:
+### What it means for design
 
-| Unit | Bytes | Cost | Per frame |
-|---|---|---|---|
-| one 16x16 tile, 4bpp | 128 | 33 µs | **6.7 ms** at 725 tiles — 18% of frame |
-| one 16x16-cell WorldTile | 516 | 45 µs | ~0 — read at a boundary, not per frame |
-| one atlas (`caveset`) | 5,728 | 202 µs | ~0 — read when a WorldTile first needs it |
-| a whole resident set (16 WorldTiles + 4 atlases) | ~31,000 | ~1.5 ms | 4%, once, on a warp |
-
-**A tile is the wrong unit and a WorldTile is the right one** for exactly the reason the
-table shows: the ~29 µs call cost is paid once either way, but a WorldTile amortises it
-over 256 cells and pays it when the player crosses a boundary rather than every frame.
-That is why `pnx_assets.h` still says residency-not-streaming, and why maps stream anyway.
-
-Refilling the streamer's margin is bounded by `PNX_MAP_STREAM_BUDGET` at four WorldTiles a
-frame — 180 µs, half a percent — so the cap exists to bound a pathological case rather than
-because the ordinary one is expensive.
-
-### …and the device says the model above is wrong for deep reads
-
-The table above is what `29 µs + bytes ÷ 33 MB/s` predicts. `examples/worldtiles` ran on
-hardware and predicted nothing of the kind:
-
-| Load | Bytes | Calls | Predicted | **Actual** | Out by |
-|---|---|---|---|---|---|
-| field, 9 WorldTiles at the map's origin | 13,281 | 16 | 0.9 ms | **46 ms** | 53x |
-| field, 16 WorldTiles at tile 142,52 | 22,563 | 19 | 1.2 ms | **305 ms** | 247x |
-| plain, all 144 WorldTiles | 96,108 | 148 | 7.2 ms | **1,984 ms** | 275x |
-| plain, all 144 again | 94,847 | 148 | 7.2 ms | **1,996 ms** | 279x |
-
-**The error is not constant — it grows with how deep into the resource the read starts.**
-The same 16-WorldTile window costs 46 ms near the map's origin and 305 ms two thirds of the
-way through it, for 1.7x the bytes and the same call count. That rules out both a fixed
-per-call cost and a throughput figure, and leaves one explanation: **`resource_load_byte_range`
-is O(offset), not O(length)** — it streams from the start of the resource on every call.
-
-Fitting `cost ≈ Σ offsetᵢ ÷ T` gives T ≈ 2.8 MB/s and reproduces all four rows within 2x,
-including the near/far pair the other models cannot explain at all.
-
-The original 29 µs figure was measured over a 16KB resource, where every offset is small
-enough for the seek to disappear into the per-call noise. It is not wrong; it is a special
-case of this, and the probe never went deep enough to see the term that dominates here.
-
-**What it costs in practice.** Steady walking is unaffected — 26.8 fps held, and the
-streamer never fell behind (`missing` stayed 0 even at 8 tiles per tick). Crossing a
-WorldTile boundary costs a frame: 47–63 ms against 8 ms of ordinary work, so one dropped
-frame per boundary, and 24.2 fps while sprinting. Scene loads are where it bites: a warp
-into the middle of the field is 305 ms and holding the world whole is 2 s.
-
-### The fix, and what it confirmed
-
-Two changes, both aimed at the offset term rather than the byte count. **Banking** moved
-WorldTile payloads out of the map's 75KB resource into ~4KB bank resources, so a seek is
-capped by the bank instead of the map. **Batching** then reads a whole run of consecutive
-WorldTiles in one call. Measured on the same hardware, same content:
+Split map payloads into small resources and read consecutive runs in one call. Both target
+the offset term; neither changes the byte count. Same hardware, same content:
 
 | | Before | After | |
 |---|---|---|---|
-| hold the 192x192 world (144 WorldTiles) | 1,984 ms | **74 ms** | 26.8x |
-| warp into the middle of the field | 305 ms | **12 ms** | 25.4x |
+| hold the whole 192x192 world | 1,984 ms | **74 ms** | 26.8x |
+| warp into the middle of it | 305 ms | **12 ms** | 25.4x |
 | worst frame while walking | 47–63 ms | **8–12 ms** | 5.2x |
 | frames dropped crossing a WorldTile | one, every time | **none** | — |
+| per read | 13.4 ms | **1.8 ms** | 7.4x |
 
-**This is the confirmation the O(offset) reading needed.** Nothing about the bytes changed
-— the same 74 KB of cells is read either way — and the call count alone cannot explain a
-27x fall, since batching only took 148 calls to 41. What changed is how far into a resource
-each call starts, and the cost moved with it.
+Which is also the confirmation the O(offset) reading needed: the bytes never changed, and
+148 calls to 41 cannot explain 27x on its own. What is left at 1.8 ms is transfer rather
+than seek — 74 KB at ~1.4 MB/s.
 
-At 74 ms over 41 reads the held-whole load now costs **1.8 ms per read against 13.4 ms
-before**, and what is left is transfer rather than seek: 74 KB at ~1.4 MB/s effective. The
-seek term has stopped dominating, which is what banking was for.
+The same reasoning picks the streaming unit. A 128-byte tile read per drawn tile is 6.7 ms
+a frame at 725 tiles; a 516-byte WorldTile amortises one call over 256 cells and pays it at
+a boundary rather than every frame. That is why `pnx_assets.h` still says
+residency-not-streaming and maps stream anyway — the rule is unchanged, the unit is not.
 
-Steady walking holds 26.8 fps — the PT2 ceiling — with the worst frame at 12 ms against a
-37.33 ms budget. The streamer's backlog reached 3 WorldTiles once, on a diagonal crossing a
-WorldTile *corner*, which asks for tiles in two directions at once; no holes appeared and
-no frame dropped, so `PNX_MAP_STREAM_BUDGET` at 4 has room to spare. Raising it is now
-affordable if a game wants the headroom back: four reads is ~7 ms.
-
-**Still wanted: a real probe.** The before/after above is strong, but it is still read off
-session logs — the loads carry other scene assets and frame boundaries are coarse. What
-would settle the model properly is the same shape as the original flash probe, sweeping
-offset independently of length over a resource large enough to matter.
+**Still wanted: a real probe.** The above is read off session logs, where loads carry other
+scene assets and frame boundaries are coarse. Sweeping offset independently of length over
+a large resource would settle the model properly.
 
 ## Persist: writes are ~116x slower than reads **(replicated, 3 runs)**
 
@@ -244,33 +191,6 @@ offset independently of length over a resource large enough to matter.
 **Cost is per call, not per byte.** Four bytes costs half of 256 — 877 µs/byte versus
 28 µs/byte, **31x worse per byte**. Rewriting one key beats spreading across keys,
 implying per-key index work. Extrapolated: 8KB = 229 ms, 32KB = ~918 ms.
-
-## Audio
-
-The batch API (`speaker_play_tracks`) mixes 4 monophonic tracks with pitch-shifted,
-looping PCM samples — a SNES-shaped sampler. It is unusable for music plus effects:
-
-| Property | Measured |
-|---|---|
-| Seam when chaining phrases | **94, 94, 94, 99, 94, 94, 102, 99 ms** |
-| `speaker_play_tracks()` blocks the app task | 7–16 ms |
-| Resubmit while playing | **REJECTED**, returns immediately |
-
-Eight trials clustered at 94 ms with almost no spread: a *fixed per-submission cost*,
-not jitter. With no layering and no position query, every route to music + SFX is
-blocked.
-
-Streaming works and is the answer:
-
-| Property | Measured (8 kHz / 8-bit) |
-|---|---|
-| `speaker_stream_open()` | 8 ms, once |
-| Buffer capacity | **8,192 bytes = 1,024 ms of audio** |
-| 3 s run, feeding per frame | 82 feeds (36.8 ms cadence), **0 short writes, 0 underrun** |
-
-~25 consecutive frames could be dropped before the speaker runs dry. Capacity is in
-*bytes*, so 16 kHz/16-bit gives 256 ms (~7 frames). **Buffer lead is SFX latency** —
-that is a game-design knob, not an implementation detail.
 
 ## Lifecycle: throttled, not suspended
 
@@ -293,36 +213,6 @@ Two frames where 37 ms cadence would give ~123: the app is throttled to roughly
   off the render loop onto `app_timer`: had it stayed there, every notification would have
   stalled the mixer for seconds. It also means the sequencer's 4-row catch-up clamp never
   fires for notifications, only for something that stalls timers outright.
-
-## Alloy (JavaScript): viable as scripting, not as an engine
-
-The XS engine lives in **firmware**, not the app. An Alloy app measured **276 bytes of
-footprint with 130,796 bytes of heap free**; the JS ships as a `.xsa` resource
-(7–12KB). Poco's drawing primitives (`drawBitmap`, `drawMasked`, `clip`, `origin`,
-`fillRectangle`, `drawText`) are native C, and `Bitmap.RGB332` matches the panel
-format exactly.
-
-But the interpreter is slow **(replicated, <0.5% apart)**:
-
-| | JS | C | Ratio |
-|---|---|---|---|
-| position kernel, per entity | **49,277 ns** | 136 ns | **363x** |
-| elementary op (`acc = (acc+i)|0`) | **3,360 ns** | — | ~810 cycles |
-
-~3.4 µs per elementary JS operation gives a budget of roughly **10,000 JS operations
-per frame**. 256 entities of trivial movement costs 12.6 ms — 36% of a frame. So JS
-can afford native *calls* (195 `drawBitmap` ≈ 0.6–1.2 ms is fine) but not native
-*work*.
-
-**FFI mechanics.** Declared in the mod manifest's `ffi` block with explicit types;
-`void*` maps to an ArrayBuffer passed as a raw pointer, so C operates directly on JS
-memory. Two traps, both silent:
-
-1. Omitting the `ffi` block compiles fine and leaves `Natives` undefined.
-2. **`pebble new-project --alloy` generates an `mdbl.c` that never sets
-   `.fxBuildFFI`**, so registration never happens and the natives are stripped by
-   `--gc-sections`. The official `helloffi` example sets it; the template does not.
-   Fix: `.fxBuildFFI = fxBuildFFI` in the `ModdableCreationRecord`.
 
 ## Input timing (M0 spike)
 
@@ -363,6 +253,28 @@ a discrete prompt and suits a combo whose timing is defined by an animation much
 in the handler; only visual feedback is frame-quantised. Graded results (perfect / good
 / miss) are therefore expressible despite the frame rate.
 
+## Entity layout: it does not matter
+
+Three layouts, three kernels, 64–2048 entities, working sets to ~114KB. ns/entity at
+n=1536, 52-byte → 64-byte stride:
+
+| Kernel | AoS | SoA | Pointer table (shuffled) |
+|---|---|---|---|
+| all channels | **209 → 237** | 251 → 251 | 222 → 217 |
+| position only | 134 → 131 | 160 → 158 | 153 → 143 |
+| stream one field | **50 → 38** | 38 → 38 | 54 → 46 |
+
+Everything within ~1.5x. **Pointer chasing was the fastest on the wide kernel.**
+On-chip SRAM has near-flat access cost — no DRAM means no ~200-cycle miss penalty for
+locality to win back.
+
+Cache-line padding is a trade with a sign that depends on access width: +24% on a
+single-field sweep, **−13%** on an all-channel one, 23% more RAM either way.
+
+**Methodology warning.** Two earlier conclusions here were *reversed* once measured
+properly. Effects are 5–25%, small enough that any uncontrolled variable swamps them.
+A/B inside one session with a control that should not change.
+
 ## Traps worth not rediscovering
 
 - **`pebble install --logs` attaches after `init()` runs.** Anything logged during
@@ -393,6 +305,13 @@ in the handler; only visual feedback is frame-quantised. Graded results (perfect
 - **16.16 fixed point holds ±32,767 whole units, and an int64 intermediate does not
   extend that.** The wider intermediate protects the *product* mid-calculation; the
   result still has to fit. `300 * 200` silently returns −5,536.
+
+
+---
+
+# Content and encoding
+
+*How art, maps and text are stored, and why each format won.*
 
 ## Tile encoding: 16x16 with metatiles, measured against the alternatives
 
@@ -571,7 +490,7 @@ binding constraint while frame time is not.
 On the small carved regions the examples use, reuse is 1.04-1.12x and metatiles still lose --
 correctly declined. The pipeline reports the verdict and the margin on every build.
 
-## Map format: u16 cells, blob v5
+## Map format: u16 cells
 
 Map cells were one byte of tile index. They are now u16, which is what lets the pipeline's
 deduplication survive into the map:
@@ -582,6 +501,11 @@ deduplication survive into the map:
 | 10 | flip X |
 | 11 | flip Y |
 | 12-15 | reserved -- per-cell palette index |
+
+The ten bits index the **map's** id space rather than one atlas's, which is what lets a map
+draw from several tilesets without spending a bit per cell on saying which — the map's atlas
+table partitions the range instead. Blob v8; the layout around the cells has moved on
+several times since these numbers were taken, but the cell itself has not.
 
 Doubling the cells costs 3,223 bytes across the two example maps, up from ~2,071. That buys 128
 bytes back for every tile a mirrored pair no longer needs its own copy of, and the flip bits are
@@ -625,6 +549,36 @@ every pixel of every zone using it.
 The pipeline refuses a variant that is not a consistent recolour -- a moved pixel, a change in what is
 transparent, one base colour mapping to two, or two base colours flattened into one. Each of those
 would corrupt shared pixel data rather than merely look wrong.
+
+## Font costs (E7)
+
+Measured on `examples/overworld` with Liberation Sans, glyph sets derived from the
+manifest's dialog pages:
+
+| Face | Size | Depth | Glyphs | Bitmaps | Blob |
+|---|---|---|---|---|---|
+| `hud` | 12px | 1bpp | 40 | 331 B | **757 B** |
+| `dialogue` | 16px | 2bpp | 27 | 580 B | **902 B** |
+
+Three things the numbers show:
+
+- **`charset = "auto"` is most of the saving.** The HUD face carries 40 glyphs because
+  that is what the dialog pages plus `extra` actually use. All 95 printable ASCII would
+  roughly double it for characters the game never draws.
+- **The index is a real fraction of a small font.** 8 bytes a glyph is 320 B of the HUD
+  face's 757 — bigger than a third of it. That is the price of trimming glyphs to their
+  inked box and carrying per-glyph bearings, and it is still the cheaper side of the
+  trade: uniform cells cost more in bitmap than they save in index, and the margin widens
+  with size.
+- **2bpp is not 2x.** The dialogue face is 27 glyphs at 16px against 40 at 12px, so the
+  depths are not directly comparable — but the bitmap block is 580 B for 27 antialiased
+  glyphs against 331 B for 40 crisp ones, which is roughly the doubling per glyph you
+  would expect and no worse.
+
+Engine cost of the whole feature: **+662 B in `gfx`** (the blitter, both span writers, the
+32-byte blend table, wrapping and measuring) and **+993 B in `assets`** (the loader, its
+validation, and two more scene slots). The overworld example went from 12,208 to
+**14,784 of 65,535 bytes (22.6%)**.
 
 ## Asset pipeline (M2)
 
@@ -984,6 +938,40 @@ is the compile-time module selection working as specified, not merely as intende
 The log ring is the largest single static allocation in an otherwise empty app — about a
 third of its footprint — which is why `PNX_LOG_LINES` and `PNX_LOG_LINE_LEN` are tunable.
 
+
+---
+
+# Audio
+
+*The largest unknown, and the one where the platform API had to be abandoned.*
+
+## Audio
+
+The batch API (`speaker_play_tracks`) mixes 4 monophonic tracks with pitch-shifted,
+looping PCM samples — a SNES-shaped sampler. It is unusable for music plus effects:
+
+| Property | Measured |
+|---|---|
+| Seam when chaining phrases | **94, 94, 94, 99, 94, 94, 102, 99 ms** |
+| `speaker_play_tracks()` blocks the app task | 7–16 ms |
+| Resubmit while playing | **REJECTED**, returns immediately |
+
+Eight trials clustered at 94 ms with almost no spread: a *fixed per-submission cost*,
+not jitter. With no layering and no position query, every route to music + SFX is
+blocked.
+
+Streaming works and is the answer:
+
+| Property | Measured (8 kHz / 8-bit) |
+|---|---|
+| `speaker_stream_open()` | 8 ms, once |
+| Buffer capacity | **8,192 bytes = 1,024 ms of audio** |
+| 3 s run, feeding per frame | 82 feeds (36.8 ms cadence), **0 short writes, 0 underrun** |
+
+~25 consecutive frames could be dropped before the speaker runs dry. Capacity is in
+*bytes*, so 16 kHz/16-bit gives 256 ms (~7 frames). **Buffer lead is SFX latency** —
+that is a game-design knob, not an implementation detail.
+
 ## Audio costs (M4)
 
 | | Bytes | |
@@ -1031,7 +1019,6 @@ per pipeline stage is the expensive habit, not the code. The audiotest app fell 
 15,420 bytes on the collapse, and to **13,384** once the single remaining buffer moved to the
 heap -- **37% of the whole app** -- with no change to the audio.
 
-
 ## Audio streaming: short writes are normal, discarding them is not
 
 First device run of the mixer sounded badly broken, and the log said why:
@@ -1055,26 +1042,6 @@ ask.
 
 The `deficit 7456` was a startup artefact, constant from the first sample: the gap between
 opening the stream and the first feed, while assets loaded. Not an ongoing underrun.
-
-## MIDI as a music source: the reduction is the hard part
-
-A real SNES-era arrangement, analysed to size the problem:
-
-| | |
-|---|---|
-| Tracks with notes | 11, on 11 separate MIDI channels |
-| Note-ons | 5,440 over ~131 bars |
-| Pitch range | MIDI 26-89, over five octaves |
-| 16th-note slots needing >4 simultaneous notes | **646 of 1,380 (47%)**, peaking at 9 |
-
-Parsing MIDI is straightforward. **Fitting it into four channels is not** -- nearly half of
-a real arrangement is too thick, so an importer must choose what to drop and say so. A
-silent reduction would make a song sound wrong with no indication why, which is the same
-class of failure as an unreachable warp: the output looks fine and simply is not.
-
-That argues for reduction driven by declared intent -- which tracks are melody, bass,
-harmony -- rather than a generic algorithm guessing.
-
 
 ## Streaming audio: what actually governs continuity
 
@@ -1190,3 +1157,59 @@ windows. That capture was right, and it is why the search eventually went below 
 Every quantity reachable from inside the app now reads correct, so the next step is not more
 instrumentation -- it is recording the speaker and looking at a spectrum. A fixed frequency
 implicates the device's DAC or power path; one that tracks the feed interval is still ours.
+
+## MIDI as a music source: the reduction is the hard part
+
+A real SNES-era arrangement, analysed to size the problem:
+
+| | |
+|---|---|
+| Tracks with notes | 11, on 11 separate MIDI channels |
+| Note-ons | 5,440 over ~131 bars |
+| Pitch range | MIDI 26-89, over five octaves |
+| 16th-note slots needing >4 simultaneous notes | **646 of 1,380 (47%)**, peaking at 9 |
+
+Parsing MIDI is straightforward. **Fitting it into four channels is not** -- nearly half of
+a real arrangement is too thick, so an importer must choose what to drop and say so. A
+silent reduction would make a song sound wrong with no indication why, which is the same
+class of failure as an unreachable warp: the output looks fine and simply is not.
+
+That argues for reduction driven by declared intent -- which tracks are melody, bass,
+harmony -- rather than a generic algorithm guessing.
+
+
+---
+
+# Scripting
+
+*Whether a script layer can carry gameplay.*
+
+## Alloy (JavaScript): viable as scripting, not as an engine
+
+The XS engine lives in **firmware**, not the app. An Alloy app measured **276 bytes of
+footprint with 130,796 bytes of heap free**; the JS ships as a `.xsa` resource
+(7–12KB). Poco's drawing primitives (`drawBitmap`, `drawMasked`, `clip`, `origin`,
+`fillRectangle`, `drawText`) are native C, and `Bitmap.RGB332` matches the panel
+format exactly.
+
+But the interpreter is slow **(replicated, <0.5% apart)**:
+
+| | JS | C | Ratio |
+|---|---|---|---|
+| position kernel, per entity | **49,277 ns** | 136 ns | **363x** |
+| elementary op (`acc = (acc+i)|0`) | **3,360 ns** | — | ~810 cycles |
+
+~3.4 µs per elementary JS operation gives a budget of roughly **10,000 JS operations
+per frame**. 256 entities of trivial movement costs 12.6 ms — 36% of a frame. So JS
+can afford native *calls* (195 `drawBitmap` ≈ 0.6–1.2 ms is fine) but not native
+*work*.
+
+**FFI mechanics.** Declared in the mod manifest's `ffi` block with explicit types;
+`void*` maps to an ArrayBuffer passed as a raw pointer, so C operates directly on JS
+memory. Two traps, both silent:
+
+1. Omitting the `ffi` block compiles fine and leaves `Natives` undefined.
+2. **`pebble new-project --alloy` generates an `mdbl.c` that never sets
+   `.fxBuildFFI`**, so registration never happens and the natives are stripped by
+   `--gc-sections`. The official `helloffi` example sets it; the template does not.
+   Fix: `.fxBuildFFI = fxBuildFFI` in the `ModdableCreationRecord`.

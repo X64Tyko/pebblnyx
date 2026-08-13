@@ -410,6 +410,88 @@ WorldTile *corner*, which asks for tiles in two directions at once. No holes, no
 Still wanted: the flash probe that sweeps offset independently of length. The before/after is strong
 but still read off session logs, and `MEASUREMENTS.md` says so.
 
+### Footprint: the WorldTile size is chosen, not defaulted
+
+`worldtile = "auto"` is now the default, and the pipeline picks by arithmetic -- the same bargain the
+atlas `metatiles` key already offers, and for the same reason: the cheapest size depends on the
+screen and the map, so a constant is right for one shape of content and quietly wrong for the rest.
+
+Three terms, pulling different ways. The pool grows as the SQUARE of the size; the per-slot
+descriptors follow it; the lookup array is one byte per WorldTile in the whole map and grows as the
+size shrinks. **Which way the answer goes depends on whether the map streams.** A streaming map holds
+a fixed window, so a bigger WorldTile means a bigger margin ring of world nobody can see -- it wants
+*small*. A map held whole has no ring, every term scales with the count, and it wants *large*.
+
+On the 192x192 field, 200x228 screen, 16px tiles:
+
+| | Picked | Resident | Was (fixed 16) |
+|---|---|---|---|
+| streaming | **8** | 17,967 B | 22,491 B |
+| held whole | **32** | 93,715 B | 94,255 B |
+
+The WorldTile part of the streamed scene halved -- 8,720 B to 4,376 B -- and the scene fell 20%. What
+it exposed is that **WorldTiles were never the expensive part**: the atlas pool is a flat 12,496 B of
+the field's 18 KB, so the remaining footprint question is about tilesets, not tiling.
+
+**A caution the example makes visible.** `field` and `plain` now tile differently, so their banks are
+no longer byte-identical and the `.pbpack` stopped deduplicating them -- resources went 103 KB to
+178 KB. That is an artifact of shipping the same world twice to compare it, not a property of
+auto-sizing, but it is the kind of thing worth seeing before it surprises someone.
+
+**And smaller WorldTiles exposed a bug batching had introduced.** `PNX_MAP_STREAM_BUDGET` counted
+WorldTiles, but a run of consecutive ones is a single read -- so a batched fetch was charged four or
+five times over and the streamer ran at a quarter of the I/O it was paying for. Invisible while
+WorldTiles were large and few; on device at eight tiles a tick the backlog went from 3 to **12** the
+moment the pipeline started choosing smaller ones, for no extra reads. The budget now counts reads.
+`tests/test_stream.c` sprints 40 WorldTiles and asserts the backlog stays at zero, because nothing
+about this shows up in a frame time or a byte count.
+
+### Is it worth the space?
+
+The engine cost is **3,076 bytes** -- `pnx/assets` grew 2,596 and `pnx/gfx` 480, measured from the
+device size report. Against the RAM it buys, on a 16px grid and a 200x228 screen:
+
+| Map | Streamed | Held whole | |
+|---|---|---|---|
+| 16x16 | 537 | 537 | fits its pool: held whole, streaming never runs |
+| 32x24 | 1,836 | 1,836 | same |
+| 48x48 | 2,888 | 4,833 | 1,945 B cheaper |
+| 96x96 | 3,320 | 18,657 | 15,337 B cheaper |
+| 192x192 | 4,376 | 74,628 | **70,252 B cheaper** |
+| 255x255 | 4,824 | 132,672 | 127,848 B cheaper |
+
+**Streaming never costs more RAM than holding whole, at any size.** Below the pool it is the same
+number, because a map that fits its pool IS held whole and the streaming path never executes; above
+it, streaming is strictly cheaper by a margin that grows quadratically. Streamed residency is
+O(screen), held-whole is O(map area).
+
+So the 3,076 bytes is the only cost, it is paid once by the framework rather than per map, and the
+question is just whether a project has any map above roughly 48x48 cells. If it does, the saving
+passes the code cost almost immediately and then runs away with it -- 23x over on the 192x192 field.
+If every map fits one screen, the feature is inert rather than expensive: no pool, no eviction, no
+reads, the same bytes as before it existed.
+
+*(An earlier version of this table called 64x48 a "break-even" and said smaller maps "cost more than
+they save". That was comparing per-map RAM against a one-time binary cost, which is not a comparison
+that means anything -- and it read as though streaming penalised small maps, which it does not.)*
+
+### While confirming that: the resource ceilings, read from the SDK
+
+Three limits, two of them spelled 256, and the pipeline was only reporting one:
+
+| | | |
+|---|---|---|
+| `MAX_RESOURCES_SIZE_APPSTORE` | 256 KB | bytes in the whole `.pbpack` -- a warning |
+| `MAX_RESOURCES_SIZE` | **1 MB** | bytes -- the hard error |
+| pbpack `table_size` | **256 entries** | resources, whatever they weigh |
+
+The byte limits apply to the pack as a whole (`os.stat(resources_path).st_size` in the SDK's
+`report_memory_usage.py`), not to any single resource. The entry count is the one that started
+mattering with banking: a map is now one resource plus a bank per few WorldTiles, so a project of
+large maps runs out of *entries* long before it runs out of bytes -- and exceeding it was a bare
+traceback out of the SDK's packer. The budget report now prints both ceilings and the entry count,
+and refuses a build that would overflow the table with a message naming the banks.
+
 ## M5 — Save
 
 - Chunk packing into 256-byte units, minimum key count

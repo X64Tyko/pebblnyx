@@ -140,8 +140,13 @@ void test_stream(void) {
   S_CHECK(pnx_map_load(&field, PNX_ASSET_MAP_FIELD));
   S_CHECK_EQ(field.w, MAP_FIELD_W);
   S_CHECK_EQ(field.h, MAP_FIELD_H);
-  S_CHECK_EQ(field.wt_cols * field.wt_rows, 144);
   S_CHECK_EQ(field.atlas_count, 3);
+
+  // The WorldTile size is chosen per map by the pipeline, so the grid is asserted against
+  // the map's own dimensions rather than against a number -- a hardcoded 144 would only
+  // have been testing whichever size was in favour the day it was written.
+  S_CHECK_EQ(field.wt_cols, (MAP_FIELD_W + field.worldtile - 1) / field.worldtile);
+  S_CHECK_EQ(field.wt_rows, (MAP_FIELD_H + field.worldtile - 1) / field.worldtile);
 
   // The two numbers that make this a streaming test rather than a big-map test: fewer
   // WorldTile slots than WorldTiles, and fewer atlas slots than atlases.
@@ -219,6 +224,32 @@ void test_stream(void) {
   S_CHECK(read_after_walk > read_after_load);
   S_CHECK(pnx_map_resident(&field) <= field.slot_count);
 
+  // --- sprinting: eight tiles a tick, which crosses a whole WorldTile per tick at the
+  //     size the pipeline picks. The budgeted call has to keep up, and the reason it can
+  //     is that its budget counts READS -- a row of WorldTiles is one of them.
+  //
+  //     Charging per WorldTile instead throttled the streamer to a quarter of the I/O it
+  //     was paying for, and did it invisibly: the backlog went 3 to 12 on the same content
+  //     at the same speed the moment WorldTiles got smaller. Pinned here because nothing
+  //     about it is visible in a frame time or a byte count.
+  {
+    const int32_t step = 8 * field.tile_px;
+    uint32_t worst_sprint = 0, reads = 0;
+    for (int32_t i = 0; i < 40; i++) {
+      pnx_camera_center(&cam, (i + 4) * step, (i + 4) * step,
+                        pnx_tilemap_width(&field), pnx_tilemap_height(&field));
+      const uint32_t before_reads = pnx_host_resource_reads();
+      const uint8_t missing = pnx_map_stream(&field, cam.x, cam.y,
+                                             cam.view_w, cam.view_h);
+      reads += pnx_host_resource_reads() - before_reads;
+      if (missing > worst_sprint) worst_sprint = missing;
+    }
+    S_CHECK_EQ(worst_sprint, 0);
+    S_CHECK(reads <= 40 * PNX_MAP_STREAM_BUDGET);
+    printf("  ... sprinted 40 WorldTiles, worst backlog %u, %u reads\n",
+           worst_sprint, (unsigned)reads);
+  }
+
   // --- and a hostile case: jumping a whole screen at a time, which no player does but a
   //     warp does. The budgeted call is allowed to fall behind here -- that is what the
   //     blocking one is for -- so what is checked is that the blocking one catches up.
@@ -295,7 +326,13 @@ void test_stream(void) {
   const uint32_t load_reads = pnx_host_resource_reads() - reads_before;
   S_CHECK_EQ(plain.w, field.w);
   S_CHECK_EQ(plain.h, field.h);
-  S_CHECK_EQ(plain.wt_cols * plain.wt_rows, field.wt_cols * field.wt_rows);
+
+  // The same world, tiled DIFFERENTLY, and that is the pipeline being right rather than
+  // inconsistent: a streaming map holds a fixed window, so a big WorldTile means a big
+  // margin ring of world nobody can see; a map held whole has no ring, so a big WorldTile
+  // just means fewer per-tile headers. The two modes want opposite sizes.
+  S_CHECK(plain.worldtile > field.worldtile);
+  S_CHECK(plain.wt_cols * plain.wt_rows < field.wt_cols * field.wt_rows);
 
   // Held whole means a slot for every WorldTile and a slot for every atlas -- so nothing
   // is ever evicted, and the streamer's eviction path never runs.

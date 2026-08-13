@@ -22,18 +22,24 @@
 // The comparison this example exists to make, measured rather than estimated -- these are
 // what the scenes actually occupy, and the pipeline prints the same figures at build time:
 //
-//   field  192x192, streamed   23,678 B     16 of 144 WorldTiles, 3 atlases in 2 slots
-//   plain  192x192, held whole 98,551 B    144 of 144 WorldTiles, 3 atlases in 3 slots
+//   field  192x192, streamed   17,967 B     25 of 576 WorldTiles, 3 atlases in 2 slots
+//   plain  192x192, held whole 93,715 B      36 of 36 WorldTiles, 3 atlases in 3 slots
 //
 // Same world, same tilesets, same rows. `plain` differs from `field` by `resident = true`
-// in the manifest and nothing else, so 4.2x is the price of holding it rather than
+// in the manifest and nothing else, so 5.2x is the price of holding it rather than
 // streaming it.
 //
-// **And note how little room is left.** `emery` reports ~111 KB of heap, so the held-whole
-// world fits with about 12 KB to spare -- before the game allocates anything of its own.
+// The two tile the world DIFFERENTLY, and that is the pipeline being right rather than
+// inconsistent. A streaming map holds a fixed window, so a big WorldTile means a big
+// margin ring of world nobody can see and it picks 8; a map held whole has no ring at all,
+// so a big WorldTile just means fewer per-tile headers and it picks 32. One rule, two
+// answers, and the streamed figure fell 4.5 KB when the pipeline started choosing.
+//
+// **And note how little room is left.** `emery` reports ~110 KB of heap, so the held-whole
+// world fits with about 15 KB to spare -- before the game allocates anything of its own.
 // That is the argument for WorldTiles in one number: not that holding a 192x192 world is
 // impossible, but that it consumes the watch and leaves nothing to build a game with.
-#define FIELD_ARENA_BYTES  (26 * 1024)
+#define FIELD_ARENA_BYTES  (20 * 1024)
 #define PLAIN_ARENA_BYTES  (100 * 1024)
 #define PERSIST_ARENA_BYTES 1024
 

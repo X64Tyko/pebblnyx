@@ -133,15 +133,27 @@ typedef struct {
 #define PNX_MAP_MAX_ATLASES 8
 #define PNX_MAP_NO_SLOT 0xFF
 
-// How many WorldTiles a single pnx_map_stream call will read. Chosen against the measured
-// cost: a 16x16 WorldTile is 516 bytes, so ~29 us of call plus ~16 us of transfer, and
-// four of them is half a percent of a 37.33 ms frame. The cap exists to bound a
-// pathological case, not because the ordinary one is expensive -- which is why it is four
-// rather than one. Crossing a WorldTile corner diagonally wants several at once, and the
-// margin only helps if the streamer can actually refill it.
+// How many resource READS a single pnx_map_stream call will issue.
+//
+// Reads, not WorldTiles, and the difference is not pedantic: a run of consecutive
+// WorldTiles is fetched in one read, so counting tiles charges a batched fetch four or
+// five times over and throttles the streamer to a quarter of what it is paying for. That
+// mistake was invisible while WorldTiles were large and few, and showed up the moment the
+// pipeline started choosing smaller ones -- the backlog went from 3 to 12 on the same
+// content at the same speed, for no extra I/O.
+//
+// Eight, against a measured ~1.8 ms per read once payloads are banked: ~14 ms of a
+// 37.33 ms frame in the worst case, on top of ~8 ms of ordinary work. The cap bounds a
+// pathological case rather than an expensive ordinary one -- filling a fresh window takes
+// about that many runs, so this is roughly "catch up within one frame".
 #ifndef PNX_MAP_STREAM_BUDGET
-#define PNX_MAP_STREAM_BUDGET 4
+#define PNX_MAP_STREAM_BUDGET 8
 #endif
+
+// Longest run of WorldTiles one read may carry. Bounds a stack array in the loader, and
+// nothing else: a caller wanting more loops. Independent of the budget above, which counts
+// reads and says nothing about how many WorldTiles one of them holds.
+#define PNX_MAP_MAX_RUN 32
 
 typedef struct {
   uint16_t asset;       // the atlas's asset id
