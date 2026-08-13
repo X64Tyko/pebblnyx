@@ -10,8 +10,18 @@
 // a 16x16 tile at a time would cost ~6.7 ms/frame, 18% of the frame budget, to save
 // memory that is not scarce. See docs/MEASUREMENTS.md.
 //
+// **The map is the exception, and the same numbers are why.** A map is read a WorldTile
+// at a time -- a block of 16x16 cells -- because that unit amortises the ~29 us call over
+// 256 cells and pays it when the player crosses a boundary rather than every frame: ~45 us,
+// occasionally, against 6.7 ms every frame. The rule above is unchanged; only the unit is.
+// It buys maps larger than RAM, which the u8 map dimensions could always describe and
+// nothing could load. Its atlases stream on the same terms, pinned by the WorldTiles that
+// name them.
+//
 // Assets live in an arena the caller supplies. There is no individual unload: a scene
-// boundary resets the arena and reloads, which is the only load point that exists.
+// boundary resets the arena and reloads, which is the only load point that exists. A map's
+// two pools are the one place a byte of arena is reused within a scene, and they are
+// fixed-size and allocated once at map load -- so the arena still only ever grows.
 
 #pragma once
 
@@ -31,7 +41,7 @@
 
 // Every blob carries this, so a stale .bin against a newer runtime is a clean error
 // rather than garbage pixels. Bumped whenever a format changes.
-#define PNX_BLOB_VERSION 7
+#define PNX_BLOB_VERSION 8
 #define PNX_BLOB_HEADER_BYTES 8
 
 // ------------------------------------------------------------------- palettes
@@ -105,24 +115,113 @@ typedef struct {
   uint8_t dest_x, dest_y;
 } PnxWarp;
 
+// ------------------------------------------------------------------ maps and WorldTiles
+//
+// A map is stored as a grid of **WorldTiles** -- square blocks of map CELLS that are the
+// unit of residency. Not to be confused with a metatile, which is the deduplicated 8x8
+// quadrant inside an atlas: a metatile is art, a WorldTile is a piece of the world.
+//
+// Every map is sliced, including small ones. When the whole grid fits the pool, all of it
+// loads at map load and nothing is ever evicted -- so a 32x24 map costs what it always did
+// and there is no second code path for "small". Only the residency policy adapts.
+//
+// A map also draws from SEVERAL atlases. Its cells name a map-global tile id, and the
+// atlas table below says where each atlas's slice of that id space begins -- which spends
+// none of the four per-cell bits reserved for a future per-cell palette, and costs the
+// draw loop one walk of a table with at most PNX_MAP_MAX_ATLASES entries.
+
+#define PNX_MAP_MAX_ATLASES 8
+#define PNX_MAP_NO_SLOT 0xFF
+
+// How many WorldTiles a single pnx_map_stream call will read. Chosen against the measured
+// cost: a 16x16 WorldTile is 516 bytes, so ~29 us of call plus ~16 us of transfer, and
+// four of them is half a percent of a 37.33 ms frame. The cap exists to bound a
+// pathological case, not because the ordinary one is expensive -- which is why it is four
+// rather than one. Crossing a WorldTile corner diagonally wants several at once, and the
+// margin only helps if the streamer can actually refill it.
+#ifndef PNX_MAP_STREAM_BUDGET
+#define PNX_MAP_STREAM_BUDGET 4
+#endif
+
+typedef struct {
+  uint16_t asset;       // the atlas's asset id
+  uint16_t first_tile;  // where its slice of the map's tile id space begins
+  uint16_t tile_count;
+  uint8_t slot;         // atlas pool slot holding it, or PNX_MAP_NO_SLOT
+} PnxMapAtlas;
+
+// One resident WorldTile. `cells` points into the pool slot, not into the blob: the blob
+// is never held whole.
+typedef struct {
+  const uint8_t *cells;      // cell_w * cell_h u16 entries
+  const uint8_t *overrides;  // override_count * 3 bytes: x, y local to this WorldTile
+  uint16_t override_count;
+  uint8_t wx, wy;            // which WorldTile of the grid this slot holds
+  uint8_t cell_w, cell_h;    // clipped at the map's edge, so no padding is stored
+  bool live;
+} PnxWorldTile;
+
 // Flags come from the TILESET, not from a per-cell plane. A 32x24 map used to carry 768
 // flag bytes restating what the tile already knew; at 30 maps that was 8.7% of the whole
 // content budget. Cells that genuinely differ -- a door drawn on an ordinary scenery
-// tile -- are listed as sparse overrides instead.
+// tile -- are listed as sparse overrides instead, inside the WorldTile they belong to.
+//
+// The flag table is the map's OWN, not the atlas's, and that is not duplication for its
+// own sake: collision is asked about cells whose atlas may not be resident -- the player
+// walking toward a wall the streamer has not reached -- so it cannot read flags out of an
+// atlas that might be gone. A few hundred bytes buys collision that never depends on what
+// the renderer happens to have loaded.
 typedef struct {
-  const uint8_t *tiles;       // w * h atlas indices
-  const uint8_t *tile_flags;  // borrowed from the atlas; NOT owned
+  const uint8_t *tile_flags;  // tile_total bytes, indexed by map-global tile id
 
-  // Optional palette variant: tile_count bytes naming the palette slot to use instead of the
-  // atlas's own, so one atlas serves several recoloured zones. NULL means use the atlas's.
-  // 44 bytes for the cave tileset against ~5,600 for a second copy of it.
+  // Optional palette variant: tile_total bytes naming the palette slot to use instead of
+  // the atlas's own, so one atlas serves several recoloured zones. NULL means use the
+  // atlas's. 44 bytes for the cave tileset against ~5,600 for a second copy of it.
   const uint8_t *tile_palette;
-  const uint8_t *overrides;   // override_count * 3 bytes: x, y, flags
   const PnxWarp *warps;
-  uint16_t override_count;
-  uint16_t tile_count;        // bound for tile_flags
+  const uint8_t *wt_mask;     // wt_cols * wt_rows: which atlases each WorldTile needs
+
+  // The atlas pool's slots are NOT a uniform stride. When there is a slot per atlas
+  // nothing is ever evicted, so each slot is exactly its atlas's size -- which for one
+  // large tileset beside one small one is the difference between fitting in RAM and not.
+  // Only a map that really streams its atlases pays for slots that all hold the largest.
+  const uint8_t *pool_offset; // (atlas_slots + 1) u32 offsets into pool_mem
+
+  PnxMapAtlas atlas[PNX_MAP_MAX_ATLASES];
+  PnxAtlas *pool;             // atlas_slots views onto pool_mem
+  uint8_t *pool_mem;          // pool_bytes
+  uint8_t *pool_owner;        // atlas_slots: which atlas index sits there, or NO_SLOT
+  uint8_t *pool_pins;         // atlas_slots: live WorldTiles depending on that slot
+
+  PnxWorldTile *slots;        // slot_count of them
+  uint8_t *slot_mem;          // slot_count * slot_bytes
+  uint8_t *wt_slot;           // wt_cols * wt_rows: slot holding it, or NO_SLOT
+
+  // WorldTile payloads are not in the map's resource. They live in BANK resources whose
+  // asset ids run consecutively from `first_bank_asset`, because a ranged read costs by
+  // how far in it starts -- see docs/MEASUREMENTS.md. A tile's home needs no lookup:
+  // bank `index >> bank_shift`, offset `(index & mask) * slot_bytes`, since payloads are
+  // padded to the slot stride. Which also makes a run of consecutive tiles one read.
+  uint16_t first_bank_asset;
+  uint8_t bank_shift;
+
+  uint32_t resource;          // the map's own resource: the resident preamble
+  uint16_t tile_count;        // bound for tile_flags: the map's whole id space
+  uint16_t slot_bytes;
   uint8_t w, h;
   uint8_t warp_count;
+  uint8_t atlas_count;
+  uint8_t atlas_slots;
+  uint8_t slot_count;
+  uint8_t wt_cols, wt_rows;
+  uint8_t worldtile;          // cells per side
+  uint8_t wt_shift;           // log2(worldtile): a cell finds its WorldTile by shifting
+  uint8_t tile_px;
+
+  // Every WorldTile and every atlas has a slot, so the map was loaded whole and can never
+  // need another read. Every small map is in this case, which is most of them: the
+  // streaming calls become one comparison and return.
+  bool held_whole;
 } PnxMap;
 
 typedef struct {
@@ -266,7 +365,10 @@ bool pnx_scene_load(uint16_t scene_id);
 // Valid only after a successful pnx_scene_load. NULL when the scene declared none.
 const PnxAtlas *pnx_scene_atlas(uint8_t index);
 const PnxSprite *pnx_scene_sprite(uint8_t index);
-const PnxMap *pnx_scene_map(void);
+// Not const: a map streams, so its resident set changes as the camera moves. Handing back
+// a const pointer would have meant a `_mut` twin for the streaming calls, which says the
+// same thing less honestly.
+PnxMap *pnx_scene_map(void);
 const PnxDialog *pnx_scene_dialog(void);
 const PnxFont *pnx_scene_font(uint8_t index);
 uint8_t pnx_scene_atlas_count(void);
@@ -280,17 +382,32 @@ bool pnx_atlas_load(PnxAtlas *out, uint16_t asset_id);
 bool pnx_sprite_load(PnxSprite *out, uint16_t asset_id);
 bool pnx_dialog_load(PnxDialog *out, uint16_t asset_id);
 
-// Takes the atlas because a map's collision flags live on its tileset. The atlas must
-// outlive the map, which it does when both sit in the same scene arena.
+// Takes no atlas: a map names the tilesets it was authored against and owns them, which
+// is what lets it draw from several and stream them. Loading a map allocates its two pools
+// from the scene arena -- the sizes come from the blob, so what a map costs resident is a
+// number the pipeline printed at build time rather than one discovered on the watch.
 //
-// The map records which atlas it was authored against, and this refuses a mismatch
-// rather than drawing one tileset's map in another's tiles -- a failure that looks like
-// corrupted art rather than a pairing mistake.
-bool pnx_map_load(PnxMap *out, uint16_t asset_id, const PnxAtlas *atlas);
+// A map small enough to be held whole IS held whole when this returns -- every WorldTile
+// and every atlas -- so small maps behave exactly as they did before WorldTiles existed
+// and never run the streaming path at all. A map larger than its pool comes back with
+// nothing resident; call pnx_map_stream_now once before the first frame, which is what a
+// scene load and a warp both do.
+bool pnx_map_load(PnxMap *out, uint16_t asset_id);
 
-// The asset id of the atlas a map needs, readable without loading the map. The scene
-// loader uses it to pick the right one among several.
-bool pnx_map_atlas_asset(uint16_t asset_id, uint8_t *out_atlas_asset);
+// Bring the WorldTiles covering a world-pixel rectangle into residency, plus one
+// WorldTile of margin around it.
+//
+// `pnx_map_stream` spends at most PNX_MAP_STREAM_BUDGET reads and returns how many
+// WorldTiles are still missing, so a caller can see it falling behind. Per frame.
+//
+// `pnx_map_stream_now` returns only once everything the rectangle needs is loaded. For a
+// scene load or a warp, where there is no previous frame to show and a partial world would
+// be visible as holes.
+uint8_t pnx_map_stream(PnxMap *m, int32_t x, int32_t y, int32_t w, int32_t h);
+uint8_t pnx_map_stream_now(PnxMap *m, int32_t x, int32_t y, int32_t w, int32_t h);
+
+// WorldTiles resident right now, for diagnostics and for tests that assert on eviction.
+uint8_t pnx_map_resident(const PnxMap *m);
 
 // Reads a whole blob into the scene arena and validates magic and version, handing back
 // the four format-specific header bytes. Shared so modules outside assets/ -- audio, for
@@ -336,42 +453,101 @@ void pnx_decode_4bpp(const uint8_t *src, const PnxPalette *palette,
 // four reserved for a per-cell palette index into a future per-map palette table. Doubling
 // the map costs ~1.2KB across the example maps, against 128 bytes for every tile a mirrored
 // pair no longer needs its own copy of.
+//
+// The ten bits index the MAP's id space, not one atlas's, which is what lets a map draw
+// from several tilesets without spending a bit per cell on saying which.
 #define PNX_MAP_INDEX_MASK 0x03FF
 #define PNX_MAP_FLIP_X     0x0400
 #define PNX_MAP_FLIP_Y     0x0800
 #define PNX_MAP_PALETTE_SHIFT 12
 
+// A cell that is not resident. Distinct from tile 0, which is a real tile.
+#define PNX_MAP_NO_CELL 0xFFFF
+
+// The WorldTile holding this cell, or NULL when it is not resident. `worldtile` is a power
+// of two so this is a shift, which is the whole reason the pipeline insists on one.
+static inline const PnxWorldTile *pnx_map_worldtile(const PnxMap *m, int32_t x, int32_t y) {
+  const uint32_t i = (uint32_t)(y >> m->wt_shift) * m->wt_cols + (uint32_t)(x >> m->wt_shift);
+  const uint8_t slot = m->wt_slot[i];
+  return slot == PNX_MAP_NO_SLOT ? NULL : &m->slots[slot];
+}
+
+// PNX_MAP_NO_CELL when the cell's WorldTile is not resident. Callers on the hot path have
+// already been told which WorldTiles are live -- pnx_tilemap_draw walks them -- so this is
+// for the ones that ask about a single arbitrary cell.
 static inline uint16_t pnx_map_entry(const PnxMap *m, int32_t x, int32_t y) {
-  const uint32_t i = ((uint32_t)y * m->w + (uint32_t)x) * 2u;
-  return (uint16_t)(m->tiles[i] | ((uint16_t)m->tiles[i + 1] << 8));
+  const PnxWorldTile *wt = pnx_map_worldtile(m, x, y);
+  if (!wt) return PNX_MAP_NO_CELL;
+  const uint32_t i = ((uint32_t)(y & (m->worldtile - 1)) * wt->cell_w
+                      + (uint32_t)(x & (m->worldtile - 1))) * 2u;
+  return (uint16_t)(wt->cells[i] | ((uint16_t)wt->cells[i + 1] << 8));
 }
 
 static inline uint16_t pnx_map_tile(const PnxMap *m, int32_t x, int32_t y) {
-  return pnx_map_entry(m, x, y) & PNX_MAP_INDEX_MASK;
+  const uint16_t e = pnx_map_entry(m, x, y);
+  return e == PNX_MAP_NO_CELL ? PNX_MAP_NO_CELL : (e & PNX_MAP_INDEX_MASK);
 }
 
 // PNX_FLIP_X / PNX_FLIP_Y, ready to hand to pnx_blit_4bpp.
 static inline uint8_t pnx_map_flip(const PnxMap *m, int32_t x, int32_t y) {
   const uint16_t e = pnx_map_entry(m, x, y);
+  if (e == PNX_MAP_NO_CELL) return 0;
   return (uint8_t)(((e & PNX_MAP_FLIP_X) ? 1u : 0u) | ((e & PNX_MAP_FLIP_Y) ? 2u : 0u));
 }
 
+// Which of the map's atlases a tile id belongs to, and its index within that atlas.
+// Linear over at most PNX_MAP_MAX_ATLASES entries; a table of 1024 bytes mapping every id
+// would be O(1) and cost more RAM than the walk saves at this scale.
+static inline const PnxMapAtlas *pnx_map_tile_atlas(const PnxMap *m, uint16_t tile,
+                                                    uint16_t *out_index) {
+  for (uint8_t i = 0; i < m->atlas_count; i++) {
+    const PnxMapAtlas *a = &m->atlas[i];
+    if (tile >= a->first_tile && tile < a->first_tile + a->tile_count) {
+      if (out_index) *out_index = (uint16_t)(tile - a->first_tile);
+      return a;
+    }
+  }
+  return NULL;
+}
+
+// The loaded atlas behind a tile id, or NULL when its slot has been evicted. A resident
+// WorldTile always pins the atlases it needs, so a cell whose WorldTile is live cannot
+// return NULL here.
+static inline const PnxAtlas *pnx_map_atlas(const PnxMap *m, uint16_t tile,
+                                            uint16_t *out_index) {
+  const PnxMapAtlas *a = pnx_map_tile_atlas(m, tile, out_index);
+  return (a && a->slot != PNX_MAP_NO_SLOT) ? &m->pool[a->slot] : NULL;
+}
+
 static inline uint8_t pnx_map_flags(const PnxMap *m, int32_t x, int32_t y) {
-  const uint16_t tile = pnx_map_tile(m, x, y);
-  uint8_t flags = tile < m->tile_count ? m->tile_flags[tile] : 0;
+  const PnxWorldTile *wt = pnx_map_worldtile(m, x, y);
+  if (!wt) return PNX_TILE_SOLID;    // see pnx_map_solid
+
+  const uint8_t lx = (uint8_t)(x & (m->worldtile - 1));
+  const uint8_t ly = (uint8_t)(y & (m->worldtile - 1));
+  const uint32_t i = ((uint32_t)ly * wt->cell_w + lx) * 2u;
+  const uint16_t tile = (uint16_t)(wt->cells[i] | ((uint16_t)wt->cells[i + 1] << 8))
+                        & PNX_MAP_INDEX_MASK;
+  const uint8_t flags = tile < m->tile_count ? m->tile_flags[tile] : 0;
 
   // Linear, because overrides are rare by construction: the pipeline picks each tile's
-  // most common flags as the default, so only genuine exceptions land here. A map with
-  // enough overrides for this to matter has a badly chosen tileset.
-  for (uint16_t i = 0; i < m->override_count; i++) {
-    const uint8_t *o = m->overrides + (uint32_t)i * 3;
-    if (o[0] == x && o[1] == y) return o[2];
+  // most common flags as the default, so only genuine exceptions land here -- and the
+  // scan is over ONE WorldTile's exceptions, not the whole map's, which is what keeps it
+  // bounded as maps grow.
+  for (uint16_t k = 0; k < wt->override_count; k++) {
+    const uint8_t *o = wt->overrides + (uint32_t)k * 3;
+    if (o[0] == lx && o[1] == ly) return o[2];
   }
   return flags;
 }
 
 // Out-of-bounds counts as solid, so a map needs no border wall to contain the player
 // and collision code needs no separate edge test.
+//
+// A cell whose WorldTile is not resident counts as solid too, and for the same reason: it
+// stops the player at the edge of what is loaded rather than walking them into a void. The
+// streamer's margin means this should never fire during ordinary play -- if it does, the
+// view is moving faster than PNX_MAP_STREAM_BUDGET can keep up with.
 static inline bool pnx_map_solid(const PnxMap *m, int32_t x, int32_t y) {
   if (x < 0 || y < 0 || x >= m->w || y >= m->h) return true;
   return (pnx_map_flags(m, x, y) & PNX_TILE_SOLID) != 0;

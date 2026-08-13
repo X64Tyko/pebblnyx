@@ -44,7 +44,7 @@ FLAG_NAMES = {"solid": FLAG_SOLID, "warp": FLAG_WARP}
 # Blob format versions. A mismatch between a stale .bin and a newer runtime is exactly
 # the kind of failure that presents as garbage pixels rather than an error, so every
 # blob is tagged and the runtime checks.
-BLOB_VERSION = 7
+BLOB_VERSION = 8
 MAGIC_ATLAS = b"PA"
 MAGIC_SPRITE = b"PS"
 MAGIC_MAP = b"PM"
@@ -54,8 +54,73 @@ MAGIC_SCENES = b"PC"
 MAGIC_MUSIC = b"PN"
 MAGIC_SAMPLE = b"PW"
 MAGIC_FONT = b"PF"
+# A WorldTile bank. Stamped like everything else: a bank is geometry, so one left over
+# from a build in the other orientation is a scrambled world rather than a stale sample,
+# and M4c's rule that every blob carries its orientation exists for exactly that.
+MAGIC_BANK = b"PK"
 
 HEADER_BYTES = 8
+
+# ------------------------------------------------------------------------- worldtiles
+#
+# A map is stored as a grid of WorldTiles -- square blocks of map CELLS that are the unit
+# of residency. Not to be confused with a metatile, which is the deduplicated 8x8 quadrant
+# inside an atlas: a metatile is art, a WorldTile is a piece of the world.
+#
+# Every map is sliced, including small ones. When a map's whole grid fits the pool, all of
+# it loads at map load and nothing is ever evicted -- so a 32x24 map costs what it always
+# did and the runtime needs no second code path for "small".
+WORLDTILE_DEFAULT = 16
+WORLDTILE_MIN = 4
+WORLDTILE_MAX = 32
+
+# The map cell is a u16 with 10 bits of tile index, so a map's atlases share one id space
+# of this size. See PNX_MAP_INDEX_MASK.
+MAP_TILE_IDS = 1024
+
+# WorldTile payloads are split across BANK resources of about this size rather than living
+# in one contiguous run inside the map's own resource.
+#
+# This is not a tidiness decision. `resource_load_byte_range` on this platform is O(offset)
+# -- it streams from the start of the resource on every call -- so a WorldTile two thirds of
+# the way through a 75KB map cost 13 ms to read, and holding a 192x192 world whole took two
+# seconds. Measured on device; see docs/MEASUREMENTS.md. Banking caps the seek at the bank's
+# own size instead of the map's, which is the only lever that touches the term that dominates.
+#
+# 8KB is the trade: smaller banks are faster to seek within and cost more resources, and a
+# .pbpack has a bounded number of those. At 8KB a 516-byte WorldTile averages a 2KB seek
+# rather than a 37KB one.
+WORLDTILE_BANK_BYTES = 8192
+
+# Hardcoded because emery is the only platform the engine builds for today; M9's
+# per-platform carve is where this becomes a table. It is used only to size the resident
+# WorldTile window, so being wrong here costs slots, not correctness.
+SCREEN_W, SCREEN_H = 200, 228
+
+# One WorldTile of margin on EACH SIDE of what the view can touch, so the streamer has a
+# frame or more of lead before the player reaches a boundary rather than loading at the
+# moment the tile becomes visible. Per side rather than per axis because the player can
+# walk either way and the streamer has no velocity to lean on.
+WORLDTILE_MARGIN = 1
+
+
+def worldtile_window(tile_px, worldtile):
+    """How many WorldTiles must be resident at once, as (cols, rows).
+
+    A view `view_px` wide can touch floor((view_px - 1) / span) + 2 WorldTiles of `span`
+    pixels each -- the +2, not +1, because the worst alignment starts one pixel before a
+    boundary and so reaches one WorldTile further than a view of the same width that
+    happens to be aligned. Getting this wrong costs a column of tiles at the screen edge
+    exactly when the camera is between WorldTiles, which reads as flicker rather than as a
+    missing slot.
+
+    The margin is then added on top, and it is what the pool is really for: without it a
+    WorldTile is read in the frame it becomes visible, and any hitch in that read is a gap
+    on screen. With it there is a whole WorldTile of walking in hand.
+    """
+    span = tile_px * worldtile
+    return tuple((v - 1) // span + 2 + 2 * WORLDTILE_MARGIN for v in (SCREEN_W, SCREEN_H))
+
 
 # ------------------------------------------------------------------------ orientation
 #
@@ -990,7 +1055,12 @@ def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT):
 # ------------------------------------------------------------------------------ map
 
 def parse_legend(raw):
-    """legend char -> (tile role name, flag byte)."""
+    """legend char -> (tile role name, flag byte, atlas name or None).
+
+    The optional `atlas` key is what lets one map draw from several tilesets: without it
+    a role resolves against the map's first atlas, which is what every single-tileset
+    manifest means and keeps writing.
+    """
     legend = {}
     for ch, entry in raw.items():
         if len(ch) != 1:
@@ -1001,17 +1071,73 @@ def parse_legend(raw):
                 raise BuildError(f"legend {ch!r}: unknown flag {f!r} "
                                  f"(known: {', '.join(sorted(FLAG_NAMES))})")
             flags |= FLAG_NAMES[f]
-        legend[ch] = (entry["tile"], flags)
+        legend[ch] = (entry["tile"], flags, entry.get("atlas"))
     return legend
 
 
-def compile_map(spec, legend, roles, map_names):
-    # `roles` is this map's atlas's role table, not a global one.
-    """ASCII rows -> binary map resource.
+def map_atlas_names(spec, known, default):
+    """The atlases a map draws from, in the order that fixes its tile id space.
 
-    Format after the 8-byte header (w, h, warp_count in bytes 3..5):
-        w*h tile bytes, then w*h flag bytes, then
-        warp_count * (u8 tx, u8 ty, u8 dest_map, u8 dest_tx, u8 dest_ty)
+    `atlas = "x"` and `atlases = ["x", "y"]` are the same key spelled for one or many;
+    accepting both means a single-tileset manifest never learns a plural it does not need.
+    """
+    name = spec["name"]
+    if "atlas" in spec and "atlases" in spec:
+        raise BuildError(f"map {name!r}: give either `atlas` or `atlases`, not both")
+
+    wanted = spec.get("atlases", [spec["atlas"]] if "atlas" in spec else
+                      ([default] if default else []))
+    if isinstance(wanted, str):
+        wanted = [wanted]
+    if not wanted:
+        raise BuildError(f"map {name!r}: no atlas to draw with")
+
+    seen = []
+    for which in wanted:
+        if which not in known:
+            raise BuildError(f"map {name!r}: atlas {which!r} is not defined "
+                             f"(known: {', '.join(sorted(known))})")
+        if which in seen:
+            raise BuildError(f"map {name!r}: atlas {which!r} is listed twice")
+        seen.append(which)
+    return seen
+
+
+def map_tile_bases(name, atlas_names, tile_counts, tile_px):
+    """Partition the 10-bit cell index into one contiguous slice per atlas.
+
+    A cell names a tile by a MAP-GLOBAL id, and the map's atlas table says where each
+    atlas's slice begins. That spends none of the four per-cell bits M4b reserved for a
+    future per-cell palette, and it costs the draw loop one walk of a table with at most a
+    handful of entries.
+
+    Returns [(atlas_name, first_tile, tile_count)], and the total.
+    """
+    table, base = [], 0
+    for which in atlas_names:
+        px = tile_px[which]
+        if px != tile_px[atlas_names[0]]:
+            raise BuildError(
+                f"map {name!r}: atlas {which!r} has {px}px tiles but {atlas_names[0]!r} "
+                f"has {tile_px[atlas_names[0]]}px -- one map draws on one grid, so every "
+                f"atlas it uses must share a tile size")
+        table.append((which, base, tile_counts[which]))
+        base += tile_counts[which]
+
+    if base > MAP_TILE_IDS:
+        detail = ", ".join(f"{n} {tile_counts[n]}" for n in atlas_names)
+        raise BuildError(
+            f"map {name!r}: its atlases hold {base} tiles between them ({detail}), but a "
+            f"map cell has {MAP_TILE_IDS} tile ids to spend. Carve less, or split the map.")
+    return table, base
+
+
+def compile_map(spec, legend, roles_by_atlas, atlas_table, map_names):
+    """ASCII rows -> a compiled map, ready for finish_map to slice and pack.
+
+    `atlas_table` is this map's [(atlas, first_tile, tile_count)] partition, so a legend
+    char resolves to a map-global tile id here and nothing downstream has to know which
+    tileset a cell came from.
     """
     name = spec["name"]
     rows = [r for r in spec["rows"].strip("\n").split("\n") if r.strip()]
@@ -1027,25 +1153,46 @@ def compile_map(spec, legend, roles, map_names):
     if w > 255 or h > 255:
         raise BuildError(f"map {name!r}: {w}x{h} exceeds the u8 dimension limit")
 
+    # Resolving a legend char is the same work for every cell that uses it, and a map is
+    # thousands of cells over a few dozen characters. Doing it once per character also
+    # means an unusable legend entry is reported whether or not the map happens to use it.
+    bases = {a: first for a, first, _ in atlas_table}
+    default_atlas = atlas_table[0][0]
+    resolved, unusable = {}, {}
+    for ch, (role, flag, want_atlas) in legend.items():
+        which = want_atlas or default_atlas
+        # The legend is project-wide but an atlas set is per map, so a character this map
+        # cannot draw is only an error if this map USES it. Reported at the cell rather
+        # than here, where it would fail every map that merely shares the legend.
+        if which not in bases:
+            unusable[ch] = (f"legend {ch!r} draws from atlas {which!r}, which this map "
+                            f"does not use. It draws from: "
+                            f"{', '.join(a for a, _, _ in atlas_table)}")
+            continue
+        roles = roles_by_atlas[which]
+        if role not in roles:
+            unusable[ch] = (f"legend {ch!r} names tile role {role!r}, which atlas "
+                            f"{which!r} does not define. That atlas provides: "
+                            f"{', '.join(sorted(roles)) or '(no roles -- give it an '
+                                                           'autopick or [atlas.semantic] '
+                                                           'table)'}")
+            continue
+        # u16 little-endian: 10 bits of MAP-GLOBAL index, then PNX_MAP_FLIP_X / _Y, then
+        # four reserved bits for a per-cell palette. Roles resolve to unmirrored tiles, so
+        # the flip bits are zero today -- the format carries them so a tile picker can
+        # place a mirrored tile without the atlas needing a second copy.
+        resolved[ch] = ((bases[which] + roles[role]) & 0x03FF, flag)
+
     tiles = bytearray(w * h * 2)   # u16 per cell
     flags = bytearray(w * h)   # one byte per cell; tiles are u16, see below
     for y, row in enumerate(rows):
         for x, ch in enumerate(row):
-            if ch not in legend:
+            if ch not in resolved:
+                if ch in unusable:
+                    raise BuildError(f"map {name!r} at {x},{y}: {unusable[ch]}")
                 raise BuildError(f"map {name!r}: unknown legend char {ch!r} at {x},{y} "
                                  f"(known: {' '.join(sorted(legend))})")
-            role, flag = legend[ch]
-            if role not in roles:
-                raise BuildError(
-                    f"map {name!r}: legend {ch!r} names tile role {role!r}, which its "
-                    f"atlas does not define. That atlas provides: "
-                    f"{', '.join(sorted(roles)) or '(no roles -- give it an autopick or '
-                                                   '[atlas.semantic] table)'}")
-            # u16 little-endian: 10 bits of index, then PNX_MAP_FLIP_X / _Y, then four
-            # reserved bits for a per-cell palette. Roles resolve to unmirrored tiles, so
-            # the flip bits are zero today -- the format carries them so a tile picker can
-            # place a mirrored tile without the atlas needing a second copy.
-            entry = roles[role] & 0x03FF
+            entry, flag = resolved[ch]
             tiles[(y * w + x) * 2] = entry & 0xFF
             tiles[(y * w + x) * 2 + 1] = entry >> 8
             flags[y * w + x] = flag
@@ -1118,14 +1265,16 @@ def compile_map(spec, legend, roles, map_names):
 
     print(f"  map {name}: {w}x{h}, {len(warps)} warps, "
           f"{len(reachable)}/{walkable} tiles reachable"
-          + (f", {sealed} sealed off" if sealed else ""))
+          + (f", {sealed} sealed off" if sealed else "")
+          + (f", {len(atlas_table)} atlases" if len(atlas_table) > 1 else ""))
 
 
 
     # The blob is built later by finish_map, once tile flag defaults are known.
     return {"name": name, "w": w, "h": h, "start": (sx, sy), "tiles": bytes(tiles),
             "out": spec["out"], "warps": warps, "reachable": reachable,
-            "flags": flags}
+            "flags": flags, "atlas_table": atlas_table,
+            "atlases": [a for a, _, _ in atlas_table]}
 
 
 def rotate_maps(maps, orient):
@@ -1161,6 +1310,18 @@ def rotate_maps(maps, orient):
         m["w"], m["h"] = nw, nh
 
 
+def map_tile_owner(m, tile):
+    """A map-global tile id -> (atlas name, index within that atlas).
+
+    Linear over the map's atlas table, which has at most a handful of entries -- the same
+    walk the runtime does per drawn cell.
+    """
+    for name, first, count in m["atlas_table"]:
+        if first <= tile < first + count:
+            return name, tile - first
+    return None, tile
+
+
 def compute_tile_flags(maps):
     """Pick each tile's default flags: whichever value it carries most often.
 
@@ -1168,6 +1329,13 @@ def compute_tile_flags(maps):
     stays the single place behaviour is written down. Any cell disagreeing with its
     tile's default becomes an override -- which is how one accent tile can be scenery in
     one spot and a door in another.
+
+    Keyed by (atlas, index within that atlas) rather than by the cell's value, because a
+    cell now holds a MAP-global id: tile 5 of a map whose first atlas is `caveset` and
+    tile 5 of a map whose first atlas is `tiles` are different pictures, and tallying them
+    together would give both the other's flags.
+
+    Returns {atlas name: {tile index: flag byte}}.
     """
     tally = {}
     for m in maps:
@@ -1180,59 +1348,400 @@ def compute_tile_flags(maps):
             # disagrees -- so the only symptom was maps carrying hundreds of overrides
             # they did not need, and defaults that shifted with cell order.
             tile = (m["tiles"][i * 2] | (m["tiles"][i * 2 + 1] << 8)) & 0x03FF
+            atlas, local = map_tile_owner(m, tile)
             flag = m["flags"][i]
-            tally.setdefault(tile, {}).setdefault(flag, 0)
-            tally[tile][flag] += 1
+            counts = tally.setdefault(atlas, {}).setdefault(local, {})
+            counts[flag] = counts.get(flag, 0) + 1
 
     defaults = {}
-    for tile, counts in tally.items():
+    for atlas, tiles in tally.items():
         # Ties break toward the lower flag value rather than toward whichever the
         # traversal happened to see first. Content compiles to the same bytes in either
         # orientation only if every choice here is a function of the counts alone.
-        defaults[tile] = max(counts.items(), key=lambda kv: (kv[1], -kv[0]))[0]
+        defaults[atlas] = {tile: max(counts.items(), key=lambda kv: (kv[1], -kv[0]))[0]
+                           for tile, counts in tiles.items()}
     return defaults
 
 
-def finish_map(m, tile_defaults, atlas_asset, pal_table=b"",
-               orient=ORIENT_BUTTONS_RIGHT):
-    """Build the map blob, replacing the flag plane with sparse overrides.
+def slice_worldtiles(m, tile_defaults, worldtile):
+    """Cut the cell plane into WorldTiles, each carrying its own flag overrides.
 
-    `atlas_asset` is stored in the header so the runtime can find the tileset a map was
-    authored against. Without it a scene with two atlases would have to guess, and
-    guessing wrong draws a map in another tileset's tiles -- which looks like corrupted
-    art rather than a mismatch.
+    Overrides ride along with the cells they describe rather than sitting in one map-wide
+    list, because a list would have to be resident whole for a map whose cells are not --
+    and because a WorldTile-local x,y keeps the 3-byte override record the format already
+    uses instead of widening it to reach a 255-cell map.
+
+    Edge WorldTiles are stored clipped rather than padded out to a full square. The pool
+    slot is still full size, so nothing downstream cares, and a 32x24 map does not pay for
+    the 8 rows of nothing that padding to 32x32 would invent.
     """
     w, h = m["w"], m["h"]
-    overrides = bytearray()
-    count = 0
-    for y in range(h):
-        for x in range(w):
-            i = y * w + x
-            tile = m["tiles"][i * 2] | (m["tiles"][i * 2 + 1] << 8)
-            tile &= 0x03FF
-            if m["flags"][i] != tile_defaults.get(tile, 0):
-                overrides += bytes([x, y, m["flags"][i]])
-                count += 1
+    cols = (w + worldtile - 1) // worldtile
+    rows = (h + worldtile - 1) // worldtile
 
-    if count > 0xFFFF:
-        raise BuildError(f"map {m['name']!r}: {count} flag overrides exceeds the u16 "
-                         f"limit -- the tile flag defaults must be badly chosen")
+    tiles = []
+    for wy in range(rows):
+        for wx in range(cols):
+            x0, y0 = wx * worldtile, wy * worldtile
+            cw = min(worldtile, w - x0)
+            ch = min(worldtile, h - y0)
 
-    # A palette table, when present, is one byte per atlas tile naming the palette slot to use
-    # instead of the atlas's own. That is 44 bytes for the cave tileset against ~5,600 for a second
-    # copy of the atlas -- the whole point of recolouring rather than re-authoring. Byte 2 says
-    # whether it is there; its length is the atlas's tile count, which the runtime already knows.
-    body = (count.to_bytes(2, "little") + bytes([1 if pal_table else 0, 0])
-            + bytes(pal_table)
-            + m["tiles"] + bytes(overrides)
-            + b"".join(bytes(x) for x in m["warps"]))
-    m["blob"] = (blob_header(MAGIC_MAP, w, h, len(m["warps"]), atlas_asset,
-                             orient=orient) + body)
+            cells = bytearray()
+            overrides = bytearray()
+            used = set()
+            for ly in range(ch):
+                for lx in range(cw):
+                    i = (y0 + ly) * w + (x0 + lx)
+                    cells += m["tiles"][i * 2:i * 2 + 2]
+                    tile = (m["tiles"][i * 2] | (m["tiles"][i * 2 + 1] << 8)) & 0x03FF
+                    used.add(tile)
+                    if m["flags"][i] != tile_defaults.get(tile, 0):
+                        overrides += bytes([lx, ly, m["flags"][i]])
 
-    saved = w * h - len(overrides)   # flag plane would be 1 byte/cell
-    print(f"  map {m['name']}: {count} flag overrides "
-          f"({saved} bytes saved over a per-cell plane)")
+            count = len(overrides) // 3
+            if count > 0xFFFF:
+                raise BuildError(
+                    f"map {m['name']!r}: WorldTile {wx},{wy} needs {count} flag overrides, "
+                    f"past the u16 limit -- the tile flag defaults must be badly chosen")
+
+            # Which atlases this WorldTile draws from, as a bit per entry in the map's
+            # atlas table. The streamer reads it to pin those atlases BEFORE it reads the
+            # cells, so a resident WorldTile can never name a tile whose art is gone.
+            mask = 0
+            for tile in used:
+                for bit, (_, first, n) in enumerate(m["atlas_table"]):
+                    if first <= tile < first + n:
+                        mask |= 1 << bit
+                        break
+
+            tiles.append({"x": wx, "y": wy, "w": cw, "h": ch, "mask": mask,
+                          "cells": bytes(cells), "overrides": bytes(overrides),
+                          "payload": bytes([cw, ch]) + count.to_bytes(2, "little")
+                                     + bytes(cells) + bytes(overrides)})
+    return cols, rows, tiles
+
+
+def check_worldtile_windows(m, cols, rows, tiles, window, atlas_slots):
+    """Every window of WorldTiles that can be resident at once must fit the atlas pool.
+
+    This is the check that turns a map which would thrash -- evicting an atlas and reading
+    it back every few steps -- into a build error naming the corner of the map that does
+    it. The streamer cannot recover from it at runtime: if one screenful needs five atlases
+    and there are four slots, something has to be evicted while it is still on screen.
+    """
+    by_xy = {(t["x"], t["y"]): t for t in tiles}
+    worst, worst_at = 0, None
+    for wy in range(max(1, rows - window[1] + 1)):
+        for wx in range(max(1, cols - window[0] + 1)):
+            mask = 0
+            for dy in range(min(window[1], rows)):
+                for dx in range(min(window[0], cols)):
+                    t = by_xy.get((wx + dx, wy + dy))
+                    if t:
+                        mask |= t["mask"]
+            if bin(mask).count("1") > worst:
+                worst, worst_at = bin(mask).count("1"), (wx, wy, mask)
+
+    if worst > atlas_slots:
+        wx, wy, mask = worst_at
+        names = [n for bit, (n, _, _) in enumerate(m["atlas_table"]) if mask >> bit & 1]
+        raise BuildError(
+            f"map {m['name']!r}: the {window[0]}x{window[1]} WorldTiles resident around "
+            f"{wx},{wy} draw from {worst} atlases ({', '.join(names)}), but the map "
+            f"declares atlas_slots = {atlas_slots}. One of those atlases would be evicted "
+            f"while it is still on screen. Raise atlas_slots to {worst}, or keep that part "
+            f"of the map to fewer tilesets.")
+    return worst
+
+
+def atlas_pool_layout(sizes, slots):
+    """Where each atlas pool slot begins, as offsets with a sentinel past the last.
+
+    Two cases, one table. When there is a slot per atlas nothing is ever evicted, so slot
+    i is atlas i and each gets EXACTLY its own size -- which for the ship's 29,596-byte
+    tileset beside water's 8,116 is 37 KB rather than the 59 KB that two slots of the
+    larger would cost, and the difference between fitting on a 128 KB watch and not.
+
+    When there are fewer slots than atlases any atlas can land in any slot, so every slot
+    has to hold the largest. That is the price of eviction, and it is paid only by the maps
+    that need it.
+    """
+    if slots >= len(sizes):
+        at, offsets = 0, []
+        for n in sizes:
+            offsets.append(at)
+            at += (n + 3) & ~3
+        return offsets + [at]
+    stride = (max(sizes) + 3) & ~3
+    return [i * stride for i in range(slots + 1)]
+
+
+def bank_shift_for(slot_bytes, bank_bytes):
+    """Tiles per bank, as a shift, so the runtime finds a bank by shifting an index.
+
+    The largest power of two whose bank still fits the cap, and never zero: one WorldTile
+    that overruns the cap on its own gets a bank to itself rather than an error, because
+    the cap is a target for seek cost and not a format limit.
+    """
+    shift = 0
+    while (2 << shift) * slot_bytes <= bank_bytes and shift < 8:
+        shift += 1
+    return shift
+
+
+def prepare_map(m, flags_by_atlas, worldtile=WORLDTILE_DEFAULT,
+                bank_bytes=WORLDTILE_BANK_BYTES):
+    """Slice a map into WorldTiles and work out how many bank resources it needs.
+
+    Split out of finish_map because of an ordering knot: a map's banks are resources, so
+    they need asset ids, so they have to exist before the id table is built -- and the id
+    table has to exist before finish_map, which writes atlas ids into the blob. Slicing is
+    the only part that answers "how many banks", and it depends on nothing but the map, so
+    it moves here and runs first.
+    """
+    tile_defaults = {}
+    for name, first, count in m["atlas_table"]:
+        per_atlas = flags_by_atlas.get(name, {})
+        for local in range(count):
+            tile_defaults[first + local] = per_atlas.get(local, 0)
+
+    cols, rows, tiles = slice_worldtiles(m, tile_defaults, worldtile)
+    slot_bytes = (max(len(t["payload"]) for t in tiles) + 3) & ~3
+    shift = bank_shift_for(slot_bytes, bank_bytes)
+
+    m["tile_defaults"] = tile_defaults
+    m["wt"] = (cols, rows, tiles)
+    m["slot_bytes"] = slot_bytes
+    m["bank_shift"] = shift
+    m["bank_count"] = (cols * rows + (1 << shift) - 1) >> shift
     return m
+
+
+def finish_map(m, flags_by_atlas, atlas_assets, atlas_bytes, pal_table=b"",
+               worldtile=WORLDTILE_DEFAULT, atlas_slots=None, resident=False,
+               bank_bytes=WORLDTILE_BANK_BYTES, first_bank_asset=0,
+               orient=ORIENT_BUTTONS_RIGHT):
+    """Build the map blob: a resident preamble, then WorldTile payloads to stream.
+
+    `atlas_assets` maps each of the map's atlas names to its asset id, which is how the
+    runtime finds the tilesets a map was authored against without a scene having to guess.
+    Guessing wrong draws a map in another tileset's tiles -- a failure that looks like
+    corrupted art rather than like a pairing mistake.
+
+    The flag table is flattened out of the per-atlas defaults into the map's own id space
+    and shipped WITH the map. Collision has to answer for a cell whose atlas is not
+    resident -- the player walks into a wall the streamer has not reached yet -- so it
+    cannot read its flags out of an atlas that may be gone.
+
+    The map's own resource holds only what stays resident. WorldTile payloads live in
+    separate BANK resources -- see WORLDTILE_BANK_BYTES for why -- whose asset ids run
+    consecutively from `first_bank_asset`, so bank i is simply that plus i.
+
+    **Payloads are padded to the pool's slot stride inside a bank**, which buys two things
+    for the cost of a few bytes at the map's edge. A WorldTile's position needs no lookup
+    at all -- bank `i >> bank_shift`, offset `(i & mask) * slot_bytes` -- so the per-tile
+    offset table leaves the resident preamble entirely. And a run of consecutive WorldTiles
+    is then a contiguous read that lands in consecutive pool slots, which is what lets the
+    runtime fetch a whole row, or a whole bank, in one call instead of one per tile.
+
+    Layout after the 8-byte header (w, h, warp_count, worldtile in bytes 3..6):
+
+        u8  atlas_count, wt_cols, wt_rows, flags (bit 0: palette remap present)
+        u16 tile_total;  u8 tile_px, bank_shift
+        u16 wt_slot_bytes;  u8 wt_slots, atlas_slots
+        u32 atlas_pool_bytes
+        atlas table    atlas_count * (u16 asset id, u16 first_tile)
+        atlas slots    (atlas_slots + 1) * u32, offsets into the atlas pool
+        u16 first_bank_asset, pad
+        flag table     tile_total bytes, padded to 4
+        palette remap  tile_total bytes when present, padded to 4
+        warps          warp_count * 5, padded to 4
+        wt masks       wt_cols * wt_rows bytes, padded to 4
+
+    Returns the map with `banks` set to the payload blobs the caller writes beside it.
+    """
+    w, h = m["w"], m["h"]
+    cols, rows, tiles = m["wt"]
+    tile_defaults = m["tile_defaults"]
+    n = cols * rows
+
+    tile_total = sum(count for _, _, count in m["atlas_table"])
+    flag_table = bytes(tile_defaults.get(tile, 0) for tile in range(tile_total))
+
+    # The window is what the SCREEN can reach, so a map smaller than one window is fully
+    # resident and never streams -- the adaptive half of "one format, one code path".
+    window = worldtile_window(m["tile_px"], worldtile)
+    wt_slots = n if resident else min(n, window[0] * window[1])
+    if wt_slots > 255:
+        raise BuildError(
+            f"map {m['name']!r}: `resident = true` wants a slot for each of its {n} "
+            f"WorldTiles, past the 255 the format can address. A map this size is one "
+            f"that has to stream -- which is the answer the comparison was going to give.")
+
+    needed = check_worldtile_windows(m, cols, rows, tiles, window,
+                                     atlas_slots if atlas_slots else len(m["atlas_table"]))
+    if atlas_slots is None:
+        atlas_slots = needed
+
+    override_total = sum(len(t["overrides"]) // 3 for t in tiles)
+    slot_bytes = m["slot_bytes"]
+
+    pool = atlas_pool_layout([atlas_bytes[n] for n, _, _ in m["atlas_table"]], atlas_slots)
+
+    # Banks. Payloads are packed in WorldTile index order, `1 << bank_shift` of them per
+    # bank, and each tile's recorded offset is relative to the start of its own bank --
+    # which is the whole point: the runtime's ranged read then seeks at most one bank in
+    # rather than most of the map.
+    shift = m["bank_shift"]
+    per_bank = 1 << shift
+    banks = []
+    for start in range(0, n, per_bank):
+        body = bytearray()
+        for t in tiles[start:start + per_bank]:
+            body += t["payload"].ljust(slot_bytes, b"\0")
+        # Stamped like every other blob, so a bank left over from a build in the other
+        # orientation is refused rather than drawn sideways. The header is why a tile's
+        # offset within its bank starts at HEADER_BYTES rather than at zero.
+        banks.append(blob_header(MAGIC_BANK, len(tiles[start:start + per_bank]),
+                                 slot_bytes & 0xFF, slot_bytes >> 8, 0, orient=orient)
+                     + bytes(body))
+
+    preamble = bytearray()
+    preamble += bytes([len(m["atlas_table"]), cols, rows, 1 if pal_table else 0])
+    preamble += tile_total.to_bytes(2, "little") + bytes([m["tile_px"], shift])
+    preamble += slot_bytes.to_bytes(2, "little") + bytes([wt_slots, atlas_slots])
+    preamble += pool[-1].to_bytes(4, "little")
+    for name, first, _ in m["atlas_table"]:
+        preamble += atlas_assets[name].to_bytes(2, "little") + first.to_bytes(2, "little")
+    preamble += b"".join(o.to_bytes(4, "little") for o in pool)
+    preamble += first_bank_asset.to_bytes(2, "little") + bytes(2)
+    preamble += pad4(flag_table)
+    preamble += pad4(bytes(pal_table)) if pal_table else b""
+    preamble += pad4(b"".join(bytes(x) for x in m["warps"]))
+    preamble += pad4(bytes(t["mask"] for t in tiles))
+
+    base = HEADER_BYTES + len(preamble)
+    m["blob"] = blob_header(MAGIC_MAP, w, h, len(m["warps"]), worldtile,
+                            orient=orient) + bytes(preamble)
+    m["banks"] = banks
+    m["bank_shift"] = shift
+    m["resident_bytes"] = base + wt_slots * slot_bytes + pool[-1]
+    m["worldtiles"] = n
+    m["wt_slots"] = wt_slots
+    m["atlas_slots"] = atlas_slots
+    m["atlas_pool_bytes"] = pool[-1]
+
+    saved = w * h - override_total * 3   # a per-cell flag plane would be 1 byte/cell
+    held = "all resident" if wt_slots == n else f"{wt_slots} of {n} resident"
+    print(f"  map {m['name']}: {cols}x{rows} WorldTiles of {worldtile} ({held}), "
+          f"{override_total} flag overrides ({saved} bytes saved over a per-cell plane)")
+    if len(banks) > 1:
+        biggest = max(len(b) for b in banks)
+        print(f"    {len(banks)} banks of {per_bank} WorldTiles, largest {biggest:,} B "
+              f"-- a ranged read seeks at most that, not {sum(len(b) for b in banks):,}")
+    if len(m["atlas_table"]) > 1:
+        whole = sum(atlas_bytes[n_] for n_, _, _ in m["atlas_table"])
+        note = ("every atlas resident" if atlas_slots >= len(m["atlas_table"])
+                else f"{whole - pool[-1]:,} B saved by streaming them")
+        print(f"    {len(m['atlas_table'])} atlases, {tile_total} tile ids, "
+              f"{atlas_slots} slot(s) in {pool[-1]:,} B -- {note}")
+
+    # The counterfactual, whenever the map actually streams something. Streaming's whole
+    # claim is a RAM number, and a claim of that shape is worth nothing without the figure
+    # it is being compared against -- so the pipeline states both rather than leaving
+    # "smaller than what?" to the reader. A map that holds everything anyway has no
+    # counterfactual and gets no line.
+    if wt_slots < n or atlas_slots < len(m["atlas_table"]):
+        whole = base + n * slot_bytes + sum(atlas_bytes[a] for a, _, _ in m["atlas_table"])
+        print(f"    resident {m['resident_bytes']:,} B against {whole:,} B held whole "
+              f"-- {100 - 100 * m['resident_bytes'] // whole}% less")
+    return m
+
+
+def parse_map(blob, banks=()):
+    """Read a packed map back into its parts, including a reassembled cell plane.
+
+    The inverse of finish_map, and the only place outside it that knows the layout. Tests
+    assert on the plane rather than on byte offsets, and the editor reads a built map
+    without re-deriving the slicing -- both of which used to mean a second copy of the
+    format that could drift from this one.
+
+    `banks` is the map's WorldTile bank blobs in order. Without them everything resident is
+    still readable -- dimensions, atlases, flags, warps -- and `cells` comes back empty,
+    which is the honest answer for a caller that only has the map's own resource.
+    """
+    if blob[:2] != MAGIC_MAP:
+        raise BuildError(f"not a map blob: magic {blob[:2]!r}")
+    if blob[2] != BLOB_VERSION:
+        raise BuildError(f"map blob is v{blob[2]}, this pipeline writes v{BLOB_VERSION}")
+
+    w, h, warp_count, worldtile = blob[3], blob[4], blob[5], blob[6]
+    p = HEADER_BYTES
+    atlas_count, cols, rows, flags = blob[p:p + 4]
+    tile_total = int.from_bytes(blob[p + 4:p + 6], "little")
+    tile_px, bank_shift = blob[p + 6], blob[p + 7]
+    slot_bytes = int.from_bytes(blob[p + 8:p + 10], "little")
+    wt_slots, atlas_slots = blob[p + 10], blob[p + 11]
+    atlas_pool_bytes = int.from_bytes(blob[p + 12:p + 16], "little")
+
+    at = p + 16
+    atlas_table = []
+    for _ in range(atlas_count):
+        atlas_table.append((int.from_bytes(blob[at:at + 2], "little"),
+                            int.from_bytes(blob[at + 2:at + 4], "little")))
+        at += 4
+
+    pool = [int.from_bytes(blob[at + i * 4:at + i * 4 + 4], "little")
+            for i in range(atlas_slots + 1)]
+    at += (atlas_slots + 1) * 4
+
+    first_bank_asset = int.from_bytes(blob[at:at + 2], "little")
+    at += 4
+
+    def take(n):
+        nonlocal at
+        chunk = blob[at:at + n]
+        at += (n + 3) & ~3
+        return chunk
+
+    flag_table = take(tile_total)
+    remap = take(tile_total) if flags & 1 else b""
+    warps = take(warp_count * 5)
+    masks = take(cols * rows)
+
+    n = cols * rows
+    per_bank = 1 << bank_shift
+
+    # A WorldTile's home is arithmetic, not a lookup: payloads are padded to the slot
+    # stride, so bank and offset both fall out of the index.
+    cells = bytearray(w * h * 2) if banks else bytearray()
+    overrides = []
+    for i in range(n if banks else 0):
+        wx, wy = i % cols, i // cols
+        bank = banks[i >> bank_shift]
+        off = HEADER_BYTES + (i & (per_bank - 1)) * slot_bytes
+        body = bank[off:off + slot_bytes]
+        cw, ch = body[0], body[1]
+        count = int.from_bytes(body[2:4], "little")
+        for ly in range(ch):
+            src = 4 + ly * cw * 2
+            dst = ((wy * worldtile + ly) * w + wx * worldtile) * 2
+            cells[dst:dst + cw * 2] = body[src:src + cw * 2]
+        base = 4 + cw * ch * 2
+        for k in range(count):
+            ox, oy, of = body[base + k * 3:base + k * 3 + 3]
+            overrides.append((wx * worldtile + ox, wy * worldtile + oy, of))
+
+    return {"w": w, "h": h, "worldtile": worldtile, "tile_px": tile_px,
+            "cols": cols, "rows": rows, "bank_shift": bank_shift,
+            "bank_count": (n + per_bank - 1) >> bank_shift,
+            "first_bank_asset": first_bank_asset,
+            "atlas_table": atlas_table, "tile_flags": flag_table, "palette": remap,
+            "warps": [tuple(warps[i * 5:i * 5 + 5]) for i in range(warp_count)],
+            "masks": masks, "cells": bytes(cells), "overrides": overrides,
+            "wt_slots": wt_slots, "wt_slot_bytes": slot_bytes,
+            "atlas_slots": atlas_slots, "atlas_pool": pool,
+            "atlas_pool_bytes": atlas_pool_bytes}
 
 
 def check_warp_destinations(maps):
@@ -1871,19 +2380,23 @@ def build_scenes(man, asset_index, maps=(), orient=ORIENT_BUTTONS_RIGHT):
         if not ids:
             raise BuildError(f"scene {name!r}: loads nothing")
 
-        # A scene whose map is drawn with a tileset the scene does not load cannot
-        # possibly work. The runtime refuses it, but by then the author is holding a
-        # watch showing nothing -- so it is caught here instead.
+        # A map owns the tilesets it draws with and streams them itself, so a scene must
+        # not also load them: the scene's copy is resident for the whole scene, and the
+        # map's pool holds a second one. That is not a mismatch the runtime can see -- it
+        # just quietly costs twice the atlas -- so it is caught here.
         if "map" in spec:
             for m in maps:
                 if m["name"] != spec["map"]:
                     continue
-                needed = f"PNX_ASSET_ATLAS_{c_ident(m['atlas'])}"
-                if asset_index.get(needed) not in ids:
+                clash = [a for a in m["atlases"]
+                         if asset_index.get(f"PNX_ASSET_ATLAS_{c_ident(a)}") in ids]
+                if clash:
+                    keep = [a for a in spec.get("atlases", []) if a not in clash]
                     raise BuildError(
-                        f"scene {name!r}: map {m['name']!r} is drawn with atlas "
-                        f"{m['atlas']!r}, but the scene does not load it -- add "
-                        f'atlases = ["{m["atlas"]}"]')
+                        f"scene {name!r}: map {m['name']!r} already streams "
+                        f"{', '.join(clash)}, so listing it in `atlases` loads a second "
+                        f"resident copy. Drop it: "
+                        + (f"atlases = {keep!r}" if keep else "remove the `atlases` line"))
 
         index.append((len(entries), len(ids), map_id))
         entries.extend(ids)
@@ -1899,20 +2412,24 @@ def build_scenes(man, asset_index, maps=(), orient=ORIENT_BUTTONS_RIGHT):
             "blob": blob_header(MAGIC_SCENES, len(names), orient=orient) + bytes(body)}
 
 
-def report_scene_budgets(scenes, sizes, palette_bytes_total):
+def report_scene_budgets(scenes, sizes, palette_bytes_total, map_resident=None):
     """Per-scene resident cost -- the number that decides the scene arena size.
 
     Total resource size says what ships; this says what has to be in RAM at once, which
     is the constraint that actually bites. Palettes are counted into every scene because
     they load before anything else does.
+
+    A map costs its resident preamble plus its two pools, NOT its blob size: the whole
+    point of WorldTiles is that a map on disk and a map in RAM are different numbers.
     """
     if not scenes:
         return
+    map_resident = map_resident or {}
     print("\nscene residency (what must fit in the scene arena at once)")
     worst, worst_name = 0, ""
     for i, name in enumerate(scenes["names"]):
         first, count, _ = scenes["index"][i]
-        total = palette_bytes_total + sum(sizes.get(a, 0)
+        total = palette_bytes_total + sum(map_resident.get(a, sizes.get(a, 0))
                                           for a in scenes["entries"][first:first + count])
         if total > worst:
             worst, worst_name = total, name
@@ -1936,7 +2453,7 @@ def write_blob(path, blob):
 
 def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0,
                     scenes=None, songs=None, samples=None, fonts=None,
-                    orient=ORIENT_BUTTONS_RIGHT):
+                    blob_files=None, orient=ORIENT_BUTTONS_RIGHT):
     L = [
         "// GENERATED by tools/pnx_assets.py -- do not edit.",
         "//",
@@ -1959,7 +2476,13 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
     assets = ([("PALETTES", "palettes")]
               + [("ATLAS", a["name"]) for a in atlases]
               + [("SPRITE", s["name"]) for s in sprites]
-              + [("MAP", m["name"]) for m in maps]
+              # Each map is followed by its WorldTile banks, consecutively, which is what
+              # the blob's `first_bank_asset` relies on. Must stay in step with `ordered`
+              # in build() -- these two lists ARE the asset id order.
+              + [h for m in maps
+                 for h in ([("MAP", m["name"])]
+                           + [("BANK", f"{m['name']}_{i}")
+                              for i in range(m["bank_count"])])]
               + ([("DIALOG", "dialog")] if dialog else [])
               + [("MUSIC", sg["name"]) for sg in (songs or [])]
               + [("SAMPLE", sm["name"]) for sm in (samples or [])]
@@ -1988,6 +2511,14 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
           "#define PNX_ASSET_RESOURCE_TABLE { \\"]
     for kind, name in assets:
         L.append(f"  RESOURCE_ID_{c_ident(name)}, \\")
+    L += ["}", "#else",
+          "// The host has no resource ids, only files. Emitted for the same reason the",
+          "// table above is: a hand-written list of blob paths in a test goes stale the",
+          "// moment the manifest gains an asset, and the symptom is a scene failing for",
+          "// a reason that has nothing to do with scenes.",
+          "#define PNX_ASSET_FILE_TABLE { \\"]
+    for out in (blob_files or []):
+        L.append(f'  "{out}", \\')
     L += ["}", "#endif", ""]
 
     for a in atlases:
@@ -2085,6 +2616,22 @@ def sync_package_json(path, blobs):
 
     media = [{"type": "raw", "name": c_ident(name), "file": os.path.basename(out)}
              for name, out in blobs]
+
+    # Resource names become #defines in the SDK's generated header, so two assets of
+    # DIFFERENT kinds sharing a name -- an atlas called `ship` and a map called `ship` --
+    # emit RESOURCE_ID_SHIP twice and the app fails to compile with a redefinition warning
+    # that names neither asset and points at a generated file. The manifest's own handles
+    # are prefixed by kind and never collide, so this is the only place it can bite, and
+    # it is invisible until an `arm-none-eabi-gcc` that nothing in the pipeline runs.
+    seen = {}
+    for entry, (name, _out) in zip(media, blobs):
+        if entry["name"] in seen:
+            raise BuildError(
+                f"assets {seen[entry['name']]!r} and {name!r} both become resource "
+                f"{entry['name']}, which the SDK turns into one #define -- the app would "
+                f"fail to compile with a redefinition of RESOURCE_ID_{entry['name']} and "
+                f"name neither of them. Rename one; the kinds do not have to differ.")
+        seen[entry["name"]] = name
 
     pkg.setdefault("pebble", {}).setdefault("resources", {})["media"] = media
 
@@ -2191,24 +2738,62 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
         raise BuildError("maps need at least one atlas to draw with")
 
     default_atlas = atlases[0]["name"] if atlases else None
+    tile_counts = {a["name"]: len(a["tiles"]) for a in atlases}
+    tile_px = {a["name"]: a["tile_px"] for a in atlases}
     maps = []
     for spec in map_specs:
-        which = spec.get("atlas", default_atlas)
-        if which not in roles_by_atlas:
-            raise BuildError(f"map {spec['name']!r}: atlas {which!r} is not defined "
-                             f"(known: {', '.join(sorted(roles_by_atlas))})")
-        m = compile_map(spec, legend, roles_by_atlas[which], map_names)
-        m["atlas"] = which
+        names = map_atlas_names(spec, roles_by_atlas, default_atlas)
+        table, _ = map_tile_bases(spec["name"], names, tile_counts, tile_px)
+        m = compile_map(spec, legend, roles_by_atlas, table, map_names)
         m["palette"] = spec.get("palette")
+        m["tile_px"] = tile_px[names[0]]
+
+        wt = int(spec.get("worldtile", WORLDTILE_DEFAULT))
+        if not WORLDTILE_MIN <= wt <= WORLDTILE_MAX or wt & (wt - 1):
+            raise BuildError(
+                f"map {spec['name']!r}: worldtile = {wt} must be a power of two between "
+                f"{WORLDTILE_MIN} and {WORLDTILE_MAX}. The runtime finds a cell's WorldTile "
+                f"by shifting, not dividing, which is what makes it free per drawn tile.")
+        m["worldtile"] = wt
+
+        slots = spec.get("atlas_slots")
+        if slots is not None and not 1 <= int(slots) <= len(names):
+            raise BuildError(
+                f"map {spec['name']!r}: atlas_slots = {slots}, but the map declares "
+                f"{len(names)} atlases -- a slot count outside 1..{len(names)} is either "
+                f"a pool that cannot hold one atlas or one that can never fill.")
+        m["atlas_slots"] = int(slots) if slots is not None else None
+
+        # `resident = true` gives the map a slot per WorldTile, so all of it loads at map
+        # load and none of it is ever evicted -- what a map cost before WorldTiles existed.
+        # It is here to be MEASURED against, not because anything needs it: the per-map
+        # report prints both numbers either way, and this is what lets a project put the
+        # two side by side at runtime instead of taking the report's word for it.
+        m["resident"] = bool(spec.get("resident", False))
+
+        # How big a WorldTile bank resource may get. Lower it to cut seek cost further at
+        # the price of more resources; the default is explained at WORLDTILE_BANK_BYTES.
+        bank = int(spec.get("bank_bytes", WORLDTILE_BANK_BYTES))
+        if bank < 512:
+            raise BuildError(
+                f"map {spec['name']!r}: bank_bytes = {bank} is below one WorldTile's worth "
+                f"of cells, so every bank would hold a single tile and the map would cost "
+                f"a resource each. Give it at least 512.")
+        m["bank_bytes"] = bank
         maps.append(m)
     check_warp_destinations(maps)
     rotate_maps(maps, orient)
 
-    # Tile flags live on the tileset, so each atlas takes its defaults only from the maps
-    # that actually use it -- otherwise one tileset's flags would leak into another.
-    flags_by_atlas = {a["name"]: compute_tile_flags([m for m in maps
-                                                     if m["atlas"] == a["name"]])
-                      for a in atlases}
+    # Tile flags live on the tileset, and compute_tile_flags keys its tally by the atlas a
+    # cell's tile actually belongs to -- so a map drawing from three tilesets contributes to
+    # all three, and none of them leak into each other.
+    flags_by_atlas = compute_tile_flags(maps)
+    flags_by_atlas = {a["name"]: flags_by_atlas.get(a["name"], {}) for a in atlases}
+
+    # Slice every map before any asset id is handed out: a map's WorldTile banks are
+    # resources of their own, so they need ids, and only slicing says how many there are.
+    for m in maps:
+        prepare_map(m, flags_by_atlas, m["worldtile"], m["bank_bytes"])
 
     dialog_specs = man.get("dialog", {})
 
@@ -2218,7 +2803,12 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
     ordered = (["PNX_ASSET_PALETTES_PALETTES"]
                + [f"PNX_ASSET_ATLAS_{c_ident(a['name'])}" for a in atlases]
                + [f"PNX_ASSET_SPRITE_{c_ident(sp['name'])}" for sp in sprites]
-               + [f"PNX_ASSET_MAP_{c_ident(m['name'])}" for m in maps]
+               # A map, then its WorldTile banks, consecutively -- which is what lets the
+               # blob store one `first_bank_asset` and find bank i at that plus i.
+               + [h for m in maps
+                  for h in ([f"PNX_ASSET_MAP_{c_ident(m['name'])}"]
+                            + [f"PNX_ASSET_BANK_{c_ident(m['name'])}_{i}"
+                               for i in range(m["bank_count"])])]
                + (["PNX_ASSET_DIALOG_DIALOG"] if dialog_specs else [])
                + [f"PNX_ASSET_MUSIC_{c_ident(sg['name'])}" for sg in
                   pack_music_names(man)]
@@ -2241,18 +2831,29 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
 
     by_name = {a["name"]: a for a in atlases}
     for m in maps:
-        atlas_asset = asset_index[f"PNX_ASSET_ATLAS_{c_ident(m['atlas'])}"]
+        assets = {n: asset_index[f"PNX_ASSET_ATLAS_{c_ident(n)}"] for n in m["atlases"]}
+
+        # The palette remap runs over the map's whole tile id space, so an atlas without
+        # the named variant keeps its own assignment. That is what lets one recoloured zone
+        # span several tilesets without every one of them having to declare the variant.
         want = m.get("palette")
         table = b""
         if want:
-            tables = by_name[m["atlas"]].get("variant_tables", {})
-            if want not in tables:
+            offered = {n: by_name[n].get("variant_tables", {}) for n in m["atlases"]}
+            if not any(want in t for t in offered.values()):
+                every = sorted({v for t in offered.values() for v in t})
                 raise BuildError(
-                    f"map {m['name']!r}: palette = {want!r}, but atlas {m['atlas']!r} declares no "
-                    f"such variant. It provides: {', '.join(sorted(tables)) or '(none -- add '
-                    f'`variants` to the atlas)'}")
-            table = tables[want]
-        finish_map(m, flags_by_atlas[m["atlas"]], atlas_asset, table, orient)
+                    f"map {m['name']!r}: palette = {want!r}, but none of its atlases "
+                    f"({', '.join(m['atlases'])}) declares such a variant. Between them "
+                    f"they provide: {', '.join(every) or '(none -- add `variants` to an atlas)'}")
+            table = b"".join(offered[n].get(want) or bytes(by_name[n]["assign"])
+                             for n in m["atlases"])
+
+        sizes = {n: len(by_name[n]["blob"]) for n in m["atlases"]}
+        first_bank = asset_index[f"PNX_ASSET_BANK_{c_ident(m['name'])}_0"]
+        finish_map(m, flags_by_atlas, assets, sizes, table,
+                   m["worldtile"], m["atlas_slots"], m["resident"],
+                   m["bank_bytes"], first_bank, orient)
     palette_blob = (blob_header(MAGIC_PALETTES, len(shared), orient=orient)
                     + b"".join(palette_bytes(p) for p in shared))
     print(f"  {len(shared)} palettes, {len(shared) * PALETTE_ENTRIES} B shared across "
@@ -2289,6 +2890,17 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
         entries.append(("map", m["name"],
                         write_blob(os.path.join(out_dir, m["out"]), m["blob"])))
         blobs.append((m["name"], m["out"]))
+
+        # Banks follow their map immediately, matching the id order in `ordered`. The name
+        # carries the map's -- `field_0`, not `bank_0`, which two maps would collide on --
+        # and it is the same name the handle is built from, since the SDK's resource id
+        # comes from this and the handle from generate_header's parallel list.
+        stem = m["out"][:-4] if m["out"].endswith(".bin") else m["out"]
+        for i, bank in enumerate(m["banks"]):
+            out = f"{stem}_b{i}.bin"
+            entries.append(("bank", f"{m['name']}_{i}",
+                            write_blob(os.path.join(out_dir, out), bank)))
+            blobs.append((f"{m['name']}_{i}", out))
     if dialog:
         out = project.get("dialog_out", "dialog.bin")
         entries.append(("dialog", "dialog",
@@ -2322,7 +2934,8 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
         asset_index["PNX_ASSET_SCENES_SCENES"] = len(ordered) - 1
 
     generate_header(header_path, atlases, sprites, maps, dialog, roles_by_atlas,
-                    len(shared), scenes, songs, samples, fonts, orient)
+                    len(shared), scenes, songs, samples, fonts,
+                    [out for _name, out in blobs], orient)
     print(f"\nheader: {header_path}")
 
     if fonts:
@@ -2343,7 +2956,9 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
         # entries[] is in the same order as `ordered`, so index maps straight across.
         sizes = {i: entries[i][2] for i in range(len(entries)) if i < len(ordered)}
         pal_bytes = next((sz for kind, _n, sz in entries if kind == "palette"), 0)
-        report_scene_budgets(scenes, sizes, pal_bytes)
+        map_resident = {asset_index[f"PNX_ASSET_MAP_{c_ident(m['name'])}"]:
+                        m["resident_bytes"] for m in maps}
+        report_scene_budgets(scenes, sizes, pal_bytes, map_resident)
 
     return 0
 

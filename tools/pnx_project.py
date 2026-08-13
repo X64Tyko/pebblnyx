@@ -358,6 +358,15 @@ budget_bytes = 262144
 #   [[font]]    a rasterised typeface  (a licence is required)
 #   [[map]]     a grid of legend characters
 #   [scene.*]   what loads together -- the only load point the framework has
+#
+# A map draws from one atlas by default -- the first one declared. To use several:
+#
+#   [[map]]
+#   atlases = ["village", "forest"]   # the order fixes the map's tile id space
+#
+# and give a legend character an `atlas` key to say which one its role resolves against.
+# A scene must NOT list a map's atlases: the map owns them, sizes its own pool and streams
+# them by WorldTile, so naming one in a scene loads a second resident copy.
 '''
 
 PACKAGE_JSON = {

@@ -5,10 +5,24 @@
 // somewhere unrelated. On the host it is an assertion.
 
 #include "../src/pnx/gfx/pnx_gfx.h"
+#include "../src/pnx/gfx/pnx_tilemap.h"
+#include "../src/pnx/core/pnx_arena.h"
 #include "../src/pnx/platform/pnx_platform_host.h"
 
 #include <stdio.h>
 #include <string.h>
+
+// The example's own blobs, so the draw loop is exercised against real content rather than
+// against a map written to suit it. Its generated header names the assets.
+#define TILEMAP_DIR "../examples/overworld/resources/"
+#include "../examples/overworld/src/c/assets_gen.h"
+
+// Straight from the pipeline, in asset-id order: a hand-written list went stale the
+// moment the manifest gained an asset, and WorldTile banks are assets.
+static const char *TILEMAP_FILES[] = PNX_ASSET_FILE_TABLE;
+static char TILEMAP_PATHS[PNX_ASSET_COUNT][64];
+
+static void test_tilemap(void);
 
 extern int s_failures;
 extern int s_checks;
@@ -208,4 +222,122 @@ void test_gfx(void) {
   G_CHECK_EQ(pnx_floor_div(0, 16), 0);
   G_CHECK_EQ(pnx_floor_div(15, 16), 0);
   G_CHECK_EQ(pnx_floor_div(16, 16), 1);
+
+  test_tilemap();
+}
+
+// ------------------------------------------------------------------------- tilemap
+//
+// The draw loop walks WorldTiles outer and cells inner, which means a tile's screen
+// position is now computed from its WorldTile's origin plus its offset within it rather
+// than from the map alone. Get that wrong by one WorldTile and the world draws in blocks
+// shifted against each other -- which looks like art, not like a bug, and is exactly the
+// kind of thing no amount of reading catches.
+//
+// So: draw the real example maps and assert on pixels.
+
+static int ink_in(PnxTarget *t, int16_t x0, int16_t y0, int16_t x1, int16_t y1,
+                  uint8_t background) {
+  int n = 0;
+  for (int16_t y = y0; y <= y1; y++) {
+    for (int16_t x = x0; x <= x1; x++) {
+      if (pixel_at(t, x, y) != background) n++;
+    }
+  }
+  return n;
+}
+
+static void test_tilemap(void) {
+  PnxArena persistent, scene;
+  if (!pnx_arena_init(&persistent, "tm-persistent", 4 * 1024, 4)
+      || !pnx_arena_init(&scene, "tm-scene", 128 * 1024, 4)) {
+    return;
+  }
+
+  pnx_host_reset();
+  static uint32_t resources[PNX_ASSET_COUNT];
+  for (uint32_t i = 0; i < PNX_ASSET_COUNT; i++) {
+    resources[i] = i + 1;
+    snprintf(TILEMAP_PATHS[i], sizeof(TILEMAP_PATHS[i]), "%s%s",
+             TILEMAP_DIR, TILEMAP_FILES[i]);
+    pnx_host_register_resource(resources[i], TILEMAP_PATHS[i]);
+  }
+  if (!pnx_assets_init(&persistent, &scene, resources, PNX_ASSET_COUNT)
+      || !pnx_palettes_load(PNX_ASSET_PALETTES_PALETTES)) {
+    pnx_arena_destroy(&persistent);
+    pnx_arena_destroy(&scene);
+    return;
+  }
+
+  PnxTarget *t = pnx_host_target();
+  PnxCamera cam;
+  pnx_camera_init(&cam, 200, 228);
+
+  // --- the ship: two atlases, and a WorldTile boundary down the middle of the screen
+  PnxMap ship;
+  G_CHECK(pnx_map_load(&ship, PNX_ASSET_MAP_DECK));
+  G_CHECK_EQ(ship.wt_cols, 2);
+  G_CHECK_EQ(pnx_map_stream_now(&ship, 0, 0, 200, 228), 0);
+
+  // Note there is no "load it and draw before streaming" case to test here: `deck` fits
+  // its pool, so pnx_map_load holds it whole and it is drawable the moment it loads. The
+  // draw-before-stream path only exists for a map too large to hold, and it is tested in
+  // test_stream.c against one.
+
+  // The WorldTile boundary is at cell 16, which at 32px tiles is x = 512 in world space
+  // -- off screen at camera 0. Park the camera so the boundary falls mid-screen and
+  // assert both sides drew: a WorldTile placed at the wrong origin leaves one half blank
+  // or doubles the other.
+  const int32_t boundary = 16 * ship.tile_px;
+  pnx_camera_center(&cam, boundary, 3 * ship.tile_px,
+                    pnx_tilemap_width(&ship), pnx_tilemap_height(&ship));
+  G_CHECK_EQ(pnx_map_stream_now(&ship, cam.x, cam.y, cam.view_w, cam.view_h), 0);
+
+  pnx_gfx_clear(t, 0x40);
+  pnx_tilemap_draw(&ship, t, &cam);
+  const int32_t split = boundary - cam.x;
+  G_CHECK(split > 0 && split < 200);
+  if (split > 0 && split < 200) {
+    G_CHECK(ink_in(t, 0, 0, (int16_t)(split - 1), 227, 0x40) > 0);
+    G_CHECK(ink_in(t, (int16_t)split, 0, 199, 227, 0x40) > 0);
+  }
+
+  // Nothing may be left as background: the ship map is water and deck edge to edge, so
+  // any unwritten pixel is a cell the WorldTile walk missed.
+  G_CHECK_EQ(ink_in(t, 0, 0, 199, 227, 0x40), 200 * 228);
+
+  // --- the same content drawn at two camera positions one tile apart must differ by
+  //     exactly that: a scroll, not a re-layout.
+  pnx_gfx_clear(t, 0x40);
+  pnx_tilemap_draw(&ship, t, &cam);
+  static uint8_t before[200];
+  for (int16_t x = 0; x < 200; x++) before[x] = pixel_at(t, x, 100);
+
+  cam.x += ship.tile_px;
+  G_CHECK_EQ(pnx_map_stream_now(&ship, cam.x, cam.y, cam.view_w, cam.view_h), 0);
+  pnx_gfx_clear(t, 0x40);
+  pnx_tilemap_draw(&ship, t, &cam);
+
+  int shifted = 0;
+  for (int16_t x = 0; x + ship.tile_px < 200; x++) {
+    if (pixel_at(t, x, 100) == before[x + ship.tile_px]) shifted++;
+  }
+  G_CHECK(shifted > (200 - ship.tile_px) * 9 / 10);
+
+  // --- eviction: a camera that leaves a WorldTile behind must free its slot, and coming
+  //     back must reload it rather than finding a stale one.
+  PnxMap outdoor;
+  G_CHECK(pnx_map_load(&outdoor, PNX_ASSET_MAP_OUTDOOR));
+  G_CHECK_EQ(pnx_map_stream_now(&outdoor, 0, 0, 200, 228), 0);
+  const uint16_t corner = pnx_map_tile(&outdoor, 0, 0);
+  G_CHECK(corner != PNX_MAP_NO_CELL);
+
+  const int32_t far_x = pnx_tilemap_width(&outdoor) - 200;
+  const int32_t far_y = pnx_tilemap_height(&outdoor) - 228;
+  G_CHECK_EQ(pnx_map_stream_now(&outdoor, far_x, far_y, 200, 228), 0);
+  G_CHECK_EQ(pnx_map_stream_now(&outdoor, 0, 0, 200, 228), 0);
+  G_CHECK_EQ(pnx_map_tile(&outdoor, 0, 0), corner);
+
+  pnx_arena_destroy(&persistent);
+  pnx_arena_destroy(&scene);
 }

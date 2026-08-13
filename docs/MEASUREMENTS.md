@@ -144,6 +144,92 @@ Reading 128KB (larger than any on-chip cache) gave ~18.6 MB/s versus ~36 MB/s fo
 repeatedly-read 16KB block, so **~18–19 MB/s is real flash throughput** and the higher
 figure was cache-inflated. Cold vs warm showed no systematic difference at 128KB.
 
+### What this makes streamable, and what it does not
+
+The same two numbers answer both questions, and they answer them differently depending on
+the unit. Derived from `29 µs + bytes ÷ 33 MB/s`, against a 37.33 ms frame:
+
+| Unit | Bytes | Cost | Per frame |
+|---|---|---|---|
+| one 16x16 tile, 4bpp | 128 | 33 µs | **6.7 ms** at 725 tiles — 18% of frame |
+| one 16x16-cell WorldTile | 516 | 45 µs | ~0 — read at a boundary, not per frame |
+| one atlas (`caveset`) | 5,728 | 202 µs | ~0 — read when a WorldTile first needs it |
+| a whole resident set (16 WorldTiles + 4 atlases) | ~31,000 | ~1.5 ms | 4%, once, on a warp |
+
+**A tile is the wrong unit and a WorldTile is the right one** for exactly the reason the
+table shows: the ~29 µs call cost is paid once either way, but a WorldTile amortises it
+over 256 cells and pays it when the player crosses a boundary rather than every frame.
+That is why `pnx_assets.h` still says residency-not-streaming, and why maps stream anyway.
+
+Refilling the streamer's margin is bounded by `PNX_MAP_STREAM_BUDGET` at four WorldTiles a
+frame — 180 µs, half a percent — so the cap exists to bound a pathological case rather than
+because the ordinary one is expensive.
+
+### …and the device says the model above is wrong for deep reads
+
+The table above is what `29 µs + bytes ÷ 33 MB/s` predicts. `examples/worldtiles` ran on
+hardware and predicted nothing of the kind:
+
+| Load | Bytes | Calls | Predicted | **Actual** | Out by |
+|---|---|---|---|---|---|
+| field, 9 WorldTiles at the map's origin | 13,281 | 16 | 0.9 ms | **46 ms** | 53x |
+| field, 16 WorldTiles at tile 142,52 | 22,563 | 19 | 1.2 ms | **305 ms** | 247x |
+| plain, all 144 WorldTiles | 96,108 | 148 | 7.2 ms | **1,984 ms** | 275x |
+| plain, all 144 again | 94,847 | 148 | 7.2 ms | **1,996 ms** | 279x |
+
+**The error is not constant — it grows with how deep into the resource the read starts.**
+The same 16-WorldTile window costs 46 ms near the map's origin and 305 ms two thirds of the
+way through it, for 1.7x the bytes and the same call count. That rules out both a fixed
+per-call cost and a throughput figure, and leaves one explanation: **`resource_load_byte_range`
+is O(offset), not O(length)** — it streams from the start of the resource on every call.
+
+Fitting `cost ≈ Σ offsetᵢ ÷ T` gives T ≈ 2.8 MB/s and reproduces all four rows within 2x,
+including the near/far pair the other models cannot explain at all.
+
+The original 29 µs figure was measured over a 16KB resource, where every offset is small
+enough for the seek to disappear into the per-call noise. It is not wrong; it is a special
+case of this, and the probe never went deep enough to see the term that dominates here.
+
+**What it costs in practice.** Steady walking is unaffected — 26.8 fps held, and the
+streamer never fell behind (`missing` stayed 0 even at 8 tiles per tick). Crossing a
+WorldTile boundary costs a frame: 47–63 ms against 8 ms of ordinary work, so one dropped
+frame per boundary, and 24.2 fps while sprinting. Scene loads are where it bites: a warp
+into the middle of the field is 305 ms and holding the world whole is 2 s.
+
+### The fix, and what it confirmed
+
+Two changes, both aimed at the offset term rather than the byte count. **Banking** moved
+WorldTile payloads out of the map's 75KB resource into ~4KB bank resources, so a seek is
+capped by the bank instead of the map. **Batching** then reads a whole run of consecutive
+WorldTiles in one call. Measured on the same hardware, same content:
+
+| | Before | After | |
+|---|---|---|---|
+| hold the 192x192 world (144 WorldTiles) | 1,984 ms | **74 ms** | 26.8x |
+| warp into the middle of the field | 305 ms | **12 ms** | 25.4x |
+| worst frame while walking | 47–63 ms | **8–12 ms** | 5.2x |
+| frames dropped crossing a WorldTile | one, every time | **none** | — |
+
+**This is the confirmation the O(offset) reading needed.** Nothing about the bytes changed
+— the same 74 KB of cells is read either way — and the call count alone cannot explain a
+27x fall, since batching only took 148 calls to 41. What changed is how far into a resource
+each call starts, and the cost moved with it.
+
+At 74 ms over 41 reads the held-whole load now costs **1.8 ms per read against 13.4 ms
+before**, and what is left is transfer rather than seek: 74 KB at ~1.4 MB/s effective. The
+seek term has stopped dominating, which is what banking was for.
+
+Steady walking holds 26.8 fps — the PT2 ceiling — with the worst frame at 12 ms against a
+37.33 ms budget. The streamer's backlog reached 3 WorldTiles once, on a diagonal crossing a
+WorldTile *corner*, which asks for tiles in two directions at once; no holes appeared and
+no frame dropped, so `PNX_MAP_STREAM_BUDGET` at 4 has room to spare. Raising it is now
+affordable if a game wants the headroom back: four reads is ~7 ms.
+
+**Still wanted: a real probe.** The before/after above is strong, but it is still read off
+session logs — the loads carry other scene assets and frame boundaries are coarse. What
+would settle the model properly is the same shape as the original flash probe, sweeping
+offset independently of length over a resource large enough to matter.
+
 ## Persist: writes are ~116x slower than reads **(replicated, 3 runs)**
 
 | Operation | Avg | Spread |

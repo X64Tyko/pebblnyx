@@ -72,7 +72,11 @@ PnxRow pnx_target_row(PnxTarget *t, int16_t y) {
 // File-backed, so host tests exercise the SAME parsing code against the SAME blobs the
 // device loads. A mock returning synthetic bytes would test the mock.
 
-#define MAX_RESOURCES 32
+// Generous, and host-only. Registration past the end is silently dropped, which presents
+// as a scene failing to load with nothing wrong in it -- and a project's asset count is no
+// longer roughly its content count now that a map's WorldTile banks are resources of their
+// own. `examples/worldtiles` alone declares 51.
+#define MAX_RESOURCES 256
 
 typedef struct {
   uint32_t id;
@@ -113,11 +117,20 @@ bool pnx_platform_resource_size(uint32_t resource_id, size_t *out_size) {
   return true;
 }
 
+// Counted because the DEVICE's cost is per call, not per byte -- a ranged read there
+// streams from the start of the resource, so a change that halves the reads is worth far
+// more than one that halves the bytes. The host cannot reproduce that cost, but it can
+// count the thing that causes it.
+static uint32_t s_resource_reads;
+
+uint32_t pnx_host_resource_reads(void) { return s_resource_reads; }
+
 size_t pnx_platform_resource_read(uint32_t resource_id, size_t offset,
                                   void *dst, size_t bytes) {
   const char *path = resource_path(resource_id);
   if (!path || !dst) return 0;
 
+  s_resource_reads++;
   FILE *f = fopen(path, "rb");
   if (!f) return 0;
 
@@ -232,6 +245,7 @@ void pnx_host_queue_event(PnxEvent ev) {
 
 void pnx_host_reset(void) {
   s_resource_count = 0;
+  s_resource_reads = 0;
   s_queued_count = 0;
   s_queued_read = 0;
   s_quit = false;

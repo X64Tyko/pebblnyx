@@ -49,6 +49,9 @@ extern int s_checks;
 #define A_PALETTES PNX_ASSET_PALETTES_PALETTES
 #define A_TILES    PNX_ASSET_ATLAS_TILES
 #define A_CAVESET  PNX_ASSET_ATLAS_CAVESET
+#define A_SHIP     PNX_ASSET_ATLAS_SHIP
+#define A_WATER    PNX_ASSET_ATLAS_WATER
+#define A_MAP_DECK PNX_ASSET_MAP_DECK
 #define A_HERO     PNX_ASSET_SPRITE_HERO
 #define A_NPC      PNX_ASSET_SPRITE_NPC
 #define A_OUTDOOR  PNX_ASSET_MAP_OUTDOOR
@@ -64,40 +67,24 @@ enum { SCENE_CAVE, SCENE_OUTDOOR };   // pipeline sorts scene names alphabetical
 // The host platform keys resources by number, so any distinct ids will do.
 static uint32_t RESOURCES[A_COUNT];
 
-// Designated initialisers keyed by the generated enum, so an asset added to the example
-// leaves a NULL hole rather than shifting everything after it.
-static const char *ASSET_PATHS[A_COUNT] = {
-  [A_PALETTES] = ASSETS_DIR "palettes.bin",
-  [A_TILES]    = ASSETS_DIR "tiles.bin",
-  [A_CAVESET]  = ASSETS_DIR "caveset.bin",
-  [A_HERO]     = ASSETS_DIR "hero.bin",
-  [A_NPC]      = ASSETS_DIR "npc.bin",
-  [A_OUTDOOR]  = ASSETS_DIR "map_outdoor.bin",
-  [A_CAVE]     = ASSETS_DIR "map_cave.bin",
-  [A_DIALOG]   = ASSETS_DIR "dialog.bin",
-  [A_FONT_HUD] = ASSETS_DIR "font_hud.bin",
-  [A_FONT_DLG] = ASSETS_DIR "font_dialogue.bin",
-  [A_SCENES]   = ASSETS_DIR "scenes.bin",
-};
+// Paths straight from the pipeline, in asset-id order. This used to be a hand-written
+// table of designated initialisers, which meant an asset added to the example left a hole
+// nothing registered -- and a map's WorldTile banks are assets, thirty-odd of them, so
+// the hand-written version stopped being maintainable rather than merely stale.
+static const char *ASSET_FILES[] = PNX_ASSET_FILE_TABLE;
+static char ASSET_PATHS[A_COUNT][64];
 
 static bool register_assets(void) {
-  // Every asset the example declares must resolve, including any the manifest gained
-  // since these tests were written -- otherwise a scene referencing it fails obscurely.
   for (int i = 0; i < A_COUNT; i++) {
     RESOURCES[i] = (uint32_t)(i + 1);
-    const char *path = ASSET_PATHS[i];
-    if (!path) {
-      // An asset this test does not name. Point it at a file that exists so a scene
-      // loading it still works; the scene tests only assert on the named ones.
-      continue;
-    }
-    FILE *f = fopen(path, "rb");
+    snprintf(ASSET_PATHS[i], sizeof(ASSET_PATHS[i]), "%s%s", ASSETS_DIR, ASSET_FILES[i]);
+    FILE *f = fopen(ASSET_PATHS[i], "rb");
     if (!f) {
-      printf("  SKIP assets: %s not built -- run tools/pnx_assets.py\n", path);
+      printf("  SKIP assets: %s not built -- run tools/pnx_assets.py\n", ASSET_PATHS[i]);
       return false;
     }
     fclose(f);
-    pnx_host_register_resource(RESOURCES[i], path);
+    pnx_host_register_resource(RESOURCES[i], ASSET_PATHS[i]);
   }
   return true;
 }
@@ -112,7 +99,11 @@ void test_assets(void) {
 
   PnxArena persistent, arena;
   A_CHECK(pnx_arena_init(&persistent, "persistent", 4 * 1024, 4));
-  A_CHECK(pnx_arena_init(&arena, "scene", 64 * 1024, 4));
+  // Deliberately larger than any watch's: these tests load every map in the example one
+  // after another without a scene reset between them, so the arena has to hold the sum of
+  // things a scene would only ever hold one of. The scene checks at the end are where
+  // realistic residency is asserted.
+  A_CHECK(pnx_arena_init(&arena, "scene", 192 * 1024, 4));
   A_CHECK(pnx_assets_init(&persistent, &arena, RESOURCES, A_COUNT));
 
   // --- palettes must load before anything that indexes them
@@ -218,11 +209,26 @@ void test_assets(void) {
              pnx_sprite_frame_palette(&npc, 0)->entries[0]);
 
   // --- maps
+  //
+  // A map takes no atlas: it names and owns the tilesets it draws from, and nothing of it
+  // is resident until the streamer has run. Every assertion below the stream call would
+  // read as "not resident" without it, which is the shape of the one mistake this API can
+  // still invite.
   PnxMap outdoor;
-  A_CHECK(pnx_map_load(&outdoor, A_OUTDOOR, &atlas));
+  A_CHECK(pnx_map_load(&outdoor, A_OUTDOOR));
   A_CHECK_EQ(outdoor.w, MAP_OUTDOOR_W);
   A_CHECK_EQ(outdoor.h, MAP_OUTDOOR_H);
   A_CHECK_EQ(outdoor.warp_count, 1);
+  A_CHECK_EQ(outdoor.atlas_count, 1);
+  A_CHECK_EQ(outdoor.tile_px, TILES_TILE_PX);
+
+  // Small enough to be held whole, so pnx_map_load filled it and the streaming path never
+  // runs -- which is how every map in this example behaves, and how they all behaved
+  // before WorldTiles existed. A map too large to hold comes back empty instead; that
+  // case is tested in test_stream.c, which has one.
+  A_CHECK_EQ(pnx_map_resident(&outdoor), outdoor.wt_cols * outdoor.wt_rows);
+  A_CHECK(pnx_map_tile(&outdoor, 0, 0) != PNX_MAP_NO_CELL);
+  A_CHECK_EQ(pnx_map_stream_now(&outdoor, 0, 0, 200, 228), 0);
 
   // The border is wall, the interior start tile is not.
   A_CHECK(pnx_map_solid(&outdoor, 0, 0));
@@ -243,16 +249,17 @@ void test_assets(void) {
   }
   A_CHECK(pnx_map_warp_at(&outdoor, 1, 1) == NULL);
 
-  // The cave is drawn with a DIFFERENT tileset, so it must be paired with that one --
-  // loading it against the wrong atlas is the mismatch the blob's atlas id prevents.
+  // The cave is drawn with a DIFFERENT tileset, and says so itself rather than being
+  // handed one -- which is what makes pairing it with the wrong atlas impossible rather
+  // than merely detected.
   PnxAtlas caveset;
   A_CHECK(pnx_atlas_load(&caveset, A_CAVESET));
-  uint8_t wants = 0;
-  A_CHECK(pnx_map_atlas_asset(A_CAVE, &wants));
-  A_CHECK_EQ(wants, A_CAVESET);
 
   PnxMap cave;
-  A_CHECK(pnx_map_load(&cave, A_CAVE, &caveset));
+  A_CHECK(pnx_map_load(&cave, A_CAVE));
+  A_CHECK_EQ(cave.atlas_count, 1);
+  A_CHECK_EQ(cave.atlas[0].asset, A_CAVESET);
+  A_CHECK_EQ(pnx_map_stream_now(&cave, 0, 0, 200, 228), 0);
 
   // --- palette variant: one atlas, a recoloured zone
   //
@@ -310,12 +317,46 @@ void test_assets(void) {
   PnxAtlas wrong;
   A_CHECK(!pnx_atlas_load(&wrong, A_OUTDOOR));   // a map is not an atlas
   PnxMap wrong_map;
-  A_CHECK(!pnx_map_load(&wrong_map, A_TILES, &atlas));   // nor the reverse
+  A_CHECK(!pnx_map_load(&wrong_map, A_TILES));   // nor the reverse
   A_CHECK(!pnx_atlas_load(&wrong, A_COUNT));     // out of range handle
+  A_CHECK(!pnx_map_load(&wrong_map, A_COUNT));
 
-  // A map cannot load without its tileset: flags live on the atlas.
-  PnxMap orphan;
-  A_CHECK(!pnx_map_load(&orphan, A_OUTDOOR, NULL));
+  // --- multiple atlases in one map
+  //
+  // The ship draws from `ship` and `water`, so its cells name a MAP-global tile id that
+  // the atlas table partitions. What is worth pinning is that the two slices do not
+  // overlap and that a cell resolves to the atlas it was authored against -- a wrong
+  // resolve draws a real tile from the wrong tileset, which looks like art and not like
+  // a bug.
+  PnxMap ship;
+  A_CHECK(pnx_map_load(&ship, A_MAP_DECK));
+  A_CHECK_EQ(ship.atlas_count, 2);
+  A_CHECK_EQ(ship.atlas[0].asset, A_SHIP);
+  A_CHECK_EQ(ship.atlas[1].asset, A_WATER);
+  A_CHECK_EQ(ship.atlas[0].first_tile, 0);
+  A_CHECK_EQ(ship.atlas[1].first_tile, ship.atlas[0].tile_count);
+  A_CHECK_EQ(ship.tile_count, ship.atlas[0].tile_count + ship.atlas[1].tile_count);
+  A_CHECK_EQ(pnx_map_stream_now(&ship, 0, 0, 200, 228), 0);
+
+  // The manifest's rows put water in the corner and deck in the middle, so the two must
+  // resolve to different atlases.
+  uint16_t local_sea = 0, local_deck = 0;
+  const PnxMapAtlas *sea = pnx_map_tile_atlas(&ship, pnx_map_tile(&ship, 0, 0), &local_sea);
+  const PnxMapAtlas *deck = pnx_map_tile_atlas(&ship, pnx_map_tile(&ship, 10, 3), &local_deck);
+  A_CHECK(sea != NULL && deck != NULL);
+  if (sea && deck) {
+    A_CHECK_EQ(sea->asset, A_WATER);
+    A_CHECK_EQ(deck->asset, A_SHIP);
+    A_CHECK(local_sea < sea->tile_count);
+    A_CHECK(local_deck < deck->tile_count);
+  }
+
+  // Both atlases are resident, because the WorldTile that uses them pins them. Collision
+  // works across the join: water is solid, the deck is not.
+  A_CHECK(pnx_map_atlas(&ship, pnx_map_tile(&ship, 0, 0), NULL) != NULL);
+  A_CHECK(pnx_map_atlas(&ship, pnx_map_tile(&ship, 10, 3), NULL) != NULL);
+  A_CHECK(pnx_map_solid(&ship, 0, 0));
+  A_CHECK(!pnx_map_solid(&ship, 10, 3));
 
   // The door is an override: it uses the same tile as ordinary scenery but carries a
   // warp flag. That is the case the sparse-override format exists to represent, so it
@@ -330,11 +371,25 @@ void test_assets(void) {
   A_CHECK(pnx_scenes_load(A_SCENES));
 
   A_CHECK(pnx_scene_load(SCENE_OUTDOOR));
-  A_CHECK_EQ(pnx_scene_atlas_count(), 1);
+
+  // Zero, not one: a scene no longer loads its map's tileset, because the map owns and
+  // streams it. A scene atlas would be a second resident copy, which the pipeline now
+  // refuses -- so this is the runtime half of that rule.
+  A_CHECK_EQ(pnx_scene_atlas_count(), 0);
   A_CHECK_EQ(pnx_scene_sprite_count(), 2);
   A_CHECK(pnx_scene_map() != NULL);
   A_CHECK(pnx_scene_dialog() != NULL);
   if (pnx_scene_map()) A_CHECK_EQ(pnx_scene_map()->w, MAP_OUTDOOR_W);
+
+  // A scene's map is usable the moment the scene loads. That holds because this map fits
+  // its pool; a scene whose map does not needs pnx_map_stream_now before the first frame,
+  // which is the sequence every scene entry has to follow either way.
+  PnxMap *scene_map = pnx_scene_map();
+  if (scene_map) {
+    A_CHECK(pnx_map_resident(scene_map) > 0);
+    A_CHECK_EQ(pnx_map_stream_now(scene_map, 0, 0, 200, 228), 0);
+    A_CHECK(pnx_map_atlas(scene_map, pnx_map_tile(scene_map, 1, 1), NULL) != NULL);
+  }
 
   // Fonts load as scene assets like anything else, and the metrics the runtime reads
   // must match what the pipeline wrote into the header.

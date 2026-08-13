@@ -808,16 +808,33 @@ class Project:
         return [[("transparent" if pv.gcolor_rgb(c) is None
                   else "#%02x%02x%02x" % pv.gcolor_rgb(c)) for c in p] for p in pals]
 
-    def maps(self):
+    def map_atlases(self, m):
+        """The atlases one map draws from, in the order that fixes its tile id space.
+
+        `atlas = "x"` and `atlases = ["x", "y"]` are the same key spelled for one or many,
+        and a map naming neither draws with the first atlas declared -- the same three
+        rules the pipeline's map_atlas_names applies, so the editor shows what will build.
+        """
         specs = self.man.get("atlas", [])
-        default_atlas = specs[0]["name"] if specs else None
+        if "atlases" in m:
+            want = m["atlases"]
+            return list(want) if not isinstance(want, str) else [want]
+        if "atlas" in m:
+            return [m["atlas"]]
+        return [specs[0]["name"]] if specs else []
+
+    def maps(self):
         out = []
         for m in self.man.get("map", []):
             rows = [r for r in m["rows"].strip("\n").split("\n") if r.strip()]
+            names = self.map_atlases(m)
             out.append({"name": m["name"], "rows": rows,
                         "start": m.get("start", [1, 1]),
                         "warps": m.get("warps", []),
-                        "atlas": m.get("atlas", default_atlas)})
+                        # `atlas` stays for everything that only wants the first one; the
+                        # list is what a map drawing from several is actually described by.
+                        "atlas": names[0] if names else None,
+                        "atlases": names})
         return out
 
     def state(self):
@@ -1642,18 +1659,35 @@ class Project:
         if not m:
             return None
 
-        spec = next((a for a in self.man.get("atlas", []) if a["name"] == m["atlas"]),
-                    None)
-        if not spec:
-            return None
-        blob = os.path.join(self.res, spec["out"])
-        if not os.path.exists(blob):
+        # Every atlas the map draws from, since a legend character now says which one it
+        # resolves against. Loading only the first would draw the other tilesets' cells as
+        # holes -- which reads as missing art rather than as a preview limitation.
+        loaded = {}
+        for name in m["atlases"]:
+            spec = next((a for a in self.man.get("atlas", []) if a["name"] == name), None)
+            if not spec:
+                continue
+            blob = os.path.join(self.res, spec["out"])
+            if os.path.exists(blob):
+                loaded[name] = pv.parse_atlas(pv.read(blob))
+        if not loaded:
             return None
 
-        atlas = pv.parse_atlas(pv.read(blob))
-        roles = self._roles().get(m["atlas"], {})
+        roles_by_atlas = self._roles()
         legend = self.man.get("legend", {})
-        T = atlas["tile_px"]
+        default_atlas = m["atlases"][0] if m["atlases"] else None
+        T = next(iter(loaded.values()))["tile_px"]
+
+        # Resolved once per character rather than once per cell, the way compile_map does.
+        resolved = {}
+        for ch, e in legend.items():
+            which = e.get("atlas") or default_atlas
+            atlas = loaded.get(which)
+            if not atlas:
+                continue
+            idx = roles_by_atlas.get(which, {}).get(e.get("tile"))
+            if idx is not None and idx < atlas["count"]:
+                resolved[ch] = (atlas, idx)
 
         img = Image.new("RGBA", (self.SCREEN_W, self.SCREEN_H),
                         (pv.gcolor_rgb(clear) or (0, 0, 0)) + (255,))
@@ -1663,12 +1697,10 @@ class Project:
                 tx, ty = first_tx + i, first_ty + j
                 if not (0 <= ty < len(m["rows"]) and 0 <= tx < len(m["rows"][ty])):
                     continue
-                ch = m["rows"][ty][tx]
-                role = legend.get(ch, {}).get("tile")
-                idx = roles.get(role)
-                if idx is None or idx >= atlas["count"]:
+                hit = resolved.get(m["rows"][ty][tx])
+                if not hit:
                     continue
-                tile = self._upright(pv.tile_image(atlas, palettes, idx))
+                tile = self._upright(pv.tile_image(hit[0], palettes, hit[1]))
                 # Masked, so index 0 leaves the clear colour rather than punching a hole.
                 img.paste(tile, (tx * T - ox, ty * T - oy), tile)
         return img
@@ -1970,8 +2002,11 @@ class Project:
             "res_before": current["total"], "res_after": after, "budget": budget,
             "res_pct_after": 100.0 * after / budget if budget else 0,
             "res_over": after > budget,
-            # An atlas is read whole into the scene arena and stays there for the
-            # scene's life, so its blob size is also its resident cost.
+            # An atlas is read whole into a pool slot, so its blob size is still its
+            # resident cost -- what changed with WorldTiles is WHEN it is resident, not how
+            # big it is. A map that streams its atlases pays for the slots it declared
+            # rather than for all of them, and only the pipeline knows that number, so the
+            # figure here is the honest upper bound: what this atlas costs while loaded.
             "heap_before": heap,
             "heap_after": (heap - est) if heap is not None else None,
             "strip": strip,
@@ -2088,20 +2123,16 @@ class Project:
                 "exclude": [int(e) for e in spec.get("exclude", [])
                             if not isinstance(e, (list, tuple))]}
 
-    def update_atlas(self, name, rel, tile, region, max_tiles, exclude=(),
-                     colorkey=None):
-        """Rewrite one atlas's settings in place, keeping everything else in its block.
+    def _atlas_block(self, name):
+        """(lines, start, end) for one [[atlas]] block, end exclusive.
 
-        Line surgery rather than re-emitting the block from the parsed manifest, because
-        re-emitting would discard the comments -- and in this project a manifest's comments
-        are half its content. Only the keys the Import tab owns are replaced; a `metatiles`
-        line, a `[atlas.semantic]` table or a paragraph explaining the carve survives
-        untouched.
+        Line surgery rather than re-emitting from the parsed manifest, because re-emitting
+        would discard the comments -- and in this project a manifest's comments are half
+        its content.
         """
         lines = open(self.path).read().split("\n")
 
-        # Find this atlas's block: the [[atlas]] whose name matches, up to the next table
-        # header at column 0.
+        # The [[atlas]] whose name matches, up to the next table header at column 0.
         start = None
         for i, line in enumerate(lines):
             if line.strip() == "[[atlas]]":
@@ -2120,6 +2151,88 @@ class Project:
 
         end = next((i for i in range(start + 1, len(lines))
                     if lines[i].lstrip().startswith("[")), len(lines))
+        return lines, start, end
+
+    def atlas_users(self, name):
+        """Everything that would break if this atlas went away, in words.
+
+        Returned rather than raised, so the page can warn BEFORE the button is pressed
+        instead of only explaining after it is refused.
+        """
+        specs = self.man.get("atlas", [])
+        first = specs[0]["name"] if specs else None
+        reasons = []
+
+        for m in self.man.get("map", []):
+            drawn = m.get("atlases") or ([m["atlas"]] if "atlas" in m else None)
+            if drawn is None:
+                # A map with no atlas key draws with the first one declared. Removing that
+                # one silently re-points every such map at a different tileset, which
+                # rebuilds clean and draws the wrong world.
+                if name == first:
+                    reasons.append(f"map {m['name']!r} has no `atlas` key, so it draws "
+                                   f"with the first atlas declared -- which is this one")
+            elif name in drawn:
+                reasons.append(f"map {m['name']!r} draws with it")
+
+        for sname, spec in self.man.get("scene", {}).items():
+            if name in spec.get("atlases", []):
+                reasons.append(f"scene {sname!r} lists it in `atlases`")
+
+        # A legend entry naming the atlas only matters if a map actually PAINTS with that
+        # character. The pipeline takes the same view -- it reports the cell, not the
+        # legend -- so a character nobody used is a dangling reference, not a dependency,
+        # and refusing over it would make removal impossible for no gain.
+        for ch, e in self.man.get("legend", {}).items():
+            if e.get("atlas") != name:
+                continue
+            painted = [m["name"] for m in self.man.get("map", [])
+                       if ch in m.get("rows", "")]
+            if painted:
+                reasons.append(f"legend {ch!r} resolves against it and is painted in "
+                               + ", ".join(f"map {p!r}" for p in painted))
+        return reasons
+
+    def remove_atlas(self, name):
+        """Delete an [[atlas]] block, once nothing depends on it.
+
+        The check is the point. Deleting an atlas a map draws with produces a manifest that
+        fails to build -- recoverable, but only by hand-editing, which is the thing this
+        exists to avoid. So the editor says what still uses it and changes nothing.
+        """
+        if not any(a.get("name") == name for a in self.man.get("atlas", [])):
+            raise ValueError(f"no atlas named {name!r}")
+
+        users = self.atlas_users(name)
+        if users:
+            raise ValueError(f"{name!r} is still in use: " + "; ".join(users)
+                             + ". Point those at another atlas first.")
+
+        lines, start, end = self._atlas_block(name)
+
+        # Take the blank lines that separated this block from the next, so removing an
+        # atlas and adding one back does not leave a widening gap. Comments ABOVE the
+        # block are left alone: an editor-written atlas keeps its comments inside the
+        # block, and a hand-written one may sit under a section heading that belongs to
+        # the file rather than to it.
+        while end < len(lines) and lines[end].strip() == "":
+            end += 1
+        while start > 0 and lines[start - 1].strip() == "":
+            start -= 1
+
+        lines[start:end] = [""]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def update_atlas(self, name, rel, tile, region, max_tiles, exclude=(),
+                     colorkey=None):
+        """Rewrite one atlas's settings in place, keeping everything else in its block.
+
+        Only the keys the Import tab owns are replaced; a `metatiles` line, a
+        `[atlas.semantic]` table or a paragraph explaining the carve survives untouched.
+        """
+        lines, start, end = self._atlas_block(name)
 
         want = {
             "sheet": f'sheet = "{rel}"',
@@ -2818,6 +2931,11 @@ button:disabled{opacity:.45;cursor:not-allowed}
         <datalist id="atlasnames"></datalist>
         <button id="aload" style="display:none" title="load this atlas's settings">
           ↺ load</button>
+        <!-- Removal lives next to load, because both only apply to an atlas that already
+             exists. Until this, the only way to undo an import was to hand-edit the TOML
+             the editor exists to keep you out of. -->
+        <button id="adel" style="display:none" title="delete this atlas">
+          🗑 remove</button>
         <!-- The colour key. Picked off the sheet with the eyedropper rather than typed,
              because the value that matters is the one actually in the art -- a
              background that looks like magenta is often not 255,0,255. -->
@@ -3864,6 +3982,7 @@ function atlasMode(){
   const exists=atlasNames().includes(name);
   $('#addatlas').textContent=exists?'Update atlas':'Add atlas';
   $('#aload').style.display=exists?'':'none';
+  $('#adel').style.display=exists?'':'none';
   $('#atlasnames').innerHTML=atlasNames().map(n=>`<option value="${n}">`).join('');
   return exists;
 }
@@ -3883,6 +4002,31 @@ $('#aload').onclick=async()=>{
   $('#log').className=''; $('#log').textContent=
     `Loaded "${name}" — change anything and press Update atlas.`;
   analyse(); drawSlice();
+};
+
+// Removal asks the server what still uses the atlas BEFORE confirming, so the dialog says
+// "the ship map draws with it" rather than offering a delete that will simply be refused.
+$('#adel').onclick=async()=>{
+  const name=$('#aname').value.trim();
+  const log=$('#log');
+  const post=(url)=>fetch(url,{method:'POST',
+    headers:{'content-type':'application/json'},body:JSON.stringify({name})});
+
+  const u=await (await post('/api/atlas/users')).json();
+  if(u.users&&u.users.length){
+    log.className='bad';
+    log.textContent=`Cannot remove "${name}" — ${u.users.join('; ')}.`;
+    return;
+  }
+  if(!confirm(`Remove atlas "${name}" from the manifest?\n\n`
+              +`Nothing references it. The art on disk is left alone.`)) return;
+
+  const r=await (await post('/api/atlas/remove')).json();
+  if(r.error){ log.className='bad'; log.textContent=r.error; return }
+  log.className='ok'; log.textContent=`Removed "${name}". Press Build.`;
+  $('#aname').value='';
+  await load();
+  atlasMode();
 };
 
 $('#addatlas').onclick=async()=>{
@@ -5149,6 +5293,14 @@ def make_handler(session):
                     session.proj.update_atlas(d["name"], d["sheet"], int(d["tile"]),
                                               d["region"], int(d["max_tiles"]),
                                               d.get("exclude", []), d.get("colorkey"))
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/atlas/users":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(
+                        {"users": session.proj.atlas_users(d["name"])}))
+                elif self.path == "/api/atlas/remove":
+                    d = json.loads(raw)
+                    session.proj.remove_atlas(d["name"])
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/atlas":
                     d = json.loads(raw)

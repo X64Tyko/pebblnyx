@@ -107,7 +107,7 @@ def manifest(root, **overrides):
         body += textwrap.dedent(parts[key])
     # Dialog before font: `charset = "auto"` derives its glyph set from the pages, so a
     # font test that supplies dialog needs it to come first in the same manifest.
-    for key in ("sprite", "dialog", "font"):
+    for key in ("sprite", "dialog", "font", "scene"):
         if key in parts:
             body += textwrap.dedent(parts[key])
 
@@ -342,15 +342,18 @@ def check_orientation():
             check(f"{name}: start rotates with the map",
                   (rd["MAP_A_START_X"], rd["MAP_A_START_Y"]) == (sx, sy))
 
-            # --- the tile plane IS the portrait one, rotated. Header is 8 bytes, then
-            #     u16 override count, a palette-table flag and its pad, then w*h u16 cells.
-            w, h = fm[3], fm[4]
-            body = 8 + 4
-            cells = w * h * 2
-            turned, _, _ = pnx_assets.rotate_grid(fm[body:body + cells], w, h, orient,
+            # --- the tile plane IS the portrait one, rotated. Read through parse_map
+            #     rather than off a byte offset: cells live inside WorldTiles now, and a
+            #     test that knew the layout would have to be re-derived every time the
+            #     format moves -- which is exactly when this check is worth most.
+            fp, rp = pnx_assets.parse_map(fm), pnx_assets.parse_map(rm)
+            turned, _, _ = pnx_assets.rotate_grid(fp["cells"], fp["w"], fp["h"], orient,
                                                   stride=2)
             check(f"{name}: tile plane is the portrait plane rotated",
-                  turned == rm[body:body + cells])
+                  turned == rp["cells"])
+            check(f"{name}: flag overrides rotate with the plane",
+                  sorted(pnx_assets.rotate_point(x, y, fp["w"], fp["h"], orient) + (f,)
+                         for x, y, f in fp["overrides"]) == sorted(rp["overrides"]))
 
             # --- and it costs nothing. Rotation permutes cells, so a map that changes
             #     size between orientations means a choice somewhere depends on the order
@@ -461,6 +464,417 @@ def _font_advance(root, dialog, font, ch):
     if index == 0xFF:
         return None
     return b[16 + index * pnx_assets.FONT_GLYPH_ENTRY + 4]
+
+
+# ------------------------------------------------------ multi-atlas maps and WorldTiles
+#
+# Two features that had to land together. A map draws from several atlases by partitioning
+# its 10-bit cell index into one slice per atlas, and it is stored as a grid of WorldTiles
+# so a map larger than RAM is a content decision rather than an impossible one.
+#
+# What is worth testing here is not that a big map builds -- it is that the id partition
+# and the slicing are INVERTIBLE, since both are silent when wrong: a cell that resolves to
+# the wrong atlas draws the wrong picture, and a WorldTile written at the wrong offset
+# draws the wrong part of the world. Neither raises anything.
+
+TWO_ATLASES = '''
+    [[atlas]]
+    name = "tiles"
+    sheet = "sheet.png"
+    tile = 16
+    region = [0, 0, 2, 2]
+    max_tiles = 16
+    out = "tiles.bin"
+    autopick = ["floor", "wall", "accent"]
+
+    [[atlas]]
+    name = "second"
+    sheet = "sheet2.png"
+    tile = 16
+    region = [0, 0, 2, 2]
+    max_tiles = 16
+    out = "second.bin"
+    autopick = ["floor", "wall", "accent"]
+'''
+
+TWO_LEGEND = '''
+    [legend."."]
+    tile = "floor"
+    flags = []
+    [legend."#"]
+    tile = "wall"
+    flags = ["solid"]
+    [legend."D"]
+    tile = "accent"
+    flags = ["warp"]
+    [legend."s"]
+    tile = "floor"
+    atlas = "second"
+    flags = []
+'''
+
+
+def second_sheet(root):
+    """A second, visibly different sheet, so the two atlases cannot dedup into one."""
+    make_sheet(os.path.join(root, "sheet.png"))
+    img = Image.open(os.path.join(root, "sheet.png")).convert("RGBA")
+    px = img.load()
+    for y in range(img.size[1]):
+        for x in range(img.size[0]):
+            r, g, b, a = px[x, y]
+            px[x, y] = (b, r, g, a)
+    img.save(os.path.join(root, "sheet2.png"))
+
+
+def build_maps(root, _extra=None, **overrides):
+    """Builds and returns {map name: parsed blob}, so a test can assert on the content."""
+    (_extra or make_sheet)(os.path.join(root, "sheet.png") if _extra is None else root)
+    path = manifest(root, **overrides)
+    out = os.path.join(root, "out")
+    with contextlib.redirect_stdout(io.StringIO()):
+        pnx_assets.build(path, out, os.path.join(out, "gen.h"))
+    built = {}
+    for name in os.listdir(out):
+        if not name.endswith(".bin"):
+            continue
+        blob = read_blob(out, name)
+        if blob[:2] != pnx_assets.MAGIC_MAP:
+            continue
+        # A map's WorldTile payloads are in bank resources beside it, `<stem>_b<N>.bin`,
+        # so reassembling the cell plane means gathering them first.
+        stem = name[:-4]
+        banks, i = [], 0
+        while os.path.exists(os.path.join(out, f"{stem}_b{i}.bin")):
+            banks.append(read_blob(out, f"{stem}_b{i}.bin"))
+            i += 1
+        built[name] = pnx_assets.parse_map(blob, banks)
+    return built
+
+
+def check_worldtiles():
+    # --- the id partition is arithmetic, so it is tested as arithmetic. Reaching 1024 ids
+    #     through real sheets would mean five 255-tile atlases and a slow test for a bound
+    #     that is one comparison.
+    table, total = pnx_assets.map_tile_bases(
+        "m", ["a", "b", "c"], {"a": 10, "b": 200, "c": 5}, {"a": 16, "b": 16, "c": 16})
+    check("tile ids partition in declaration order",
+          table == [("a", 0, 10), ("b", 10, 200), ("c", 210, 5)] and total == 215)
+
+    try:
+        pnx_assets.map_tile_bases("m", ["a", "b"], {"a": 600, "b": 600},
+                                  {"a": 16, "b": 16})
+        check("1024 tile ids is a build error", False)
+    except pnx_assets.BuildError as e:
+        check("1024 tile ids is a build error", "1200 tiles between them" in str(e))
+
+    try:
+        pnx_assets.map_tile_bases("m", ["a", "b"], {"a": 4, "b": 4}, {"a": 16, "b": 8})
+        check("mixed tile sizes in one map is a build error", False)
+    except pnx_assets.BuildError as e:
+        check("mixed tile sizes in one map is a build error",
+              "must share a tile size" in str(e))
+
+    # --- a map that draws from two atlases resolves each legend char to the right slice
+    with tempfile.TemporaryDirectory() as root:
+        second_sheet(root)
+        built = build_maps(root, _extra=second_sheet, atlas=TWO_ATLASES, legend=TWO_LEGEND, **maps('''
+            [[map]]
+            name = "a"
+            out = "a.bin"
+            atlases = ["tiles", "second"]
+            start = [1, 1]
+            rows = """
+            ####
+            #.s#
+            ####
+            """
+        '''))
+        m = built["a.bin"]
+        check("map records both atlases", len(m["atlas_table"]) == 2)
+        first_second = m["atlas_table"][1][1]
+
+        def cell(x, y):
+            i = (y * m["w"] + x) * 2
+            return (m["cells"][i] | m["cells"][i + 1] << 8) & 0x03FF
+
+        check("a cell from the first atlas keeps a low id", cell(1, 1) < first_second)
+        check("a cell from the second atlas lands in its slice",
+              cell(2, 1) >= first_second)
+        check("both atlases are pinned by the WorldTile that uses them",
+              m["masks"][0] == 0b11)
+
+    # --- a map whose legend reaches an atlas it does not draw from, named at the cell
+    expect_fail("legend names an atlas the map does not use", "which this map does not use",
+                _extra=second_sheet, atlas=TWO_ATLASES, legend=TWO_LEGEND, **maps('''
+        [[map]]
+        name = "a"
+        out = "a.bin"
+        atlases = ["tiles"]
+        start = [1, 1]
+        rows = """
+        ####
+        #.s#
+        ####
+        """
+    '''))
+
+    # --- ...but a legend it merely shares is fine. This is the case that makes a
+    #     project-wide legend usable at all: every map would otherwise have to define
+    #     every character.
+    expect_ok("an unused legend char may name another map's atlas",
+              _extra=second_sheet, atlas=TWO_ATLASES, legend=TWO_LEGEND, **maps('''
+        [[map]]
+        name = "a"
+        out = "a.bin"
+        atlases = ["tiles"]
+        start = [1, 1]
+        rows = """
+        ####
+        #..#
+        ####
+        """
+    '''))
+
+    expect_fail("atlas listed twice", "listed twice",
+                _extra=second_sheet, atlas=TWO_ATLASES, **maps('''
+        [[map]]
+        name = "a"
+        out = "a.bin"
+        atlases = ["tiles", "tiles"]
+        start = [1, 1]
+        rows = """
+        ####
+        #..#
+        ####
+        """
+    '''))
+
+    expect_fail("atlas and atlases together", "not both", **maps('''
+        [[map]]
+        name = "a"
+        out = "a.bin"
+        atlas = "tiles"
+        atlases = ["tiles"]
+        start = [1, 1]
+        rows = """
+        ####
+        #..#
+        ####
+        """
+    '''))
+
+    # --- slicing is invertible. A map three WorldTiles wide exercises the offsets, the
+    #     clipped edge column and the reassembly all at once.
+    with tempfile.TemporaryDirectory() as root:
+        rows = "\n".join(["#" * 40] + ["#" + "." * 38 + "#"] * 18 + ["#" * 40])
+        built = build_maps(root, **{"maps": f'''
+            [[map]]
+            name = "a"
+            out = "a.bin"
+            worldtile = 16
+            start = [1, 1]
+            rows = """
+{rows}
+"""
+        '''})
+        m = built["a.bin"]
+        check("a 40x20 map slices into 3x2 WorldTiles",
+              (m["cols"], m["rows"]) == (3, 2))
+        check("the reassembled plane is the whole map",
+              len(m["cells"]) == m["w"] * m["h"] * 2)
+        check("the clipped edge column is not padded out",
+              m["w"] == 40 and m["h"] == 20)
+        # Corners are wall, the interior is floor: if any WorldTile landed at the wrong
+        # offset the plane would disagree with the rows that produced it.
+        def cell(x, y):
+            i = (y * m["w"] + x) * 2
+            return (m["cells"][i] | m["cells"][i + 1] << 8) & 0x03FF
+        check("cells land at the coordinates they were authored at",
+              cell(0, 0) == cell(39, 19) == cell(20, 0) and cell(20, 10) != cell(0, 0))
+
+    # --- and a map bigger than the screen streams rather than sitting resident whole
+    with tempfile.TemporaryDirectory() as root:
+        rows = "\n".join(["#" * 200] + ["#" + "." * 198 + "#"] * 198 + ["#" * 200])
+        built = build_maps(root, **{"maps": f'''
+            [[map]]
+            name = "a"
+            out = "a.bin"
+            start = [1, 1]
+            rows = """
+{rows}
+"""
+        '''})
+        m = built["a.bin"]
+        total = m["cols"] * m["rows"]
+        check("a 200x200 map holds more WorldTiles than slots", total > m["wt_slots"])
+        # A 200x228 screen at 16px tiles touches at most 2 WorldTiles of 16 cells per
+        # axis, plus one of margin on each side: 4x4.
+        check("the resident pool covers the screen with a margin on each side",
+              m["wt_slots"] == 16)
+        whole_plane = m["w"] * m["h"] * 2
+        check("streaming a 200x200 map costs a pool, not the whole 80 KB plane",
+              m["wt_slots"] * m["wt_slot_bytes"] < whole_plane // 8)
+
+    # --- `resident = true` gives a slot per WorldTile: what a map cost before WorldTiles
+    #     existed, kept so the two can be measured against each other rather than argued
+    #     about. Checked on a map big enough for the two to differ.
+    with tempfile.TemporaryDirectory() as root:
+        rows = "\n".join(["#" * 120] + ["#" + "." * 118 + "#"] * 118 + ["#" * 120])
+        spec = '''
+            [[map]]
+            name = "a"
+            out = "a.bin"
+            {extra}
+            start = [1, 1]
+            rows = """
+{rows}
+"""
+        '''
+        streamed = build_maps(root, **{"maps": spec.format(extra="", rows=rows)})["a.bin"]
+        whole = build_maps(root, **{"maps": spec.format(extra="resident = true",
+                                                        rows=rows)})["a.bin"]
+        total = streamed["cols"] * streamed["rows"]
+        check("without `resident` a large map streams", streamed["wt_slots"] < total)
+        check("`resident = true` takes a slot per WorldTile", whole["wt_slots"] == total)
+        check("and the two describe the same world",
+              whole["cells"] == streamed["cells"])
+        check("holding it whole costs several times the pool",
+              whole["wt_slots"] * whole["wt_slot_bytes"]
+              > 3 * streamed["wt_slots"] * streamed["wt_slot_bytes"])
+
+    # --- worldtile size is a power of two, because the runtime shifts rather than divides
+    expect_fail("worldtile must be a power of two", "power of two", **maps('''
+        [[map]]
+        name = "a"
+        out = "a.bin"
+        worldtile = 12
+        start = [1, 1]
+        rows = """
+        ####
+        #..#
+        ####
+        """
+    '''))
+
+    # --- a scene must not also load a tileset its map streams: that is two resident copies
+    expect_fail("scene reloads a tileset its map streams", "already streams", scene='''
+        [scene.only]
+        map = "a"
+        atlases = ["tiles"]
+    ''')
+
+    # --- an atlas and a map sharing a name both become RESOURCE_ID_<NAME> in the SDK's
+    #     generated header. The manifest's own handles are prefixed by kind and never
+    #     collide, so this only shows up at `arm-none-eabi-gcc` -- as a redefinition
+    #     warning that names neither asset and points at a generated file.
+    global checks, failures
+    checks += 1
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        path = manifest(root, **maps('''
+            [[map]]
+            name = "tiles"
+            out = "map_tiles.bin"
+            start = [1, 1]
+            rows = """
+            ####
+            #..#
+            ####
+            """
+        '''))
+        with open(os.path.join(root, "package.json"), "w") as f:
+            f.write('{"pebble": {"resources": {"media": []}}}')
+        err = None
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                pnx_assets.build(path, os.path.join(root, "out"),
+                                 os.path.join(root, "out", "gen.h"),
+                                 package=os.path.join(root, "package.json"))
+        except pnx_assets.BuildError as e:
+            err = str(e)
+        if err is None or "RESOURCE_ID_TILES" not in err:
+            print(f"  FAIL an atlas and a map sharing a name must be refused: got {err!r}")
+            failures += 1
+
+
+# ------------------------------------------------------- removing an atlas from the editor
+#
+# Until this existed the only way to undo an import was to hand-edit the TOML the editor
+# exists to keep you out of. What is worth testing is not that a block disappears -- it is
+# that the manifest still BUILDS afterwards, and that an atlas something still draws with
+# is refused with the reason rather than deleted.
+
+def check_editor_atlas_removal():
+    import shutil as sh
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "..", "tools"))
+    import pnx_editor                                       # noqa: E402
+
+    with tempfile.TemporaryDirectory() as root:
+        second_sheet(root)
+        path = manifest(root, atlas=TWO_ATLASES, legend=TWO_LEGEND, **maps('''
+            [[map]]
+            name = "a"
+            out = "a.bin"
+            atlases = ["tiles", "second"]
+            start = [1, 1]
+            rows = """
+            ####
+            #.s#
+            ####
+            """
+        '''))
+        proj = pnx_editor.Project(path)
+
+        check("an atlas a map draws with reports its user",
+              any("map 'a'" in u for u in proj.atlas_users("second")))
+        try:
+            proj.remove_atlas("second")
+            check("removing an atlas in use is refused", False)
+        except ValueError as e:
+            check("removing an atlas in use is refused", "still in use" in str(e))
+
+        # Point the map at one atlas, then the other really is removable -- and what is
+        # left has to build, which is the assertion that would catch a block excised at
+        # the wrong line.
+        sh.copy(path, path + ".bak")
+        text = open(path).read().replace('atlases = ["tiles", "second"]',
+                                         'atlases = ["tiles"]').replace("#.s#", "#..#")
+        with open(path, "w") as f:
+            f.write(text)
+        proj = pnx_editor.Project(path)
+        proj.remove_atlas("second")
+
+        check("the block is gone",
+              not any(a["name"] == "second" for a in proj.man.get("atlas", [])))
+        # The legend entry survives, and is allowed to: nothing paints with it any more,
+        # so it is a dangling reference rather than a broken build. The pipeline agrees --
+        # it reports the cell, not the legend.
+        check("and the legend entry pointing at it survives untouched",
+              proj.man.get("legend", {}).get("s", {}).get("atlas") == "second")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            pnx_assets.build(path, os.path.join(root, "out2"),
+                             os.path.join(root, "out2", "gen.h"))
+        check("the manifest still builds after a removal", True)
+
+        try:
+            proj.remove_atlas("nosuch")
+            check("removing an atlas that does not exist is refused", False)
+        except ValueError:
+            check("removing an atlas that does not exist is refused", True)
+
+    # The first atlas is what every map with NO `atlas` key draws with, so removing it
+    # would silently re-point them at whatever is declared first instead. That rebuilds
+    # clean and draws the wrong world, which is the worst shape a content bug can take --
+    # and the reason this case is called out separately rather than folded into "in use".
+    with tempfile.TemporaryDirectory() as root:
+        second_sheet(root)
+        proj = pnx_editor.Project(manifest(root, atlas=TWO_ATLASES))
+        check("removing the default atlas warns about the maps that rely on it",
+              any("first atlas declared" in u for u in proj.atlas_users("tiles")))
+        check("a second atlas nothing uses is removable",
+              proj.atlas_users("second") == [])
 
 
 def main():
@@ -717,7 +1131,9 @@ def main():
     '''))
 
     # --- legend and atlas
-    expect_fail("legend names a role its atlas lacks", "atlas does not define", legend='''
+    # The message names the atlas, not just "its atlas": a map can draw from several now,
+    # and "which atlas?" is the first thing an author asks.
+    expect_fail("legend names a role its atlas lacks", "'tiles' does not define", legend='''
         [legend."."]
         tile = "nonexistent"
         flags = []
@@ -846,6 +1262,8 @@ def main():
         out = "guy.bin"
         variants = ["var.png"]
     ''')
+
+    check_worldtiles()
 
     # --- fonts
     #
@@ -1076,6 +1494,8 @@ def main():
             print(f"  FAIL editor page: <{tag}> opened {opens} times, closed {closes}")
             failures += 1
             break
+
+    check_editor_atlas_removal()
 
     print(f"\n{checks} checks, {failures} failures")
     return 1 if failures else 0

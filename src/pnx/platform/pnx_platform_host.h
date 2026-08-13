@@ -13,6 +13,11 @@ void pnx_host_queue_event(PnxEvent ev);
 // Clears queued events and zeroes the framebuffer.
 void pnx_host_reset(void);
 
+// Ranged reads issued since the last pnx_host_reset. On device a read's cost is dominated
+// by how far into the resource it starts, so "how many reads" is the number a streaming
+// change has to be judged on -- and it is not observable anywhere else.
+uint32_t pnx_host_resource_reads(void);
+
 // The flat render target, for asserting on pixels directly.
 PnxTarget *pnx_host_target(void);
 

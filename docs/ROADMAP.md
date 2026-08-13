@@ -1,11 +1,12 @@
 # Roadmap
 
-Current state: **M0-M4c complete**, editor through E14, shipped as
+Current state: **M0-M4d complete**, editor through E15, shipped as
 [v0.1.0-beta.1](https://github.com/X64Tyko/pebblnyx/releases/tag/v0.1.0-beta.1) —
 installers for Linux, Windows and both macOS architectures, engine inside. M5 (save)
 next. `platform`, `core`, `assets`, `gfx`, `audio` and `input` run on device and are
-covered by 435 host checks plus 84 pipeline checks. Audio and landscape still want
-hardware confirmation. No emulator is possible for PT2 — see [`EDITOR.md`](EDITOR.md).
+covered by 562 host checks plus 121 pipeline checks. Audio, landscape and map streaming
+still want hardware confirmation. No emulator is possible for PT2 — see
+[`EDITOR.md`](EDITOR.md).
 
 The ordering principle: a framework with no consumer gets the abstractions wrong in ways
 nobody discovers until someone tries to use it. PGE (the 2014 Pebble game engine) failed
@@ -246,6 +247,169 @@ Outstanding: device confirmation. A host cannot tell you whether a landscape scr
 the hand, whether the backlight hold survives a notification, or whether swallowing BACK feels like
 protection or a trap.
 
+## M4d — Multi-atlas maps and WorldTile streaming — **DONE** (pending device confirmation)
+
+Three limits arrived together as content grew past the first example's scale: a map could draw
+from exactly one atlas, a map was resident whole or not at all, and an atlas imported by mistake
+could only be removed by hand-editing the manifest.
+
+**A map draws from several atlases by partitioning its tile id space, not by spending a bit per
+cell.** The cell's existing ten bits become a map-global id, and the map's atlas table says where
+each atlas's slice begins. That costs the draw loop a walk of a table with at most eight entries
+and leaves the four per-cell palette bits M4b reserved exactly where they were. 1,024 ids covers
+four full atlases; past that the pipeline names the atlases and their tile counts and stops.
+
+**A map is stored as a grid of WorldTiles** -- square blocks of map cells that are the unit of
+residency. Deliberately *not* called a MegaTile: `metatile` already means the deduplicated 8x8
+quadrant inside an atlas, and two names two letters apart in the same headers is a reading hazard
+for as long as the code lives. A metatile is art; a WorldTile is a piece of the world.
+
+- **One format, adaptive policy.** Every map is sliced, including small ones. When the whole grid
+  fits the pool, all of it loads at map load and nothing is ever evicted -- a 32x24 map costs what
+  it always did and the runtime has no second code path for "small".
+- **The unit is what makes this legal**, given `pnx_assets.h`'s residency rule. A 128-byte tile is
+  6.7 ms/frame at 725 tiles; a 516-byte WorldTile is ~45 µs paid at a boundary. Same fitted model,
+  opposite conclusion, because the call cost amortises over 256 cells.
+- **Atlases stream too**, pinned by the WorldTiles that name them and evicted when nothing resident
+  depends on them. The pipeline checks that the union of atlases across any simultaneously-resident
+  window fits the pool, and fails the build naming the corner of the map that does not -- a runtime
+  thrash turned into a build error.
+- **Pool slots are not a uniform stride.** With a slot per atlas nothing is ever evicted, so each
+  slot is exactly its atlas's size: the example's ship at 29,596 B beside water at 8,116 costs
+  37 KB rather than the 59 KB two slots of the larger would. Only a map that really streams its
+  atlases pays for slots sized for the biggest.
+- **Collision stopped depending on the atlas.** The flag table ships with the MAP, indexed by its
+  own tile ids. A streamed atlas can be gone when the player walks toward a wall, so reading flags
+  out of one was never going to hold. A few hundred bytes for collision that never depends on what
+  the renderer happens to have loaded.
+- **A scene no longer lists its map's tilesets.** The map owns them; a scene listing one loads a
+  second resident copy, which is not a mismatch the runtime can see -- it just quietly costs twice
+  the atlas. The pipeline refuses it and says which line to delete.
+
+**Result.** Map format v8. The overworld's `deck` map draws from two atlases, and a second example
+walks a 192x192 world that cannot fit in RAM. 562 host checks and 121 pipeline checks pass.
+
+| Module | Before | After | Δ |
+|---|---|---|---|
+| pnx/assets | 3,549 | 5,369 | +1,820 |
+| pnx/gfx | 2,192 | 2,552 | +360 |
+| game | 1,340 | 1,510 | +170 |
+| **app total** | **15,157** | **18,349 / 65,535 (28.0%)** | **+3,192** |
+
+**~2.4 KB of engine to buy maps that do not have to fit in RAM.** Worth stating plainly rather than
+buried: that is a fifth of what the framework cost before this, spent on a pool allocator, an
+eviction policy and a second blob-loading destination. It pays for itself the first time a map
+exceeds ~30 KB of cells, and costs a project whose maps all fit exactly that much and nothing back.
+
+**A build-order bug fell out of verifying it.** An atlas named `ship` and a map named `ship` both
+become `RESOURCE_ID_SHIP` in the SDK's generated header -- the manifest's own handles are prefixed
+by kind and never collide, but `package.json` resource names are not. The app failed to compile with
+a redefinition warning naming neither asset and pointing at a generated file. The pipeline refuses
+the collision now and names both.
+
+### `examples/worldtiles`, and the two bugs it found
+
+A second example, because the first one's maps all fit and a streamer that never streams is not
+tested by anything. A 192x192 field -- 73,728 bytes of cell plane, more than half `emery`'s app RAM
+-- in three atlas bands, plus three interiors warped between. Full reasoning in its
+[README](../examples/worldtiles/README.md).
+
+**It carries its own control, which is the part worth copying.** `resident = true` on a map gives it
+a slot per WorldTile: what a map cost before any of this existed. `field` and `plain` are the same
+rows drawn from the same tilesets and differ by that one line, so SELECT swaps between them at the
+same position and the only thing that changes is the number:
+
+| | Resident | WorldTiles | Atlas slots |
+|---|---|---|---|
+| `field` — streamed | **23,678 B** | 16 of 144 | 2 of 3 |
+| `plain` — held whole | **98,551 B** | 144 of 144 | 3 of 3 |
+
+4.2x, for an identical picture -- and `emery` reports ~111 KB of heap, so the held-whole world fits
+with about 12 KB to spare before the game allocates anything of its own. That is the argument in one
+number, and it is now a build-time line on every map that streams rather than a claim in a document.
+
+Two real bugs, both found by `tests/test_stream.c` walking the field end to end:
+
+- **A warp deadlocked the atlas pool.** WorldTiles were evicted one at a time, on demand, and each
+  still-resident one pinned the old atlases -- so a jump to a region drawn from a tileset nothing
+  resident used could never free a slot, and the whole window failed to load. Walking never showed
+  it, because the window moves a tile at a time and the old WorldTiles drain gradually. It took a
+  jump to a distant part of the map, which is exactly what a warp is. Fixed by evicting everything
+  outside the window *before* loading anything, which also took the streamer's worst backlog from
+  one WorldTile to zero.
+- **A map that fits was still being filled lazily.** "Resident" described the allocation and not the
+  contents, so a small map -- every map in the overworld example -- still read flash as the player
+  walked. `pnx_map_load` now fills any map whose pools can hold it before it returns, and the
+  streaming calls early-out on it entirely. Small maps behave exactly as they did before WorldTiles,
+  which is what they always should have.
+
+**E15 falls out of the same work**: `remove_atlas` in the editor, refusing while a map, a scene or a
+painted legend character still depends on the atlas and saying which. A legend entry nobody paints
+with is a dangling reference rather than a dependency, the same view the pipeline takes.
+
+### Device confirmation: the RAM claim holds, the flash model does not
+
+`examples/worldtiles` ran on hardware. **The memory result is exactly as designed** -- 23,514 B
+streamed against 97,351 B held whole, 26.8 fps held while walking, the streamer never once behind
+(`missing` stayed 0 even at eight tiles per tick), and `Still allocated <0B>` at exit.
+
+**The read cost is another matter.** Loads came in 50-280x over the predicted figure, and the
+multiplier grows with how deep into the resource the read starts: the same 16-WorldTile window costs
+46 ms near the map's origin and 305 ms two thirds of the way through it. That points at
+`resource_load_byte_range` being **O(offset)** -- streaming from the start of the resource on every
+call -- which the original 29 µs/call figure could not have caught, having been measured over a 16KB
+resource where every offset is small. Numbers and the fit in [`MEASUREMENTS.md`](MEASUREMENTS.md).
+
+In practice: walking is unaffected, crossing a WorldTile boundary drops one frame (47-63 ms against
+8 ms of ordinary work, 24.2 fps while sprinting), and scene loads pay for it -- 305 ms for a warp
+into the middle of the field, 2 s to hold the world whole.
+
+### The layout answer: banks, and batched runs
+
+Two changes, both aimed at the term that actually dominates.
+
+**WorldTile payloads left the map's resource.** They live in **bank resources** of ~8KB, whose asset
+ids run consecutively from a `first_bank_asset` in the map header, so bank *i* is that plus *i*. A
+seek is now capped by the bank rather than by the map: 4KB instead of 74KB on the field, and the
+map's own resource drops from 75,232 bytes to 1,000 -- it holds only what stays resident.
+
+**Payloads are padded to the pool's slot stride**, which pays for itself twice. A WorldTile's home
+becomes arithmetic -- bank `i >> bank_shift`, offset `(i & mask) * slot_bytes` -- so the per-tile
+offset table leaves the resident preamble entirely. And a run of consecutive WorldTiles is then
+contiguous at *both* ends, in the bank and in the pool, which is what makes **batching** a single
+ranged read: a whole-map load is one read per bank instead of one per tile (18 against 144), and a
+streaming window fetches each row-run in one call.
+
+Banks are stamped like every other blob and checked once at map load rather than per read -- M4c's
+rule holds, and a bank is geometry, so one left from a build in the other orientation would be a
+scrambled world. Checking per read would have put a seek to offset 0 in front of every fetch, on the
+one platform where the seek *is* the cost.
+
+**A side effect worth having**: `field` and `plain` are the same world, so their banks are
+byte-identical and the `.pbpack` deduplicates them. The example ships two 192x192 worlds for 103 KB
+rather than 177 KB.
+
+**Confirmed on hardware, and it settled the diagnosis.** Same watch, same content:
+
+| | Before | After | |
+|---|---|---|---|
+| hold the 192x192 world | 1,984 ms | **74 ms** | 26.8x |
+| warp into the middle of the field | 305 ms | **12 ms** | 25.4x |
+| worst frame while walking | 47-63 ms | **8-12 ms** | 5.2x |
+| frames dropped crossing a WorldTile | one, every time | **none** | -- |
+
+Nothing about the byte count changed and the call count only fell 148 to 41, so neither explains a
+27x drop. What changed is how far into a resource each read starts. Per read: **1.8 ms against
+13.4 ms**. Walking now holds 26.8 fps -- the PT2 ceiling -- with the worst frame at 12 ms of a
+37.33 ms budget, and the held-whole world reads nothing at all once loaded.
+
+One observation to keep: the streamer's backlog reached 3 WorldTiles on a diagonal crossing a
+WorldTile *corner*, which asks for tiles in two directions at once. No holes, no dropped frame, so
+`PNX_MAP_STREAM_BUDGET` at 4 has room to spare -- and raising it is now cheap if a game wants it.
+
+Still wanted: the flash probe that sweeps offset independently of length. The before/after is strong
+but still read off session logs, and `MEASUREMENTS.md` says so.
+
 ## M5 — Save
 
 - Chunk packing into 256-byte units, minimum key count
@@ -409,6 +573,7 @@ any runtime code. Staged so each piece is independently useful:
 | **E12** | Sprite editor painting in ARGB2222; code editor over the project tree (stubs) | E10 | **DONE** |
 | **E13** | IDE shell: activity rail, contextual toolbar, shared output panel, status bar | E12 | **DONE** |
 | **E14** | Live budget while editing; per-tile import selection; opt-in engine editing; C highlighting and symbol checking | E13 | **DONE** |
+| **E15** | Remove an atlas, refusing while anything still draws with it; multi-atlas maps in the preview and the tile picker | E14, M4d | **DONE** |
 
 **E7 exists because a font is the one asset a person cannot author by hand at this scale.** At
 6x12 most typefaces are illegible -- hinting dominates at small sizes -- so the editor has to

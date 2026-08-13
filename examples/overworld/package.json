@@ -38,6 +38,21 @@
         },
         {
           "type": "raw",
+          "name": "SHIP",
+          "file": "ship.bin"
+        },
+        {
+          "type": "raw",
+          "name": "WATER",
+          "file": "water.bin"
+        },
+        {
+          "type": "raw",
+          "name": "SHIP_ACC",
+          "file": "ship_acc.bin"
+        },
+        {
+          "type": "raw",
           "name": "HERO",
           "file": "hero.bin"
         },
@@ -53,8 +68,28 @@
         },
         {
           "type": "raw",
+          "name": "OUTDOOR_0",
+          "file": "map_outdoor_b0.bin"
+        },
+        {
+          "type": "raw",
           "name": "CAVE",
           "file": "map_cave.bin"
+        },
+        {
+          "type": "raw",
+          "name": "CAVE_0",
+          "file": "map_cave_b0.bin"
+        },
+        {
+          "type": "raw",
+          "name": "DECK",
+          "file": "map_deck.bin"
+        },
+        {
+          "type": "raw",
+          "name": "DECK_0",
+          "file": "map_deck_b0.bin"
         },
         {
           "type": "raw",

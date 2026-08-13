@@ -46,8 +46,19 @@ static const uint32_t RESOURCES[] = PNX_ASSET_RESOURCE_TABLE;
 static bool enter_scene(Game *g, uint8_t scene, int32_t tx, int32_t ty) {
   if (!pnx_scene_load(scene)) return false;
 
-  const PnxAtlas *atlas = pnx_scene_atlas(0);
-  const int32_t T = atlas->tile_px;
+  PnxMap *map = pnx_scene_map();
+  if (!map) return false;
+
+  // The tile size comes from the MAP now, not from a scene atlas: a map draws from
+  // several tilesets and streams them, so there is no single "the" atlas to ask, and
+  // nothing is resident until the streamer has run.
+  const int32_t T = map->tile_px;
+
+  // Load what the first frame will show before it is shown. Without this the scene draws
+  // once with an empty world, which reads as a flash of holes on every warp.
+  pnx_camera_center(&g->camera, tx * T + T / 2, ty * T + T,
+                    pnx_tilemap_width(map), pnx_tilemap_height(map));
+  pnx_tilemap_stream_now(map, &g->camera);
 
   g->current_scene = scene;
   g->hero_tx = tx;
@@ -76,9 +87,8 @@ static bool enter_scene(Game *g, uint8_t scene, int32_t tx, int32_t ty) {
 // ------------------------------------------------------------------------ movement
 
 static void try_move(Game *g, int32_t dx, int32_t dy) {
-  const PnxMap *map = pnx_scene_map();
-  const PnxAtlas *atlas = pnx_scene_atlas(0);
-  if (!map || !atlas) return;
+  PnxMap *map = pnx_scene_map();
+  if (!map) return;
 
   const int32_t nx = g->hero_tx + dx, ny = g->hero_ty + dy;
   if (dx < 0) g->sprites[HERO].flags |= PNX_SPRITE_MIRROR;
@@ -90,7 +100,7 @@ static void try_move(Game *g, int32_t dx, int32_t dy) {
   g->hero_ty = ny;
   g->walk_phase ^= 1;
 
-  const int32_t T = atlas->tile_px;
+  const int32_t T = map->tile_px;
   g->sprites[HERO].x = nx * T + T / 2;
   g->sprites[HERO].y = ny * T + T;
   g->sprites[HERO].frame = g->walk_phase ? HERO_STEP_A : HERO_STEP_B;
@@ -143,13 +153,15 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
   if (!g->ready) {
     pnx_gfx_clear(target, 0xC0);
   } else {
-    const PnxMap *map = pnx_scene_map();
-    const PnxAtlas *atlas = pnx_scene_atlas(0);
+    PnxMap *map = pnx_scene_map();
 
     pnx_camera_center(&g->camera, g->sprites[HERO].x, g->sprites[HERO].y,
-                      pnx_tilemap_width(map, atlas), pnx_tilemap_height(map, atlas));
+                      pnx_tilemap_width(map), pnx_tilemap_height(map));
 
-    pnx_tilemap_draw(map, atlas, target, &g->camera);
+    // Stream, then draw. The margin means this is usually a no-op -- what it costs when
+    // it is not is a couple of ~44 us reads, against the 37.33 ms frame.
+    pnx_tilemap_stream(map, &g->camera);
+    pnx_tilemap_draw(map, target, &g->camera);
     pnx_sprites_draw_sorted(g->sprites, g->sprite_count, g->order, target, &g->camera);
 
     // The HUD draws HERE, inside the frame, like anything else. It used to be deferred

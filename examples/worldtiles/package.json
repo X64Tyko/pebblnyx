@@ -1,0 +1,282 @@
+{
+  "name": "pnx-worldtiles",
+  "author": "tyton",
+  "version": "1.0.0",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "pnx worldtiles",
+    "uuid": "3f9a5c12-7d64-4e08-b1a3-6c2e8f0d5b47",
+    "sdkVersion": "3",
+    "enableMultiJS": false,
+    "targetPlatforms": [
+      "emery"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [],
+    "resources": {
+      "media": [
+        {
+          "type": "raw",
+          "name": "PALETTES",
+          "file": "palettes.bin"
+        },
+        {
+          "type": "raw",
+          "name": "MEADOW",
+          "file": "meadow.bin"
+        },
+        {
+          "type": "raw",
+          "name": "RUINS",
+          "file": "ruins.bin"
+        },
+        {
+          "type": "raw",
+          "name": "HALL",
+          "file": "hall.bin"
+        },
+        {
+          "type": "raw",
+          "name": "HERO",
+          "file": "hero.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD",
+          "file": "map_field.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_0",
+          "file": "map_field_b0.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_1",
+          "file": "map_field_b1.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_2",
+          "file": "map_field_b2.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_3",
+          "file": "map_field_b3.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_4",
+          "file": "map_field_b4.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_5",
+          "file": "map_field_b5.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_6",
+          "file": "map_field_b6.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_7",
+          "file": "map_field_b7.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_8",
+          "file": "map_field_b8.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_9",
+          "file": "map_field_b9.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_10",
+          "file": "map_field_b10.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_11",
+          "file": "map_field_b11.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_12",
+          "file": "map_field_b12.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_13",
+          "file": "map_field_b13.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_14",
+          "file": "map_field_b14.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_15",
+          "file": "map_field_b15.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_16",
+          "file": "map_field_b16.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_17",
+          "file": "map_field_b17.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN",
+          "file": "map_plain.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_0",
+          "file": "map_plain_b0.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_1",
+          "file": "map_plain_b1.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_2",
+          "file": "map_plain_b2.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_3",
+          "file": "map_plain_b3.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_4",
+          "file": "map_plain_b4.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_5",
+          "file": "map_plain_b5.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_6",
+          "file": "map_plain_b6.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_7",
+          "file": "map_plain_b7.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_8",
+          "file": "map_plain_b8.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_9",
+          "file": "map_plain_b9.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_10",
+          "file": "map_plain_b10.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_11",
+          "file": "map_plain_b11.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_12",
+          "file": "map_plain_b12.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_13",
+          "file": "map_plain_b13.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_14",
+          "file": "map_plain_b14.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_15",
+          "file": "map_plain_b15.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_16",
+          "file": "map_plain_b16.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PLAIN_17",
+          "file": "map_plain_b17.bin"
+        },
+        {
+          "type": "raw",
+          "name": "HUT",
+          "file": "map_hut.bin"
+        },
+        {
+          "type": "raw",
+          "name": "HUT_0",
+          "file": "map_hut_b0.bin"
+        },
+        {
+          "type": "raw",
+          "name": "CRYPT",
+          "file": "map_crypt.bin"
+        },
+        {
+          "type": "raw",
+          "name": "CRYPT_0",
+          "file": "map_crypt_b0.bin"
+        },
+        {
+          "type": "raw",
+          "name": "KEEP",
+          "file": "map_keep.bin"
+        },
+        {
+          "type": "raw",
+          "name": "KEEP_0",
+          "file": "map_keep_b0.bin"
+        },
+        {
+          "type": "raw",
+          "name": "HUD",
+          "file": "font_hud.bin"
+        },
+        {
+          "type": "raw",
+          "name": "SCENES",
+          "file": "scenes.bin"
+        }
+      ]
+    }
+  }
+}

@@ -8,7 +8,7 @@
 
 CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -DPNX_PLATFORM_HOST -g -O1
-SRC      = test_core.c test_assets.c test_gfx.c test_text.c test_audio.c test_input.c \
+SRC      = test_core.c test_assets.c test_gfx.c test_text.c test_audio.c test_input.c test_stream.c \
            ../src/pnx/core/pnx_arena.c ../src/pnx/core/pnx_fmt.c ../src/pnx/core/pnx_diag.c \
            ../src/pnx/assets/pnx_assets.c \
            ../src/pnx/gfx/pnx_gfx.c ../src/pnx/gfx/pnx_tilemap.c \
@@ -24,7 +24,14 @@ all: test
 # Every header under src/, not a hand-listed subset. The list used to name only core and
 # platform, so editing pnx_assets.h left a stale binary that segfaulted on blobs the new
 # reader had already been taught to parse -- a failure that looks like a code bug and is not.
-HDRS = $(shell find ../src -name '*.h')
+#
+# The example's GENERATED header counts too, and for the same reason: test_assets.c takes
+# its asset ids from it rather than restating them, so adding an atlas to the example's
+# manifest renumbers every id under a binary that still holds the old ones. That presents
+# as twelve scene failures with nothing wrong in any source file.
+HDRS = $(shell find ../src -name '*.h') \
+       ../examples/overworld/src/c/assets_gen.h \
+       ../examples/worldtiles/src/c/assets_gen.h
 
 $(OUT): $(SRC) $(HDRS)
 	@mkdir -p build
