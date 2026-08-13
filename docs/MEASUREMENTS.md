@@ -1107,6 +1107,37 @@ A square with a duty other than 50% still uses the threshold comparison -- pulse
 cannot be tabled without a table per duty -- so PWM keeps its hard edges, which is the
 chiptune sound and is wanted. A plain 50% square now reads the band-limited table.
 
+### The frame rate drop was debug text, not the synth
+
+Enabling the synth took `audiotest` from 26.8 fps to 22, and the arithmetic matched almost
+exactly: the synth renders 7.9 ms a frame and the period grew 8.1 ms. That fit was a
+coincidence of magnitudes, and taking it as proof cost several device round trips.
+
+The app was drawing its HUD with five `pnx_platform_text_draw` calls. That path goes
+through the SDK at **~4.3 ms a call -- 21.5 ms, 58% of a 37.3 ms frame**, before any audio
+work at all. The diagnostics were the most expensive thing in the app; the synth was
+merely what pushed the total past the deadline.
+
+| | ms/frame | of a 37.3 ms period |
+|---|---|---|
+| 5 SDK text draws + synth | 29.4 | 79% |
+| 1 glyph-blitter draw + synth | 12.2 | 33% |
+| 1 glyph-blitter draw, synth off | 4.3 | 12% |
+
+**This is what E7 was for**, and the example predated it. A game drawing text through
+`pnx_text_draw` pays a blit; one drawing through the platform pays a system call it can
+only make after the framebuffer is released -- which is also why the HUD had to live in a
+post-frame hook and could never be drawn over.
+
+The crackle followed the frame rate: at 22 fps the period is 45 ms, so the audio timer is
+serviced irregularly and in bursts, and the lead was sized for 37. Restoring the frame rate
+restored the audio, with no change to the synth at all.
+
+**Worth generalising: measure the frame, not the feature you just added.** Three of the
+four things blamed for this -- 64-bit multiplies in the filter, envelope state on the
+stack, block-boundary discontinuities -- were wrong, and the last of those was an artefact
+of a broken measurement harness rather than anything in the audio.
+
 ### Headroom, not CPU, is what binds
 
 Four detuned voices plus wet effects peaked at **163 against the 127** the mixer clamps its

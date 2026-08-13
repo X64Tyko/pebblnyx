@@ -1063,6 +1063,10 @@ class Project:
             "dialog": {k: v.get("pages", [])
                        for k, v in self.man.get("dialog", {}).items()},
             "dialogs": self.dialogs(),
+            "songs": self.songs(),
+            "waveforms": list(pa.WAVEFORMS),
+            "lfo_targets": list(pa.LFO_TARGETS),
+            "filter_modes": list(pa.FILTER_MODES),
             "scenes": self.scenes(),
             "sprites": self.sprites(),
             "sprite_names": [s.get("name") for s in self.man.get("sprite", [])
@@ -3362,6 +3366,261 @@ rows = """
     # Text is content, so it lives in the manifest rather than as string literals in C --
     # and until now that meant a text editor, because the tab that reads dialog (Fonts,
     # for `charset = "auto"`) could only read it.
+
+    # ----------------------------------------------------------------------- music
+    #
+    # A song is patterns of rows, an order list, and a table of instruments -- the shape
+    # the sequencer reads and the shape a tracker shows. It had no editor at all, which
+    # left the one asset class that is genuinely hard to write by hand as the only one
+    # still requiring a text editor.
+    #
+    # A row cell is `NOTE:INSTRUMENT`, or '.' to hold and '-' to release. That spelling is
+    # the manifest's, and the editor keeps it rather than inventing a second one: a song
+    # half-edited by hand and half in the tool has to stay one song.
+
+    def songs(self):
+        """Every [music.*], in the shape a tracker draws."""
+        out = []
+        for name, spec in sorted(self.man.get("music", {}).items()):
+            patterns = [list(p.get("rows", [])) for p in spec.get("pattern", [])]
+            rows_per = len(patterns[0]) if patterns else 0
+            instruments = []
+            synth = spec.get("synth", [])
+            for i, ins in enumerate(spec.get("instrument", [])):
+                entry = {"wave": ins.get("wave", "square"),
+                         "attack": ins.get("attack", 5),
+                         "decay": ins.get("decay", 50),
+                         "sustain": ins.get("sustain", 180),
+                         "release": ins.get("release", 100),
+                         # The synth record for this index, if the song carries one. The
+                         # pipeline requires the two tables be the same length -- a row
+                         # names ONE instrument index -- so they are shown as one thing.
+                         "synth": dict(synth[i]) if i < len(synth) else None}
+                instruments.append(entry)
+            out.append({
+                "name": name,
+                "tempo": spec.get("tempo", 120),
+                "channels": spec.get("channels", 4),
+                "rows_per": rows_per,
+                "patterns": patterns,
+                "order": list(spec.get("order", list(range(len(patterns))))),
+                "instruments": instruments,
+                "has_synth": bool(synth),
+                # What the blob will cost: two bytes a cell, plus the tables.
+                "bytes": (len(patterns) * rows_per * spec.get("channels", 4) * 2
+                          + len(instruments) * 8
+                          + (2 + len(synth) * 48 if synth else 0)),
+            })
+        return out
+
+    def _music_block(self, name):
+        """(lines, start, end) for a [music.x] table and every subtable under it.
+
+        `[[music.x.pattern]]` and `[[music.x.instrument]]` bind to the song, so the block
+        runs past them -- stopping at the first bracket would cut a song in half and leave
+        its patterns orphaned under whatever came next.
+        """
+        lines = open(self.path).read().split("\n")
+        want = f"[music.{name}]"
+        start = next((i for i, l in enumerate(lines) if l.strip() == want), None)
+        if start is None:
+            return None
+        end = len(lines)
+        for j in range(start + 1, len(lines)):
+            s = lines[j].lstrip()
+            if not s.startswith("["):
+                continue
+            # Both spellings belong to the song: `[music.x.foo]` for a subtable and
+            # `[[music.x.foo]]` for an array of them. Matching only the first stopped the
+            # block at the song's own first instrument, which made every pattern in it
+            # invisible to the editor.
+            inner = s.lstrip("[")
+            if not inner.startswith(f"music.{name}."):
+                end = j
+                break
+        return lines, start, end
+
+    def _nth_table(self, header, index):
+        """(lines, start, end) for the index-th occurrence of a table header, file-wide.
+
+        Searched across the WHOLE file rather than inside the song's leading block,
+        because TOML lets a table's subtables appear anywhere -- audiotest's synth records
+        sit after its samples, which are not part of the song at all. Assuming contiguity
+        found the patterns and silently missed the synth table.
+        """
+        lines = open(self.path).read().split("\n")
+        heads = [j for j, l in enumerate(lines) if l.strip() == header]
+        if index >= len(heads):
+            return None
+        head = heads[index]
+        end = next((j for j in range(head + 1, len(lines))
+                    if lines[j].lstrip().startswith("[")), len(lines))
+        return lines, head, end
+
+    def _replace_table(self, header, index, body):
+        """Rewrite one table in place, keeping the blank lines that separate it."""
+        found = self._nth_table(header, index)
+        if not found:
+            raise ValueError(f"{header} #{index} is not in the manifest")
+        lines, head, end = found
+        gap = 0
+        while end - gap > head and lines[end - gap - 1].strip() == "":
+            gap += 1
+        lines[head:end] = body + [""] * gap
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def save_song_meta(self, name, tempo=None, order=None):
+        """Tempo and the order list -- the two song-level things a tracker changes often.
+
+        Patterns and instruments are edited through their own writers, because rewriting a
+        whole song to change one cell would discard every comment in it.
+        """
+        spec = self.man.get("music", {}).get(name)
+        if spec is None:
+            raise ValueError(f"no song named {name!r}")
+
+        want = []
+        if tempo is not None:
+            t = int(tempo)
+            if not 20 <= t <= 400:
+                raise ValueError("tempo must be between 20 and 400 bpm")
+            want.append(("tempo", f"tempo = {t}"))
+        if order is not None:
+            count = len(spec.get("pattern", []))
+            for p in order:
+                if not 0 <= int(p) < count:
+                    raise ValueError(f"order names pattern {p}, but the song has {count}")
+            if not order:
+                raise ValueError("an order list with no entries plays nothing")
+            want.append(("order", "order = " + json.dumps([int(p) for p in order])))
+
+        lines, start, end = self._music_block(name)
+        for key, value in want:
+            at = next((j for j in range(start + 1, end)
+                       if re.match(rf"\s*{key}\s*=", lines[j])), None)
+            if at is not None:
+                # The key may span several lines -- `order` is routinely written one
+                # pattern per line -- so the whole array is consumed. Replacing only the
+                # line the key sits on leaves the continuation lines behind as bare TOML,
+                # which is the same way migrating a map broke on a multi-line `warps`.
+                stop = at + 1
+                depth = lines[at].count("[") - lines[at].count("]")
+                while depth > 0 and stop < end:
+                    depth += lines[stop].count("[") - lines[stop].count("]")
+                    stop += 1
+                lines[at:stop] = [value]
+                end -= (stop - at) - 1
+            else:
+                # Before the first subtable, or the key would bind to a pattern.
+                at = next((j for j in range(start + 1, end)
+                           if lines[j].lstrip().startswith("[")), end)
+                while at > start and lines[at - 1].strip() == "":
+                    at -= 1
+                lines[at:at] = [value]
+                end += 1
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def save_pattern(self, name, index, rows):
+        """Rewrite one pattern's rows. The unit a tracker edits."""
+        spec = self.man.get("music", {}).get(name)
+        if spec is None:
+            raise ValueError(f"no song named {name!r}")
+        patterns = spec.get("pattern", [])
+        if not 0 <= index < len(patterns):
+            raise ValueError(f"song {name!r} has {len(patterns)} patterns, not {index + 1}")
+
+        channels = int(spec.get("channels", 4))
+        expect = len(patterns[0].get("rows", []))
+        if len(rows) != expect:
+            raise ValueError(f"pattern 0 has {expect} rows, so this one must too -- the "
+                             f"pipeline requires every pattern in a song to match")
+        for ri, row in enumerate(rows):
+            cells = row.split()
+            if len(cells) != channels:
+                raise ValueError(f"row {ri} has {len(cells)} cells for {channels} channels")
+
+        body = [f"[[music.{name}.pattern]]", "rows = ["]
+        body += [f'  {json.dumps(r)},' for r in rows]
+        body += ["]"]
+        self._replace_table(f"[[music.{name}.pattern]]", index, body)
+
+    def save_instrument(self, name, index, plain, synth=None):
+        """Rewrite one instrument of a song, both halves.
+
+        The plain envelope and the synth record are edited as ONE thing because a pattern
+        row names one instrument index: the pipeline refuses tables of different lengths
+        precisely so a note cannot play a different sound depending on which table it
+        resolved through. Splitting them in the UI would invite exactly that.
+
+        Validated by packing the candidate through the real pipeline, the same way an
+        atlas carve and a sprite are, so anything the build would reject is rejected here.
+        """
+        spec = self.man.get("music", {}).get(name)
+        if spec is None:
+            raise ValueError(f"no song named {name!r}")
+        count = len(spec.get("instrument", []))
+        if not 0 <= index < count:
+            raise ValueError(f"song {name!r} has {count} instruments, not {index + 1}")
+
+        if plain.get("wave") not in pa.WAVEFORMS:
+            raise ValueError(f"unknown waveform {plain.get('wave')!r} "
+                             f"(known: {', '.join(pa.WAVEFORMS)})")
+        if synth is not None:
+            try:
+                pa.pack_synth_instrument(synth, f"instrument {index}")
+            except pa.BuildError as e:
+                raise ValueError(str(e)) from None
+            if not spec.get("synth"):
+                raise ValueError(
+                    f"song {name!r} has no synth table. Adding one means adding a record "
+                    f"for every instrument, because a row names one index and the two "
+                    f"tables have to line up.")
+
+        body = [f"[[music.{name}.instrument]]",
+                f'wave = "{plain["wave"]}"',
+                f'attack = {int(plain.get("attack", 5))}',
+                f'decay = {int(plain.get("decay", 50))}',
+                f'sustain = {int(plain.get("sustain", 180))}',
+                f'release = {int(plain.get("release", 100))}']
+        self._replace_table(f"[[music.{name}.instrument]]", index, body)
+
+        if synth is not None:
+            self._save_synth_record(name, index, synth)
+
+    def _save_synth_record(self, name, index, synth):
+        """Rewrite one [[music.x.synth]] entry, keeping the rest of the table."""
+        def env(e, d_attack, d_decay, d_sustain, d_release):
+            return ("{ attack = %d, decay = %d, sustain = %d, release = %d }"
+                    % (int(e.get("attack", d_attack)), int(e.get("decay", d_decay)),
+                       int(e.get("sustain", d_sustain)), int(e.get("release", d_release))))
+
+        body = [f"[[music.{name}.synth]]",
+                f'filter = "{synth.get("filter", "off")}"',
+                f'cutoff_base = {int(synth.get("cutoff_base", 128))}',
+                f'resonance = {int(synth.get("resonance", 0))}',
+                f'cutoff_env = {int(synth.get("cutoff_env", 0))}',
+                f'lfo_target = "{synth.get("lfo_target", "off")}"',
+                f'lfo_rate = {int(synth.get("lfo_rate", 0))}',
+                f'lfo_depth = {int(synth.get("lfo_depth", 0))}',
+                f'pitch_env = {int(synth.get("pitch_env", 0))}',
+                f'pitch_env_decay = {int(synth.get("pitch_env_decay", 0))}',
+                f'reverb = {int(synth.get("reverb", 0))}',
+                f'chorus = {int(synth.get("chorus", 0))}',
+                "amp = " + env(synth.get("amp", {}), 5, 80, 180, 120),
+                "cutoff = " + env(synth.get("cutoff", {}), 5, 80, 128, 120),
+                "osc = ["]
+        for o in synth.get("osc", []):
+            body.append('  { wave = "%s", volume = %d, detune = %d, octave = %d, '
+                        'duty = %d },'
+                        % (o.get("wave", "square"), int(o.get("volume", 200)),
+                           int(o.get("detune", 0)), int(o.get("octave", 0)),
+                           int(o.get("duty", 128))))
+        body.append("]")
+        self._replace_table(f"[[music.{name}.synth]]", index, body)
 
     def dialogs(self):
         """Every [dialog.*] and its pages, with what the text costs."""
@@ -8696,6 +8955,20 @@ def make_handler(session):
                 elif self.path == "/api/project/set":
                     d = json.loads(raw)
                     session.proj.set_project(d["key"], d["value"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/song/meta":
+                    d = json.loads(raw)
+                    session.proj.save_song_meta(d["name"], d.get("tempo"),
+                                                d.get("order"))
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/song/pattern":
+                    d = json.loads(raw)
+                    session.proj.save_pattern(d["name"], int(d["index"]), d["rows"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/song/instrument":
+                    d = json.loads(raw)
+                    session.proj.save_instrument(d["name"], int(d["index"]),
+                                                 d["plain"], d.get("synth"))
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/dialog":
                     d = json.loads(raw)
