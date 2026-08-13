@@ -173,10 +173,20 @@ class Updater:
     engine their project compiles against -- so an upgrade is a decision, not a surprise.
     """
 
+    # How long a caller will wait for GitHub before being told to try again. Short on
+    # purpose: the answer is "is there a newer build", nobody is blocked on it, and the
+    # cost of waiting longer is a UI that appears to have hung.
+    CHECK_DEADLINE = 6.0
+
+    # When a check that never returned is written off, so the network coming back does not
+    # leave the editor permanently convinced a check is still running.
+    CHECK_ABANDON = 60.0
+
     def __init__(self):
         self.current = pp.EDITOR_VERSION
         self._cache = None          # (checked_at, payload)
         self._lock = threading.Lock()
+        self._checking_since = None  # when the in-flight check started, if any
         self.progress = None        # (downloaded, total) while a download runs
         self.downloaded = None      # path to the verified asset, once it is here
         self.busy = False
@@ -196,11 +206,65 @@ class Updater:
         Cached for an hour. The check runs on a timer at start-up and on every visit to
         Settings, and GitHub rate-limits unauthenticated callers to 60 requests an hour --
         which is a limit a user could reach by clicking around.
-        """
-        with self._lock:
-            if self._cache and not force and time.time() - self._cache[0] < 3600:
-                return self._cache[1]
 
+        The request itself runs on a worker with a deadline, and this returns whether or
+        not the worker is finished. That is not belt-and-braces on top of the urlopen
+        timeout: `urlopen(timeout=)` bounds the socket operations and NOT the name lookup,
+        so a machine whose DNS has stopped answering blocks in getaddrinfo for as long as
+        the resolver wants -- measured at 25 seconds against a 10 second timeout. A caller
+        that cannot bound its own wait is how this froze the editor.
+        """
+        now = time.time()
+        with self._lock:
+            if self._cache and not force and now - self._cache[0] < 3600:
+                return self._cache[1]
+            # One check at a time. Clicking the button twice used to mean two calls to
+            # GitHub against a 60-per-hour budget; with a hung resolver it meant a thread
+            # each, none of which ever came back.
+            running = (self._checking_since is not None
+                       and now - self._checking_since < self.CHECK_ABANDON)
+            if not running:
+                self._checking_since = now
+
+        if running:
+            return self._pending("a check is already running")
+
+        done = threading.Event()
+        box = {}
+
+        def work():
+            try:
+                box["out"] = self._fetch()
+            except Exception as e:                       # noqa: BLE001
+                box["out"] = {"current": self.current, "available": False,
+                              "checked": False,
+                              "why": f"could not reach GitHub: {e}"}
+            with self._lock:
+                self._cache = (time.time(), box["out"])
+                self._checking_since = None
+            done.set()
+
+        threading.Thread(target=work, daemon=True).start()
+        if done.wait(self.CHECK_DEADLINE):
+            return box["out"]
+
+        # The worker is still out there and may yet succeed -- its result will land in the
+        # cache and the next check will find it. This answer is not cached, because "we
+        # gave up waiting" is a fact about this moment, not about the release list.
+        return self._pending(
+            f"GitHub did not answer within {self.CHECK_DEADLINE:.0f}s -- still trying")
+
+    def _pending(self, why):
+        """What a caller gets while a check is in flight: the last answer, or nothing."""
+        with self._lock:
+            last = self._cache[1] if self._cache else None
+        if last:
+            return {**last, "pending": True, "why": why}
+        return {"current": self.current, "available": False, "checked": False,
+                "pending": True, "why": why}
+
+    def _fetch(self):
+        """The network half. Runs on a worker; never on a request thread."""
         out = {"current": self.current, "checked": True, "available": False}
         try:
             req = urllib.request.Request(
@@ -212,10 +276,9 @@ class Updater:
                 releases = json.load(r)
         except Exception as e:                           # noqa: BLE001
             # Offline is the common case, not an error worth a dialog: the editor works
-            # perfectly well without ever reaching GitHub.
+            # perfectly well without ever reaching GitHub. Caching is the caller's job now,
+            # so this just says what happened.
             out.update({"checked": False, "why": f"could not reach GitHub: {e}"})
-            with self._lock:
-                self._cache = (time.time(), out)
             return out
 
         # Someone already running a prerelease is told about prereleases; someone on a
@@ -250,8 +313,6 @@ class Updater:
                 "asset": {"name": asset["name"], "bytes": asset.get("size", 0),
                           "url": asset["browser_download_url"]},
             })
-        with self._lock:
-            self._cache = (time.time(), out)
         return out
 
     @staticmethod
@@ -5185,7 +5246,12 @@ let UPD=null, updPoll=null;
 function updRender(){
   const u=UPD||{};
   const info=$('#updinfo');
-  if(!u.checked){
+  if(u.pending){
+    // Distinct from "could not reach GitHub": nothing has failed, the answer is simply
+    // not back. Saying it failed would be a lie the user acts on by retrying.
+    info.innerHTML=`<div><span class="k">running</span> <b>${u.current||'—'}</b></div>`
+      +`<small>checking… <span class="dim">${u.why||''}</span></small>`;
+  }else if(!u.checked){
     info.innerHTML=`<div><span class="k">running</span> <b>${u.current||'—'}</b></div>`
       +`<small>${u.why||'not checked yet'}</small>`;
   }else if(!u.available){
@@ -5211,13 +5277,26 @@ function updRender(){
   }
 }
 
+// The check no longer blocks the editor while GitHub thinks about it, which means it can
+// come back "still trying" -- so the page has to come back for the answer rather than
+// treating the first reply as final. Bounded, because a resolver that never answers must
+// not leave a poll running for the life of the session.
+let updRetry=null;
 async function updCheck(force){
+  clearTimeout(updRetry);
+  $('#updcheck').disabled=true;
   try{
     UPD=await (await fetch('/api/update'+(force?'/check':''),
       {method:force?'POST':'GET'})).json();
-  }catch(_){ return }
+  }catch(_){ $('#updcheck').disabled=false; return }
   UPD.dl=await (await fetch('/api/update/progress')).json();
   updRender();
+  if(UPD.pending && (updCheck.tries=(updCheck.tries||0)+1) <= 10){
+    updRetry=setTimeout(()=>updCheck(false), 2000);
+  }else{
+    updCheck.tries=0;
+    $('#updcheck').disabled=false;
+  }
 }
 
 function updWatch(){
@@ -6083,6 +6162,26 @@ def browse(path=None):
 # point: a connection that stalls mid-request blocks nothing but itself.
 REQUEST_LOCK = threading.Lock()
 
+# Routes that must NOT take it.
+#
+# The lock exists because the routing bodies share one Project. These do not touch it --
+# they talk to the updater, the toolchain probe or the liveness clock, each of which
+# guards its own state -- and taking the lock anyway is what let one slow network call
+# freeze the whole editor.
+#
+# It was "Check for updates" that showed it. The check ran inside the handler, holding
+# this lock, so every other request queued behind a call to GitHub: the heartbeat, the
+# map, the build button. Worse, `urlopen(timeout=)` bounds the socket and NOT the name
+# lookup, so with dead DNS -- a dropped VPN, a captive portal -- the freeze had no upper
+# limit at all. Past 25 seconds of blocked heartbeat the liveness watchdog concluded the
+# UI was gone and shut the editor down, which is how "check for updates" could close the
+# window it was checking from.
+LOCK_FREE_PATHS = frozenset({
+    "/api/alive", "/api/ping",
+    "/api/update", "/api/update/progress", "/api/update/check",
+    "/api/update/download", "/api/update/apply",
+})
+
 
 class EditorServer(socketserver.ThreadingTCPServer):
     """One thread per connection, and none of them outlive the process.
@@ -6110,12 +6209,17 @@ def make_handler(session):
         def log_message(self, *a):
             pass
 
+        def _serialised(self):
+            """The lock, unless this route has no business holding it."""
+            path = self.path.split("?", 1)[0]
+            return contextlib.nullcontext() if path in LOCK_FREE_PATHS else REQUEST_LOCK
+
         def do_GET(self):
-            with REQUEST_LOCK:
+            with self._serialised():
                 self._route_get()
 
         def do_POST(self):
-            with REQUEST_LOCK:
+            with self._serialised():
                 self._route_post()
 
         def _send(self, code, body, ctype="application/json"):

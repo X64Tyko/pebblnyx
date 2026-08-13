@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import textwrap
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -1446,6 +1447,104 @@ def check_editor_map_atlases():
         check("and still builds", builds(proj.path, root, "out_single"))
 
 
+# ------------------------------------------------------- editor: the update check
+#
+# "Check for updates" froze the whole editor. The check ran inside the request handler
+# holding the one lock every route takes, so a call to GitHub blocked the heartbeat, the
+# map and the build button -- and because `urlopen(timeout=)` bounds the socket but NOT
+# the name lookup, a machine with dead DNS froze with no upper limit. Past 25 seconds of
+# blocked heartbeat the liveness watchdog decided the UI was gone and shut the editor
+# down: the check could close the window it was checking from.
+#
+# Tested through a real socket, because the defect was in how requests are serialised and
+# nothing below that layer can show it.
+
+def check_editor_update():
+    import threading
+    import urllib.request
+    import urllib.error
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "..", "tools"))
+    import pnx_editor                                       # noqa: E402
+
+    updater = pnx_editor.UPDATER
+    original = pnx_editor.Updater._fetch
+    started = threading.Event()
+
+    def hang(self):
+        """A GitHub that never answers -- what dead DNS actually looks like."""
+        started.set()
+        time.sleep(30)
+        return {"current": self.current, "checked": True, "available": False}
+
+    pnx_editor.Updater._fetch = hang
+    updater._cache = None
+    updater._checking_since = None
+    updater.CHECK_DEADLINE = 1.0
+
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        path = manifest(root, atlas=FLIP_ATLAS, **maps(EDITOR_MAP))
+        # Session.open() looks for assets.toml or a .pknproj; the fixture writes m.toml,
+        # so the Project is attached directly. What is under test is request handling,
+        # not project discovery.
+        session = pnx_editor.Session()
+        session.proj = pnx_editor.Project(path)
+
+        srv = pnx_editor.EditorServer(("127.0.0.1", 0), pnx_editor.make_handler(session))
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+        def call(route, data=None):
+            t = time.time()
+            urllib.request.urlopen(f"http://127.0.0.1:{port}{route}",
+                                   data=data, timeout=20).read()
+            return time.time() - t
+
+        try:
+            threading.Thread(
+                target=lambda: call("/api/update/check", b"{}"), daemon=True).start()
+            started.wait(5)
+
+            # The assertion the bug was: an unrelated request, while the check is out.
+            check("a hung update check does not block the heartbeat",
+                  call("/api/alive") < 0.5)
+            check("a hung update check does not block the project",
+                  call("/api/state") < 2.0)
+            # A second check must not start a second call to GitHub: unbounded, that
+            # leaked a thread per click against a 60-per-hour rate limit.
+            check("a second check while one is running returns at once",
+                  call("/api/update/check", b"{}") < 0.5)
+
+            # And a check with nothing already in flight gives up rather than waiting
+            # forever. The in-flight guard has to be cleared first -- otherwise this
+            # returns down the "already running" path and would pass with no deadline
+            # at all, which is exactly how it passed while the deadline was removed.
+            with updater._lock:
+                updater._checking_since = None
+                updater._cache = None
+            started.clear()
+            t = time.time()
+            out = updater.check(force=True)
+            waited = time.time() - t
+            check("the check returns within its deadline", 0.5 < waited < 3.0)
+            check("and says it is still trying rather than claiming failure",
+                  out.get("pending") is True and out.get("available") is False)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            pnx_editor.Updater._fetch = original
+            updater._cache = None
+            updater._checking_since = None
+            updater.CHECK_DEADLINE = pnx_editor.Updater.CHECK_DEADLINE
+
+    # The routes that must never take the shared lock, named rather than inferred, so
+    # adding one to the handler without thinking about it shows up here.
+    check("the update routes are exempt from the request lock",
+          {"/api/alive", "/api/update", "/api/update/check", "/api/update/progress"}
+          <= pnx_editor.LOCK_FREE_PATHS)
+
+
 def main():
     # The font cases assert on blob contents directly rather than only on pass/fail, so
     # they count their own checks rather than going through expect_ok.
@@ -2072,6 +2171,7 @@ def main():
     check_editor_roles()
     check_editor_autopick()
     check_editor_map_atlases()
+    check_editor_update()
 
     print(f"\n{checks} checks, {failures} failures")
     return 1 if failures else 0
