@@ -782,6 +782,11 @@ class Project:
             # The canvas the author is working on, which is the device's display turned
             # if the project is landscape. Sent as dimensions rather than as a flag so
             # the page never has to know which way round that is.
+            # From the MANIFEST, not from built blobs: `atlases` is empty until a
+            # build has run, and whether an atlas exists is a question about the
+            # manifest.
+            "atlas_names": [a.get("name") for a in self.man.get("atlas", [])
+                            if a.get("name")],
             "orientation": pa.ORIENT_NAMES[self.orientation],
             "screen": [self.SCREEN_W, self.SCREEN_H],
             "budget": self.project.get("budget_bytes", 262144),
@@ -1942,6 +1947,157 @@ class Project:
                 "with it.\n"
                 f"exclude = [\n  {body}\n]\n")
 
+    # Keys the Import tab owns. Anything else in an [[atlas]] block -- metatiles,
+    # semantic, variants, and every comment around them -- belongs to whoever wrote it
+    # and is never touched by an edit from here.
+    ATLAS_KEYS = ("sheet", "tile", "region", "max_tiles", "colorkey", "exclude")
+
+    def validate_atlas(self, rel, tile, region, max_tiles, exclude=(), colorkey=None,
+                       name=None):
+        """Run a candidate carve through the REAL pipeline and report what it says.
+
+        Not a re-implementation of the checks: it calls the same `pack_atlas` the build
+        calls, so anything the build would reject is rejected here, in front of the person
+        who can still change it. The alternative is what happened before -- the block goes
+        into the manifest, Build fails, and now there is a broken atlas in the file to
+        remove by hand.
+
+        Errors block. Warnings do not: a capped carve or a repaired tile is a legitimate
+        choice, and refusing it would be the editor overruling an author about their own
+        art. They are said out loud instead.
+        """
+        spec = {"name": name or "candidate", "sheet": rel, "tile": int(tile),
+                "region": list(region), "max_tiles": int(max_tiles),
+                "out": f"{name or 'candidate'}.bin",
+                "exclude": list(exclude)}
+        if colorkey:
+            spec["colorkey"] = list(colorkey)
+
+        warnings = []
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                atlas = pa.pack_atlas(self.root, spec, self.orientation)
+        except pa.BuildError as e:
+            return {"ok": False, "error": str(e), "warnings": []}
+        except Exception as e:                           # noqa: BLE001
+            return {"ok": False, "error": f"{type(e).__name__}: {e}", "warnings": []}
+
+        unique = len(atlas["tiles"])
+        if unique >= int(max_tiles):
+            warnings.append(
+                f"the carve hit max_tiles ({max_tiles}) -- tiles past that were dropped, "
+                f"so the atlas may be missing art. Raise max_tiles or carve less.")
+        if atlas.get("repaired"):
+            warnings.append(
+                f"{atlas['repaired']} tile(s) had more than {pa.PALETTE_USABLE} colours "
+                f"and were reduced. The art is altered; edit it to avoid that.")
+
+        # Autopick is where a small carve fails, and it fails at BUILD time with a message
+        # about roles rather than about the region -- so it is checked here too.
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                pa.autopick_tiles(atlas, ["floor", "wall", "accent"])
+        except pa.BuildError as e:
+            return {"ok": False, "error": str(e), "warnings": warnings}
+
+        est = self.estimate()
+        after = est["total"] + len(atlas["blob"]) if atlas.get("blob") else est["total"]
+        if after > est["budget"]:
+            warnings.append(
+                f"this would put resources over the {est['budget']:,} B appstore cap.")
+
+        return {"ok": True, "error": None, "warnings": warnings,
+                "unique": unique, "palettes": len(atlas.get("variants", [])) or None}
+
+    def atlas_spec(self, name):
+        """An existing atlas's settings, for loading back into the Import tab."""
+        spec = next((a for a in self.man.get("atlas", []) if a.get("name") == name), None)
+        if not spec:
+            raise ValueError(f"no atlas named {name!r}")
+        return {"name": name, "sheet": spec.get("sheet"), "tile": spec.get("tile", 16),
+                "region": spec.get("region", [0, 0, 16, 16]),
+                "max_tiles": spec.get("max_tiles", 64),
+                "colorkey": spec.get("colorkey"),
+                "exclude": [int(e) for e in spec.get("exclude", [])
+                            if not isinstance(e, (list, tuple))]}
+
+    def update_atlas(self, name, rel, tile, region, max_tiles, exclude=(),
+                     colorkey=None):
+        """Rewrite one atlas's settings in place, keeping everything else in its block.
+
+        Line surgery rather than re-emitting the block from the parsed manifest, because
+        re-emitting would discard the comments -- and in this project a manifest's comments
+        are half its content. Only the keys the Import tab owns are replaced; a `metatiles`
+        line, a `[atlas.semantic]` table or a paragraph explaining the carve survives
+        untouched.
+        """
+        lines = open(self.path).read().split("\n")
+
+        # Find this atlas's block: the [[atlas]] whose name matches, up to the next table
+        # header at column 0.
+        start = None
+        for i, line in enumerate(lines):
+            if line.strip() == "[[atlas]]":
+                for j in range(i + 1, len(lines)):
+                    if lines[j].lstrip().startswith("["):
+                        break
+                    m = re.match(r'\s*name\s*=\s*"([^"]+)"', lines[j])
+                    if m:
+                        if m.group(1) == name:
+                            start = i
+                        break
+            if start is not None:
+                break
+        if start is None:
+            raise ValueError(f"no [[atlas]] block named {name!r} in the manifest")
+
+        end = next((i for i in range(start + 1, len(lines))
+                    if lines[i].lstrip().startswith("[")), len(lines))
+
+        want = {
+            "sheet": f'sheet = "{rel}"',
+            "tile": f"tile = {int(tile)}",
+            "region": f"region = [{region[0]}, {region[1]}, {region[2]}, {region[3]}]",
+            "max_tiles": f"max_tiles = {int(max_tiles)}",
+        }
+        if colorkey:
+            r, g, b = (int(c) for c in colorkey)
+            want["colorkey"] = f"colorkey = [{r}, {g}, {b}]"
+
+        block = lines[start:end]
+        seen = set()
+        out = []
+        skipping = False
+        for line in block:
+            key = (re.match(r"\s*([a-z_]+)\s*=", line) or [None, None])[1]
+            # `exclude` spans several lines; drop the old one wholesale and re-emit it.
+            if skipping:
+                if "]" in line:
+                    skipping = False
+                continue
+            if key == "exclude":
+                skipping = "]" not in line
+                continue
+            if key in want:
+                out.append(want[key])
+                seen.add(key)
+                continue
+            # A key we manage that is now unset -- a cleared colour key -- goes away.
+            if key == "colorkey":
+                continue
+            out.append(line)
+
+        for key, text in want.items():
+            if key not in seen:
+                out.append(text)
+        if exclude:
+            out.append(self._exclude_block(exclude).rstrip("\n"))
+
+        lines[start:end] = out
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
     def add_atlas(self, name, rel, tile, region, max_tiles, exclude=(),
                   colorkey=None):
         """Append an [[atlas]] block. Appending keeps every existing comment intact."""
@@ -1949,6 +2105,13 @@ class Project:
             raise ValueError(f"an atlas named {name!r} already exists")
         if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
             raise ValueError("name must be lowercase letters, digits and underscores")
+
+        # The manifest is the build's input, so nothing that would fail the build goes
+        # into it from here. Checked server-side as well as in the page: the page can be
+        # bypassed, the manifest cannot be un-broken by anything but hand-editing.
+        check = self.validate_atlas(rel, tile, region, max_tiles, exclude, colorkey, name)
+        if not check["ok"]:
+            raise ValueError(check["error"])
 
         block = f'''
 
@@ -2580,7 +2743,14 @@ button:disabled{opacity:.45;cursor:not-allowed}
         <label>w<input id="rw" type="number" value="16" min="1"></label>
         <label>h<input id="rh" type="number" value="16" min="1"></label>
         <label>Max tiles<input id="maxt" type="number" value="64" min="1"></label>
-        <label>Name<input id="aname" placeholder="cave_env"></label>
+        <!-- Typing the name of an atlas that already exists turns this into an edit.
+             Before, Add was the only door: a carve you got wrong was in the manifest for
+             good, and fixing it meant hand-editing TOML. -->
+        <label>Name<input id="aname" placeholder="cave_env" list="atlasnames"
+                          autocomplete="off"></label>
+        <datalist id="atlasnames"></datalist>
+        <button id="aload" style="display:none" title="load this atlas's settings">
+          ↺ load</button>
         <!-- The colour key. Picked off the sheet with the eyedropper rather than typed,
              because the value that matters is the one actually in the art -- a
              background that looks like magenta is often not 255,0,255. -->
@@ -2931,7 +3101,7 @@ async function load(){
 
   $('#mapsel').innerHTML=S.data.maps.map((m,i)=>`<option value="${i}">${m.name}</option>`).join('');
   $('#atlassel').innerHTML=S.data.atlases.map(a=>`<option value="${a.name}">${a.name}</option>`).join('');
-  drawPalettes(); budget(); statusbar(); orientation();
+  drawPalettes(); budget(); statusbar(); orientation(); atlasMode();
   // Once, a moment after the editor is usable: an update check is never
   // worth delaying the first paint for.
   setTimeout(()=>updCheck(), 1500);
@@ -3464,9 +3634,16 @@ $('#sldropempty').onclick=async()=>{
   drawSlice(); analyse();
 };
 
-let pending=null;
+// Each analyse is tagged, and a reply that is not the newest is dropped.
+//
+// The responses used only to paint, so a stale one was a flicker. Now one of them CLAMPS
+// THE REGION, and a reply describing the sheet you just switched away from will resize
+// the carve to fit a sheet you are no longer looking at -- which is exactly what it did:
+// a 16x32 region became 6x1, the shape of the previously selected sheet.
+let pending=null, analyseSeq=0;
 function analyse(){
   clearTimeout(pending);
+  const seq=++analyseSeq;
   pending=setTimeout(async()=>{
     const body={sheet:$('#sheet').value,tile:+$('#tile').value,
       region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
@@ -3474,6 +3651,7 @@ function analyse(){
     if(!body.sheet) return;
     const r=await (await fetch('/api/analyse',{method:'POST',
       headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
+    if(seq!==analyseSeq) return;          // a newer request is already in flight
     if(r.error){$('#stats').innerHTML=`<div class="warn"><b>!</b><span>${r.error}</span></div>`;return}
     const cell=(v,l,warn)=>`<div class="${warn?'warn':''}"><b>${v}</b><span>${l}</span></div>`;
     // What it costs, and what it costs YOU: the same bytes read very differently
@@ -3554,10 +3732,37 @@ $('#sheetimg').addEventListener('click',e=>{
 
 // The region as a box on the sheet. Percentages of the sheet's size in TILES, which is
 // the same fraction as pixels and survives the thumbnail being scaled to fit.
+// The region cannot be larger than the sheet holds AT THIS TILE SIZE, and the tile size
+// changes what the sheet holds: 480x256 is 30x16 tiles at 16px and 15x8 at 32px. Typing a
+// region that fits at one size and then changing the size is how a carve ends up running
+// off the sheet -- which the pipeline rejects, but only at build time, and only if the
+// block already went into the manifest.
+//
+// Clamped rather than merely flagged, and the inputs' own max is set too, so the spinners
+// stop where the art does.
+function clampRegion(sx, sy){
+  let changed=false;
+  const fit=(id, hi)=>{
+    const el=$('#'+id);
+    el.max=hi;
+    if(+el.value > hi){ el.value=hi; changed=true }
+    if(+el.value < +el.min){ el.value=el.min; changed=true }
+  };
+  fit('rx', Math.max(0, sx-1));
+  fit('ry', Math.max(0, sy-1));
+  fit('rw', Math.max(1, sx - +$('#rx').value));
+  fit('rh', Math.max(1, sy - +$('#ry').value));
+  return changed;
+}
+
 function drawCrop(sheetTiles){
   const box=$('#cropbox');
   if(!sheetTiles || !sheetTiles[0] || !sheetTiles[1]){ box.style.display='none'; return }
   const [sx,sy]=sheetTiles;
+  if(clampRegion(sx, sy)){
+    // Re-price against what the region actually became, rather than what was typed.
+    analyse(); drawSlice();
+  }
   const rx=+$('#rx').value, ry=+$('#ry').value,
         rw=+$('#rw').value, rh=+$('#rh').value;
   // 'block', not '': clearing the inline style hands display back to the stylesheet,
@@ -3577,16 +3782,72 @@ function drawCrop(sheetTiles){
     : `${rw}×${rh} of ${sx}×${sy} tiles — ${(100*rw*rh/(sx*sy)).toFixed(0)}% of the sheet`;
 }
 
-$('#addatlas').onclick=async()=>{
+// An atlas that already exists is edited, not duplicated. The button says which, because
+// a button that silently does one of two things is worse than either.
+function atlasNames(){ return S.data.atlas_names || [] }
+
+function importBody(){
+  return {name:$('#aname').value.trim(), sheet:$('#sheet').value, tile:+$('#tile').value,
+          colorkey:KEY, max_tiles:+$('#maxt').value, exclude:[...IMPEX],
+          region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value]};
+}
+
+function atlasMode(){
   const name=$('#aname').value.trim();
-  if(!name){alert('Name the atlas first.');return}
-  const r=await (await fetch('/api/atlas',{method:'POST',
+  const exists=atlasNames().includes(name);
+  $('#addatlas').textContent=exists?'Update atlas':'Add atlas';
+  $('#aload').style.display=exists?'':'none';
+  $('#atlasnames').innerHTML=atlasNames().map(n=>`<option value="${n}">`).join('');
+  return exists;
+}
+$('#aname').addEventListener('input',atlasMode);
+
+$('#aload').onclick=async()=>{
+  const name=$('#aname').value.trim();
+  const s=await (await fetch('/api/atlas/spec',{method:'POST',
     headers:{'content-type':'application/json'},
-    body:JSON.stringify({name,sheet:$('#sheet').value,tile:+$('#tile').value,colorkey:KEY,
-      region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
-      max_tiles:+$('#maxt').value,exclude:[...IMPEX]})})).json();
-  const log=$('#log'); log.className=r.ok?'ok':'bad';
-  log.textContent=r.ok?`Added [[atlas]] "${name}" to the manifest. Press Build.`:r.error;
+    body:JSON.stringify({name})})).json();
+  if(s.error){ $('#log').className='bad'; $('#log').textContent=s.error; return }
+  const set=(id,v)=>{ $('#'+id).value=v };
+  set('sheet',s.sheet); set('tile',s.tile); set('maxt',s.max_tiles);
+  set('rx',s.region[0]); set('ry',s.region[1]); set('rw',s.region[2]); set('rh',s.region[3]);
+  KEY=s.colorkey||null; keyLabel();
+  IMPEX=new Set(s.exclude||[]); impRegion=impRegionKey();
+  $('#log').className=''; $('#log').textContent=
+    `Loaded "${name}" — change anything and press Update atlas.`;
+  analyse(); drawSlice();
+};
+
+$('#addatlas').onclick=async()=>{
+  const body=importBody();
+  if(!body.name){alert('Name the atlas first.');return}
+  const log=$('#log');
+
+  // Validated through the real pipeline BEFORE anything is written. A carve that fails
+  // the build used to go into the manifest anyway, and the only sign was Build failing
+  // afterwards -- leaving a broken block to remove by hand.
+  const v=await (await fetch('/api/atlas/validate',{method:'POST',
+    headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
+  if(!v.ok){
+    log.className='bad';
+    log.textContent=`Not added — ${v.error}`;
+    return;
+  }
+
+  const editing=atlasNames().includes(body.name);
+  const r=await (await fetch(editing?'/api/atlas/update':'/api/atlas',{method:'POST',
+    headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
+  log.className=r.ok?'ok':'bad';
+  if(!r.ok){ log.textContent=r.error; return }
+
+  // Warnings are said, not enforced: a capped carve or a reduced tile is a legitimate
+  // choice about someone's own art.
+  log.textContent=(editing?`Updated [[atlas]] "${body.name}".`
+                          :`Added [[atlas]] "${body.name}" to the manifest.`)
+    + (v.warnings.length?`\n\n${v.warnings.map(w=>'! '+w).join('\n')}`:'')
+    + '\n\nPress Build.';
+  await load();
+  atlasMode();
 };
 
 // ------------------------------------------------------------------- fonts view
@@ -4753,6 +5014,20 @@ def make_handler(session):
                     self._send(200, json.dumps(session.proj.slice_grid(
                         d["sheet"], int(d["tile"]), d["region"],
                         d.get("exclude", []), d.get("colorkey"))))
+                elif self.path == "/api/atlas/validate":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(session.proj.validate_atlas(
+                        d["sheet"], int(d["tile"]), d["region"], int(d["max_tiles"]),
+                        d.get("exclude", []), d.get("colorkey"), d.get("name"))))
+                elif self.path == "/api/atlas/spec":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(session.proj.atlas_spec(d["name"])))
+                elif self.path == "/api/atlas/update":
+                    d = json.loads(raw)
+                    session.proj.update_atlas(d["name"], d["sheet"], int(d["tile"]),
+                                              d["region"], int(d["max_tiles"]),
+                                              d.get("exclude", []), d.get("colorkey"))
+                    self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/atlas":
                     d = json.loads(raw)
                     session.proj.add_atlas(d["name"], d["sheet"], int(d["tile"]),
