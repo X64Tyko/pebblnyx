@@ -30,6 +30,7 @@ import platform
 import re
 import shutil
 import socketserver
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -140,6 +141,30 @@ def newer(candidate, current):
         return a[0] > b[0]
 
 
+def https_context():
+    """An SSL context that can actually verify GitHub from inside a frozen binary.
+
+    The packaged editor carries its own OpenSSL, and its compiled-in CA locations are the
+    BUILD machine's -- on a target that keeps its certificates somewhere else, or in a
+    container with none, every HTTPS request fails with:
+
+        [SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate
+
+    which the updater reported, accurately and unhelpfully, as "could not reach GitHub".
+    It never showed up in testing because a source checkout uses the system Python, which
+    finds the system store.
+
+    So the bundled `certifi` roots come first -- they travel inside the binary and are
+    therefore always present -- and the system store is the fallback for anyone running
+    from source without it.
+    """
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:                                    # noqa: BLE001
+        return ssl.create_default_context()
+
+
 class Updater:
     """Checks for, downloads and applies a new editor build.
 
@@ -182,7 +207,8 @@ class Updater:
                 UPDATE_API + "?per_page=10",
                 headers={"Accept": "application/vnd.github+json",
                          "User-Agent": f"pebblnyx-editor/{self.current}"})
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with urllib.request.urlopen(req, timeout=10,
+                                       context=https_context()) as r:
                 releases = json.load(r)
         except Exception as e:                           # noqa: BLE001
             # Offline is the common case, not an error worth a dialog: the editor works
@@ -292,7 +318,9 @@ class Updater:
             # Written beside the target and renamed at the end, so an interrupted download
             # cannot leave a truncated file that looks like a complete one.
             part = dest + ".part"
-            with urllib.request.urlopen(req, timeout=30) as r, open(part, "wb") as f:
+            with urllib.request.urlopen(req, timeout=30,
+                                       context=https_context()) as r, \
+                    open(part, "wb") as f:
                 total = int(r.headers.get("Content-Length") or asset["bytes"] or 0)
                 got = 0
                 while True:
@@ -5049,6 +5077,10 @@ def selftest():
         ("pillow draw", "PIL.ImageDraw", lambda m: "ok"),
         ("pillow fonts", "PIL.ImageFont", lambda m: "ok"),
         ("tomllib", "tomllib", lambda m: "ok"),
+        # The updater's whole job is one HTTPS request, and a frozen binary carries its
+        # own OpenSSL with the build machine's CA paths compiled in. Without these roots
+        # every check fails as "could not reach GitHub" -- which is what shipped.
+        ("certifi", "certifi", lambda m: m.where()),
         ("pipeline", "pnx_assets", lambda m: f"blob v{m.BLOB_VERSION}"),
         ("preview", "pnx_preview", lambda m: "ok"),
         ("project", "pnx_project", lambda m: f"engine {m.FRAMEWORK_VERSION}"),
@@ -5074,6 +5106,21 @@ def selftest():
         ok = ok and have
     except Exception as e:                               # noqa: BLE001
         print(f"  engine sources   MISSING -- {e}")
+        ok = False
+
+    # Can this binary actually verify a certificate? Importing certifi proves the module
+    # is here; loading its roots into a context proves the DATA FILE came along, which is
+    # the half PyInstaller drops. No network needed, so this works on a build machine
+    # behind any firewall.
+    try:
+        ctx = https_context()
+        stats = ctx.cert_store_stats()
+        ok_certs = stats.get("x509_ca", 0) > 0
+        print(f"  https roots      {stats.get('x509_ca', 0)} CA certificates loaded"
+              if ok_certs else "  https roots      NONE LOADED -- update checks will fail")
+        ok = ok and ok_certs
+    except Exception as e:                               # noqa: BLE001
+        print(f"  https roots      MISSING -- {e}")
         ok = False
 
     # Optional. A missing webview is a documented fallback to a browser tab, not a fault,

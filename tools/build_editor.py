@@ -51,14 +51,18 @@ APP_GUID = "9E5A5C4E-6D3B-4E51-9B7C-3F2A1D0C4B87"
 
 # Pillow is a hard requirement here, unlike in the pipeline where it is an optional
 # import: an editor that cannot rasterise a font or slice a sheet has no reason to exist.
-REQUIRED = ["PyInstaller", "PIL"]
+# certifi is required, not optional: the frozen binary carries its own OpenSSL, whose
+# compiled-in CA paths are the build machine's. Without a bundled root store the
+# updater cannot verify github.com and reports the whole internet as unreachable.
+REQUIRED = ["PyInstaller", "PIL", "certifi"]
 
 # pywebview is not required to BUILD. Without it the editor opens a browser tab instead
 # of a window, which is the documented fallback -- and on Linux there is often no system
 # webview binding to bundle anyway. Missing it is a warning, not a failure.
 OPTIONAL = ["webview"]
 
-PIP_NAMES = {"PIL": "pillow", "webview": "pywebview", "PyInstaller": "pyinstaller"}
+PIP_NAMES = {"PIL": "pillow", "webview": "pywebview", "PyInstaller": "pyinstaller",
+             "certifi": "certifi"}
 
 
 def check_deps():
@@ -375,6 +379,10 @@ def main():
         # The pipeline and the preview renderer are imported by the editor, not shelled
         # out to -- which is exactly why Project.build() had to stop invoking
         # sys.executable. Named explicitly so PyInstaller's analysis cannot miss them.
+        # Imported inside a function, so the analysis cannot see it; its data file is
+        # the actual payload.
+        "--hidden-import=certifi",
+        "--collect-data=certifi",
         "--hidden-import=pnx_assets",
         "--hidden-import=pnx_preview",
         "--hidden-import=pnx_project",
