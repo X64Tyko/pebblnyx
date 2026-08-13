@@ -107,7 +107,7 @@ def manifest(root, **overrides):
         body += textwrap.dedent(parts[key])
     # Dialog before font: `charset = "auto"` derives its glyph set from the pages, so a
     # font test that supplies dialog needs it to come first in the same manifest.
-    for key in ("sprite", "dialog", "font", "scene"):
+    for key in ("sprite", "dialog", "font", "scene", "tile_flags"):
         if key in parts:
             body += textwrap.dedent(parts[key])
 
@@ -229,8 +229,14 @@ def defines(out_dir):
     with open(os.path.join(out_dir, "gen.h")) as f:
         for line in f:
             parts = line.split()
-            if len(parts) == 3 and parts[0] == "#define" and parts[2].lstrip("-").isdigit():
-                found[parts[1]] = int(parts[2])
+            if len(parts) != 3 or parts[0] != "#define":
+                continue
+            # Hex as well as decimal: tile flag bits are emitted as 0x04 so the header
+            # reads like the PNX_TILE_* constants they sit beside.
+            try:
+                found[parts[1]] = int(parts[2], 0)
+            except ValueError:
+                pass
     return found
 
 
@@ -283,6 +289,36 @@ def check_colorkey():
         first = b[pixels:pixels + 8]
         check("keyed pixels are palette index 0",
               all(byte == 0 for byte in first[:2]))
+
+    # --- and on every OTHER tile, which is where it used to stop working.
+    #
+    # `key` held the colour key and was then rebound to each tile's bytes inside the dedup
+    # loop, so tile 0 was keyed and every tile after it was read with a bytes object as
+    # its key -- matching nothing, leaving the background opaque. The case above could
+    # never catch it: it keys a corner of tile 0, the one tile the bug spared.
+    with tempfile.TemporaryDirectory() as root:
+        sheet = os.path.join(root, "sheet.png")
+        make_sheet(sheet)
+        img = Image.open(sheet).convert("RGBA")
+        px = img.load()
+        # A block in the SECOND tile of the row, and a different one in the third, so
+        # neither can dedup into the first.
+        for y in range(4):
+            for x in range(4):
+                px[16 + x, y] = (255, 0, 255, 255)
+                px[x, 16 + y] = (255, 0, 255, 255)
+        img.save(sheet)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            atlas = pnx_assets.pack_atlas(
+                root, {"name": "t", "sheet": "sheet.png", "tile": 16,
+                       "region": [0, 0, 2, 2], "max_tiles": 16, "out": "t.bin",
+                       "colorkey": [255, 0, 255]},
+                pnx_assets.ORIENT_BUTTONS_RIGHT)
+        keyed = [i for i, t in enumerate(atlas["tiles"])
+                 if any(b == pnx_assets.TRANSPARENT for b in t)]
+        check("the colour key applies to tiles after the first",
+              len(keyed) >= 2 and keyed != [0])
 
     # And a key that is not a colour is a build failure, not a silent no-op.
     expect_fail("colorkey that is not three numbers", "colorkey must be three integers",
@@ -843,6 +879,211 @@ def check_worldtiles():
 # that the manifest still BUILDS afterwards, and that an atlas something still draws with
 # is refused with the reason rather than deleted.
 
+# ------------------------------------------------- raw tile indices, flips, user flags
+#
+# All three exist so the EDITOR can offer what the format could always carry. Roles named
+# only three tiles of an atlas, the flip bits the cell format reserved were never set by
+# anything, and the flag byte had six free bits nobody could name. None of that is visible
+# from the runtime side, so it is tested here against the compiled bytes.
+
+FLIP_LEGEND = '''
+    [legend."."]
+    tile = "floor"
+    flags = []
+    [legend."#"]
+    tile = "wall"
+    flags = ["solid"]
+    [legend."D"]
+    tile = "accent"
+    flags = ["warp"]
+    [legend."r"]
+    tile = 1
+    flags = []
+    [legend."<"]
+    tile = 1
+    flip = ["x"]
+    flags = []
+    [legend."v"]
+    tile = 1
+    flip = ["x", "y"]
+    flags = []
+'''
+
+FLIP_ATLAS = '''
+    [[atlas]]
+    name = "tiles"
+    sheet = "sheet.png"
+    tile = 16
+    region = [0, 0, 2, 2]
+    max_tiles = 16
+    out = "tiles.bin"
+    autopick = ["floor", "wall", "accent"]
+    # Explicit, because the flip bits are only honoured for flat tiles and "auto" would
+    # let the sheet's redundancy decide whether this test is testing anything.
+    metatiles = false
+'''
+
+FLIP_MAP = '''
+    [[map]]
+    name = "a"
+    out = "a.bin"
+    start = [1, 1]
+    warps = []
+    rows = """
+    #####
+    #r<v#
+    #...#
+    #####
+    """
+'''
+
+
+def cells(mp):
+    """The cell plane as u16s, which is how every bit in it is named."""
+    return [mp["cells"][i] | (mp["cells"][i + 1] << 8)
+            for i in range(0, len(mp["cells"]), 2)]
+
+
+def cell(mp, x, y):
+    return cells(mp)[y * mp["w"] + x]
+
+
+def cell_flags(mp, x, y):
+    """The flag byte a cell actually carries: its tile's default, or its override."""
+    for ox, oy, of in mp["overrides"]:
+        if (ox, oy) == (x, y):
+            return of
+    return mp["tile_flags"][cell(mp, x, y) & pnx_assets.MAP_INDEX_MASK]
+
+
+def check_tile_indices_and_flips():
+    # --- a raw index paints the same tile a role would, and the flip bits ride along in
+    #     the cell rather than costing a second copy of the art.
+    with tempfile.TemporaryDirectory() as root:
+        built = build_maps(root, legend=FLIP_LEGEND,
+                           atlas=FLIP_ATLAS, **maps(FLIP_MAP))
+        mp = built["a.bin"]
+        plain, flip_x, flip_xy = cell(mp, 1, 1), cell(mp, 2, 1), cell(mp, 3, 1)
+
+        check("a raw tile index resolves",
+              plain & pnx_assets.MAP_INDEX_MASK == 1)
+        check("a flipped entry names the SAME tile as the unflipped one",
+              flip_x & pnx_assets.MAP_INDEX_MASK == 1
+              and flip_xy & pnx_assets.MAP_INDEX_MASK == 1)
+        check("an unflipped entry sets no flip bits",
+              plain & (pnx_assets.MAP_FLIP_X | pnx_assets.MAP_FLIP_Y) == 0)
+        check("flip = [\"x\"] sets only FLIP_X",
+              flip_x & pnx_assets.MAP_FLIP_X and not flip_x & pnx_assets.MAP_FLIP_Y)
+        check("flip = [\"x\", \"y\"] sets both",
+              flip_xy & pnx_assets.MAP_FLIP_X and flip_xy & pnx_assets.MAP_FLIP_Y)
+
+    # --- a quarter turn moves the cell AND turns its mirror axis with it. Getting this
+    #     wrong is invisible in portrait and mirrors the wrong way in landscape, which is
+    #     exactly the class of bug pre-rotation exists to make impossible.
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        path = manifest(root, legend=FLIP_LEGEND, atlas=FLIP_ATLAS, **maps(FLIP_MAP))
+        out = os.path.join(root, "land")
+        with contextlib.redirect_stdout(io.StringIO()):
+            pnx_assets.build(path, out, os.path.join(out, "gen.h"),
+                             orientation="buttons_top")
+        banks = []
+        i = 0
+        while os.path.exists(os.path.join(out, f"a_b{i}.bin")):
+            banks.append(read_blob(out, f"a_b{i}.bin"))
+            i += 1
+        mp = pnx_assets.parse_map(read_blob(out, "a.bin"), banks)
+        turned = [c for c in cells(mp)
+                  if c & pnx_assets.MAP_INDEX_MASK == 1
+                  and c & (pnx_assets.MAP_FLIP_X | pnx_assets.MAP_FLIP_Y)]
+        check("rotating a map turns an X mirror into a Y mirror",
+              any(c & pnx_assets.MAP_FLIP_Y and not c & pnx_assets.MAP_FLIP_X
+                  for c in turned))
+        check("a doubly-flipped cell survives the turn doubly flipped",
+              any(c & pnx_assets.MAP_FLIP_X and c & pnx_assets.MAP_FLIP_Y
+                  for c in turned))
+
+    # --- the checks that keep an index from being the loose end a role never was.
+    expect_fail("a tile index past the end of the atlas", "packed",
+                legend=FLIP_LEGEND.replace("tile = 1\n    flags = []",
+                                           "tile = 99\n    flags = []", 1),
+                atlas=FLIP_ATLAS, **maps(FLIP_MAP))
+    expect_fail("flip on a metatiled atlas", "metatile",
+                legend=FLIP_LEGEND, atlas=FLIP_ATLAS.replace("metatiles = false",
+                                                             "metatiles = true"),
+                **maps(FLIP_MAP))
+    expect_fail("a nonsense flip axis", "flip must be",
+                legend=FLIP_LEGEND.replace('flip = ["x"]', 'flip = ["z"]'),
+                atlas=FLIP_ATLAS, **maps(FLIP_MAP))
+
+
+def check_user_flags():
+    named = '''
+        [tile_flags]
+        water = 0x04
+        ledge = 0x20
+    '''
+    legend = FLIP_LEGEND + '''
+    [legend."~"]
+    tile = "floor"
+    flags = ["water"]
+    [legend."^"]
+    tile = "floor"
+    flags = ["water", "ledge"]
+'''
+    body = FLIP_MAP.replace("#...#", "#~^.#")
+
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        path = manifest(root, legend=legend, atlas=FLIP_ATLAS, tile_flags=named,
+                        **maps(body))
+        out = os.path.join(root, "out")
+        with contextlib.redirect_stdout(io.StringIO()):
+            pnx_assets.build(path, out, os.path.join(out, "gen.h"))
+
+        d = defines(out)
+        check("a named flag reaches the header as its bit",
+              d.get("TILE_FLAG_WATER") == 0x04 and d.get("TILE_FLAG_LEDGE") == 0x20)
+
+        banks = []
+        i = 0
+        while os.path.exists(os.path.join(out, f"a_b{i}.bin")):
+            banks.append(read_blob(out, f"a_b{i}.bin"))
+            i += 1
+        mp = pnx_assets.parse_map(read_blob(out, "a.bin"), banks)
+        # '~' and '^' paint the SAME tile as '.', so any flag difference between the
+        # three can only have come from the legend characters -- which is the thing
+        # worth asserting. Whichever value loses the per-tile tally becomes an override,
+        # so the effective byte is read through both.
+        check("a custom flag reaches the cell it was painted on",
+              cell_flags(mp, 1, 2) & 0x04)
+        check("two custom flags combine in one byte",
+              cell_flags(mp, 2, 2) & 0x04 and cell_flags(mp, 2, 2) & 0x20)
+        check("an unflagged cell of the same tile stays clear",
+              not cell_flags(mp, 3, 2) & (0x04 | 0x20))
+
+    expect_fail("redefining a built-in flag", "built-in",
+                tile_flags="[tile_flags]\nsolid = 0x04\n")
+    expect_fail("claiming a bit that is not free", "free flag bit",
+                tile_flags="[tile_flags]\nwater = 0x03\n")
+    expect_fail("two flags on one bit", "both claim",
+                tile_flags="[tile_flags]\nwater = 0x04\nledge = 0x04\n")
+    expect_fail("a flag name that is not an identifier", "C identifier",
+                tile_flags='[tile_flags]\n"deep water" = 0x04\n')
+    expect_fail("an unknown flag on a legend entry", "unknown flag",
+                legend='''
+                    [legend."."]
+                    tile = "floor"
+                    flags = ["swamp"]
+                    [legend."#"]
+                    tile = "wall"
+                    flags = ["solid"]
+                    [legend."D"]
+                    tile = "accent"
+                    flags = ["warp"]
+                ''')
+
+
 def check_editor_atlas_removal():
     import shutil as sh
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -914,6 +1155,295 @@ def check_editor_atlas_removal():
               any("first atlas declared" in u for u in proj.atlas_users("tiles")))
         check("a second atlas nothing uses is removable",
               proj.atlas_users("second") == [])
+
+
+# ------------------------------------------------------------- editor: legend writing
+#
+# The editor writes the legend now, which is what makes every tile of an atlas paintable
+# instead of only the three `autopick` names. The thing worth testing is not that the
+# right characters land in the file -- it is that the manifest still BUILDS afterwards,
+# because a legend entry that does not resolve breaks every map painting it.
+
+# At column 0 deliberately. `manifest` runs each part through textwrap.dedent, and the
+# shared fixture's rows sit at column 0 already -- so the common prefix is empty, nothing
+# is dedented, and `[[map]]` ends up indented. tomllib does not mind, but save_map anchors
+# on `^\[\[map\]\]`, so a test that edits a map has to supply one it can find.
+EDITOR_MAP = '''
+# ------------------------------------------------------------------------------ maps
+#
+# A section heading and a comment between the legend and the first map, because that is
+# what a real manifest looks like and it is what a legend writer has to not step over.
+
+[[map]]
+name = "a"
+out = "a.bin"
+start = [2, 1]
+warps = []
+rows = """
+####
+#..#
+####
+"""
+'''
+
+
+def editor_project(root, **overrides):
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "..", "tools"))
+    import pnx_editor                                       # noqa: E402
+    return pnx_editor.Project(manifest(root, **overrides))
+
+
+def builds(path, root, tag):
+    """True when the manifest at `path` still compiles."""
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            pnx_assets.build(path, os.path.join(root, tag),
+                             os.path.join(root, tag, "gen.h"))
+        return True
+    except pnx_assets.BuildError as e:
+        print(f"         build failed: {e}")
+        return False
+
+
+def check_editor_legend():
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root, atlas=FLIP_ATLAS, **maps(EDITOR_MAP))
+
+        # A raw index, which is the whole point: no role, no [atlas.semantic] entry, and
+        # still paintable.
+        proj.save_legend("q", 2, flags=["solid"])
+        check("a legend entry written by index lands in the manifest",
+              proj.man["legend"]["q"] == {"tile": 2, "flags": ["solid"]})
+
+        proj.save_legend("<", 2, flip=["x"])
+        check("a flipped entry records its axis",
+              proj.man["legend"]["<"].get("flip") == ["x"])
+
+        # Rewriting in place rather than appending a second block for the same character,
+        # which TOML would reject outright as a duplicate key.
+        proj.save_legend("q", "wall", flags=[])
+        check("saving the same character twice rewrites it",
+              proj.man["legend"]["q"] == {"tile": "wall", "flags": []})
+        check("and leaves exactly one block for it",
+              open(proj.path).read().count('[legend."q"]') == 1)
+
+        # Rewriting must not eat the blank line separating the entry from what follows.
+        # It once did, so every flag ticked closed the gap a little more.
+        gap = lambda: open(proj.path).read().split('[legend."<"]')[0].endswith("\n\n")
+        was = gap()
+        proj.save_legend("q", "wall", flags=["solid"])
+        proj.save_legend("q", "wall", flags=[])
+        check("rewriting an entry keeps the blank line after it", gap() == was)
+
+        check("the manifest still builds with the new entries",
+              builds(proj.path, root, "out_legend"))
+
+        # Placed with the other legend entries, not merely somewhere that parses. A new
+        # entry once landed under the section heading and explanatory comment belonging to
+        # the MAPS below it -- valid TOML that reads as though someone lost their place,
+        # which in a file whose comments are half its content is a real defect.
+        text = open(proj.path).read().split("\n")
+        at = text.index('[legend."q"]')
+        before = [l for l in text[:at] if l.strip()][-1]
+        check("a new entry sits with the legend, not in the next section",
+              not before.startswith("#") and not before.startswith("[["))
+
+        # Removal is refused while a map paints it, for the same reason an atlas removal
+        # is: the alternative is a manifest that only hand-editing can fix.
+        proj.save_legend("z", "floor")
+        proj.save_map("a", ["####", "#z.#", "####"], [2, 1], [])
+        try:
+            proj.remove_legend("z")
+            check("removing a painted legend character is refused", False)
+        except ValueError as e:
+            check("removing a painted legend character is refused",
+                  "still painted" in str(e))
+        check("and it names the map", proj.legend_users("z") == ["a"])
+
+        proj.save_map("a", ["####", "#..#", "####"], [2, 1], [])
+        proj.remove_legend("z")
+        check("once nothing paints it, it goes", "z" not in proj.man["legend"])
+        check("the manifest builds after a removal",
+              builds(proj.path, root, "out_removed"))
+
+        # The checks that keep the picker from writing something the build refuses.
+        for label, call in (
+            ("an index past the end of the atlas",
+             lambda: proj.save_legend("Q", 999)),
+            ("an unknown flag", lambda: proj.save_legend("Q", 0, flags=["nope"])),
+            ("an unknown atlas", lambda: proj.save_legend("Q", 0, atlas="nope")),
+            ("a multi-character key", lambda: proj.save_legend("ab", 0)),
+            ("a whitespace character", lambda: proj.save_legend(" ", 0)),
+        ):
+            try:
+                call()
+                check(f"the editor refuses {label}", False)
+            except ValueError:
+                check(f"the editor refuses {label}", True)
+
+
+def check_editor_flags():
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root, atlas=FLIP_ATLAS, **maps(EDITOR_MAP))
+
+        got = proj.save_flag("water")
+        check("a new flag takes the lowest free bit", got["bit"] == 0x04)
+        check("and a second takes the next", proj.save_flag("ledge")["bit"] == 0x08)
+        # Adding a flag that already exists must NOT move it. It used to take "the lowest
+        # free bit", which for an existing name is the next one along -- silently changing
+        # what every built map and every compiled `& TILE_FLAG_WATER` already meant.
+        check("re-adding an existing flag keeps its bit",
+              proj.save_flag("water")["bit"] == 0x04)
+        check("and does not duplicate the line",
+              open(proj.path).read().count("water = ") == 1)
+        check("both are readable back",
+              proj.flag_names().get("water") == 0x04
+              and proj.flag_names().get("ledge") == 0x08)
+
+        proj.save_legend("~", "floor", flags=["water"])
+        check("a custom flag can be set on a legend entry",
+              proj.man["legend"]["~"]["flags"] == ["water"])
+        check("and the manifest builds with it",
+              builds(proj.path, root, "out_flags"))
+        check("the flag reaches the generated header",
+              defines(os.path.join(root, "out_flags")).get("TILE_FLAG_WATER") == 0x04)
+
+        try:
+            proj.remove_flag("water")
+            check("removing a flag still in use is refused", False)
+        except ValueError as e:
+            check("removing a flag still in use is refused", "still set" in str(e))
+
+        proj.save_legend("~", "floor", flags=[])
+        proj.remove_flag("water")
+        check("once nothing carries it, it goes", "water" not in proj.flag_names())
+
+        for label, call in (
+            ("redefining a built-in", lambda: proj.save_flag("solid")),
+            ("a name that is not an identifier", lambda: proj.save_flag("deep water")),
+            ("a bit another flag holds", lambda: proj.save_flag("mud", 0x08)),
+        ):
+            try:
+                call()
+                check(f"the editor refuses {label}", False)
+            except ValueError:
+                check(f"the editor refuses {label}", True)
+
+
+def check_editor_roles():
+    """Naming a tile writes [atlas.semantic] under the right atlas, and it compiles."""
+    with tempfile.TemporaryDirectory() as root:
+        second_sheet(root)
+        proj = editor_project(root, atlas=TWO_ATLASES, legend=TWO_LEGEND,
+                              **maps(EDITOR_MAP))
+
+        proj.save_role("second", "door", 2)
+        check("a named tile lands in the atlas's semantic table",
+              proj.man["atlas"][1].get("semantic", {}).get("door") == 2)
+        check("and not in the other atlas's",
+              "semantic" not in proj.man["atlas"][0])
+
+        # The subtable binds to the most recent [[atlas]] in TOML, so a table written
+        # under the wrong block names a tile in the wrong tileset -- silently, because
+        # both parse. This is the assertion that catches it.
+        text = open(proj.path).read()
+        after = text[text.index("[atlas.semantic]"):]
+        before = text[:text.index("[atlas.semantic]")]
+        check("the semantic table follows the atlas it belongs to",
+              before.rindex('name = "second"') > before.rindex('name = "tiles"'))
+
+        proj.save_role("second", "gate", 3)
+        check("a second name joins the same table",
+              proj.man["atlas"][1]["semantic"] == {"door": 2, "gate": 3})
+        check("the manifest builds with named tiles",
+              builds(proj.path, root, "out_roles"))
+        d = defines(os.path.join(root, "out_roles"))
+        check("a named tile reaches the header prefixed by its atlas",
+              d.get("SECOND_TILE_DOOR") == 2 and d.get("SECOND_TILE_GATE") == 3)
+
+        # A role only becomes paintable through a legend character, which is the same
+        # path a raw index takes -- so naming and painting compose.
+        proj.save_legend("g", "door", atlas="second")
+        check("a legend entry can resolve through a named tile",
+              builds(proj.path, root, "out_named"))
+
+        try:
+            proj.remove_role("second", "door")
+            check("removing a role a legend resolves through is refused", False)
+        except ValueError as e:
+            check("removing a role a legend resolves through is refused",
+                  "resolve through" in str(e))
+
+        for label, call in (
+            ("a role name that is not an identifier",
+             lambda: proj.save_role("second", "front door", 1)),
+            ("a tile index past the atlas",
+             lambda: proj.save_role("second", "far", 999)),
+            ("an unknown atlas", lambda: proj.save_role("nope", "x", 0)),
+            ("a name autopick already owns", lambda: proj.save_role("second", "wall", 2)),
+            ("moving an existing name to another tile",
+             lambda: proj.save_role("second", "gate", 1)),
+        ):
+            try:
+                call()
+                check(f"the editor refuses {label}", False)
+            except ValueError:
+                check(f"the editor refuses {label}", True)
+
+
+def check_editor_autopick():
+    """The importer's one pre-build say over roles."""
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root, atlas=FLIP_ATLAS, **maps(EDITOR_MAP))
+
+        proj.set_autopick("tiles", ["floor", "wall", "accent", "water"])
+        check("autopick is rewritten in place",
+              proj.man["atlas"][0]["autopick"] == ["floor", "wall", "accent", "water"])
+        check("and the manifest still builds",
+              builds(proj.path, root, "out_pick"))
+        check("the extra role reaches the header",
+              "TILES_TILE_WATER" in defines(os.path.join(root, "out_pick")))
+
+        try:
+            proj.set_autopick("tiles", ["floor", "floor"])
+            check("a repeated role is refused", False)
+        except ValueError:
+            check("a repeated role is refused", True)
+
+
+def check_editor_map_atlases():
+    """A map's tileset list round-trips, and the two spellings never both survive."""
+    with tempfile.TemporaryDirectory() as root:
+        second_sheet(root)
+        proj = editor_project(root, atlas=TWO_ATLASES, legend=TWO_LEGEND,
+                              **maps(EDITOR_MAP))
+
+        # Scoped to the map block: a legend entry pinned to an atlas carries an
+        # `atlas = "..."` line of its own, and scanning the whole file would read that as
+        # the map's.
+        def map_block():
+            text = open(proj.path).read()
+            at = text.index("[[map]]")
+            return text[at:]
+
+        proj.save_map("a", ["####", "#.s#", "####"], [1, 1], [],
+                      atlases=["tiles", "second"])
+        check("saving several atlases writes the list form",
+              'atlases = ["tiles", "second"]' in map_block())
+        check("and drops the single-atlas spelling",
+              not re.search(r'^atlas\s*=', map_block(), re.M))
+        check("the map reads back with both",
+              proj.maps()[0]["atlases"] == ["tiles", "second"])
+        check("a multi-atlas map builds", builds(proj.path, root, "out_multi"))
+
+        proj.save_map("a", ["####", "#..#", "####"], [1, 1], [], atlases=["tiles"])
+        check("going back to one atlas restores the short spelling",
+              'atlas = "tiles"' in map_block() and "atlases" not in map_block())
+        check("and still builds", builds(proj.path, root, "out_single"))
 
 
 def main():
@@ -1303,6 +1833,8 @@ def main():
     ''')
 
     check_worldtiles()
+    check_tile_indices_and_flips()
+    check_user_flags()
 
     # --- fonts
     #
@@ -1535,6 +2067,11 @@ def main():
             break
 
     check_editor_atlas_removal()
+    check_editor_legend()
+    check_editor_flags()
+    check_editor_roles()
+    check_editor_autopick()
+    check_editor_map_atlases()
 
     print(f"\n{checks} checks, {failures} failures")
     return 1 if failures else 0

@@ -795,6 +795,11 @@ class Project:
                 # at this size, which is what turns a screen in pixels into a frame in
                 # tiles for the camera overlay.
                 "tile": atlas["tile_px"],
+                # A metatiled atlas cannot be drawn flipped -- pnx_tilemap_draw skips the
+                # flip for composed tiles rather than mirroring the quadrant order. So the
+                # picker has to hide the mirrored variants for this atlas rather than
+                # offer a choice the build will refuse.
+                "metatiled": bool(atlas.get("metatiled")),
                 "roles": roles,
                 "tiles": [pv.data_uri(self._upright(pv.tile_image(atlas, palettes, i, 2)))
                           for i in range(atlas["count"])],
@@ -807,6 +812,19 @@ class Project:
         pals = pv.parse_palettes(pv.read(os.path.join(self.res, "palettes.bin")))
         return [[("transparent" if pv.gcolor_rgb(c) is None
                   else "#%02x%02x%02x" % pv.gcolor_rgb(c)) for c in p] for p in pals]
+
+    def flag_names(self):
+        """Flag name -> bit, built-ins and the project's own together.
+
+        Read through the pipeline's parser rather than the raw table, so a manifest the
+        build would reject cannot reach the page looking valid. A broken [tile_flags]
+        falls back to the built-ins: the editor still opens, which is what lets you fix
+        it, and Build will say what is wrong.
+        """
+        try:
+            return pa.parse_flag_names(self.man.get("tile_flags", {}))
+        except pa.BuildError:
+            return dict(pa.FLAG_NAMES)
 
     def map_atlases(self, m):
         """The atlases one map draws from, in the order that fixes its tile id space.
@@ -838,9 +856,23 @@ class Project:
         return out
 
     def state(self):
-        legend = {ch: {"tile": e["tile"], "flags": e.get("flags", [])}
+        # `atlas` and `flip` used to be dropped here, which is why the page could only
+        # ever paint through the map's FIRST tileset: a character pinned to another atlas
+        # resolved against the wrong role table and showed up as missing art, even though
+        # the same manifest built and previewed correctly. The page needs every key the
+        # pipeline reads, or it is describing a different legend from the one that builds.
+        legend = {ch: {"tile": e["tile"], "flags": e.get("flags", []),
+                       "atlas": e.get("atlas"),
+                       "flip": ([e["flip"]] if isinstance(e.get("flip"), str)
+                                else list(e.get("flip", [])))}
                   for ch, e in self.man.get("legend", {}).items()}
         return {
+            # Every flag name a legend entry may carry, and its bit. Built-ins first so
+            # the page can show them as the fixed pair they are, then whatever
+            # [tile_flags] invented.
+            "flags": self.flag_names(),
+            "flag_bits_free": [b for b in pa.FLAG_USER_BITS
+                               if b not in self.flag_names().values()],
             "name": self.project.get("name", "project"),
             "built": self.built,
             # Where this project actually lives. Worth surfacing because the editor can
@@ -2120,8 +2152,365 @@ class Project:
                 "region": spec.get("region", [0, 0, 16, 16]),
                 "max_tiles": spec.get("max_tiles", 64),
                 "colorkey": spec.get("colorkey"),
+                "autopick": list(spec.get("autopick", [])),
+                "semantic": {k: int(v) for k, v in spec.get("semantic", {}).items()},
                 "exclude": [int(e) for e in spec.get("exclude", [])
                             if not isinstance(e, (list, tuple))]}
+
+    # --------------------------------------------------------------------- legend
+    #
+    # Painting used to be limited to whatever the legend already said, and the legend was
+    # only reachable by hand-editing the manifest. That put the three tiles `autopick`
+    # names between an artist and a 200-tile sheet. These writers are what let the tile
+    # picker mint an entry, so choosing a tile and choosing what it MEANS are one action.
+
+    @staticmethod
+    def _toml_key(ch):
+        """One legend character as a quoted TOML key.
+
+        The characters worth painting with are punctuation, so the two that would break
+        the quoting -- a quote and a backslash -- are exactly the ones a person reaches
+        for eventually.
+        """
+        return '"' + ch.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    def _legend_block(self, ch):
+        """(lines, start, end) for one [legend."x"] block, or None if it has none."""
+        lines = open(self.path).read().split("\n")
+        want = f"[legend.{self._toml_key(ch)}]"
+        for i, line in enumerate(lines):
+            if line.strip() == want:
+                end = next((j for j in range(i + 1, len(lines))
+                            if lines[j].lstrip().startswith("[")), len(lines))
+                return lines, i, end
+        return None
+
+    def _legend_lines(self, ch, tile, atlas=None, flags=(), flip=()):
+        body = [f"[legend.{self._toml_key(ch)}]"]
+        # An int is a raw index into the atlas, a string is a role it defines. Both are
+        # first-class; the quoting is the whole difference in the file.
+        body.append(f"tile = {tile}" if isinstance(tile, int)
+                    else f'tile = "{tile}"')
+        if atlas:
+            body.append(f'atlas = "{atlas}"')
+        body.append("flags = [" + ", ".join(f'"{f}"' for f in flags) + "]")
+        if flip:
+            body.append("flip = [" + ", ".join(f'"{a}"' for a in flip) + "]")
+        return body
+
+    def save_legend(self, ch, tile, atlas=None, flags=(), flip=()):
+        """Create or rewrite one legend character, validating it the way the build will.
+
+        Checked here rather than only in the page, because a legend entry that does not
+        resolve breaks every map that paints it -- and the editor is the thing that is
+        supposed to make a manifest you cannot break.
+        """
+        if len(ch) != 1:
+            raise ValueError("a legend character is exactly one character")
+        if ch.isspace():
+            raise ValueError("whitespace cannot be a legend character: the rows block "
+                             "would not survive a round trip through it")
+
+        known = self.flag_names()
+        for f in flags:
+            if f not in known:
+                raise ValueError(f"unknown flag {f!r} (known: {', '.join(sorted(known))})")
+        for axis in flip:
+            if axis not in ("x", "y"):
+                raise ValueError(f"flip must be \"x\" or \"y\", not {axis!r}")
+
+        names = [a.get("name") for a in self.man.get("atlas", [])]
+        if atlas and atlas not in names:
+            raise ValueError(f"no atlas named {atlas!r}")
+        if flip:
+            which = atlas or (names[0] if names else None)
+            built = next((a for a in self.atlases() if a["name"] == which), None)
+            if built and built["metatiled"]:
+                raise ValueError(
+                    f"atlas {which!r} is metatiled, and the runtime does not flip a "
+                    f"composed tile -- it would draw unmirrored. Set `metatiles = false` "
+                    f"on that atlas to paint it flipped.")
+
+        if isinstance(tile, int):
+            which = atlas or (names[0] if names else None)
+            built = next((a for a in self.atlases() if a["name"] == which), None)
+            if built:
+                count = built["count"]
+            else:
+                # Before the first build there is no packed atlas to count, but max_tiles
+                # is a ceiling the carve cannot exceed -- so an index past it is wrong now
+                # rather than wrong later, and refusing it does not depend on having built.
+                spec = next((a for a in self.man.get("atlas", [])
+                             if a.get("name") == which), None)
+                count = spec.get("max_tiles") if spec else None
+            if count is not None and not 0 <= tile < count:
+                raise ValueError(f"atlas {which!r} holds {count} tiles "
+                                 f"(0-{count - 1}), not {tile}")
+
+        block = self._legend_block(ch)
+        if block:
+            lines, start, end = block
+            # The block runs to the next table header, which means it takes the blank
+            # lines separating it from that header with it. Rewriting without them would
+            # close the gap a little more every time a flag was ticked, until the legend
+            # was one unbroken wall of text.
+            gap = 0
+            while end - gap > start and lines[end - gap - 1].strip() == "":
+                gap += 1
+            lines[start:end] = (self._legend_lines(ch, tile, atlas, flags, flip)
+                                + [""] * gap)
+            with open(self.path, "w") as f:
+                f.write("\n".join(lines))
+        else:
+            # Appended beside the other legend entries when there are any, so the file
+            # stays readable as one table rather than growing a second legend section at
+            # the bottom under the maps.
+            lines = open(self.path).read().split("\n")
+            last = max((i for i, l in enumerate(lines)
+                        if l.strip().startswith("[legend.")), default=None)
+            new = self._legend_lines(ch, tile, atlas, flags, flip)
+            if last is None:
+                lines = lines + [""] + new
+            else:
+                # Straight after the last legend entry's own key/values, and no further.
+                # Scanning to the next table header instead would step over the blank line
+                # and the section comment that belong to whatever comes NEXT -- which put
+                # new entries under the "maps" heading, where they parse correctly and
+                # read as though someone had lost their place.
+                end = last + 1
+                while (end < len(lines) and lines[end].strip()
+                       and not lines[end].lstrip().startswith("[")
+                       and not lines[end].lstrip().startswith("#")):
+                    end += 1
+                lines[end:end] = [""] + new
+            with open(self.path, "w") as f:
+                f.write("\n".join(lines))
+        self.reload()
+
+    def legend_users(self, ch):
+        """The maps that paint this character, so removing it can refuse and say which."""
+        return [m["name"] for m in self.man.get("map", [])
+                if ch in m.get("rows", "")]
+
+    def remove_legend(self, ch):
+        """Delete a legend character, once no map paints it."""
+        block = self._legend_block(ch)
+        if not block:
+            raise ValueError(f"no legend entry for {ch!r}")
+        users = self.legend_users(ch)
+        if users:
+            raise ValueError(f"{ch!r} is still painted in: {', '.join(users)}. "
+                             f"Paint over it first.")
+        lines, start, end = block
+        while end < len(lines) and lines[end].strip() == "":
+            end += 1
+        while start > 0 and lines[start - 1].strip() == "":
+            start -= 1
+        lines[start:end] = [""]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def save_flag(self, name, bit=None):
+        """Name a bit of the tile flag byte, so a project can have its own `water`.
+
+        The bit is written down rather than assigned by position because a flag value is
+        baked into built maps AND compiled into game code: a name that silently changes
+        bit would break both, and neither would say so.
+        """
+        if name in pa.FLAG_NAMES:
+            raise ValueError(f"{name!r} is built in and cannot be redefined")
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise ValueError("a flag name must be lowercase letters, digits and "
+                             "underscores -- it becomes a C identifier")
+        current = self.flag_names()
+        if bit is None:
+            # A flag that already exists keeps its bit. Picking "the lowest free one"
+            # would hand an existing name a DIFFERENT bit -- silently invalidating every
+            # map already built with it and every `& TILE_FLAG_X` already compiled, which
+            # is the one thing writing bits down instead of positions exists to prevent.
+            bit = current.get(name)
+        if bit is None:
+            bit = next((b for b in pa.FLAG_USER_BITS if b not in current.values()), None)
+            if bit is None:
+                raise ValueError("all six free flag bits are taken; the flag byte is full")
+        bit = int(bit)
+        taken = next((n for n, b in current.items() if b == bit and n != name), None)
+        if taken:
+            raise ValueError(f"0x{bit:02X} is already {taken!r}")
+
+        lines = open(self.path).read().split("\n")
+        head = next((i for i, l in enumerate(lines) if l.strip() == "[tile_flags]"), None)
+        entry = f"{name} = 0x{bit:02X}"
+        if head is None:
+            lines += ["", "# Tile flags this project invented. Each becomes a "
+                          "TILE_FLAG_* define in the", "# generated header, and "
+                          "pnx_map_flags gives the whole byte back to test it.",
+                      "[tile_flags]", entry]
+        else:
+            end = next((j for j in range(head + 1, len(lines))
+                        if lines[j].lstrip().startswith("[")), len(lines))
+            at = next((j for j in range(head + 1, end)
+                       if re.match(rf"\s*{re.escape(name)}\s*=", lines[j])), None)
+            if at is not None:
+                lines[at] = entry
+            else:
+                while end > head and lines[end - 1].strip() == "":
+                    end -= 1
+                lines[end:end] = [entry]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+        return {"name": name, "bit": bit}
+
+    def flag_users(self, name):
+        """Legend characters carrying this flag -- what a removal would silently change."""
+        return [ch for ch, e in self.man.get("legend", {}).items()
+                if name in e.get("flags", [])]
+
+    def remove_flag(self, name):
+        if name in pa.FLAG_NAMES:
+            raise ValueError(f"{name!r} is built in and cannot be removed")
+        users = self.flag_users(name)
+        if users:
+            raise ValueError(f"{name!r} is still set on legend "
+                             f"{', '.join(repr(c) for c in sorted(users))}. "
+                             f"Clear it there first.")
+        lines = open(self.path).read().split("\n")
+        head = next((i for i, l in enumerate(lines) if l.strip() == "[tile_flags]"), None)
+        if head is None:
+            raise ValueError(f"no [tile_flags] table in the manifest")
+        end = next((j for j in range(head + 1, len(lines))
+                    if lines[j].lstrip().startswith("[")), len(lines))
+        at = next((j for j in range(head + 1, end)
+                   if re.match(rf"\s*{re.escape(name)}\s*=", lines[j])), None)
+        if at is None:
+            raise ValueError(f"no flag named {name!r}")
+        del lines[at]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    # ----------------------------------------------------------------- tile roles
+    #
+    # A role is what game code names a tile by. `autopick` invents three of them, and
+    # everything else needed a hand-written [atlas.semantic] table -- so a tile could be
+    # painted but never referred to from C. Naming one is the other half of the picker:
+    # the index makes it paintable, the role makes it addressable.
+
+    def save_role(self, atlas, role, index):
+        """Name one tile of an atlas, writing [atlas.semantic] under its block.
+
+        The subtable has to sit immediately after its own [[atlas]] block: in TOML it
+        binds to the most recent array element, so the same three lines under a different
+        atlas silently name a tile in the wrong tileset.
+        """
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", role):
+            raise ValueError("a role name must be lowercase letters, digits and "
+                             "underscores -- it becomes a C identifier")
+        spec = next((a for a in self.man.get("atlas", []) if a.get("name") == atlas), None)
+        if not spec:
+            raise ValueError(f"no atlas named {atlas!r}")
+
+        index = int(index)
+        built = next((a for a in self.atlases() if a["name"] == atlas), None)
+        count = built["count"] if built else spec.get("max_tiles")
+        if count is not None and not 0 <= index < count:
+            raise ValueError(f"atlas {atlas!r} holds {count} tiles (0-{count - 1}), "
+                             f"not {index}")
+
+        # `autopick` runs first and `semantic` overrides it, so naming a tile the autopick
+        # already claimed is a redefinition rather than a clash -- but silently moving
+        # "wall" to another tile would change every map that draws it, so it is refused.
+        if role in spec.get("autopick", []):
+            raise ValueError(f"{role!r} is autopicked for {atlas!r}. Remove it from "
+                             f"`autopick` first, or name this tile something else.")
+        taken = spec.get("semantic", {}).get(role)
+        if taken is not None and int(taken) != index:
+            raise ValueError(f"{atlas!r} already names tile {taken} {role!r}. "
+                             f"Pick another name.")
+
+        lines, start, end = self._atlas_block(atlas)
+        entry = f"{role} = {index}"
+
+        # The block ends at the next table header, which IS `[atlas.semantic]` when one is
+        # already there.
+        if end < len(lines) and lines[end].strip() == "[atlas.semantic]":
+            stop = next((j for j in range(end + 1, len(lines))
+                         if lines[j].lstrip().startswith("[")), len(lines))
+            at = next((j for j in range(end + 1, stop)
+                       if re.match(rf"\s*{re.escape(role)}\s*=", lines[j])), None)
+            if at is not None:
+                lines[at] = entry
+            else:
+                while stop > end and lines[stop - 1].strip() == "":
+                    stop -= 1
+                lines[stop:stop] = [entry]
+        else:
+            while end > start and lines[end - 1].strip() == "":
+                end -= 1
+            lines[end:end] = ["", "# Tiles this project names. Game code refers to them as"
+                                  f" {re.sub(r'[^A-Za-z0-9]', '_', atlas).upper()}_TILE_*.",
+                              "[atlas.semantic]", entry, ""]
+
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def remove_role(self, atlas, role):
+        """Unname a tile. The tile stays; only the name goes."""
+        spec = next((a for a in self.man.get("atlas", []) if a.get("name") == atlas), None)
+        if not spec or role not in spec.get("semantic", {}):
+            raise ValueError(f"atlas {atlas!r} does not name a tile {role!r}")
+        users = [ch for ch, e in self.man.get("legend", {}).items()
+                 if e.get("tile") == role and (e.get("atlas") or self._default_atlas()) == atlas]
+        if users:
+            raise ValueError(f"legend {', '.join(repr(c) for c in sorted(users))} "
+                             f"resolve through {role!r}. Repoint them first.")
+        lines, start, end = self._atlas_block(atlas)
+        if not (end < len(lines) and lines[end].strip() == "[atlas.semantic]"):
+            raise ValueError(f"no [atlas.semantic] table for {atlas!r}")
+        stop = next((j for j in range(end + 1, len(lines))
+                     if lines[j].lstrip().startswith("[")), len(lines))
+        at = next((j for j in range(end + 1, stop)
+                   if re.match(rf"\s*{re.escape(role)}\s*=", lines[j])), None)
+        if at is None:
+            raise ValueError(f"no role named {role!r}")
+        del lines[at]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def _default_atlas(self):
+        specs = self.man.get("atlas", [])
+        return specs[0]["name"] if specs else None
+
+    def set_autopick(self, atlas, roles):
+        """Rewrite one atlas's `autopick` list.
+
+        The importer's only pre-build say over roles: which ones to invent from the art.
+        Everything else has to wait for a packed atlas, because a role is an index into
+        one and dedup decides what those are.
+        """
+        for r in roles:
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", r):
+                raise ValueError(f"role {r!r} must be lowercase letters, digits and "
+                                 f"underscores")
+        if len(set(roles)) != len(roles):
+            raise ValueError("the same role twice")
+        lines, start, end = self._atlas_block(atlas)
+        entry = "autopick = [" + ", ".join(f'"{r}"' for r in roles) + "]"
+        at = next((j for j in range(start, end)
+                   if re.match(r"\s*autopick\s*=", lines[j])), None)
+        if at is not None and roles:
+            lines[at] = entry
+        elif at is not None:
+            del lines[at]
+        elif roles:
+            lines[end:end] = [entry]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
 
     def _atlas_block(self, name):
         """(lines, start, end) for one [[atlas]] block, end exclusive.
@@ -2314,14 +2703,20 @@ autopick = ["floor", "wall", "accent"]
             f.write(block)
         self.reload()
 
-    def legend_chars(self):
+    def legend_chars(self, atlas=None):
         """Pick sensible default characters for a blank map's floor and walls.
 
         Derived from the legend's flags rather than assuming '.' and '#', so a project
         with its own legend gets a blank map it can actually paint on.
         """
+        specs = self.man.get("atlas", [])
+        default = specs[0]["name"] if specs else None
         floor = wall = None
         for ch, e in self.man.get("legend", {}).items():
+            # A character resolving against ANOTHER tileset cannot go in this map's blank
+            # room: the build would refuse it, and the new map would open unpaintable.
+            if atlas and (e.get("atlas") or default) != atlas:
+                continue
             flags = e.get("flags", [])
             if "solid" in flags and wall is None:
                 wall = ch
@@ -2343,9 +2738,11 @@ autopick = ["floor", "wall", "accent"]
         if not (3 <= w <= 255 and 3 <= h <= 255):
             raise ValueError("width and height must be between 3 and 255")
 
-        floor, wall = self.legend_chars()
+        floor, wall = self.legend_chars(atlas)
         if not floor or not wall:
-            raise ValueError("the legend needs a walkable tile and a solid tile")
+            raise ValueError(
+                f"atlas {atlas!r} has no walkable legend character and no solid one, so "
+                f"there is nothing to build a room out of. Add them from the tile picker.")
 
         rows = [wall * w]
         for _ in range(h - 2):
@@ -2377,13 +2774,17 @@ atlases = ["{atlas}"]
 
     # ------------------------------------------------------------------- saving
 
-    def save_map(self, name, rows, start, warps, atlas=None):
+    def save_map(self, name, rows, start, warps, atlas=None, atlases=None):
         """Rewrite one map's rows/start/warps in place, touching nothing else.
 
         Located by scanning `[[map]]` blocks for the matching name rather than by
         rewriting the parsed document, so every comment in the file survives -- which
         matters more here than elsewhere, because manifests carry the reasoning behind
         the content.
+
+        `atlas` and `atlases` are the same key spelled for one tileset or many, and the
+        two are mutually exclusive in the file -- so writing either clears the other
+        rather than leaving a manifest that says both.
         """
         text = open(self.path).read()
 
@@ -2404,12 +2805,32 @@ atlases = ["{atlas}"]
             chunk = re.sub(r"^start\s*=\s*\[.*?\]$",
                            f"start = [{start[0]}, {start[1]}]", chunk, flags=re.M)
 
-            if atlas:
-                if re.search(r"^atlas\s*=", chunk, re.M):
-                    chunk = re.sub(r'^atlas\s*=.*$', f'atlas = "{atlas}"', chunk,
-                                   flags=re.M)
+            # One tileset stays spelled `atlas`, because that is what almost every map is
+            # and what almost every manifest already says. The list form only appears when
+            # a map actually draws from several.
+            want = list(atlases) if atlases else ([atlas] if atlas else [])
+            if want:
+                line = (f'atlas = "{want[0]}"' if len(want) == 1
+                        else "atlases = [" + ", ".join(f'"{a}"' for a in want) + "]")
+
+                # Written over whichever spelling the file already used, so the key keeps
+                # its place and any comment above it. Both spellings are then swept, which
+                # is what stops a manifest that once said `atlas` and now says `atlases`
+                # from quietly carrying both -- where the pipeline would take the list and
+                # the leftover line would describe a map that no longer exists.
+                key = re.compile(r"^(?:atlas\s*=[^\n]*|atlases\s*=\s*\[.*?\])\n",
+                                 re.M | re.S)
+                if key.search(chunk):
+                    hits = []
+
+                    def once(_m):
+                        hits.append(1)
+                        return line + "\n" if len(hits) == 1 else ""
+
+                    chunk = key.sub(once, chunk)
                 else:
-                    chunk = re.sub(r'(^name\s*=.*$)', rf'\1\natlas = "{atlas}"',
+                    chunk = re.sub(r"(^name\s*=[^\n]*$)",
+                                   lambda m: m.group(1) + "\n" + line,
                                    chunk, count=1, flags=re.M)
 
             warp_src = ", ".join(
@@ -2560,10 +2981,44 @@ canvas{image-rendering:pixelated;cursor:crosshair;border:1px solid var(--line);
   border-radius:3px}
 .tiles{display:flex;flex-wrap:wrap;gap:4px}
 .tile{border:2px solid transparent;border-radius:4px;padding:1px;cursor:pointer;
-  background:none;line-height:0}
+  background:none;line-height:0;position:relative}
 .tile img{width:32px;height:32px;image-rendering:pixelated;display:block}
 .tile.sel{border-color:var(--accent)}
 .tile b{display:block;font:9px ui-monospace,monospace;color:var(--dim);text-align:center}
+/* The flags a character carries, on the swatch itself. Behaviour you have to hover to
+   see is behaviour nobody checks, and "which of these is solid" is the question a
+   tile palette is asked most often. */
+.tile .fmark{position:absolute;top:0;right:0;font-style:normal;font-size:9px;
+  line-height:1;padding:1px 2px;border-radius:0 3px 0 3px;
+  background:var(--accent);color:#fff}
+/* Which tileset a run of characters came from. Only shown when a map draws from more
+   than one, because otherwise it is a heading over the whole world. */
+.palgroup{width:100%;font:600 .6rem/1.6 ui-monospace,Menlo,monospace;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--dim);margin-top:.35rem}
+.dim{color:var(--dim)}
+
+/* Overlays. The tile picker shows hundreds of tiles at once, which is more than any
+   sidebar can hold and the whole reason it is not one. */
+.overlay{position:fixed;inset:0;z-index:50;background:#0009;
+  display:flex;align-items:center;justify-content:center;padding:2rem}
+.overlay .sheet{background:var(--surface);border:1px solid var(--line);border-radius:8px;
+  width:min(920px,100%);max-height:100%;display:flex;flex-direction:column;
+  box-shadow:0 12px 40px #0006}
+.overlay .sheet.narrow{width:min(460px,100%)}
+.overlay .sheet>header{display:flex;align-items:center;gap:.6rem;padding:.6rem .9rem;
+  border-bottom:1px solid var(--line)}
+.overlay .sheet>footer{padding:.5rem .9rem;border-top:1px solid var(--line);
+  font-size:.78rem}
+#pickbody,#setbody{overflow:auto;padding:.9rem;min-height:0}
+/* A picked tile is bigger than a palette swatch: at 32px you cannot tell two variants of
+   the same wall apart, which is exactly the choice being made here. */
+#pickbody .tile img{width:40px;height:40px}
+#pickbody .used{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
+.setrow{display:flex;align-items:center;gap:.5rem;padding:.35rem 0;
+  border-bottom:1px solid var(--line)}
+.setrow b{font-weight:600}
+.setrow .grow{flex:1}
+.setrow button{padding:.1rem .45rem;line-height:1.4}
 .pal{display:flex;gap:2px;flex-wrap:wrap;margin-bottom:6px}
 .sw{width:18px;height:18px;border-radius:2px;outline:1px solid var(--line)}
 .sw.clear{background:repeating-conic-gradient(from 0deg,#8886 0 25%,transparent 0 50%)
@@ -2827,7 +3282,11 @@ button:disabled{opacity:.45;cursor:not-allowed}
     <b id="ctxtitle">Maps</b>
     <span id="ctxbar">
       <select id="mapsel"></select>
-      <select id="atlassel" title="tileset this map is drawn with"></select>
+      <!-- A map draws from a LIST of tilesets, not one. The button opens the picker
+           rather than a select carrying the choice, because choosing tilesets and
+           choosing tiles out of them is one job done in one place. -->
+      <button id="tilesets" title="tilesets this map is drawn with">Tilesets…</button>
+      <button id="pick" title="every tile of every tileset this map uses">Tiles…</button>
       <span id="tool"></span>
     </span>
     <div style="flex:1"></div>
@@ -2878,6 +3337,11 @@ button:disabled{opacity:.45;cursor:not-allowed}
       <small id="painthint">Click to paint. <kbd>W</kbd> sets a warp, <kbd>S</kbd> the
       start.</small>
     </section>
+    <!-- What the selected character IS: which tile of which tileset, mirrored how, and
+         what the game will read off it. Flags used to be reachable only by hand-editing
+         the manifest, which meant the one property of a tile that changes how the game
+         plays was the one property the editor could not set. -->
+    <section><h2>Tile</h2><div id="tileinfo"><small class="dim">—</small></div></section>
     <section><h2>Map</h2><div id="mapinfo"><small>—</small></div>
       <div class="mini">
         <input id="nmname" placeholder="name" size="8">
@@ -2923,6 +3387,13 @@ button:disabled{opacity:.45;cursor:not-allowed}
         <label>w<input id="rw" type="number" value="16" min="1"></label>
         <label>h<input id="rh" type="number" value="16" min="1"></label>
         <label>Max tiles<input id="maxt" type="number" value="64" min="1"></label>
+        <!-- The roles the pipeline invents from the art. It was hardcoded to
+             floor/wall/accent, which is why a freshly imported atlas offered three
+             paintable tiles out of however many it packed. Everything past these is
+             named per tile in the tile picker, which needs a packed atlas to point at. -->
+        <label title="roles picked from the art at build time, comma separated"
+               >Autopick<input id="apick" placeholder="floor, wall, accent"
+                               autocomplete="off"></label>
         <!-- Typing the name of an atlas that already exists turns this into an edit.
              Before, Add was the only door: a carve you got wrong was in the manifest for
              good, and fixing it meant hand-editing TOML. -->
@@ -3267,9 +3738,77 @@ button:disabled{opacity:.45;cursor:not-allowed}
     <span id="stsdk"></span>
   </footer>
 </div>
+
+<!-- The tile picker.
+     Painting used to be limited to the legend, and the legend to whatever `autopick`
+     named -- three tiles of an atlas that may hold two hundred. This is where the other
+     hundred and ninety-seven become reachable: every tile of every tileset the map uses,
+     and clicking one binds it to a legend character on the spot. Bigger than a sidebar
+     can hold, hence the overlay. -->
+<div id="pickwrap" class="overlay" style="display:none">
+  <div class="sheet">
+    <header>
+      <b>Tiles</b>
+      <span id="pickhint" class="dim"></span>
+      <div style="flex:1"></div>
+      <label class="mini"><input id="pickflipx" type="checkbox"> flip X</label>
+      <label class="mini"><input id="pickflipy" type="checkbox"> flip Y</label>
+      <button id="pickclose">Close</button>
+    </header>
+    <div id="pickbody"></div>
+  </div>
+</div>
+
+<!-- Which tilesets this map draws from, and in what order -- the order is not cosmetic,
+     it fixes the map's tile id space. -->
+<div id="setwrap" class="overlay" style="display:none">
+  <div class="sheet narrow">
+    <header>
+      <b>Tilesets</b>
+      <div style="flex:1"></div>
+      <button id="setclose">Close</button>
+    </header>
+    <div id="setbody"></div>
+    <footer class="dim" id="setnote"></footer>
+  </div>
+</div>
 <script>
 const S={data:null,map:null,ch:null,mode:'paint',dirty:false,img:{},T:32};
 const $=s=>document.querySelector(s);
+
+// One JSON POST and one line of output. Both existed inline in a dozen handlers; the
+// legend and flag editors add enough more of them that the repetition stopped paying.
+const post=async(url,body)=>(await fetch(url,{method:'POST',
+  headers:{'content-type':'application/json'},
+  body:JSON.stringify(body||{})})).json();
+
+function say(text,bad){
+  const log=$('#log');
+  log.className=bad===false?'ok':(bad===undefined?'':'bad');
+  log.textContent=text;
+}
+
+// Re-read the manifest after the server has written to it, keeping the map being edited
+// selected. The legend is project-wide state, so a character minted from the picker has
+// to come back through /api/state rather than being invented in the page -- otherwise
+// the palette shows a tile the manifest does not have.
+async function reload(){
+  const keep=S.map&&S.map.name, dirty=S.dirty, rows=S.map&&S.map.rows;
+  const start=S.map&&S.map.start, warps=S.map&&S.map.warps;
+  const sets=S.map&&S.map.atlases;
+  S.data=await (await fetch('/api/state')).json();
+  const i=Math.max(0,S.data.maps.findIndex(m=>m.name===keep));
+  $('#mapsel').value=i;
+  selectMap(i);
+  // Unsaved painting survives the round trip. Reloading state to pick up one new legend
+  // character would otherwise throw away every edit made since the last save, which is
+  // the kind of loss that teaches people not to touch a feature.
+  if(dirty&&rows){
+    S.map.rows=rows; S.map.start=start; S.map.warps=warps;
+    if(sets){ S.map.atlases=sets; S.map.atlas=sets[0] }
+    S.dirty=true; mark(); draw(); info();
+  }
+}
 
 async function load(){
   S.data=await (await fetch('/api/state')).json();
@@ -3285,7 +3824,6 @@ async function load(){
   for(const id of authoring) $('#'+id).disabled=false;
 
   $('#mapsel').innerHTML=S.data.maps.map((m,i)=>`<option value="${i}">${m.name}</option>`).join('');
-  $('#atlassel').innerHTML=S.data.atlases.map(a=>`<option value="${a.name}">${a.name}</option>`).join('');
   drawPalettes(); budget(); statusbar(); orientation(); atlasMode();
   // Once, a moment after the editor is usable: an update check is never
   // worth delaying the first paint for.
@@ -3294,46 +3832,406 @@ async function load(){
   selectMap(0);
 }
 
-function atlas(){
-  return S.data.atlases.find(a=>a.name===S.map.atlas) || S.data.atlases[0];
+// The atlases this map draws from, in the order that fixes its tile id space. A map is
+// not "drawn with an atlas" -- it is drawn with a LIST, and the first one is only the
+// default for characters that do not name their own.
+function mapAtlases(){
+  const want=(S.map&&S.map.atlases)||[];
+  const found=want.map(n=>S.data.atlases.find(a=>a.name===n)).filter(Boolean);
+  return found.length?found:(S.data.atlases[0]?[S.data.atlases[0]]:[]);
+}
+function atlas(name){
+  const list=mapAtlases();
+  if(!name) return list[0];
+  return list.find(a=>a.name===name)||null;
 }
 
-// A legend character names a tile ROLE; the role resolves through whichever atlas this
-// map is drawn with. Two tilesets can both define "wall" and mean different tiles.
+// A legend character names a tile in ONE of the map's atlases -- the one it pins, or the
+// map's first if it pins none. It used to resolve against the map's first atlas always,
+// which is why a character belonging to a second tileset showed as missing art even
+// though the same manifest built and previewed correctly.
+//
+// The tile is either a role the atlas defines or a raw index into it. Roles are the
+// better thing to write, but an atlas has hundreds of tiles and only a handful are worth
+// naming, so an index is how the rest get painted at all.
 function resolve(ch){
-  const a=atlas(), e=S.data.legend[ch];
-  if(!a||!e) return null;
-  const idx=a.roles[e.tile.toLowerCase()];
-  if(idx===undefined||idx>=a.tiles.length) return null;
-  return {uri:a.tiles[idx],index:idx,role:e.tile,flags:e.flags};
+  const e=S.data.legend[ch];
+  if(!e) return null;
+  const a=atlas(e.atlas);
+  if(!a) return null;
+  const byIndex=typeof e.tile==='number';
+  const idx=byIndex?e.tile:a.roles[String(e.tile).toLowerCase()];
+  if(idx===undefined||idx<0||idx>=a.tiles.length) return null;
+  return {uri:a.tiles[idx], index:idx, atlas:a.name, role:byIndex?null:e.tile,
+          flags:e.flags||[], flip:e.flip||[]};
+}
+
+// Why a character does not resolve, in the words that say what to do about it. "missing"
+// with no reason is the failure this replaced: the answer was always in the manifest and
+// never on the screen.
+function whyMissing(ch){
+  const e=S.data.legend[ch], want=e.atlas;
+  if(want && !mapAtlases().some(a=>a.name===want))
+    return `${ch} draws from ${want}, which this map does not use`;
+  const a=atlas(want);
+  if(!a) return `${ch} has no atlas to draw from`;
+  if(typeof e.tile==='number')
+    return `${ch} names tile ${e.tile} of ${a.name}, which packed ${a.tiles.length}`;
+  return `${ch} names role "${e.tile}", which ${a.name} does not define`;
+}
+
+// CSS transforms, so a mirrored tile costs no second image: the same data URI is drawn
+// turned. The pipeline stores the flip as two bits in the cell for exactly the same
+// reason, which is what makes this an honest preview rather than a lookalike.
+function flipCss(flip){
+  if(!flip||!flip.length) return '';
+  const sx=flip.includes('x')?-1:1, sy=flip.includes('y')?-1:1;
+  return `transform:scale(${sx},${sy})`;
 }
 
 function drawLegend(){
   const el=$('#legend'); el.innerHTML=''; S.img={};
-  const a=atlas();
-  if(!a){ el.innerHTML='<small>No atlas built yet — press Build.</small>'; return }
+  const list=mapAtlases();
+  if(!list.length){ el.innerHTML='<small>No atlas built yet — press Build.</small>'; return }
 
-  let usable=0, missing=[];
-  for(const ch of Object.keys(S.data.legend)){
-    const r=resolve(ch);
-    if(!r){ missing.push(`${ch} (${S.data.legend[ch].tile})`); continue }
-    usable++;
-    const img=new Image(); img.src=r.uri; S.img[ch]=img;
-    img.onload=draw;
+  // Grouped by the atlas each character draws from, because with several tilesets in one
+  // map an ungrouped strip of tiles is just a pile: which tileset a tile came from is the
+  // thing you are actually choosing between.
+  const chars=Object.keys(S.data.legend);
+  const usable=chars.filter(c=>resolve(c));
+  const missing=chars.filter(c=>!resolve(c));
+  const groups=new Map(list.map(a=>[a.name,[]]));
+  for(const ch of usable) groups.get(resolve(ch).atlas).push(ch);
 
-    const b=document.createElement('button');
-    b.className='tile'+(S.ch===ch?' sel':'');
-    b.title=`${ch} → ${r.role} (tile ${r.index}) ${r.flags.join(' ')}`;
-    b.innerHTML=`<img src="${r.uri}" alt="${ch}"><b>${ch}</b>`;
-    b.onclick=()=>{S.ch=ch;S.mode='paint';drawLegend();tool()};
-    el.appendChild(b);
+  for(const [name,members] of groups){
+    if(list.length>1){
+      const h=document.createElement('div');
+      h.className='palgroup'; h.textContent=name;
+      el.appendChild(h);
+    }
+    if(!members.length){
+      const p=document.createElement('small');
+      p.className='dim'; p.textContent='no characters yet';
+      el.appendChild(p);
+    }
+    for(const ch of members){
+      const r=resolve(ch);
+      const img=new Image(); img.src=r.uri; S.img[ch]=img;
+      img.onload=draw;
+
+      const b=document.createElement('button');
+      b.className='tile'+(S.ch===ch?' sel':'');
+      b.title=`${ch} → ${r.role?r.role:'tile '+r.index} of ${r.atlas}`
+        +(r.flip.length?` flipped ${r.flip.join('')}`:'')
+        +(r.flags.length?` [${r.flags.join(' ')}]`:'');
+      b.innerHTML=`<img src="${r.uri}" alt="${ch}" style="${flipCss(r.flip)}"><b>${ch}</b>`
+        +(r.flags.length?`<i class="fmark">${flagMark(r.flags)}</i>`:'');
+      b.onclick=()=>{S.ch=ch;S.mode='paint';drawLegend();tool();tileInfo()};
+      el.appendChild(b);
+    }
   }
-  if(!usable||!S.img[S.ch]) S.ch=Object.keys(S.data.legend).find(c=>resolve(c))||null;
+  if(!usable.length||!S.img[S.ch]) S.ch=usable[0]||null;
 
   $('#painthint').innerHTML = missing.length
-    ? `<span style="color:var(--bad)">${a.name} defines no tile for ${missing.join(', ')}
-       — give it an <code>autopick</code> or <code>[atlas.semantic]</code> table.</span>`
+    ? `<span style="color:var(--bad)">${missing.map(whyMissing).join('; ')}.</span>`
     : 'Click to paint. <kbd>W</kbd> sets a warp, <kbd>S</kbd> the start.';
+  tileInfo();
+}
+
+// One glyph per flag, so the palette shows behaviour without a tooltip. Solid and warp
+// get the two shapes everyone already reads; a project's own flags get their initial.
+function flagMark(flags){
+  return flags.map(f=>f==='solid'?'▪':f==='warp'?'⇢':f[0].toUpperCase()).join('');
+}
+
+// ------------------------------------------------------------------ the tile panel
+//
+// The selected character, and every property of it that the manifest carries. Editing
+// here writes the manifest immediately rather than waiting for Save map: the legend is
+// project-wide, and a flag change means something to every map that paints the character,
+// not just the one on screen. Save map saves the ROWS; this is not part of them.
+
+function tileInfo(){
+  const box=$('#tileinfo'), ch=S.ch;
+  const r=ch?resolve(ch):null;
+  if(!r){ box.innerHTML='<small class="dim">no tile selected</small>'; return }
+
+  const e=S.data.legend[ch];
+  const known=S.data.flags||{solid:1,warp:2};
+  box.innerHTML='';
+
+  const head=document.createElement('div');
+  head.className='mini';
+  head.innerHTML=`<img src="${r.uri}" style="width:32px;height:32px;`
+    +`image-rendering:pixelated;${flipCss(r.flip)}">`
+    +`<small><b>${ch}</b> → ${r.role?'role "'+r.role+'"':'tile '+r.index}`
+    +`<br><span class="dim">${r.atlas}</span></small>`;
+  box.appendChild(head);
+
+  // Flags. A checkbox each, including the project's own, because the difference between
+  // solid and walkable is the difference between a wall and a floor and it should not
+  // take a text editor to say which one this is.
+  const flags=document.createElement('div');
+  flags.style.margin='.4rem 0';
+  for(const name of Object.keys(known)){
+    const on=(e.flags||[]).includes(name);
+    const l=document.createElement('label');
+    l.className='mini';
+    l.innerHTML=`<input type="checkbox" ${on?'checked':''}> ${name}`
+      +` <span class="dim">0x${known[name].toString(16).padStart(2,'0')}</span>`;
+    l.querySelector('input').onchange=ev=>{
+      const next=(e.flags||[]).filter(f=>f!==name);
+      if(ev.target.checked) next.push(name);
+      writeLegend(ch,{flags:next});
+    };
+    flags.appendChild(l);
+  }
+  box.appendChild(flags);
+
+  // Mirroring, hidden for a metatiled atlas rather than offered and then refused: the
+  // runtime does not flip composed tiles, so the choice does not exist there.
+  const a=atlas(r.atlas);
+  if(a&&!a.metatiled){
+    const flip=document.createElement('div');
+    for(const axis of ['x','y']){
+      const on=r.flip.includes(axis);
+      const l=document.createElement('label');
+      l.className='mini';
+      l.innerHTML=`<input type="checkbox" ${on?'checked':''}> flip ${axis.toUpperCase()}`;
+      l.querySelector('input').onchange=ev=>{
+        const next=r.flip.filter(f=>f!==axis);
+        if(ev.target.checked) next.push(axis);
+        writeLegend(ch,{flip:next});
+      };
+      flip.appendChild(l);
+    }
+    box.appendChild(flip);
+  }
+
+  const foot=document.createElement('div');
+  foot.className='mini';
+  const del=document.createElement('button');
+  del.textContent='Remove';
+  del.title='delete this legend character';
+  del.onclick=async()=>{
+    const r2=await post('/api/legend/remove',{char:ch});
+    if(!r2.ok){ say(r2.error); return }
+    S.ch=null; await reload(); say(`Removed ${ch} from the legend.`,false);
+  };
+  foot.appendChild(del);
+  box.appendChild(foot);
+
+  // Defining a flag is rare enough to sit behind a click, and common enough that it
+  // cannot only live in the manifest.
+  const add=document.createElement('div');
+  add.className='mini';
+  const nf=document.createElement('button');
+  nf.textContent='＋ flag';
+  nf.title='name a new tile flag the game can test';
+  nf.onclick=async()=>{
+    const name=prompt('Name the flag (lowercase; it becomes TILE_FLAG_… in the header):');
+    if(!name) return;
+    const r2=await post('/api/flag',{name:name.trim()});
+    if(!r2.ok){ say(r2.error); return }
+    await reload();
+    say(`${r2.name} is bit 0x${r2.bit.toString(16)} — test it with `
+        +`TILE_FLAG_${r2.name.toUpperCase()}.`,false);
+  };
+  add.appendChild(nf);
+  box.appendChild(add);
+}
+
+// One legend character, rewritten with some fields changed and the rest kept. Everything
+// the manifest holds for it has to be resent, because the endpoint replaces the entry
+// rather than patching it -- a partial write would silently drop the flags when you
+// changed the flip.
+async function writeLegend(ch,changes){
+  const e=S.data.legend[ch], r=resolve(ch);
+  const body={char:ch, tile:e.tile, atlas:e.atlas||(r?r.atlas:null),
+              flags:e.flags||[], flip:e.flip||[], ...changes};
+  const res=await post('/api/legend',body);
+  if(!res.ok){ say(res.error); tileInfo(); return }
+  await reload();
+  S.ch=ch; drawLegend(); draw();
+}
+
+// ------------------------------------------------------------------- the tile picker
+//
+// Every tile of every tileset the map draws from. Clicking one paints with it -- binding
+// a legend character to it first if it does not have one yet, because "which tile" and
+// "what does this tile mean" are the same decision and splitting them across two screens
+// is what made the other 197 tiles of an atlas unreachable.
+
+// Characters worth spending on a tile, in the order they get spent. Punctuation and
+// digits first because they read as terrain in a rows block; letters after, where the
+// case still distinguishes them. Space is excluded -- a rows block would not survive it.
+const PICK_CHARS =
+  ".,:;'\"!?*+-=/\\|<>()[]{}~^&%$@#0123456789"
+  +"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+function freeChar(){
+  const taken=new Set(Object.keys(S.data.legend));
+  return [...PICK_CHARS].find(c=>!taken.has(c))||null;
+}
+
+// The legend character already bound to this exact tile, flips included. Two characters
+// for one tile is legal and sometimes wanted -- the same slab as scenery and as a door --
+// but the picker should reuse rather than mint a duplicate nobody asked for.
+function charFor(name,index,flip){
+  const key=[...flip].sort().join('');
+  return Object.keys(S.data.legend).find(ch=>{
+    const r=resolve(ch);
+    return r&&r.atlas===name&&r.index===index
+      &&[...r.flip].sort().join('')===key;
+  })||null;
+}
+
+function pickFlip(){
+  return ['x','y'].filter(a=>$('#pickflip'+a).checked);
+}
+
+function drawTilePicker(){
+  const body=$('#pickbody'); body.innerHTML='';
+  const list=mapAtlases();
+  const flip=pickFlip();
+  if(!list.length){ body.innerHTML='<small>No atlas built yet — press Build.</small>'; return }
+
+  for(const a of list){
+    const h=document.createElement('div');
+    h.className='palgroup';
+    h.textContent=`${a.name} — ${a.tiles.length} tiles`
+      +(a.metatiled?' (metatiled: cannot be flipped)':'');
+    body.appendChild(h);
+
+    const strip=document.createElement('div');
+    strip.className='tiles';
+    // A metatiled atlas cannot be drawn mirrored -- the runtime skips the flip for
+    // composed tiles rather than mirroring the quadrant order -- so its tiles are shown
+    // upright whatever the checkboxes say, instead of previewing a build that fails.
+    const use=a.metatiled?[]:flip;
+    a.tiles.forEach((uri,i)=>{
+      const bound=charFor(a.name,i,use);
+      const b=document.createElement('button');
+      b.className='tile'+(bound&&bound===S.ch?' sel':'')+(bound?' used':'');
+      const role=Object.keys(a.roles||{}).find(r=>a.roles[r]===i);
+      b.title=`tile ${i} of ${a.name}`+(role?` — role "${role}"`:'')
+        +(bound?` — painted as ${bound}`:' — click to give it a character');
+      b.innerHTML=`<img src="${uri}" style="${flipCss(use)}">`
+        +`<b>${bound||(role?role.slice(0,4):i)}</b>`;
+      b.onclick=()=>bindTile(a.name,i,use,bound);
+      // Right-click names the tile. A role is what game code calls it -- painting only
+      // needs the index, but a door the game has to FIND needs a name, and that used to
+      // mean hand-writing an [atlas.semantic] table.
+      b.oncontextmenu=ev=>{ ev.preventDefault(); nameTile(a.name,i,role) };
+      strip.appendChild(b);
+    });
+    body.appendChild(strip);
+  }
+
+  const free=freeChar();
+  $('#pickhint').innerHTML=free
+    ? `click a tile to paint with it${flip.length?' (mirrored '+flip.join('')+')':''}`
+      +` · <b>right-click</b> to name it for game code`
+    : 'every legend character is taken — free one up in the sidebar to add more';
+}
+
+// A role, written into [atlas.semantic]. Named tiles are how C refers to a tile at all:
+// TILE_DOOR rather than the number 47, which changes the next time the sheet is recarved.
+async function nameTile(atlasName,index,current){
+  const role=prompt(
+    `Name tile ${index} of ${atlasName}.\n\n`
+    +`Game code will call it ${atlasName.replace(/[^A-Za-z0-9]/g,'_').toUpperCase()}`
+    +`_TILE_<NAME>. Lowercase letters, digits and underscores.`,
+    current||'');
+  if(role===null) return;
+  const want=role.trim();
+  if(!want){
+    if(!current) return;
+    const r=await post('/api/role/remove',{atlas:atlasName,role:current});
+    if(!r.ok){ say(r.error); return }
+    await reload(); drawTilePicker();
+    say(`${current} is no longer a name in ${atlasName}.`,false);
+    return;
+  }
+  const r=await post('/api/role',{atlas:atlasName,role:want,index});
+  if(!r.ok){ say(r.error); return }
+  await reload(); drawTilePicker();
+  say(`Tile ${index} of ${atlasName} is now "${want}". Build to update the header.`,false);
+}
+
+// Clicking a tile either selects the character that already draws it, or mints one. The
+// minting is the point: it is what makes a tile with no role paintable, and it writes the
+// manifest rather than holding the binding in the page, so what you painted is what
+// builds.
+async function bindTile(name,index,flip,bound){
+  if(bound){ S.ch=bound; S.mode='paint'; drawLegend(); tool(); drawTilePicker(); return }
+
+  const ch=freeChar();
+  if(!ch){ say('every legend character is taken.'); return }
+
+  // The atlas is named explicitly even when it is the map's first, because the legend is
+  // PROJECT-wide: a character that resolves by default here would resolve against a
+  // different tileset in another map, and mean a different tile.
+  const r=await post('/api/legend',
+    {char:ch, tile:index, atlas:name, flags:[], flip:flip});
+  if(!r.ok){ say(r.error); return }
+  await reload();
+  S.ch=ch; S.mode='paint';
+  drawLegend(); tool(); drawTilePicker();
+  say(`${ch} now paints tile ${index} of ${name}.`);
+}
+
+// ---------------------------------------------------------------- the tileset list
+//
+// A map's `atlases` list, which the editor could never edit: the toolbar had one select,
+// so a map drawing from three tilesets could only ever be told about the first.
+
+function drawSets(){
+  const body=$('#setbody'); body.innerHTML='';
+  const chosen=(S.map.atlases||[]).slice();
+
+  chosen.forEach((name,i)=>{
+    const row=document.createElement('div');
+    row.className='setrow';
+    row.innerHTML=`<b>${name}</b><span class="grow dim">${i===0?'default':''}</span>`;
+    const up=document.createElement('button');
+    up.textContent='↑'; up.title='earlier in the id space'; up.disabled=i===0;
+    up.onclick=()=>{ chosen.splice(i-1,0,chosen.splice(i,1)[0]); setAtlases(chosen) };
+    const rm=document.createElement('button');
+    rm.textContent='✕'; rm.title='stop drawing from this tileset';
+    rm.disabled=chosen.length<2;
+    rm.onclick=()=>{ chosen.splice(i,1); setAtlases(chosen) };
+    row.append(up,rm);
+    body.appendChild(row);
+  });
+
+  const rest=S.data.atlases.filter(a=>!chosen.includes(a.name));
+  if(rest.length){
+    const add=document.createElement('div');
+    add.className='setrow';
+    add.innerHTML='<span class="grow dim">add</span>';
+    const sel=document.createElement('select');
+    sel.innerHTML=rest.map(a=>`<option>${a.name}</option>`).join('');
+    const go=document.createElement('button');
+    go.textContent='＋';
+    go.onclick=()=>setAtlases(chosen.concat([sel.value]));
+    add.append(sel,go);
+    body.appendChild(add);
+  }
+
+  // The order is not cosmetic and the note says so, because reordering silently
+  // renumbers every cell in the map when it is rebuilt.
+  $('#setnote').innerHTML=
+    'Order fixes this map\'s tile id space, and the first tileset is what a legend '
+    +'character with no <code>atlas</code> of its own resolves against. '
+    +'Each one is a pool slot on the watch.';
+}
+
+function setAtlases(list){
+  if(!list.length) return;
+  S.map.atlases=list; S.map.atlas=list[0];
+  S.dirty=true; mark();
+  drawSets(); drawLegend(); info(); draw(); budget();
 }
 function drawPalettes(){
   $('#pals').innerHTML=S.data.palettes.map(p=>'<div class="pal">'+p.map(c=>
@@ -3468,7 +4366,10 @@ function tool(){
 }
 function selectMap(i){
   S.map=JSON.parse(JSON.stringify(S.data.maps[i]));
-  $('#atlassel').value=S.map.atlas||'';
+  // Normalised once, here, so nothing downstream has to know that `atlas` and `atlases`
+  // are the same key spelled for one tileset or many.
+  if(!S.map.atlases||!S.map.atlases.length)
+    S.map.atlases=S.map.atlas?[S.map.atlas]:[];
   // The frame starts where the player does, which is the section an author is most
   // likely to want to look at first.
   if(!S.cam) S.cam={on:$('#camon').checked, x:0, y:0};
@@ -3482,10 +4383,16 @@ $('#camon').onchange=e=>{
   if(!S.cam) S.cam={on:true,x:0,y:0};
   S.cam.on=e.target.checked; draw(); camInfo();
 };
-$('#atlassel').onchange=e=>{
-  S.map.atlas=e.target.value;
-  S.dirty=true; mark(); drawLegend(); info(); draw();
-};
+$('#tilesets').onclick=()=>{ drawSets(); $('#setwrap').style.display='flex' };
+$('#setclose').onclick=()=>{ $('#setwrap').style.display='none' };
+$('#pick').onclick=()=>{ drawTilePicker(); $('#pickwrap').style.display='flex' };
+$('#pickclose').onclick=()=>{ $('#pickwrap').style.display='none' };
+$('#pickflipx').onchange=drawTilePicker;
+$('#pickflipy').onchange=drawTilePicker;
+// Clicking the backdrop closes; clicking the sheet must not. Overlays that swallow a
+// misplaced click are the ones people stop trusting.
+for(const id of ['#pickwrap','#setwrap'])
+  $(id).onclick=e=>{ if(e.target===$(id)) $(id).style.display='none' };
 function mark(){$('#dirty').textContent=S.dirty?'● unsaved':''}
 // A warp needs a destination map and tile, so the form appears once a source tile is
 // picked rather than asking through a chain of prompts.
@@ -3518,8 +4425,10 @@ function renderWarps(){
 
 function info(){
   const m=S.map;
+  const sets=(m.atlases&&m.atlases.length?m.atlases:[m.atlas]).filter(Boolean);
   $('#mapinfo').innerHTML=`<small>${m.rows[0].length}×${m.rows.length} · `+
-    `tileset <b>${m.atlas||'—'}</b> · start (${m.start})<br>`+
+    `${sets.length>1?'tilesets':'tileset'} <b>${sets.join(', ')||'—'}</b> · `+
+    `start (${m.start})<br>`+
     (m.warps.length?m.warps.map(w=>`warp (${w.at}) → ${w.to[0]} (${w.to[1]},${w.to[2]})`).join('<br>'):'no warps')+'</small>';
 }
 
@@ -3529,8 +4438,20 @@ function draw(){
   g.imageSmoothingEnabled=false;
   g.fillStyle='#000'; g.fillRect(0,0,cv.width,cv.height);
   for(let y=0;y<m.rows.length;y++)for(let x=0;x<m.rows[y].length;x++){
-    const im=S.img[m.rows[y][x]];
-    if(im&&im.complete) g.drawImage(im,x*T,y*T,T,T);
+    const ch=m.rows[y][x], im=S.img[ch];
+    if(!im||!im.complete) continue;
+    // A flipped character has to be drawn flipped HERE too. The watch mirrors it from
+    // two bits in the cell, so an editor that drew it upright would be showing a map
+    // that does not exist -- and mirrored tiles are placed precisely because the
+    // mirroring is what you are looking at.
+    const flip=(S.data.legend[ch]&&S.data.legend[ch].flip)||[];
+    if(!flip.length){ g.drawImage(im,x*T,y*T,T,T); continue }
+    const sx=flip.includes('x')?-1:1, sy=flip.includes('y')?-1:1;
+    g.save();
+    g.translate(x*T+(sx<0?T:0), y*T+(sy<0?T:0));
+    g.scale(sx,sy);
+    g.drawImage(im,0,0,T,T);
+    g.restore();
   }
   // start marker and warps, drawn over the map so placement is checkable at a glance
   g.strokeStyle='#55aaff'; g.lineWidth=2;
@@ -3658,7 +4579,11 @@ $('#newmap').onclick=async()=>{
   const r=await (await fetch('/api/newmap',{method:'POST',
     headers:{'content-type':'application/json'},
     body:JSON.stringify({name,w:+$('#nmw').value,h:+$('#nmh').value,
-      atlas:$('#atlassel').value||S.data.atlases[0].name})})).json();
+      // The tileset the map being looked at uses, which is nearly always the one a new
+      // map next to it wants -- and the only one whose legend characters are certain to
+      // resolve, so the blank room it comes with is paintable.
+      atlas:(S.map&&S.map.atlases&&S.map.atlases[0])
+            ||(S.data.atlases[0]&&S.data.atlases[0].name)})})).json();
   const log=$('#log'); log.className=r.ok?'ok':'bad';
   if(!r.ok){log.textContent=r.error;return}
   log.textContent=`Created map "${name}" and a scene for it. Press Build.`;
@@ -3997,6 +4922,7 @@ $('#aload').onclick=async()=>{
   const set=(id,v)=>{ $('#'+id).value=v };
   set('sheet',s.sheet); set('tile',s.tile); set('maxt',s.max_tiles);
   set('rx',s.region[0]); set('ry',s.region[1]); set('rw',s.region[2]); set('rh',s.region[3]);
+  set('apick',(s.autopick||[]).join(', '));
   KEY=s.colorkey||null; keyLabel();
   IMPEX=new Set(s.exclude||[]); impRegion=impRegionKey();
   $('#log').className=''; $('#log').textContent=
@@ -4053,6 +4979,15 @@ $('#addatlas').onclick=async()=>{
 
   // Warnings are said, not enforced: a capped carve or a reduced tile is a legitimate
   // choice about someone's own art.
+  // The autopick list is written after the block exists, so adding and editing take the
+  // same path. Left alone when the field is untouched: an empty box on a fresh import
+  // means "the default", not "name nothing".
+  const picks=$('#apick').value.split(',').map(s=>s.trim()).filter(Boolean);
+  if(picks.length){
+    const p=await post('/api/autopick',{atlas:body.name,roles:picks});
+    if(!p.ok){ log.className='bad'; log.textContent=p.error; return }
+  }
+
   log.textContent=(editing?`Updated [[atlas]] "${body.name}".`
                           :`Added [[atlas]] "${body.name}" to the manifest.`)
     + (v.warnings.length?`\n\n${v.warnings.map(w=>'! '+w).join('\n')}`:'')
@@ -5266,7 +6201,40 @@ def make_handler(session):
                 if self.path == "/api/map":
                     m = json.loads(raw)
                     session.proj.save_map(m["name"], m["rows"], m["start"], m["warps"],
-                                  m.get("atlas"))
+                                  m.get("atlas"), m.get("atlases"))
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/legend":
+                    d = json.loads(raw)
+                    session.proj.save_legend(d["char"], d["tile"], d.get("atlas"),
+                                             d.get("flags", []), d.get("flip", []))
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/legend/remove":
+                    d = json.loads(raw)
+                    session.proj.remove_legend(d["char"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/legend/users":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(
+                        {"users": session.proj.legend_users(d["char"])}))
+                elif self.path == "/api/flag":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(
+                        {"ok": True, **session.proj.save_flag(d["name"], d.get("bit"))}))
+                elif self.path == "/api/flag/remove":
+                    d = json.loads(raw)
+                    session.proj.remove_flag(d["name"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/role":
+                    d = json.loads(raw)
+                    session.proj.save_role(d["atlas"], d["role"], d["index"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/role/remove":
+                    d = json.loads(raw)
+                    session.proj.remove_role(d["atlas"], d["role"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/autopick":
+                    d = json.loads(raw)
+                    session.proj.set_autopick(d["atlas"], d["roles"])
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/analyse":
                     d = json.loads(raw)

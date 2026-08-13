@@ -41,6 +41,17 @@ FLAG_WARP = 0x02
 
 FLAG_NAMES = {"solid": FLAG_SOLID, "warp": FLAG_WARP}
 
+# The rest of the flag byte, for names the manifest invents. The engine gives the whole
+# byte back through pnx_map_flags, so a project's own "water" or "ledge" needs no engine
+# change -- only a name, a bit, and a #define for the game code to test against.
+FLAG_USER_BITS = (0x04, 0x08, 0x10, 0x20, 0x40, 0x80)
+
+# Map cell bits, mirrored from PNX_MAP_* in pnx_assets.h. Ten bits of map-global tile id,
+# then the two flip bits the blitter honours.
+MAP_INDEX_MASK = 0x03FF
+MAP_FLIP_X = 0x0400
+MAP_FLIP_Y = 0x0800
+
 # Blob format versions. A mismatch between a stale .bin and a newer runtime is exactly
 # the kind of failure that presents as garbage pixels rather than an error, so every
 # blob is tagged and the runtime checks.
@@ -436,7 +447,13 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
     # Excluded before dedup, not after, because that is what the author is looking at:
     # a grid of sheet positions. Dropping a deduplicated tile instead would silently take
     # every other position that happens to share its pixels.
-    key = parse_colorkey(spec, f"atlas {name!r}")
+    # Named `ckey`, not `key`, because the tile-dedup loop below binds `key` to each
+    # tile's bytes. It used to share the name, so the colour key survived exactly one
+    # tile and every tile after it was read with a bytes object as its key -- which
+    # matches nothing, so the background stayed opaque. Transparency that works on the
+    # first tile of a sheet and silently nowhere else is not a crash; it is art that
+    # looks wrong on a watch.
+    ckey = parse_colorkey(spec, f"atlas {name!r}")
 
     excluded = set()
     for e in spec.get("exclude", []):
@@ -475,7 +492,7 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
             for j in range(T):
                 for i in range(T):
                     ri, rj = rotate_point(i, j, T, T, orient)
-                    buf[rj * T + ri] = to_gcolor8(px[tx * T + i, ty * T + j], key)
+                    buf[rj * T + ri] = to_gcolor8(px[tx * T + i, ty * T + j], ckey)
             key = bytes(buf)
             if not any(key):
                 empty += 1
@@ -535,7 +552,7 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
                     # can find in their PNG.
                     ri, rj = rotate_point(i, j, T, T, orient)
                     b = base_tile[rj * T + ri]
-                    v = to_gcolor8(vpx[tx * T + i, ty * T + j], key)
+                    v = to_gcolor8(vpx[tx * T + i, ty * T + j], ckey)
                     if (b == TRANSPARENT) != (v == TRANSPARENT):
                         raise BuildError(
                             f"atlas {name!r}: variant {vpath!r} differs in TRANSPARENCY at sheet "
@@ -1134,24 +1151,74 @@ def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT):
 
 # ------------------------------------------------------------------------------ map
 
-def parse_legend(raw):
-    """legend char -> (tile role name, flag byte, atlas name or None).
+def parse_flag_names(raw):
+    """Every flag name the legend may use -> its bit, builtins included.
+
+    Bits are written down rather than assigned in declaration order because a flag value
+    is baked into blobs AND compiled into game code. Reordering a list would silently
+    change what an already-built map means; an explicit bit cannot.
+    """
+    names = dict(FLAG_NAMES)
+    for name, bit in raw.items():
+        if name in FLAG_NAMES:
+            raise BuildError(f"tile_flags: {name!r} is a built-in flag "
+                             f"(0x{FLAG_NAMES[name]:02X}) and cannot be redefined")
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise BuildError(f"tile_flags: {name!r} must be lowercase letters, digits "
+                             f"and underscores -- it becomes a C identifier")
+        if bit not in FLAG_USER_BITS:
+            raise BuildError(
+                f"tile_flags: {name!r} = {bit} is not a free flag bit. The byte's low two "
+                f"bits are solid and warp; pick one of "
+                f"{', '.join('0x%02X' % b for b in FLAG_USER_BITS)}")
+        clash = next((n for n, b in names.items() if b == bit), None)
+        if clash:
+            raise BuildError(f"tile_flags: {name!r} and {clash!r} both claim "
+                             f"0x{bit:02X}")
+        names[name] = bit
+    return names
+
+
+def parse_legend(raw, flag_names=None):
+    """legend char -> (tile, flag byte, atlas name or None, flip bits).
+
+    `tile` is either a role name the atlas defines or a raw index into it. Roles are the
+    better thing to write -- they survive re-importing a sheet, and game code can name
+    them -- but an atlas has hundreds of tiles and only a handful are worth naming, so an
+    index is how the rest get painted at all.
 
     The optional `atlas` key is what lets one map draw from several tilesets: without it
     a role resolves against the map's first atlas, which is what every single-tileset
     manifest means and keeps writing.
     """
+    flag_names = flag_names or FLAG_NAMES
     legend = {}
     for ch, entry in raw.items():
         if len(ch) != 1:
             raise BuildError(f"legend key {ch!r} must be exactly one character")
         flags = 0
         for f in entry.get("flags", []):
-            if f not in FLAG_NAMES:
+            if f not in flag_names:
                 raise BuildError(f"legend {ch!r}: unknown flag {f!r} "
-                                 f"(known: {', '.join(sorted(FLAG_NAMES))})")
-            flags |= FLAG_NAMES[f]
-        legend[ch] = (entry["tile"], flags, entry.get("atlas"))
+                                 f"(known: {', '.join(sorted(flag_names))})")
+            flags |= flag_names[f]
+
+        tile = entry["tile"]
+        if isinstance(tile, bool) or not isinstance(tile, (str, int)):
+            raise BuildError(f"legend {ch!r}: tile must be a role name or a tile index, "
+                             f"not {tile!r}")
+        if isinstance(tile, int) and tile < 0:
+            raise BuildError(f"legend {ch!r}: tile index {tile} is negative")
+
+        flip = 0
+        want = entry.get("flip", [])
+        for axis in ([want] if isinstance(want, str) else want):
+            if axis not in ("x", "y"):
+                raise BuildError(f"legend {ch!r}: flip must be \"x\", \"y\" or both, "
+                                 f"not {axis!r}")
+            flip |= MAP_FLIP_X if axis == "x" else MAP_FLIP_Y
+
+        legend[ch] = (tile, flags, entry.get("atlas"), flip)
     return legend
 
 
@@ -1237,9 +1304,10 @@ def compile_map(spec, legend, roles_by_atlas, atlas_table, map_names):
     # thousands of cells over a few dozen characters. Doing it once per character also
     # means an unusable legend entry is reported whether or not the map happens to use it.
     bases = {a: first for a, first, _ in atlas_table}
+    counts = {a: n for a, _, n in atlas_table}
     default_atlas = atlas_table[0][0]
-    resolved, unusable = {}, {}
-    for ch, (role, flag, want_atlas) in legend.items():
+    resolved, unusable, flipped = {}, {}, {}
+    for ch, (tile, flag, want_atlas, flip) in legend.items():
         which = want_atlas or default_atlas
         # The legend is project-wide but an atlas set is per map, so a character this map
         # cannot draw is only an error if this map USES it. Reported at the cell rather
@@ -1249,22 +1317,42 @@ def compile_map(spec, legend, roles_by_atlas, atlas_table, map_names):
                             f"does not use. It draws from: "
                             f"{', '.join(a for a, _, _ in atlas_table)}")
             continue
+
         roles = roles_by_atlas[which]
-        if role not in roles:
-            unusable[ch] = (f"legend {ch!r} names tile role {role!r}, which atlas "
+        if isinstance(tile, int):
+            # An index is checked against the atlas as it was actually packed, so a carve
+            # that shrank -- a tighter region, a lower max_tiles -- fails the build with
+            # the character that no longer resolves rather than drawing the wrong picture.
+            if tile >= counts[which]:
+                unusable[ch] = (f"legend {ch!r} names tile {tile} of atlas {which!r}, "
+                                f"which packed {counts[which]} tiles (0-"
+                                f"{counts[which] - 1})")
+                continue
+            local = tile
+        elif tile not in roles:
+            unusable[ch] = (f"legend {ch!r} names tile role {tile!r}, which atlas "
                             f"{which!r} does not define. That atlas provides: "
                             f"{', '.join(sorted(roles)) or '(no roles -- give it an '
                                                            'autopick or [atlas.semantic] '
                                                            'table)'}")
             continue
+        else:
+            local = roles[tile]
+
+        # Whether an atlas ends up metatiled is not known until finish_atlas has weighed
+        # the saving, which is long after this. So the conflict is only RECORDED here,
+        # where the legend character is still in hand to name, and check_flip_metatiles
+        # rules on it once both halves are known.
+        if flip:
+            flipped.setdefault(which, []).append(ch)
+
         # u16 little-endian: 10 bits of MAP-GLOBAL index, then PNX_MAP_FLIP_X / _Y, then
-        # four reserved bits for a per-cell palette. Roles resolve to unmirrored tiles, so
-        # the flip bits are zero today -- the format carries them so a tile picker can
-        # place a mirrored tile without the atlas needing a second copy.
-        resolved[ch] = ((bases[which] + roles[role]) & 0x03FF, flag)
+        # four reserved bits for a per-cell palette.
+        resolved[ch] = (((bases[which] + local) & MAP_INDEX_MASK) | flip, flag)
 
     tiles = bytearray(w * h * 2)   # u16 per cell
     flags = bytearray(w * h)   # one byte per cell; tiles are u16, see below
+    painted = set()
     for y, row in enumerate(rows):
         for x, ch in enumerate(row):
             if ch not in resolved:
@@ -1272,6 +1360,7 @@ def compile_map(spec, legend, roles_by_atlas, atlas_table, map_names):
                     raise BuildError(f"map {name!r} at {x},{y}: {unusable[ch]}")
                 raise BuildError(f"map {name!r}: unknown legend char {ch!r} at {x},{y} "
                                  f"(known: {' '.join(sorted(legend))})")
+            painted.add(ch)
             entry, flag = resolved[ch]
             tiles[(y * w + x) * 2] = entry & 0xFF
             tiles[(y * w + x) * 2 + 1] = entry >> 8
@@ -1354,7 +1443,51 @@ def compile_map(spec, legend, roles_by_atlas, atlas_table, map_names):
     return {"name": name, "w": w, "h": h, "start": (sx, sy), "tiles": bytes(tiles),
             "out": spec["out"], "warps": warps, "reachable": reachable,
             "flags": flags, "atlas_table": atlas_table,
+            # {atlas: [chars]} for the characters this map PAINTED flipped, kept only so
+            # check_flip_metatiles can name them once the atlases are packed. A flipped
+            # entry nobody used is nobody's problem, the same view taken of an entry that
+            # does not resolve.
+            "flipped": {a: [c for c in chars if c in painted]
+                        for a, chars in flipped.items()
+                        if any(c in painted for c in chars)},
             "atlases": [a for a, _, _ in atlas_table]}
+
+
+def check_flip_metatiles(maps, atlases):
+    """Refuse a flipped legend character drawn from a metatiled atlas.
+
+    Mirroring a composed tile means mirroring the quadrant ORDER as well as each quadrant,
+    which pnx_tilemap_draw does not do -- it skips the flip for metatiles entirely. So the
+    watch would draw the tile unmirrored, which reads as art that is subtly wrong rather
+    than as an error, and is the kind of thing nobody finds for a week.
+
+    Deliberately not in compile_map: whether an atlas is metatiled is decided in
+    finish_atlas by weighing the saving, long after the maps are compiled. Checking here
+    is the first moment both halves are known, and the legend characters were carried
+    along so the message can still name them.
+    """
+    meta = {a["name"] for a in atlases if a.get("subtiles")}
+    for m in maps:
+        for atlas_name, chars in sorted(m.get("flipped", {}).items()):
+            if atlas_name not in meta:
+                continue
+            raise BuildError(
+                f"map {m['name']!r}: legend {', '.join(repr(c) for c in sorted(chars))} "
+                f"paints a FLIPPED tile from atlas {atlas_name!r}, which was packed as "
+                f"metatiles -- and the runtime does not flip those, so it would draw "
+                f"unmirrored. Either drop the flip, or put `metatiles = false` on that "
+                f"atlas and pay the flat tile cost.")
+
+
+def swap_flip_bits(cells):
+    """Exchange PNX_MAP_FLIP_X and _Y in every u16 cell of a tile plane."""
+    out = bytearray(cells)
+    for i in range(0, len(out), 2):
+        hi = out[i + 1]
+        x, y = hi & (MAP_FLIP_X >> 8), hi & (MAP_FLIP_Y >> 8)
+        if bool(x) != bool(y):
+            out[i + 1] = hi ^ ((MAP_FLIP_X | MAP_FLIP_Y) >> 8)
+    return bytes(out)
 
 
 def rotate_maps(maps, orient):
@@ -1380,6 +1513,11 @@ def rotate_maps(maps, orient):
     for m in maps:
         w, h = m["w"], m["h"]
         m["tiles"], nw, nh = rotate_grid(m["tiles"], w, h, orient, stride=2)
+        # Moving the cell is not the whole job for a FLIPPED cell. Each tile's art was
+        # rotated as it was carved, so the axes turned with it: a quarter turn makes the
+        # author's horizontal mirror the framebuffer's vertical one. Both landscape
+        # orientations are a quarter turn, so both swap the pair.
+        m["tiles"] = swap_flip_bits(m["tiles"])
         m["flags"], _, _ = rotate_grid(m["flags"], w, h, orient)
         m["start"] = rotate_point(*m["start"], w, h, orient)
         m["reachable"] = {rotate_point(x, y, w, h, orient) for x, y in m["reachable"]}
@@ -2535,7 +2673,7 @@ def write_blob(path, blob):
 
 def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0,
                     scenes=None, songs=None, samples=None, fonts=None,
-                    blob_files=None, orient=ORIENT_BUTTONS_RIGHT):
+                    blob_files=None, orient=ORIENT_BUTTONS_RIGHT, flag_names=None):
     L = [
         "// GENERATED by tools/pnx_assets.py -- do not edit.",
         "//",
@@ -2622,6 +2760,16 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
 
     L += [f"// Shared palette table. PNX_PALETTE_SLOTS must be at least this.",
           f"#define PNX_PALETTES_USED {palette_count}", ""]
+
+    custom = {n: b for n, b in (flag_names or {}).items() if n not in FLAG_NAMES}
+    if custom:
+        L += ["// Tile flags this project invented, from [tile_flags]. pnx_map_flags gives",
+              "// back the whole byte, so these are tested exactly like PNX_TILE_SOLID:",
+              "//",
+              "//   if (pnx_map_flags(map, x, y) & TILE_FLAG_WATER) { ... }"]
+        for name, bit in sorted(custom.items(), key=lambda kv: kv[1]):
+            L.append(f"#define TILE_FLAG_{c_ident(name)} 0x{bit:02X}")
+        L.append("")
 
     if roles:
         L += ["// Tile roles from the manifest legend, resolved per atlas. Prefixed by",
@@ -2834,7 +2982,8 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
 
     sprites = [pack_sprite(root, sp, orient) for sp in man.get("sprite", [])]
 
-    legend = parse_legend(man.get("legend", {}))
+    flag_names = parse_flag_names(man.get("tile_flags", {}))
+    legend = parse_legend(man.get("legend", {}), flag_names)
     map_specs = man.get("map", [])
     map_names = [m["name"] for m in map_specs]
     if len(set(map_names)) != len(map_names):
@@ -2946,6 +3095,9 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
     shared = []
     for a in atlases:
         finish_atlas(a, flags_by_atlas[a["name"]], shared, orient)
+    # The first point at which both halves are known: which atlases chose metatiles, and
+    # which legend characters were painted flipped.
+    check_flip_metatiles(maps, atlases)
     for sp in sprites:
         finish_sprite(sp, shared, orient)
 
@@ -3055,7 +3207,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
 
     generate_header(header_path, atlases, sprites, maps, dialog, roles_by_atlas,
                     len(shared), scenes, songs, samples, fonts,
-                    [out for _name, out in blobs], orient)
+                    [out for _name, out in blobs], orient, flag_names)
     print(f"\nheader: {header_path}")
 
     if fonts:
