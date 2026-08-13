@@ -351,10 +351,17 @@ class Updater:
     # done to a running program.
 
     def apply(self):
-        """Install what was downloaded. Returns what the user has to do next.
+        """Install what was downloaded, and come back running the new version.
 
-        Nothing here restarts the editor for the user. Losing an unsaved map to an
-        automatic relaunch would be a worse bug than the one being fixed.
+        The editor restarts itself, which it deliberately did not before -- the worry was
+        that a relaunch would take unsaved work with it. That worry is answered where it
+        belongs, in the page: the button refuses while anything is unsaved rather than the
+        install being permanently manual because something *might* be.
+
+        Each platform reaches "the new version is running" its own way, so what comes back
+        says which happened. Only Linux can be done in one step by us; the other two hand
+        off to something that outlives this process, because a running .exe cannot be
+        replaced and a mounted .app should not be scripted over.
         """
         if not self.downloaded or not os.path.exists(self.downloaded):
             return {"ok": False, "error": "nothing downloaded yet"}
@@ -362,23 +369,31 @@ class Updater:
         system = platform.system()
         try:
             if system == "Windows":
-                # A running .exe cannot be replaced on Windows, so the installer does it:
-                # it waits for this process to exit, which it can because it is a separate
-                # process. Launch it and step aside.
-                os.startfile(self.downloaded)            # noqa: S606
-                return {"ok": True, "action": "installer",
-                        "message": "The installer is open. Close the editor and let it "
-                                   "replace this version."}
+                # Inno closes this app, replaces it, and starts it again -- which it can
+                # do and we cannot, being the thing that has the file open. /NORESTART
+                # is about the MACHINE: it must never reboot anyone to update an editor.
+                subprocess.Popen([self.downloaded, "/SILENT", "/CLOSEAPPLICATIONS",
+                                  "/RESTARTAPPLICATIONS", "/NORESTART"])
+                restart_later()
+                return {"ok": True, "action": "installer", "restarting": True,
+                        "message": "Installing. The editor will close and reopen on the "
+                                   "new version."}
 
             if system == "Darwin":
-                # A .app cannot sensibly replace itself while running either, and a
-                # scripted copy into /Applications is how an install ends up half-done.
+                # Copying a .app over itself while it runs is how an install ends up half
+                # done, so the image is opened for the usual drag. Not a restart we can
+                # honestly promise, and saying so beats pretending.
                 subprocess.run(["open", self.downloaded], check=False)
-                return {"ok": True, "action": "dmg",
+                return {"ok": True, "action": "dmg", "restarting": False,
                         "message": "The disk image is open. Drag the app into "
                                    "Applications, replacing the old one, then reopen it."}
 
-            return self._apply_linux()
+            out = self._apply_linux()
+            if out.get("ok"):
+                restart_later()
+                out["restarting"] = True
+                out["message"] = "Installed. Restarting on the new version…"
+            return out
         except Exception as e:                           # noqa: BLE001
             return {"ok": False, "error": f"could not start the install: {e}"}
 
@@ -430,6 +445,58 @@ class Updater:
 
 
 UPDATER = Updater()
+
+# Set by main(), so a restart can free the port before the replacement tries to claim it.
+SERVER = None
+
+
+def restart_later(delay=0.6):
+    """Relaunch this editor and end this process, in that order and off this thread.
+
+    Ordering is the whole difficulty. The reply to "install" has to reach the page before
+    the process dies, or the page sees a dropped connection and reports a failure for
+    something that worked. And the listening socket has to be CLOSED before the successor
+    starts, or the new process finds the port taken -- by us -- decides an editor is
+    already running, and helpfully opens a window onto the corpse.
+
+    So: answer, close the socket, spawn, exit. On a thread, because the request handler is
+    what has to return first.
+    """
+    def run():
+        time.sleep(delay)                    # let the response flush
+
+        global SERVER
+        if SERVER is not None:
+            with contextlib.suppress(Exception):
+                SERVER.shutdown()
+            with contextlib.suppress(Exception):
+                SERVER.server_close()        # frees the port for the successor
+
+        # argv[0] of a frozen build is the binary itself, which is the thing that was
+        # just replaced -- so this launches the NEW one, with the same project and port.
+        exe = sys.executable if getattr(sys, "frozen", False) else sys.argv[0]
+
+        # PyInstaller's onefile bootloader unpacks to a temp directory and passes its
+        # location to child processes in the environment, so that a program which
+        # re-executes itself does not unpack twice. Inherited by a DIFFERENT frozen
+        # binary, that is poison: the successor skips its own unpacking and loads from
+        # our directory, which we delete on the way out. It dies with
+        #
+        #   Failed to load Python shared library '/tmp/_MEIxxxxxx/libpython3.12.so.1.0'
+        #
+        # after the update has already replaced the binary -- so the editor is upgraded
+        # and will not start. Scrubbed by prefix rather than by name because the exact
+        # variables differ between PyInstaller versions.
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("_MEI", "_PYI"))}
+        with contextlib.suppress(Exception):
+            subprocess.Popen([exe, *sys.argv[1:]], start_new_session=True, env=env)
+
+        # _exit rather than a clean return: the frame that would return is blocked in a
+        # window loop or a wait(), and this process has just been superseded on disk.
+        os._exit(0)
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 class Liveness:
@@ -2980,7 +3047,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
         <div class="row" style="margin-top:.7rem">
           <button id="updcheck">Check for updates</button>
           <button id="upddl" class="primary" style="display:none">Download</button>
-          <button id="updapply" class="primary" style="display:none">Install</button>
+          <button id="updapply" class="primary" style="display:none">Install &amp; Restart</button>
           <button id="updnotes" style="display:none">Release notes</button>
         </div>
         <div id="updbar" class="meter" style="display:none;margin-top:.6rem">
@@ -4097,15 +4164,70 @@ $('#upddl').onclick=async()=>{
   await fetch('/api/update/download',{method:'POST'});
   $('#updbar').style.display=''; updWatch();
 };
+// What is on the table if this restarts: a painted map that was never saved, or an edited
+// source file. The page is the only thing that knows either, which is why the warning
+// lives here rather than in the updater.
+function unsavedWork(){
+  const lost=[];
+  if(typeof S!=='undefined' && S.dirty && S.map) lost.push(`the map "${S.map.name}"`);
+  if(typeof CODE!=='undefined' && CODE.path && CODE.editable && $('#codetext')
+     && $('#codetext').value!==CODE.clean) lost.push(CODE.path);
+  return lost;
+}
+
 $('#updapply').onclick=async()=>{
-  const r=await (await fetch('/api/update/apply',{method:'POST'})).json();
-  const log=$('#log'); log.className=r.ok?'ok':'bad';
+  const v=(UPD&&UPD.version)||'the new version';
+  const lost=unsavedWork();
+  // Always asked, never assumed: this closes the application someone is working in.
+  const warning=lost.length
+    ? `Install ${v} and restart?\n\nUNSAVED CHANGES WILL BE LOST:\n`
+      + lost.map(w=>'  - '+w).join('\n')
+      + `\n\nCancel, save them, then install.`
+    : `Install ${v} and restart?\n\nThe editor will close and reopen on the new version.`;
+  if(!confirm(warning)) return;
+
+  const log=$('#log'); log.className=''; log.textContent='Installing';
+  let r;
+  try{
+    r=await (await fetch('/api/update/apply',{method:'POST'})).json();
+  }catch(_){
+    // The process can die before its reply lands. That is a restart, not a failure --
+    // the poll below establishes which.
+    r={ok:true, restarting:true, message:'Installing'};
+  }
+  log.className=r.ok?'ok':'bad';
   log.textContent=r.ok?r.message:r.error;
   // Its own block: appended inline it ran straight on from the asset size above it,
   // which read as one sentence about a file rather than a result.
   $('#updinfo').innerHTML+=`<div style="margin-top:.4rem"><small class="${r.ok?'':'bad'}">`
     +`${r.ok?r.message:r.error}</small></div>`;
+  if(r.ok && r.restarting) waitForRestart();
 };
+
+// The old process exits, the new one binds the same port, and the page reloads onto it --
+// so a restart is something the user watches happen rather than something they are told
+// to go and do.
+async function waitForRestart(){
+  const was=(UPD&&UPD.current)||'';
+  const deadline=Date.now()+60000;
+  const dots=setInterval(()=>{ $('#log').textContent+='.' }, 1000);
+  while(Date.now()<deadline){
+    await new Promise(r=>setTimeout(r,1000));
+    try{
+      const p=await (await fetch('/api/ping',{cache:'no-store'})).json();
+      // Only a DIFFERENT version means the successor is up; the old process answers
+      // right until it exits.
+      if(p.app==='pebblnyx-editor' && p.version!==was){
+        clearInterval(dots);
+        location.reload();
+        return;
+      }
+    }catch(_){ /* down: the middle of a restart, not a failure */ }
+  }
+  clearInterval(dots);
+  $('#log').className='bad';
+  $('#log').textContent='The editor did not come back on its own -- start it again.';
+}
 $('#updnotes').onclick=()=>{
   const b=$('#updbody');
   b.style.display=b.style.display==='none'?'':'none';
@@ -5464,6 +5586,10 @@ def main():
         if srv is None:
             return 0                     # an existing editor was opened instead
         args.port = port
+
+    # The updater needs this to free the port before it launches the replacement.
+    global SERVER
+    SERVER = srv
 
     with srv:
         url = f"http://127.0.0.1:{args.port}/"
