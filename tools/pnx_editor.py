@@ -1064,6 +1064,8 @@ class Project:
                        for k, v in self.man.get("dialog", {}).items()},
             "dialogs": self.dialogs(),
             "songs": self.songs(),
+            "samples": self.samples(),
+            "wavs": self.wav_files(),
             "waveforms": list(pa.WAVEFORMS),
             "lfo_targets": list(pa.LFO_TARGETS),
             "filter_modes": list(pa.FILTER_MODES),
@@ -3440,6 +3442,77 @@ rows = """
                 break
         return lines, start, end
 
+    # ---------------------------------------------------------------------- samples
+    #
+    # Short effects only. The pipeline caps a sample at 1.5 s and says why: one second of
+    # PCM is 16,000 bytes against ~160 for a whole song, so anything sustained belongs in
+    # [music.*] where it costs notes rather than kilobytes.
+
+    def samples(self):
+        out = []
+        for name, spec in sorted(self.man.get("sample", {}).items()):
+            rel = spec.get("file", "")
+            full = os.path.join(self.root, rel)
+            entry = {"name": name, "file": rel, "source_bytes": None, "bytes": None}
+            if os.path.exists(full):
+                entry["source_bytes"] = os.path.getsize(full)
+            blob = os.path.join(self.res, f"sample_{name}.bin")
+            if os.path.exists(blob):
+                entry["bytes"] = os.path.getsize(blob)
+            out.append(entry)
+        return out
+
+    def wav_files(self):
+        """WAVs inside the project, so adding one needs no file dialog."""
+        out = []
+        for dirpath, dirnames, files in os.walk(self.root):
+            dirnames[:] = [d for d in dirnames
+                           if d not in ("build", "resources", "__pycache__", ".git")]
+            for fn in sorted(files):
+                if fn.lower().endswith(".wav"):
+                    full = os.path.join(dirpath, fn)
+                    out.append({"path": os.path.relpath(full, self.root),
+                                "bytes": os.path.getsize(full)})
+        return out
+
+    def save_sample(self, name, rel):
+        """Declare a [sample.*], validated by packing it the way the build will."""
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise ValueError("a sample name must be lowercase letters, digits and "
+                             "underscores -- it becomes a C identifier")
+        if not os.path.exists(self._safe(rel)):
+            raise ValueError(f"no such file: {rel}")
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                pa.pack_samples(self.root, {name: {"file": rel}}, self.orientation)
+        except pa.BuildError as e:
+            raise ValueError(str(e)) from None
+
+        body = [f"[sample.{name}]", f'file = "{rel}"']
+        found = self._nth_table(f"[sample.{name}]", 0)
+        if found:
+            self._replace_table(f"[sample.{name}]", 0, body)
+            return
+        with open(self.path, "a") as f:
+            f.write("\n\n" + "\n".join(body) + "\n")
+        self.reload()
+
+    def remove_sample(self, name):
+        if name not in self.man.get("sample", {}):
+            raise ValueError(f"no sample named {name!r}")
+        found = self._nth_table(f"[sample.{name}]", 0)
+        if not found:
+            raise ValueError(f"no [sample.{name}] block in the manifest")
+        lines, head, end = found
+        while end < len(lines) and lines[end].strip() == "":
+            end += 1
+        while head > 0 and lines[head - 1].strip() == "":
+            head -= 1
+        lines[head:end] = [""]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
     def _nth_table(self, header, index):
         """(lines, start, end) for the index-th occurrence of a table header, file-wide.
 
@@ -4619,6 +4692,19 @@ kbd{font:11px ui-monospace,monospace;background:var(--soft);color:var(--accent);
    checkboxes gives no sign where one ends and the next begins. */
 .scenecard{border:1px solid var(--line);border-radius:6px;padding:.6rem .8rem;
   margin:.6rem 0;max-width:60ch}
+/* The tracker and the instrument panel side by side: a pattern is read while an
+   instrument is tweaked, and putting them on separate screens would mean editing a sound
+   you cannot hear in context. */
+.musicgrid{display:flex;gap:1.2rem;flex-wrap:wrap;align-items:flex-start}
+.tracker{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
+  border:1px solid var(--line);border-radius:6px;padding:.4rem;display:inline-block}
+.trow{display:flex;gap:.25rem;align-items:center}
+.trow.beat{background:rgba(255,255,255,.04)}
+.trow>b{width:2.2rem;text-align:right;color:var(--dim);font-weight:400}
+.tcell{width:4.4rem;font-family:inherit;font-size:inherit;padding:1px 3px;
+  background:transparent;border:1px solid transparent;color:inherit}
+.tcell:focus{border-color:var(--accent);background:rgba(255,255,255,.06);outline:none}
+.tcell.on{color:var(--accent)}
 .mini input{font:inherit;width:4rem;padding:.25rem .4rem;background:var(--surface);
   color:var(--fg);border:1px solid var(--line);border-radius:4px}
 .mini input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
@@ -4841,6 +4927,10 @@ button:disabled{opacity:.45;cursor:not-allowed}
        "auto"` derives a font's glyph set from it: what a character says is content, and
        which typeface says it is not. -->
   <button id="tabdialog" class="act" data-t="dialog"><i>❝</i><em>Dialog</em></button>
+  <!-- Music. A tracker over the sequencer's own model: patterns of rows, an order list,
+       and a table of instruments. Last of the content types to get an editor, and the one
+       that needed it most -- a song is the only asset here nobody can write by hand. -->
+  <button id="tabmusic" class="act" data-t="music"><i>♪</i><em>Music</em></button>
   <button id="tabfonts" class="act" data-t="fonts"><i>A</i><em>Fonts</em></button>
   <button id="tabimport" class="act" data-t="import"><i>⇥</i><em>Import</em></button>
   <button id="tabcode" class="act" data-t="code"><i>&lt;/&gt;</i><em>Code</em></button>
@@ -5064,6 +5154,53 @@ button:disabled{opacity:.45;cursor:not-allowed}
   <!-- Fonts. The layout puts the device-sized canvas next to the controls rather than
        below them, because the whole point is watching the text change as you drag the
        threshold -- a preview you have to scroll to is a preview you stop looking at. -->
+  <!-- Music. The pattern grid is the sequencer's data model shown directly: a cell is
+       NOTE:INSTRUMENT, '.' holds and '-' releases, which is the manifest's own spelling.
+       Keeping it means a song half-edited by hand and half in the tool is still one song. -->
+  <div id="music" style="display:none;flex:1;overflow:auto;padding:1.25rem">
+    <section>
+      <div class="mini">
+        <b>Song</b><select id="msong"></select>
+        <label class="mini">tempo <input id="mtempo" type="number" min="20" max="400"
+          size="4" style="width:5rem"></label>
+        <span id="mcost" class="dim"></span>
+      </div>
+      <div class="mini">
+        <b>Order</b><input id="morder" size="40" placeholder="0, 1, 2, 1">
+        <button id="mordergo">Set</button>
+        <span class="dim">which patterns play, in sequence</span>
+      </div>
+    </section>
+
+    <div class="musicgrid">
+      <section>
+        <h2>Pattern <select id="mpat"></select></h2>
+        <div id="mrows" class="tracker"></div>
+        <div class="mini"><button id="mpatsave" class="primary">Save pattern</button>
+          <span id="mpatlog" class="dim"></span></div>
+      </section>
+
+      <section>
+        <h2>Instrument <select id="minst"></select></h2>
+        <div id="minstbody"></div>
+      </section>
+    </div>
+
+    <section>
+      <h2>Samples</h2>
+      <p class="dim" style="max-width:60ch">Short effects only. One second of PCM is
+        16,000 bytes against a few hundred for a whole song, so the pipeline caps a sample
+        at 1.5&nbsp;s — anything sustained belongs in a pattern.</p>
+      <div id="msamples"></div>
+      <div class="mini">
+        <input id="msname" placeholder="name" size="10">
+        <select id="mswav"></select>
+        <button id="msadd">Add sample</button>
+      </div>
+      <div id="mslog" class="mini"></div>
+    </section>
+  </div>
+
   <!-- Dialog. One blob for every conversation, because a resource read costs ~29us per
        CALL regardless of size -- so the cost shown per entry is text, not overhead. -->
   <div id="dialog" style="display:none;flex:1;overflow:auto;padding:1.25rem">
@@ -6711,7 +6848,7 @@ let sheets=[];
 function showTab(which){
   const imp=which==='import', fnt=which==='fonts', maps=which==='maps',
         sdk=which==='sdk', pix=which==='pixel', cod=which==='code',
-        scn=which==='scenes', dlg=which==='dialog';
+        scn=which==='scenes', dlg=which==='dialog', mus=which==='music';
   $('#import').style.display=imp?'block':'none';
   $('#fonts').style.display=fnt?'block':'none';
   $('#sdk').style.display=sdk?'block':'none';
@@ -6719,6 +6856,8 @@ function showTab(which){
   $('#code').style.display=cod?'block':'none';
   $('#scenes').style.display=scn?'block':'none';
   $('#dialog').style.display=dlg?'block':'none';
+  $('#music').style.display=mus?'block':'none';
+  if(mus) drawMusic();
   if(scn) drawScenes();
   if(dlg) drawDialog();
   if(fnt) drawFontList();
@@ -6742,7 +6881,7 @@ function showTab(which){
     b.classList.toggle('on', b.dataset.t===which);
   $('#ctxtitle').textContent={maps:'Maps',import:'Import',fonts:'Fonts',
     pixel:'Sprites',code:'Code',sdk:'Settings',scenes:'Scenes',
-    dialog:'Dialog'}[which]||'';
+    dialog:'Dialog',music:'Music'}[which]||'';
 }
 
 // ------------------------------------------------------- declaring a sprite
@@ -6982,6 +7121,308 @@ $('#prsave').onclick=async()=>{
   log.textContent='Saved. The budget strip and status bar now measure against it.';
 };
 
+// -------------------------------------------------------------------------- music
+//
+// A tracker over the sequencer's own model. The cell spelling is the MANIFEST's --
+// `NOTE:INSTRUMENT`, '.' to hold, '-' to release -- rather than a prettier one invented
+// here, because a song half-edited by hand and half in this tool has to stay one song.
+
+const MU = { song: 0, pattern: 0, inst: 0, rows: null };
+
+function muSong(){ return ((S.data && S.data.songs) || [])[MU.song] || null; }
+
+function muSay(id, msg, bad){
+  const el = $(id);
+  if(!el) return;
+  el.className = (id === '#mslog' ? 'mini ' : '') + (bad === false ? 'ok' : (bad ? 'bad' : 'dim'));
+  el.textContent = msg || '';
+}
+
+// A row is fixed-width cells separated by spaces. Split on whitespace to read; pad to a
+// column on write, so the manifest stays readable as a grid rather than becoming ragged
+// the first time it is saved.
+function muCells(row, channels){
+  const c = row.trim().split(/\s+/).filter(s => s.length);
+  while(c.length < channels) c.push('.');
+  return c.slice(0, channels);
+}
+function muRow(cells){
+  return cells.map(c => (c || '.').padEnd(5, ' ')).join(' ');
+}
+
+function drawMusic(){
+  const songs = (S.data && S.data.songs) || [];
+  const sel = $('#msong');
+  sel.innerHTML = songs.map((s, i) => `<option value="${i}">${s.name}</option>`).join('');
+  if(!songs.length){
+    $('#mrows').innerHTML = '<small class="dim">No [music.*] in this manifest.</small>';
+    $('#minstbody').innerHTML = '';
+    drawSamples();
+    return;
+  }
+  if(MU.song >= songs.length) MU.song = 0;
+  sel.value = String(MU.song);
+  const s = songs[MU.song];
+
+  $('#mtempo').value = s.tempo;
+  $('#morder').value = s.order.join(', ');
+  $('#mcost').textContent = `${s.patterns.length} patterns x ${s.rows_per} rows x `
+    + `${s.channels} ch - ${s.bytes} B` + (s.has_synth ? ' - synth' : ' - envelopes');
+
+  const pat = $('#mpat');
+  pat.innerHTML = s.patterns.map((_, i) => `<option value="${i}">${i}</option>`).join('');
+  if(MU.pattern >= s.patterns.length) MU.pattern = 0;
+  pat.value = String(MU.pattern);
+
+  const inst = $('#minst');
+  inst.innerHTML = s.instruments.map((x, i) =>
+    `<option value="${i}">${i} - ${x.wave}</option>`).join('');
+  if(MU.inst >= s.instruments.length) MU.inst = 0;
+  inst.value = String(MU.inst);
+
+  drawTracker();
+  drawInstrument();
+  drawSamples();
+}
+
+function drawTracker(){
+  const s = muSong();
+  const box = $('#mrows');
+  box.innerHTML = '';
+  if(!s) return;
+  // Held in MU.rows while editing, so switching instrument or tweaking a knob does not
+  // discard unsaved cells.
+  MU.rows = s.patterns[MU.pattern].map(r => muCells(r, s.channels));
+
+  MU.rows.forEach((cells, ri) => {
+    const row = document.createElement('div');
+    // Every fourth row marked: a tracker is read in beats, and 16 undifferentiated lines
+    // is where you lose your place.
+    row.className = 'trow' + (ri % 4 === 0 ? ' beat' : '');
+    const n = document.createElement('b');
+    n.textContent = String(ri).padStart(2, '0');
+    row.appendChild(n);
+
+    cells.forEach((cell, ci) => {
+      const i = document.createElement('input');
+      i.className = 'tcell' + (cell !== '.' ? ' on' : '');
+      i.value = cell;
+      i.spellcheck = false;
+      i.title = `row ${ri}, channel ${ci}`;
+      i.onchange = () => {
+        MU.rows[ri][ci] = i.value.trim() || '.';
+        i.value = MU.rows[ri][ci];
+        i.className = 'tcell' + (MU.rows[ri][ci] !== '.' ? ' on' : '');
+        muSay('#mpatlog', 'unsaved', true);
+      };
+      row.appendChild(i);
+    });
+    box.appendChild(row);
+  });
+}
+
+function drawInstrument(){
+  const s = muSong();
+  const box = $('#minstbody');
+  box.innerHTML = '';
+  if(!s) return;
+  const ins = s.instruments[MU.inst];
+  const waves = (S.data.waveforms) || ['square','saw','triangle','noise'];
+
+  const num = (label, val, lo, hi, on) => {
+    const l = document.createElement('label');
+    l.className = 'mini';
+    l.innerHTML = `${label} `;
+    const i = document.createElement('input');
+    i.type = 'number'; i.min = lo; i.max = hi; i.value = val;
+    i.style.width = '5rem';
+    i.onchange = () => on(parseInt(i.value, 10) || 0);
+    l.appendChild(i);
+    return l;
+  };
+  const pick = (label, val, opts, on) => {
+    const l = document.createElement('label');
+    l.className = 'mini';
+    l.innerHTML = `${label} `;
+    const sl = document.createElement('select');
+    sl.innerHTML = opts.map(o => `<option${o === val ? ' selected' : ''}>${o}</option>`).join('');
+    sl.onchange = () => on(sl.value);
+    l.appendChild(sl);
+    return l;
+  };
+
+  // The PLAIN envelope. Always present, and what plays when a build has PNX_USE_SYNTH=0 --
+  // so it is shown first and never hidden, even when a synth record exists.
+  const plain = JSON.parse(JSON.stringify(ins));
+  delete plain.synth;
+  const ph = document.createElement('div');
+  ph.className = 'mini';
+  ph.innerHTML = '<b>Envelope</b> <span class="dim">plays when the synth is compiled out</span>';
+  box.appendChild(ph);
+  const prow = document.createElement('div');
+  prow.className = 'mini';
+  prow.appendChild(pick('wave', plain.wave, waves, v => { plain.wave = v; muWrite(plain, null); }));
+  for(const [k, lo, hi] of [['attack',0,5000],['decay',0,5000],['sustain',0,255],['release',0,5000]])
+    prow.appendChild(num(k, plain[k], lo, hi, v => { plain[k] = v; muWrite(plain, null); }));
+  box.appendChild(prow);
+
+  if(!ins.synth){
+    const note = document.createElement('small');
+    note.className = 'dim';
+    note.textContent = 'This song has no synth table. Adding one means a record for every '
+      + 'instrument, because a row names one index and the tables have to line up.';
+    box.appendChild(note);
+    return;
+  }
+
+  // The SYNTH record. Edited together with the envelope above, and saved together, because
+  // a pattern row names ONE instrument index.
+  const sy = JSON.parse(JSON.stringify(ins.synth));
+  const push = () => muWrite(plain, sy);
+
+  const head = document.createElement('div');
+  head.className = 'mini';
+  head.innerHTML = '<b>Synth</b>';
+  box.appendChild(head);
+
+  const f = document.createElement('div');
+  f.className = 'mini';
+  f.appendChild(pick('filter', sy.filter || 'off',
+    S.data.filter_modes || ['off','lowpass','highpass','bandpass'],
+    v => { sy.filter = v; push(); }));
+  f.appendChild(num('cutoff', sy.cutoff_base ?? 128, 0, 255, v => { sy.cutoff_base = v; push(); }));
+  f.appendChild(num('reson', sy.resonance ?? 0, 0, 255, v => { sy.resonance = v; push(); }));
+  f.appendChild(num('cut env', sy.cutoff_env ?? 0, 0, 255, v => { sy.cutoff_env = v; push(); }));
+  box.appendChild(f);
+
+  const l = document.createElement('div');
+  l.className = 'mini';
+  l.appendChild(pick('lfo', sy.lfo_target || 'off',
+    S.data.lfo_targets || ['off','pitch','volume','duty','cutoff'],
+    v => { sy.lfo_target = v; push(); }));
+  l.appendChild(num('rate', sy.lfo_rate ?? 0, 0, 255, v => { sy.lfo_rate = v; push(); }));
+  l.appendChild(num('depth', sy.lfo_depth ?? 0, 0, 255, v => { sy.lfo_depth = v; push(); }));
+  box.appendChild(l);
+
+  const pe = document.createElement('div');
+  pe.className = 'mini';
+  pe.appendChild(num('pitch env', sy.pitch_env ?? 0, -1200, 1200, v => { sy.pitch_env = v; push(); }));
+  pe.appendChild(num('decay', sy.pitch_env_decay ?? 0, 0, 255, v => { sy.pitch_env_decay = v; push(); }));
+  pe.appendChild(num('reverb', sy.reverb ?? 0, 0, 255, v => { sy.reverb = v; push(); }));
+  pe.appendChild(num('chorus', sy.chorus ?? 0, 0, 255, v => { sy.chorus = v; push(); }));
+  box.appendChild(pe);
+
+  for(const [key, label] of [['amp','amp env'],['cutoff','filter env']]){
+    const e = sy[key] || {};
+    const row = document.createElement('div');
+    row.className = 'mini';
+    row.innerHTML = `<span class="dim">${label}</span> `;
+    for(const [k, lo, hi] of [['attack',0,5000],['decay',0,5000],['sustain',0,255],['release',0,5000]])
+      row.appendChild(num(k, e[k] ?? 0, lo, hi, v => { sy[key] = sy[key] || {}; sy[key][k] = v; push(); }));
+    box.appendChild(row);
+  }
+
+  const oh = document.createElement('div');
+  oh.className = 'mini';
+  oh.innerHTML = '<span class="dim">oscillators — detune is in CENTS relative to the '
+    + 'played note, so an instrument works at every pitch</span>';
+  box.appendChild(oh);
+  (sy.osc || []).forEach((o, oi) => {
+    const row = document.createElement('div');
+    row.className = 'mini';
+    row.innerHTML = `<span class="dim">${oi}</span> `;
+    row.appendChild(pick('wave', o.wave || 'square', waves, v => { o.wave = v; push(); }));
+    row.appendChild(num('vol', o.volume ?? 200, 0, 255, v => { o.volume = v; push(); }));
+    row.appendChild(num('detune', o.detune ?? 0, -1200, 1200, v => { o.detune = v; push(); }));
+    row.appendChild(num('oct', o.octave ?? 0, -4, 4, v => { o.octave = v; push(); }));
+    row.appendChild(num('duty', o.duty ?? 128, 0, 255, v => { o.duty = v; push(); }));
+    box.appendChild(row);
+  });
+}
+
+// Both halves in one request. The pipeline refuses tables of different lengths precisely
+// so a note cannot play a different sound depending on which one it resolved through, and
+// saving them separately would be the same mistake one step earlier.
+async function muWrite(plain, synth){
+  const s = muSong();
+  if(!s) return;
+  const r = await post('/api/song/instrument',
+    { name: s.name, index: MU.inst, plain, synth });
+  if(!r.ok){ muSay('#mpatlog', r.error, true); return }
+  await reload();
+  drawMusic();
+  budget(true);
+}
+
+function drawSamples(){
+  const box = $('#msamples');
+  if(!box) return;
+  box.innerHTML = '';
+  const list = (S.data && S.data.samples) || [];
+  if(!list.length) box.innerHTML = '<small class="dim">No samples.</small>';
+  for(const sm of list){
+    const row = document.createElement('div');
+    row.className = 'mini';
+    row.innerHTML = `<b>${sm.name}</b> <span class="dim">${sm.file}`
+      + (sm.bytes ? ` - ${sm.bytes} B packed` : ' - not built') + '</span> ';
+    const del = document.createElement('button');
+    del.textContent = 'Remove';
+    del.onclick = async () => {
+      if(!confirm(`Remove sample "${sm.name}"? The WAV on disk is left alone.`)) return;
+      const r = await post('/api/sample/remove', { name: sm.name });
+      if(!r.ok){ muSay('#mslog', r.error, true); return }
+      await reload(); drawMusic(); budget(true);
+    };
+    row.appendChild(del);
+    box.appendChild(row);
+  }
+  const wav = $('#mswav');
+  wav.innerHTML = ((S.data && S.data.wavs) || [])
+    .map(w => `<option>${w.path}</option>`).join('');
+}
+
+$('#msong').onchange = () => { MU.song = +$('#msong').value; MU.pattern = 0; MU.inst = 0; drawMusic() };
+$('#mpat').onchange  = () => { MU.pattern = +$('#mpat').value; drawTracker(); muSay('#mpatlog','') };
+$('#minst').onchange = () => { MU.inst = +$('#minst').value; drawInstrument() };
+
+$('#mtempo').onchange = async () => {
+  const s = muSong(); if(!s) return;
+  const r = await post('/api/song/meta', { name: s.name, tempo: +$('#mtempo').value });
+  if(!r.ok){ muSay('#mpatlog', r.error, true); return }
+  await reload(); drawMusic();
+};
+
+$('#mordergo').onclick = async () => {
+  const s = muSong(); if(!s) return;
+  const order = $('#morder').value.split(/[,\s]+/).filter(Boolean).map(Number);
+  const r = await post('/api/song/meta', { name: s.name, order });
+  if(!r.ok){ muSay('#mpatlog', r.error, true); return }
+  await reload(); drawMusic(); budget(true);
+  muSay('#mpatlog', 'order saved', false);
+};
+
+$('#mpatsave').onclick = async () => {
+  const s = muSong(); if(!s || !MU.rows) return;
+  const rows = MU.rows.map(muRow);
+  const r = await post('/api/song/pattern',
+    { name: s.name, index: MU.pattern, rows });
+  if(!r.ok){ muSay('#mpatlog', r.error, true); return }
+  await reload(); drawMusic(); budget(true);
+  muSay('#mpatlog', 'saved', false);
+};
+
+$('#msadd').onclick = async () => {
+  const name = $('#msname').value.trim();
+  const file = $('#mswav').value;
+  if(!name){ muSay('#mslog', 'Name it first.', true); return }
+  if(!file){ muSay('#mslog', 'No WAV in the project to add.', true); return }
+  const r = await post('/api/sample', { name, file });
+  if(!r.ok){ muSay('#mslog', r.error, true); return }
+  $('#msname').value = '';
+  await reload(); drawMusic(); budget(true);
+  muSay('#mslog', `Added "${name}". Press Build.`, false);
+};
+
 // ------------------------------------------------------------------------- dialog
 //
 // A textarea per conversation, one page per line. Saved on blur rather than per
@@ -7210,6 +7651,7 @@ $('#outtoggle').onclick=()=>{
 $('#tabmaps').onclick=()=>showTab('maps');
 $('#tabscenes').onclick=()=>showTab('scenes');
 $('#tabdialog').onclick=()=>showTab('dialog');
+$('#tabmusic').onclick=()=>showTab('music');
 $('#tabimport').onclick=()=>showTab('import');
 $('#tabfonts').onclick=()=>showTab('fonts');
 $('#tabsdk').onclick=()=>showTab('sdk');
@@ -8955,6 +9397,14 @@ def make_handler(session):
                 elif self.path == "/api/project/set":
                     d = json.loads(raw)
                     session.proj.set_project(d["key"], d["value"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/sample":
+                    d = json.loads(raw)
+                    session.proj.save_sample(d["name"], d["file"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/sample/remove":
+                    d = json.loads(raw)
+                    session.proj.remove_sample(d["name"])
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/song/meta":
                     d = json.loads(raw)
