@@ -3864,7 +3864,7 @@ async function reload(){
   // Unsaved painting survives the round trip. Reloading state to pick up one new legend
   // character would otherwise throw away every edit made since the last save, which is
   // the kind of loss that teaches people not to touch a feature.
-  if(dirty&&rows){
+  if(dirty&&rows&&haveMap()){
     S.map.rows=rows; S.map.start=start; S.map.warps=warps;
     if(sets){ S.map.atlases=sets; S.map.atlas=sets[0] }
     S.dirty=true; mark(); draw(); info();
@@ -4426,6 +4426,12 @@ function tool(){
     S.mode==='warp'?'<kbd>click a door to add/remove a warp</kbd>':'<kbd>click to set start</kbd>';
 }
 function selectMap(i){
+  // A project with no maps is an ordinary state -- a fresh one, or an example that is
+  // only about audio -- and this used to throw on it: JSON.parse(JSON.stringify(undefined))
+  // raises, at the last line of load(), leaving S.map null with every Maps control still
+  // bound to it. The window came up and nothing in it did anything, which reads as a dead
+  // editor rather than as an empty project.
+  if(!S.data.maps.length || !S.data.maps[i]){ noMaps(); return }
   S.map=JSON.parse(JSON.stringify(S.data.maps[i]));
   // Normalised once, here, so nothing downstream has to know that `atlas` and `atlases`
   // are the same key spelled for one tileset or many.
@@ -4437,16 +4443,43 @@ function selectMap(i){
   const r=camRect();
   S.cam.x=Math.max(0,(S.map.start[0]+0.5)*S.T-r.w/2);
   S.cam.y=Math.max(0,(S.map.start[1]+0.5)*S.T-r.h/2);
+  for(const id of ['#tilesets','#pick','#save']) $(id).disabled=false;
   S.dirty=false; mark(); drawLegend(); renderWarps(); warpForm(null); info(); draw();
   camInfo();
 }
+// What the Maps view shows when there is nothing to show. Says which of the two things is
+// missing, because "add a map" is useless advice to a project with no tileset to draw one
+// with -- the server refuses that, and refusing without saying so is how the old dead
+// window felt.
+function noMaps(){
+  S.map=null; S.ch=null; S.dirty=false; mark();
+  const cv=$('#cv'); cv.width=cv.height=0;
+  $('#legend').innerHTML='';
+  $('#warps').innerHTML='<small>—</small>';
+  $('#tileinfo').innerHTML='<small class="dim">—</small>';
+  $('#mapinfo').innerHTML='<small class="dim">no maps yet</small>';
+  $('#caminfo').textContent='—';
+  $('#painthint').innerHTML = S.data.atlases.length
+    ? 'This project has no maps. Name one below and press <b>＋ Map</b>.'
+    : 'This project has no tilesets yet. Import a sheet on the <b>Import</b> tab, press '
+      +'<b>Build</b>, then come back and add a map.';
+  for(const id of ['#tilesets','#pick','#save']) $(id).disabled=true;
+  $('#tool').textContent='';
+}
+
+// Every Maps control needs a map. They are re-enabled here rather than at each call site
+// so a control added later cannot forget.
+function haveMap(){ return !!(S.map && S.map.rows && S.map.rows.length) }
+
 $('#camon').onchange=e=>{
   if(!S.cam) S.cam={on:true,x:0,y:0};
-  S.cam.on=e.target.checked; draw(); camInfo();
+  S.cam.on=e.target.checked; if(haveMap()){ draw(); camInfo() }
 };
-$('#tilesets').onclick=()=>{ drawSets(); $('#setwrap').style.display='flex' };
+$('#tilesets').onclick=()=>{ if(!haveMap())return; drawSets();
+  $('#setwrap').style.display='flex' };
 $('#setclose').onclick=()=>{ $('#setwrap').style.display='none' };
-$('#pick').onclick=()=>{ drawTilePicker(); $('#pickwrap').style.display='flex' };
+$('#pick').onclick=()=>{ if(!haveMap())return; drawTilePicker();
+  $('#pickwrap').style.display='flex' };
 $('#pickclose').onclick=()=>{ $('#pickwrap').style.display='none' };
 $('#pickflipx').onchange=drawTilePicker;
 $('#pickflipy').onchange=drawTilePicker;
@@ -4474,6 +4507,7 @@ function warpForm(at){
 }
 
 function renderWarps(){
+  if(!haveMap()) return;
   const m=S.map;
   $('#warps').innerHTML = m.warps.length ? m.warps.map((w,i)=>
     `<div class="warp">(${w.at[0]},${w.at[1]}) → <b>${w.to[0]}</b> (${w.to[1]},${w.to[2]})
@@ -4485,6 +4519,7 @@ function renderWarps(){
 }
 
 function info(){
+  if(!haveMap()) return;
   const m=S.map;
   const sets=(m.atlases&&m.atlases.length?m.atlases:[m.atlas]).filter(Boolean);
   $('#mapinfo').innerHTML=`<small>${m.rows[0].length}×${m.rows.length} · `+
@@ -4494,6 +4529,9 @@ function info(){
 }
 
 function draw(){
+  // Tile images call this from onload, which can land after the view has moved to a
+  // project or a state with no map.
+  if(!haveMap()) return;
   const m=S.map,T=S.T,cv=$('#cv'),g=cv.getContext('2d');
   cv.width=m.rows[0].length*T; cv.height=m.rows.length*T;
   g.imageSmoothingEnabled=false;
@@ -4595,6 +4633,7 @@ addEventListener('mouseup',()=>{ camDrag=null });
 
 $('#cv').addEventListener('mousemove',e=>{if(e.buttons&&!camDrag)paint(e,false)});
 function paint(e,click){
+  if(!haveMap()||!S.ch) return;
   const r=e.target.getBoundingClientRect();
   const x=Math.floor((e.clientX-r.left)/S.T), y=Math.floor((e.clientY-r.top)/S.T);
   const m=S.map;
@@ -4616,17 +4655,26 @@ function paint(e,click){
 
 addEventListener('keydown',e=>{
   if(e.target.tagName==='SELECT')return;
+  // Escape closes whichever overlay is open before it touches the paint mode, so the
+  // key that means "get me out of this" does.
+  if(e.key==='Escape'){
+    for(const id of ['#pickwrap','#setwrap']){
+      if($(id).style.display!=='none'){ $(id).style.display='none'; return }
+    }
+  }
+  if(!haveMap()) return;
   if(e.key==='w'||e.key==='W'){S.mode='warp';tool()}
   if(e.key==='s'||e.key==='S'){S.mode='start';tool()}
   if(e.key==='Escape'){S.mode='paint';tool()}
 });
 $('#mapsel').onchange=e=>{
   if(S.dirty&&!confirm('Discard unsaved changes to this map?')){
-    e.target.value=S.data.maps.findIndex(m=>m.name===S.map.name); return;
+    e.target.value=S.data.maps.findIndex(m=>m.name===(S.map&&S.map.name)); return;
   }
   selectMap(+e.target.value);
 };
 $('#save').onclick=async()=>{
+  if(!haveMap()) return;
   const r=await (await fetch('/api/map',{method:'POST',
     headers:{'content-type':'application/json'},body:JSON.stringify(S.map)})).json();
   const log=$('#log');
@@ -6778,12 +6826,21 @@ def main():
 
     target = args.manifest
     if not target:
-        found = find_manifest()
-        if found:
-            target = found[0]
-            print(f"using {os.path.relpath(target)}"
-                  + (f"  ({len(found) - 1} other project(s) found; pass a path to pick)"
-                     if len(found) > 1 else ""))
+        # The project you were last in, before anything found by searching. `find_manifest`
+        # returns the examples in alphabetical order, so a no-argument launch always landed
+        # on `audiotest` -- which has no maps, no atlases and nothing to click. Guessing is
+        # the fallback, not the first answer.
+        recent = Session().recent()
+        if recent:
+            target = recent[0]["path"]
+            print(f"reopening {recent[0]['name']}  ({target})")
+        else:
+            found = find_manifest()
+            if found:
+                target = found[0]
+                print(f"using {os.path.relpath(target)}"
+                      + (f"  ({len(found) - 1} other project(s) found; pass a path to pick)"
+                         if len(found) > 1 else ""))
 
     # Opening with nothing is a normal state now, not an error. A distributed editor is
     # launched from a dock or a Start menu with no arguments and no current directory
