@@ -24,6 +24,7 @@ import errno
 import http.server
 import io
 import json
+import logging
 import os
 import platform
 import re
@@ -1846,12 +1847,30 @@ class Project:
             grid = grid.resize((grid.width * 2, grid.height * 2), Image.NEAREST)
             strip = pv.data_uri(grid)
 
+        # What this carve would do to the two ceilings it spends against, priced against
+        # what the project already has. "6,248 bytes" is a number; "19,239 -> 25,487 of
+        # 262,144, and 6,248 less heap for whatever scene loads it" is a decision. The
+        # second one is the point of importing carefully, and it was invisible until the
+        # atlas had been added, built, and measured.
+        current = self.estimate()
+        budget = current["budget"]
+        after = current["total"] + est
+        app = current.get("app") or {}
+        heap = app.get("heap")
+
         return {
             "sheet_tiles": [W // tile, H // tile],
             "considered": rw * rh, "empty": empty,
             "unique": len(unique), "capped": len(unique) >= max_tiles,
             "colours": len(colours), "palettes": len(pals), "repaired": repaired,
-            "bytes": est, "pct": 100.0 * est / self.project.get("budget_bytes", 262144),
+            "bytes": est, "pct": 100.0 * est / budget,
+            "res_before": current["total"], "res_after": after, "budget": budget,
+            "res_pct_after": 100.0 * after / budget if budget else 0,
+            "res_over": after > budget,
+            # An atlas is read whole into the scene arena and stays there for the
+            # scene's life, so its blob size is also its resident cost.
+            "heap_before": heap,
+            "heap_after": (heap - est) if heap is not None else None,
             "strip": strip,
             "thumb": pv.data_uri(im.resize((min(W, 480), int(H * min(W, 480) / W)),
                                            Image.NEAREST)),
@@ -2258,6 +2277,15 @@ select.sw{font:11px ui-monospace,monospace}
 /* The slice grid. Cells carry their own state colour so what a tile will BECOME is
    visible without reading a legend: kept, a duplicate that costs nothing, empty, or
    dropped by hand. */
+/* The crop box. Positioned in PERCENTAGES of the sheet image, so it stays correct
+   whatever size the thumbnail is rendered at -- the region is in tile units and the
+   sheet's size in tiles is known, which makes the arithmetic scale-free. */
+#sheetwrap{position:relative;display:inline-block;line-height:0}
+#sheetwrap img{display:block;image-rendering:pixelated;max-width:100%}
+#cropbox{position:absolute;border:2px solid var(--accent);
+  box-shadow:0 0 0 9999px rgba(0,0,0,.55);pointer-events:none;display:none}
+.zoom{display:flex;align-items:center;gap:.4rem;font-size:.78rem;color:var(--dim)}
+.zoom input{width:7rem}
 #slice{display:grid;gap:2px;overflow:auto;max-height:60vh}
 #slice button{padding:0;border:2px solid transparent;border-radius:3px;background:none;
   line-height:0;cursor:pointer;position:relative}
@@ -2502,11 +2530,23 @@ button:disabled{opacity:.45;cursor:not-allowed}
           <button id="slkeepall">Keep all</button>
           <button id="sldropdup">Drop duplicates</button>
           <button id="sldropempty">Drop empties</button>
+          <!-- Tiles are 16 pixels square. Judging whether two of them are really the
+               same, or whether a carve cut through something, cannot be done at that
+               size on a modern display. -->
+          <label class="zoom">zoom
+            <input id="slzoom" type="range" min="1" max="8" step="1" value="3">
+            <b id="slzoomv">3×</b>
+          </label>
           <span id="slnote"></span>
         </div>
         <div id="slice"></div>
       </div>
-      <div class="plate"><h3>Sheet</h3><img id="sheetimg" alt=""></div>
+      <!-- The region, drawn ON the sheet. Four numbers in tile units are hard to hold in
+           your head against a picture; a box over the art is not. -->
+      <div class="plate"><h3>Sheet — the box is what gets carved</h3>
+        <div id="sheetwrap"><img id="sheetimg" alt=""><i id="cropbox"></i></div>
+        <small id="cropnote">—</small>
+      </div>
       <div class="plate"><h3>Tiles kept</h3><img id="strip" alt=""></div>
     </div>
   </div>
@@ -3312,8 +3352,12 @@ async function drawSlice(){
   if(g.error){ $('#slnote').textContent=g.error; return }
 
   const el=$('#slice');
-  el.style.gridTemplateColumns=`repeat(${g.cols}, minmax(0, 1fr))`;
-  el.style.maxWidth=Math.min(g.cols*40,720)+'px';
+  // Zoom is a tile SIZE, not a CSS transform: the grid stays a grid, the cells stay
+  // clickable at their real positions, and the container scrolls. A transform would
+  // scale the hit areas out from under the pointer.
+  const z=+$('#slzoom').value, cell=16*z;
+  el.style.gridTemplateColumns=`repeat(${g.cols}, ${cell}px)`;
+  el.style.maxWidth='100%';
   el.innerHTML=g.cells.map(c=>
     `<button data-i="${c.i}" class="${IMPEX.has(c.i)?'off':c.state}"
       title="cell ${c.i} at ${c.x},${c.y} — ${IMPEX.has(c.i)?'dropped':c.state}"
@@ -3364,20 +3408,59 @@ function analyse(){
       headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
     if(r.error){$('#stats').innerHTML=`<div class="warn"><b>!</b><span>${r.error}</span></div>`;return}
     const cell=(v,l,warn)=>`<div class="${warn?'warn':''}"><b>${v}</b><span>${l}</span></div>`;
+    // What it costs, and what it costs YOU: the same bytes read very differently
+    // against a budget that is already 7% spent or already 97%.
+    const B=n=>n.toLocaleString();
     $('#stats').innerHTML=
       cell(r.unique,'unique tiles',r.capped)+
       cell(r.colours,'colours')+
       cell(r.palettes,'palettes')+
-      cell(r.bytes.toLocaleString(),'bytes')+
-      cell(r.pct.toFixed(1)+'%','of budget',r.pct>25)+
+      cell(B(r.bytes),'bytes it adds')+
+      cell(`${B(r.res_before)} → ${B(r.res_after)}`,
+           `resources, ${r.res_pct_after.toFixed(1)}% of the cap`, r.res_over)+
+      (r.heap_after!==null&&r.heap_after!==undefined
+        ? cell(`${B(r.heap_before)} → ${B(r.heap_after)}`,
+               'heap while a scene holds it', r.heap_after<16384)
+        : cell('—','heap: build once to measure'))+
       cell(r.repaired,'repaired',r.repaired>0)+
       cell(r.sheet_tiles.join('×'),'sheet tiles');
     $('#sheetimg').src=r.thumb;
     $('#strip').src=r.strip||'';
+    drawCrop(r.sheet_tiles);
   },180);
 }
 for(const id of ['sheet','tile','rx','ry','rw','rh','maxt'])
   $('#'+id).addEventListener('input',()=>{ analyse(); drawSlice() });
+
+$('#slzoom').addEventListener('input',()=>{
+  $('#slzoomv').textContent=$('#slzoom').value+'×';
+  drawSlice();
+});
+
+// The region as a box on the sheet. Percentages of the sheet's size in TILES, which is
+// the same fraction as pixels and survives the thumbnail being scaled to fit.
+function drawCrop(sheetTiles){
+  const box=$('#cropbox');
+  if(!sheetTiles || !sheetTiles[0] || !sheetTiles[1]){ box.style.display='none'; return }
+  const [sx,sy]=sheetTiles;
+  const rx=+$('#rx').value, ry=+$('#ry').value,
+        rw=+$('#rw').value, rh=+$('#rh').value;
+  // 'block', not '': clearing the inline style hands display back to the stylesheet,
+  // which sets none -- so the box positioned itself perfectly and stayed invisible.
+  box.style.display='block';
+  box.style.left  =(100*Math.min(rx,sx)/sx)+'%';
+  box.style.top   =(100*Math.min(ry,sy)/sy)+'%';
+  box.style.width =(100*Math.min(rw,sx-rx)/sx)+'%';
+  box.style.height=(100*Math.min(rh,sy-ry)/sy)+'%';
+
+  // Running off the sheet is the commonest way a carve goes wrong, and the pipeline
+  // rejects it at build time; saying so here saves the round trip.
+  const over=(rx+rw>sx)||(ry+rh>sy);
+  box.style.borderColor=over?'var(--bad)':'var(--accent)';
+  $('#cropnote').innerHTML=over
+    ? `<b class="bad">the region runs off the sheet</b> — it is ${sx}×${sy} tiles`
+    : `${rw}×${rh} of ${sx}×${sy} tiles — ${(100*rw*rh/(sx*sy)).toFixed(0)}% of the sheet`;
+}
 
 $('#addatlas').onclick=async()=>{
   const name=$('#aname').value.trim();
@@ -4678,30 +4761,104 @@ def find_manifest():
     return found
 
 
-def open_window(url, title):
-    """Show the editor in a native window, or say why it could not.
+# Chromium-family browsers, which all accept `--app=URL`: a window with no tab strip, no
+# address bar and its own entry in the task switcher. Ordered by how likely someone is to
+# have made it their main browser.
+APP_BROWSERS = ("google-chrome-stable", "google-chrome", "chromium", "chromium-browser",
+                "brave-browser", "brave", "microsoft-edge-stable", "microsoft-edge",
+                "vivaldi", "opera")
 
-    Uses the OS's own webview -- WebKitGTK, WebView2, WKWebView -- rather than shipping a
-    browser engine. That keeps this a Python-only project and the frozen binary tens of
-    megabytes rather than hundreds, at the cost of depending on something the OS provides.
-    So it is a soft dependency: no webview means a browser tab, not a failure.
+
+def window_profile_dir():
+    """A private browser profile for the editor's window.
+
+    Not optional, and not about privacy: launching a Chromium that is ALREADY RUNNING
+    hands the URL to the existing process and returns immediately, which the editor would
+    read as the window having been closed a moment after opening. Its own profile makes it
+    its own process, which is what gives a real close event.
+
+    Kept between runs, so the window remembers its size and position.
+    """
+    if platform.system() == "Windows":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    elif platform.system() == "Darwin":
+        base = os.path.expanduser("~/Library/Caches")
+    else:
+        base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    return os.path.join(base, "pebblnyx", "window")
+
+
+def open_app_window(url):
+    """A chromeless window from a browser that is already installed.
+
+    The alternative for Linux was bundling a webview: PyGObject through PyInstaller is
+    distro-specific and fragile, and Qt's WebEngine is Chromium again at ~200MB, against a
+    binary that is currently 20. Both to render a page the machine can already render.
+
+    Returns True once the window has been closed, False if none could be opened.
+    """
+    exe = next((p for p in (shutil.which(b) for b in APP_BROWSERS) if p), None)
+    if not exe:
+        return False
+
+    profile = window_profile_dir()
+    os.makedirs(profile, exist_ok=True)
+    cmd = [exe, f"--app={url}", f"--user-data-dir={profile}",
+           "--window-size=1400,900", "--no-first-run", "--no-default-browser-check"]
+
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+    except OSError as e:
+        print(f"could not open a window with {os.path.basename(exe)} ({e})")
+        return False
+
+    # A browser that rejects the flags exits at once, and treating that as "the user
+    # closed the window" would quit the editor a second after starting it.
+    time.sleep(1.5)
+    if proc.poll() is not None:
+        print(f"{os.path.basename(exe)} would not open a window; using a browser tab")
+        return False
+
+    print(f"window: {os.path.basename(exe)} --app  (close it to quit)")
+    proc.wait()
+    return True
+
+
+def open_window(url, title):
+    """Show the editor in a window of its own, however this machine can manage it.
+
+    Two ways, tried in order. A real webview -- WebKitGTK, WebView2, WKWebView -- when
+    pywebview is bundled, which is the Windows and macOS builds. Otherwise a Chromium in
+    `--app` mode, which is what Linux gets: still a window with no browser furniture, and
+    nothing extra to ship.
 
     Returns True if a window was shown and has since been closed.
     """
     try:
         import webview
+        # Silenced AFTER the import, not before: pywebview sets its own logger to DEBUG
+        # as it initialises, which undoes anything set earlier. It logs a full traceback
+        # for each backend it cannot load -- two of them on a Linux box with neither GTK
+        # nor Qt bindings -- and that is this project's ordinary path, not a fault. A
+        # launch that goes on to open a window fine should not look like it crashed twice
+        # on the way.
+        logging.getLogger("pywebview").setLevel(logging.CRITICAL)
     except ImportError:
-        return False
+        webview = None
 
-    try:
-        webview.create_window(title, url, width=1400, height=900, min_size=(900, 600))
-        webview.start()
-        return True
-    except Exception as e:                               # noqa: BLE001
-        # Typically a missing system webview (no WebKitGTK) or no display. Neither is
-        # worth failing over when a browser will do.
-        print(f"native window unavailable ({e}); falling back to the browser")
-        return False
+    if webview is not None:
+        try:
+            webview.create_window(title, url, width=1400, height=900,
+                                  min_size=(900, 600))
+            webview.start()
+            return True
+        except Exception as e:                           # noqa: BLE001
+            # Typically a missing system webview or no display. Worth one line, then try
+            # the next thing rather than dropping straight to a tab.
+            print(f"native window unavailable ({e})")
+
+    return open_app_window(url)
 
 
 def _ensure_streams():
