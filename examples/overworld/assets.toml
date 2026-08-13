@@ -125,9 +125,11 @@ out = "font_dialogue.bin"
 tile = "floor"
 flags = []
 
+# No `atlas` here, deliberately: '#' is the wall of EVERY map, and every map's first
+# tileset defines a `wall` role. Pinning it to `tiles` broke `cave`, which draws from
+# `caveset` and uses '#' throughout -- see the `w` entry below for when pinning is right.
 [legend."#"]
 tile = "wall"
-atlas = "tiles"
 flags = ["solid"]
 
 [legend."~"]

@@ -902,6 +902,20 @@ class Project:
             return [m["atlas"]]
         return [specs[0]["name"]] if specs else []
 
+    @staticmethod
+    def _legend_payload(raw):
+        """One legend table, with every key the pipeline reads.
+
+        `atlas` and `flip` used to be dropped, which is why the page could only ever paint
+        through a map's FIRST tileset -- so this is shared between the project legend and
+        each map's own rather than written twice and drifting.
+        """
+        return {ch: {"tile": e["tile"], "flags": e.get("flags", []),
+                     "atlas": e.get("atlas"),
+                     "flip": ([e["flip"]] if isinstance(e.get("flip"), str)
+                              else list(e.get("flip", [])))}
+                for ch, e in raw.items()}
+
     def maps(self):
         out = []
         for m in self.man.get("map", []):
@@ -913,20 +927,16 @@ class Project:
                         # `atlas` stays for everything that only wants the first one; the
                         # list is what a map drawing from several is actually described by.
                         "atlas": names[0] if names else None,
-                        "atlases": names})
+                        "atlases": names,
+                        # This map's own [map.legend], overlaid on the project one. Sent
+                        # separately rather than pre-merged because the page has to be able
+                        # to say which table an entry lives in: editing a project character
+                        # changes every map, editing a map's own changes one.
+                        "legend": self._legend_payload(m.get("legend", {}))})
         return out
 
     def state(self):
-        # `atlas` and `flip` used to be dropped here, which is why the page could only
-        # ever paint through the map's FIRST tileset: a character pinned to another atlas
-        # resolved against the wrong role table and showed up as missing art, even though
-        # the same manifest built and previewed correctly. The page needs every key the
-        # pipeline reads, or it is describing a different legend from the one that builds.
-        legend = {ch: {"tile": e["tile"], "flags": e.get("flags", []),
-                       "atlas": e.get("atlas"),
-                       "flip": ([e["flip"]] if isinstance(e.get("flip"), str)
-                                else list(e.get("flip", [])))}
-                  for ch, e in self.man.get("legend", {}).items()}
+        legend = self._legend_payload(self.man.get("legend", {}))
         return {
             # Every flag name a legend entry may carry, and its bit. Built-ins first so
             # the page can show them as the fixed pair they are, then whatever
@@ -955,7 +965,9 @@ class Project:
             "fonts": self.fonts(),
             "dialog": {k: v.get("pages", [])
                        for k, v in self.man.get("dialog", {}).items()},
-            "scenes": list(self.man.get("scene", {})),
+            "scenes": self.scenes(),
+            "sprite_names": [s.get("name") for s in self.man.get("sprite", [])
+                             if s.get("name")],
             # The canvas the author is working on, which is the device's display turned
             # if the project is landscape. Sent as dimensions rather than as a flag so
             # the page never has to know which way round that is.
@@ -2235,8 +2247,56 @@ class Project:
         """
         return '"' + ch.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
-    def _legend_block(self, ch):
-        """(lines, start, end) for one [legend."x"] block, or None if it has none."""
+    def _map_block(self, name):
+        """(lines, start, end) for one [[map]] block, end exclusive.
+
+        `end` steps over the map's OWN subtables -- `[map.legend."x"]` binds to the most
+        recent [[map]] in TOML, so a subtable is part of the block even though it opens
+        with a bracket. Stopping at the first bracket instead would put anything appended
+        here in front of the map's own legend, i.e. in the wrong table.
+        """
+        lines = open(self.path).read().split("\n")
+        start = None
+        for i, line in enumerate(lines):
+            if line.strip() == "[[map]]":
+                if start is not None:
+                    break
+                nxt = next((j for j in range(i + 1, len(lines))
+                            if lines[j].lstrip().startswith("[")), len(lines))
+                if any(re.match(rf'^name\s*=\s*"{re.escape(name)}"', lines[j].strip())
+                       for j in range(i + 1, nxt)):
+                    start = i
+        if start is None:
+            return None
+
+        end = len(lines)
+        for j in range(start + 1, len(lines)):
+            s = lines[j].lstrip()
+            if s.startswith("[") and not s.startswith("[map."):
+                end = j
+                break
+        return lines, start, end
+
+    def _legend_block(self, ch, map_name=None):
+        """(lines, start, end) for one legend block, or None if it has none.
+
+        With `map_name` this looks for `[map.legend."x"]` inside that map rather than the
+        project-wide `[legend."x"]` -- the same character can legitimately be both, and
+        they mean different tiles.
+        """
+        if map_name:
+            found = self._map_block(map_name)
+            if not found:
+                return None
+            lines, mstart, mend = found
+            want = f"[map.legend.{self._toml_key(ch)}]"
+            for i in range(mstart, mend):
+                if lines[i].strip() == want:
+                    end = next((j for j in range(i + 1, mend)
+                                if lines[j].lstrip().startswith("[")), mend)
+                    return lines, i, end
+            return None
+
         lines = open(self.path).read().split("\n")
         want = f"[legend.{self._toml_key(ch)}]"
         for i, line in enumerate(lines):
@@ -2246,8 +2306,9 @@ class Project:
                 return lines, i, end
         return None
 
-    def _legend_lines(self, ch, tile, atlas=None, flags=(), flip=()):
-        body = [f"[legend.{self._toml_key(ch)}]"]
+    def _legend_lines(self, ch, tile, atlas=None, flags=(), flip=(), map_name=None):
+        head = "map.legend" if map_name else "legend"
+        body = [f"[{head}.{self._toml_key(ch)}]"]
         # An int is a raw index into the atlas, a string is a role it defines. Both are
         # first-class; the quoting is the whole difference in the file.
         body.append(f"tile = {tile}" if isinstance(tile, int)
@@ -2259,13 +2320,22 @@ class Project:
             body.append("flip = [" + ", ".join(f'"{a}"' for a in flip) + "]")
         return body
 
-    def save_legend(self, ch, tile, atlas=None, flags=(), flip=()):
+    def save_legend(self, ch, tile, atlas=None, flags=(), flip=(), map_name=None):
         """Create or rewrite one legend character, validating it the way the build will.
 
         Checked here rather than only in the page, because a legend entry that does not
         resolve breaks every map that paints it -- and the editor is the thing that is
         supposed to make a manifest you cannot break.
+
+        `map_name` writes the character into that map's own `[map.legend]` instead of the
+        project table. One character per cell means the printable set -- about ninety --
+        is the hard ceiling on how many distinct tiles can be placed; project-wide that
+        ceiling was shared by the whole game, which is what put most of a carved tileset
+        out of reach. Per map it is ninety each.
         """
+        if map_name and not any(m.get("name") == map_name
+                                for m in self.man.get("map", [])):
+            raise ValueError(f"no map named {map_name!r}")
         if len(ch) != 1:
             raise ValueError("a legend character is exactly one character")
         if ch.isspace():
@@ -2308,7 +2378,7 @@ class Project:
                 raise ValueError(f"atlas {which!r} holds {count} tiles "
                                  f"(0-{count - 1}), not {tile}")
 
-        block = self._legend_block(ch)
+        block = self._legend_block(ch, map_name)
         if block:
             lines, start, end = block
             # The block runs to the next table header, which means it takes the blank
@@ -2318,8 +2388,21 @@ class Project:
             gap = 0
             while end - gap > start and lines[end - gap - 1].strip() == "":
                 gap += 1
-            lines[start:end] = (self._legend_lines(ch, tile, atlas, flags, flip)
-                                + [""] * gap)
+            lines[start:end] = (
+                self._legend_lines(ch, tile, atlas, flags, flip, map_name) + [""] * gap)
+            with open(self.path, "w") as f:
+                f.write("\n".join(lines))
+        elif map_name:
+            # Appended at the END of the [[map]] block, which is the only place it can go:
+            # a subtable closes its parent, so anything written above `rows` would put the
+            # rest of the map's own keys inside `[map.legend]` and the build would fail
+            # complaining that the map has no rows.
+            lines, mstart, mend = self._map_block(map_name)
+            new = self._legend_lines(ch, tile, atlas, flags, flip, map_name)
+            at = mend
+            while at > mstart and lines[at - 1].strip() == "":
+                at -= 1
+            lines[at:at] = [""] + new
             with open(self.path, "w") as f:
                 f.write("\n".join(lines))
         else:
@@ -2348,17 +2431,28 @@ class Project:
                 f.write("\n".join(lines))
         self.reload()
 
-    def legend_users(self, ch):
-        """The maps that paint this character, so removing it can refuse and say which."""
-        return [m["name"] for m in self.man.get("map", [])
-                if ch in m.get("rows", "")]
+    def legend_users(self, ch, map_name=None):
+        """The maps that paint this character, so removing it can refuse and say which.
 
-    def remove_legend(self, ch):
+        A map-scoped character is only ever painted in its own map, and a project one
+        that some map has overridden is not painted by THAT map -- the override is, and it
+        may well mean a different tile. So the maps carrying their own entry are skipped
+        rather than counted as users of the project character.
+        """
+        maps = self.man.get("map", [])
+        if map_name:
+            return [m["name"] for m in maps
+                    if m.get("name") == map_name and ch in m.get("rows", "")]
+        return [m["name"] for m in maps
+                if ch in m.get("rows", "") and ch not in m.get("legend", {})]
+
+    def remove_legend(self, ch, map_name=None):
         """Delete a legend character, once no map paints it."""
-        block = self._legend_block(ch)
+        block = self._legend_block(ch, map_name)
         if not block:
-            raise ValueError(f"no legend entry for {ch!r}")
-        users = self.legend_users(ch)
+            where = f"map {map_name!r}" if map_name else "the project legend"
+            raise ValueError(f"no legend entry for {ch!r} in {where}")
+        users = self.legend_users(ch, map_name)
         if users:
             raise ValueError(f"{ch!r} is still painted in: {', '.join(users)}. "
                              f"Paint over it first.")
@@ -2480,12 +2574,15 @@ class Project:
             raise ValueError(f"atlas {atlas!r} holds {count} tiles (0-{count - 1}), "
                              f"not {index}")
 
-        # `autopick` runs first and `semantic` overrides it, so naming a tile the autopick
-        # already claimed is a redefinition rather than a clash -- but silently moving
-        # "wall" to another tile would change every map that draws it, so it is refused.
-        if role in spec.get("autopick", []):
-            raise ValueError(f"{role!r} is autopicked for {atlas!r}. Remove it from "
-                             f"`autopick` first, or name this tile something else.")
+        # `autopick` runs first and `semantic` overrides it -- that is the pipeline's own
+        # documented behaviour ("a manifest can start auto and be pinned down later"), so
+        # naming a tile the autopick already claimed is a pin, not a clash. This used to
+        # be refused, which left an autopicked name unreachable from the editor entirely:
+        # the only way out was hand-editing `autopick`, and the Import tab could not even
+        # clear it. The caller is told, because the pin does move the tile every map that
+        # draws through this role will use.
+        pinned = role in spec.get("autopick", [])
+
         taken = spec.get("semantic", {}).get(role)
         if taken is not None and int(taken) != index:
             raise ValueError(f"{atlas!r} already names tile {taken} {role!r}. "
@@ -2517,6 +2614,7 @@ class Project:
         with open(self.path, "w") as f:
             f.write("\n".join(lines))
         self.reload()
+        return {"pinned": pinned}
 
     def remove_role(self, atlas, role):
         """Unname a tile. The tile stays; only the name goes."""
@@ -2824,13 +2922,242 @@ rows = """
 """
 '''
         if with_scene:
+            # NOT `atlases`: the map declares its own tilesets, sizes its atlas pool and
+            # streams them (M4d). A scene listing them too loads a second resident copy,
+            # which the pipeline refuses -- so generating one made every new map unbuildable.
+            #
+            # Sprites and fonts are listed in full rather than left empty, because a scene
+            # that loads a map and nothing else draws no character and no text, which is
+            # not something anyone can test. Trim it in the Scenes tab: what is listed here
+            # is resident for the whole scene.
+            refs = ""
+            sprites = [s["name"] for s in self.man.get("sprite", []) if s.get("name")]
+            fonts = [f["name"] for f in self.man.get("font", []) if f.get("name")]
+            if sprites:
+                refs += f"sprites = {json.dumps(sprites)}\n"
+            if fonts:
+                refs += f"fonts = {json.dumps(fonts)}\n"
             block += f'''
 [scene.{name}]
 map = "{name}"
-atlases = ["{atlas}"]
-'''
+{refs}'''
         with open(self.path, "a") as f:
             f.write(block)
+        self.reload()
+
+    # ------------------------------------------------------------------ map lifecycle
+    #
+    # Neither of these existed, so iterating on a test map -- the ordinary business of
+    # trying a layout and throwing it away -- meant hand-editing the manifest. Both refuse
+    # while something still points at the map, because a dangling warp destination and a
+    # scene naming a map that is gone both fail the build a long way from the cause.
+
+    def map_users(self, name):
+        """What still points at this map: warps aimed at it, and scenes that load it."""
+        users = []
+        for m in self.man.get("map", []):
+            if m["name"] == name:
+                continue
+            for w in m.get("warps", []):
+                to = w.get("to")
+                if to and to[0] == name:
+                    users.append(f"map {m['name']} warps to it")
+                    break
+        for sname, spec in self.man.get("scene", {}).items():
+            if spec.get("map") == name:
+                users.append(f"scene {sname} loads it")
+        return users
+
+    def remove_map(self, name):
+        """Delete a [[map]] and its own [map.legend], once nothing points at it."""
+        found = self._map_block(name)
+        if not found:
+            raise ValueError(f"no map named {name!r}")
+        users = self.map_users(name)
+        if users:
+            raise ValueError(f"cannot remove {name!r} — {'; '.join(users)}. "
+                             f"Repoint or remove those first.")
+        lines, start, end = found
+        while end < len(lines) and lines[end].strip() == "":
+            end += 1
+        while start > 0 and lines[start - 1].strip() == "":
+            start -= 1
+        lines[start:end] = [""]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def rename_map(self, old, new):
+        """Rename a map, carrying every reference with it.
+
+        Warp destinations and scene `map =` keys are updated in the same pass rather than
+        left to the author: a rename that only changes the declaration builds, and then
+        fails at the first warp with an error naming a map nobody has heard of.
+        """
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", new):
+            raise ValueError("name must be lowercase letters, digits and underscores")
+        if not self._map_block(old):
+            raise ValueError(f"no map named {old!r}")
+        if any(m["name"] == new for m in self.man.get("map", [])):
+            raise ValueError(f"a map named {new!r} already exists")
+
+        lines, start, end = self._map_block(old)
+        for j in range(start, end):
+            # Rewritten in place through a capture of the original indentation, so a
+            # manifest that indents its tables keeps doing so rather than growing one
+            # flush-left line in the middle of an indented block.
+            m = re.match(rf'^(\s*name\s*=\s*)"{re.escape(old)}"\s*$', lines[j])
+            if m:
+                lines[j] = f'{m.group(1)}"{new}"'
+                break
+
+        text = "\n".join(lines)
+        # Warp destinations: `to = ["old", x, y]`, wherever they appear.
+        text = re.sub(rf'(to\s*=\s*\[\s*)"{re.escape(old)}"', rf'\g<1>"{new}"', text)
+        # Scene map keys. Scoped to a `map =` line so a sprite or atlas that happens to
+        # share the name is left alone.
+        text = re.sub(rf'^(\s*map\s*=\s*)"{re.escape(old)}"', rf'\g<1>"{new}"',
+                      text, flags=re.M)
+        with open(self.path, "w") as f:
+            f.write(text)
+        self.reload()
+
+    # ---------------------------------------------------------------------- scenes
+    #
+    # A scene is the framework's ONLY load point, and it was the one thing in the manifest
+    # with no editor at all -- so a new map could be drawn, painted and built, and still
+    # not be reachable from the game without hand-editing TOML. It is also the unit the
+    # arena is sized from, which is why the cost of each one is shown while it is edited
+    # rather than after a build.
+
+    def scenes(self):
+        """Every [scene.*], with what it loads and what that costs resident."""
+        out = []
+        for name, spec in self.man.get("scene", {}).items():
+            out.append({
+                "name": name,
+                "map": spec.get("map"),
+                "sprites": list(spec.get("sprites", [])),
+                "fonts": list(spec.get("fonts", [])),
+                # Carried through rather than dropped: a scene with no map may legitimately
+                # load atlases of its own (a menu drawing tiles), and silently discarding
+                # the key on save would break that manifest.
+                "atlases": list(spec.get("atlases", [])),
+                "dialog": bool(spec.get("dialog", False)),
+            })
+        return sorted(out, key=lambda s: s["name"])
+
+    def _scene_block(self, name):
+        """(lines, start, end) for one [scene.x] table, or None."""
+        lines = open(self.path).read().split("\n")
+        want = f"[scene.{name}]"
+        for i, line in enumerate(lines):
+            if line.strip() == want:
+                end = next((j for j in range(i + 1, len(lines))
+                            if lines[j].lstrip().startswith("[")), len(lines))
+                return lines, i, end
+        return None
+
+    def save_scene(self, name, map_name=None, sprites=(), fonts=(), dialog=False,
+                   atlases=()):
+        """Create or rewrite one [scene.*], validated the way build_scenes will validate it.
+
+        The clash check is the one worth doing here rather than at build time: a scene
+        listing an atlas its own map already streams loads a SECOND resident copy, and
+        nothing at runtime can see that -- it just quietly costs twice the atlas. That is
+        also the bug the editor used to write by itself on every new map.
+        """
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise ValueError("a scene name must be lowercase letters, digits and "
+                             "underscores -- it becomes a C identifier")
+
+        known_maps = [m["name"] for m in self.man.get("map", [])]
+        if map_name and map_name not in known_maps:
+            raise ValueError(f"no map named {map_name!r}")
+
+        known_sprites = [s.get("name") for s in self.man.get("sprite", [])]
+        for s in sprites:
+            if s not in known_sprites:
+                raise ValueError(f"no sprite named {s!r} "
+                                 f"(known: {', '.join(known_sprites) or 'none'})")
+        known_fonts = [f.get("name") for f in self.man.get("font", [])]
+        for f in fonts:
+            if f not in known_fonts:
+                raise ValueError(f"no font named {f!r} "
+                                 f"(known: {', '.join(known_fonts) or 'none'})")
+        known_atlases = [a.get("name") for a in self.man.get("atlas", [])]
+        for a in atlases:
+            if a not in known_atlases:
+                raise ValueError(f"no atlas named {a!r}")
+
+        if dialog and not self.man.get("dialog"):
+            raise ValueError("this scene asks for dialog, but the manifest defines none")
+
+        if map_name and atlases:
+            spec = next(m for m in self.man.get("map", []) if m["name"] == map_name)
+            streamed = set(self.map_atlases(spec))
+            clash = sorted(streamed.intersection(atlases))
+            if clash:
+                raise ValueError(
+                    f"map {map_name!r} already streams {', '.join(clash)}, so listing "
+                    f"it here loads a second resident copy. Drop it.")
+
+        if not (map_name or sprites or fonts or atlases or dialog):
+            raise ValueError("a scene that loads nothing cannot be built")
+
+        # Key at a time, not block at a time. Replacing the whole table would be shorter
+        # and would silently eat the comments inside it -- and in this project a
+        # manifest's comments are half its content: the example's cave scene explains in
+        # two lines why it does NOT load the dialogue face, which is exactly the kind of
+        # reasoning that never gets written down twice.
+        want = [("map", f'map = "{map_name}"' if map_name else None),
+                ("atlases", "atlases = " + json.dumps(list(atlases)) if atlases else None),
+                ("sprites", "sprites = " + json.dumps(list(sprites)) if sprites else None),
+                ("fonts", "fonts = " + json.dumps(list(fonts)) if fonts else None),
+                ("dialog", "dialog = true" if dialog else None)]
+
+        block = self._scene_block(name)
+        if not block:
+            lines = open(self.path).read().split("\n")
+            lines += [""] + [f"[scene.{name}]"] + [v for _, v in want if v]
+        else:
+            lines, start, end = block
+            for key, value in want:
+                at = next((j for j in range(start + 1, end)
+                           if re.match(rf"\s*{key}\s*=", lines[j])), None)
+                if at is not None and value:
+                    lines[at] = value
+                elif at is not None:
+                    del lines[at]
+                    end -= 1
+                elif value:
+                    # Before the trailing blank lines, so the gap to the next table
+                    # survives rather than closing a little further on every edit.
+                    at = end
+                    while at > start and lines[at - 1].strip() == "":
+                        at -= 1
+                    lines[at:at] = [value]
+                    end += 1
+
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def remove_scene(self, name):
+        """Delete a scene. Nothing in the manifest references a scene, so this is safe --
+        but game code loads them BY NAME through the generated header, so it is worth
+        saying that the C will stop compiling rather than failing silently at runtime."""
+        block = self._scene_block(name)
+        if not block:
+            raise ValueError(f"no scene named {name!r}")
+        lines, start, end = block
+        while end < len(lines) and lines[end].strip() == "":
+            end += 1
+        while start > 0 and lines[start - 1].strip() == "":
+            start -= 1
+        lines[start:end] = [""]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
         self.reload()
 
     # ------------------------------------------------------------------- saving
@@ -3115,6 +3442,10 @@ small{color:var(--dim);font-size:.78rem}
 kbd{font:11px ui-monospace,monospace;background:var(--soft);color:var(--accent);
   padding:.05em .35em;border-radius:3px}
 .mini{display:flex;flex-wrap:wrap;gap:.3rem;align-items:center;margin-top:.5rem}
+/* One scene per card, because a scene is a set of independent choices and a flat list of
+   checkboxes gives no sign where one ends and the next begins. */
+.scenecard{border:1px solid var(--line);border-radius:6px;padding:.6rem .8rem;
+  margin:.6rem 0;max-width:60ch}
 .mini input{font:inherit;width:4rem;padding:.25rem .4rem;background:var(--surface);
   color:var(--fg);border:1px solid var(--line);border-radius:4px}
 .mini input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
@@ -3328,6 +3659,10 @@ button:disabled{opacity:.45;cursor:not-allowed}
      to the thing being worked on. -->
 <div id="rail">
   <button id="tabmaps" class="act on" data-t="maps"><i>▦</i><em>Maps</em></button>
+  <!-- Scenes sits directly under Maps because it is the other half of the same job: a map
+       that no scene loads is content the game cannot reach, which is the dead end the
+       pipeline's own checks exist to catch everywhere else. -->
+  <button id="tabscenes" class="act" data-t="scenes"><i>◳</i><em>Scenes</em></button>
   <button id="tabpixel" class="act" data-t="pixel"><i>✎</i><em>Sprites</em></button>
   <button id="tabfonts" class="act" data-t="fonts"><i>A</i><em>Fonts</em></button>
   <button id="tabimport" class="act" data-t="import"><i>⇥</i><em>Import</em></button>
@@ -3409,6 +3744,13 @@ button:disabled{opacity:.45;cursor:not-allowed}
         <input id="nmw" type="number" value="24" min="3" max="255" title="width">
         <input id="nmh" type="number" value="16" min="3" max="255" title="height">
         <button id="newmap">＋ Map</button>
+      </div>
+      <!-- Renaming and deleting the map being looked at. Both refuse while a warp or a
+           scene still points at it, so the pair below is safe to press. -->
+      <div class="mini">
+        <button id="renmap" title="rename this map, carrying warps and scenes with it"
+                >Rename…</button>
+        <button id="delmap" title="delete this map">Delete…</button>
       </div>
     </section>
     <!-- What the watch actually shows of this map. Drag the blue grip to move it. -->
@@ -3509,6 +3851,24 @@ button:disabled{opacity:.45;cursor:not-allowed}
   <!-- Fonts. The layout puts the device-sized canvas next to the controls rather than
        below them, because the whole point is watching the text change as you drag the
        threshold -- a preview you have to scroll to is a preview you stop looking at. -->
+  <!-- Scenes. The framework's only load point, and the unit the scene arena is sized
+       from -- so each row carries its own resident cost rather than leaving that to a
+       build. Everything listed here is held for the whole scene. -->
+  <div id="scenes" style="display:none;flex:1;overflow:auto;padding:1.25rem">
+    <section>
+      <h2>Scenes</h2>
+      <p class="dim" style="max-width:60ch">
+        A scene is the only thing the game can load. It names one map and whatever has to
+        be resident while that map is on screen. A map with no scene cannot be reached.
+      </p>
+      <div id="scenelist"></div>
+      <div class="mini" style="margin-top:.8rem">
+        <button id="scnew">New scene…</button>
+      </div>
+      <div id="scenelog" class="mini"></div>
+    </section>
+  </div>
+
   <div id="fonts" style="display:none;flex:1;overflow:auto;padding:1.25rem">
     <div class="fontgrid">
       <div class="fontctl">
@@ -3915,8 +4275,24 @@ function atlas(name){
 // The tile is either a role the atlas defines or a raw index into it. Roles are the
 // better thing to write, but an atlas has hundreds of tiles and only a handful are worth
 // naming, so an index is how the rest get painted at all.
+// The legend this map actually paints with: the project table overlaid with the map's
+// own, which is exactly what the pipeline builds. Merged in the page rather than on the
+// server because WHICH table an entry lives in decides what editing it changes -- a
+// project character changes every map, a map's own changes this one -- so the page needs
+// both halves, not the answer.
+//
+// The overlay is what makes a tileset paintable at all. One character per cell caps a map
+// at the printable set, about ninety; project-wide, that ninety was shared by every map
+// and every atlas in the game, so most of a carved tileset could never be placed.
+function LEG(){
+  return Object.assign({}, S.data.legend, (S.map&&S.map.legend)||{});
+}
+function scopeOf(ch){
+  return (S.map&&S.map.legend&&S.map.legend[ch])?'map':'project';
+}
+
 function resolve(ch){
-  const e=S.data.legend[ch];
+  const e=LEG()[ch];
   if(!e) return null;
   const a=atlas(e.atlas);
   if(!a) return null;
@@ -3931,7 +4307,7 @@ function resolve(ch){
 // with no reason is the failure this replaced: the answer was always in the manifest and
 // never on the screen.
 function whyMissing(ch){
-  const e=S.data.legend[ch], want=e.atlas;
+  const e=LEG()[ch], want=e.atlas;
   if(want && !mapAtlases().some(a=>a.name===want))
     return `${ch} draws from ${want}, which this map does not use`;
   const a=atlas(want);
@@ -3958,7 +4334,7 @@ function drawLegend(){
   // Grouped by the atlas each character draws from, because with several tilesets in one
   // map an ungrouped strip of tiles is just a pile: which tileset a tile came from is the
   // thing you are actually choosing between.
-  const chars=Object.keys(S.data.legend);
+  const chars=Object.keys(LEG());
   const usable=chars.filter(c=>resolve(c));
   const missing=chars.filter(c=>!resolve(c));
   const groups=new Map(list.map(a=>[a.name,[]]));
@@ -3984,7 +4360,8 @@ function drawLegend(){
       b.className='tile'+(S.ch===ch?' sel':'');
       b.title=`${ch} → ${r.role?r.role:'tile '+r.index} of ${r.atlas}`
         +(r.flip.length?` flipped ${r.flip.join('')}`:'')
-        +(r.flags.length?` [${r.flags.join(' ')}]`:'');
+        +(r.flags.length?` [${r.flags.join(' ')}]`:'')
+        +(scopeOf(ch)==='map'?' — this map only':' — project-wide');
       b.innerHTML=`<img src="${r.uri}" alt="${ch}" style="${flipCss(r.flip)}"><b>${ch}</b>`
         +(r.flags.length?`<i class="fmark">${flagMark(r.flags)}</i>`:'');
       b.onclick=()=>{S.ch=ch;S.mode='paint';drawLegend();tool();tileInfo()};
@@ -4017,7 +4394,7 @@ function tileInfo(){
   const r=ch?resolve(ch):null;
   if(!r){ box.innerHTML='<small class="dim">no tile selected</small>'; return }
 
-  const e=S.data.legend[ch];
+  const e=LEG()[ch];
   const known=S.data.flags||{solid:1,warp:2};
   box.innerHTML='';
 
@@ -4074,12 +4451,25 @@ function tileInfo(){
   const del=document.createElement('button');
   del.textContent='Remove';
   del.title='delete this legend character';
+  const own=scopeOf(ch)==='map';
   del.onclick=async()=>{
-    const r2=await post('/api/legend/remove',{char:ch});
+    // Removed from the table it lives in. A project character deleted while another map
+    // still paints it is refused by the server, which is why the scope is sent rather
+    // than guessed from the map currently open.
+    const r2=await post('/api/legend/remove',{char:ch, map:own?S.map.name:null});
     if(!r2.ok){ say(r2.error); return }
-    S.ch=null; await reload(); say(`Removed ${ch} from the legend.`,false);
+    S.ch=null; await reload();
+    say(`Removed ${ch} from ${own?`map "${S.map.name}"`:'the project legend'}.`,false);
   };
+  // Which table this character lives in, said plainly next to the button that deletes it.
+  // The two look identical on the canvas and behave completely differently: editing a
+  // project character changes every map that paints it.
+  const scope=document.createElement('small');
+  scope.className='dim';
+  scope.style.marginLeft='.4rem';
+  scope.textContent=own?`this map only`:`project-wide — every map`;
   foot.appendChild(del);
+  foot.appendChild(scope);
   box.appendChild(foot);
 
   // Defining a flag is rare enough to sit behind a click, and common enough that it
@@ -4107,9 +4497,12 @@ function tileInfo(){
 // rather than patching it -- a partial write would silently drop the flags when you
 // changed the flip.
 async function writeLegend(ch,changes){
-  const e=S.data.legend[ch], r=resolve(ch);
+  const e=LEG()[ch], r=resolve(ch);
+  // Rewritten in the table it already lives in. Sending no scope would move a map's own
+  // character into the project table, which silently changes every other map.
   const body={char:ch, tile:e.tile, atlas:e.atlas||(r?r.atlas:null),
-              flags:e.flags||[], flip:e.flip||[], ...changes};
+              flags:e.flags||[], flip:e.flip||[],
+              map:scopeOf(ch)==='map'?S.map.name:null, ...changes};
   const res=await post('/api/legend',body);
   if(!res.ok){ say(res.error); tileInfo(); return }
   await reload();
@@ -4131,7 +4524,7 @@ const PICK_CHARS =
   +"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 function freeChar(){
-  const taken=new Set(Object.keys(S.data.legend));
+  const taken=new Set(Object.keys(LEG()));
   return [...PICK_CHARS].find(c=>!taken.has(c))||null;
 }
 
@@ -4140,7 +4533,7 @@ function freeChar(){
 // but the picker should reuse rather than mint a duplicate nobody asked for.
 function charFor(name,index,flip){
   const key=[...flip].sort().join('');
-  return Object.keys(S.data.legend).find(ch=>{
+  return Object.keys(LEG()).find(ch=>{
     const r=resolve(ch);
     return r&&r.atlas===name&&r.index===index
       &&[...r.flip].sort().join('')===key;
@@ -4193,7 +4586,8 @@ function drawTilePicker(){
   $('#pickhint').innerHTML=free
     ? `click a tile to paint with it${flip.length?' (mirrored '+flip.join('')+')':''}`
       +` · <b>right-click</b> to name it for game code`
-    : 'every legend character is taken — free one up in the sidebar to add more';
+    : 'this map has used all 92 legend characters — free one up in the sidebar, or move '
+      +'a character that only this map paints out of the project legend';
 }
 
 // A role, written into [atlas.semantic]. Named tiles are how C refers to a tile at all:
@@ -4217,7 +4611,14 @@ async function nameTile(atlasName,index,current){
   const r=await post('/api/role',{atlas:atlasName,role:want,index});
   if(!r.ok){ say(r.error); return }
   await reload(); drawTilePicker();
-  say(`Tile ${index} of ${atlasName} is now "${want}". Build to update the header.`,false);
+  // Pinning an autopicked name is allowed -- it is how a prototype becomes chosen art --
+  // but it moves the tile every map drawing through that role uses, so it is said out
+  // loud rather than left to be noticed after the next build.
+  say(r.pinned
+    ? `"${want}" was autopicked and is now pinned to tile ${index} of ${atlasName}.`
+      +` Every map drawing through it moves. Build to update the header.`
+    : `Tile ${index} of ${atlasName} is now "${want}". Build to update the header.`,
+    false);
 }
 
 // Clicking a tile either selects the character that already draws it, or mints one. The
@@ -4230,11 +4631,16 @@ async function bindTile(name,index,flip,bound){
   const ch=freeChar();
   if(!ch){ say('every legend character is taken.'); return }
 
-  // The atlas is named explicitly even when it is the map's first, because the legend is
-  // PROJECT-wide: a character that resolves by default here would resolve against a
-  // different tileset in another map, and mean a different tile.
+  // Minted into THIS MAP's legend, not the project one. A character costs a slot out of
+  // the printable set, and painting a decorative tile is a decision about one map -- so
+  // spending a project-wide slot on it used up the same ninety for every other map in the
+  // game. The project table keeps the characters that mean the same thing everywhere.
+  //
+  // The atlas is still named explicitly even when it is the map's first, because a
+  // character that resolves by default would resolve against a different tileset if the
+  // map's atlas list is ever reordered, and mean a different tile.
   const r=await post('/api/legend',
-    {char:ch, tile:index, atlas:name, flags:[], flip:flip});
+    {char:ch, tile:index, atlas:name, flags:[], flip:flip, map:S.map.name});
   if(!r.ok){ say(r.error); return }
   await reload();
   S.ch=ch; S.mode='paint';
@@ -4543,7 +4949,7 @@ function draw(){
     // two bits in the cell, so an editor that drew it upright would be showing a map
     // that does not exist -- and mirrored tiles are placed precisely because the
     // mirroring is what you are looking at.
-    const flip=(S.data.legend[ch]&&S.data.legend[ch].flip)||[];
+    const flip=(LEG()[ch]&&LEG()[ch].flip)||[];
     if(!flip.length){ g.drawImage(im,x*T,y*T,T,T); continue }
     const sx=flip.includes('x')?-1:1, sy=flip.includes('y')?-1:1;
     g.save();
@@ -4701,6 +5107,40 @@ $('#newmap').onclick=async()=>{
   const i=S.data.maps.findIndex(m=>m.name===name);
   $('#mapsel').value=i; selectMap(i);
 };
+$('#renmap').onclick=async()=>{
+  if(!S.map){ say('No map selected.'); return }
+  const to=prompt(`Rename map "${S.map.name}" to:\n\n`
+    +`Warps aimed at it and scenes that load it are updated too. `
+    +`Lowercase letters, digits and underscores.`, S.map.name);
+  if(!to||to.trim()===S.map.name) return;
+  const r=await post('/api/map/rename',{name:S.map.name, to:to.trim()});
+  if(!r.ok){ say(r.error); return }
+  await load();
+  const i=S.data.maps.findIndex(m=>m.name===to.trim());
+  $('#mapsel').value=i; selectMap(i);
+  say(`Renamed to "${to.trim()}". Press Build.`,false);
+};
+
+// Asks what still points at the map BEFORE confirming, so the dialog says "the cave warps
+// to it" rather than offering a delete that is then refused -- the same shape as removing
+// an atlas.
+$('#delmap').onclick=async()=>{
+  if(!S.map){ say('No map selected.'); return }
+  const name=S.map.name;
+  const u=await post('/api/map/users',{name});
+  if(u.users&&u.users.length){
+    say(`Cannot delete "${name}" — ${u.users.join('; ')}.`);
+    return;
+  }
+  if(!confirm(`Delete map "${name}"?\n\n`
+              +`Nothing points at it. Its rows and its own legend go with it.`)) return;
+  const r=await post('/api/map/remove',{name});
+  if(!r.ok){ say(r.error); return }
+  await load();
+  $('#mapsel').value=0; selectMap(0);
+  say(`Deleted "${name}". Press Build.`,false);
+};
+
 // Changing this changes what the pipeline BAKES -- every atlas, sprite, map and glyph
 // comes out turned -- so the resources on disk are stale the moment it is picked. Saying
 // so beats letting someone wonder why the preview and the watch disagree.
@@ -4731,12 +5171,15 @@ $('#build').onclick=async()=>{
 let sheets=[];
 function showTab(which){
   const imp=which==='import', fnt=which==='fonts', maps=which==='maps',
-        sdk=which==='sdk', pix=which==='pixel', cod=which==='code';
+        sdk=which==='sdk', pix=which==='pixel', cod=which==='code',
+        scn=which==='scenes';
   $('#import').style.display=imp?'block':'none';
   $('#fonts').style.display=fnt?'block':'none';
   $('#sdk').style.display=sdk?'block':'none';
   $('#pixel').style.display=pix?'block':'none';
   $('#code').style.display=cod?'block':'none';
+  $('#scenes').style.display=scn?'block':'none';
+  if(scn) drawScenes();
   if(sdk){ sdkStatus(); updCheck() }
   if(pix&&!PX.data){ pxPalette(); pxInit(+$('#pxw').value,+$('#pxh').value,1); pxLoadList() }
   if(cod&&!$('#codelist').children.length) codeTree();
@@ -4756,8 +5199,146 @@ function showTab(which){
   for(const b of document.querySelectorAll('.act'))
     b.classList.toggle('on', b.dataset.t===which);
   $('#ctxtitle').textContent={maps:'Maps',import:'Import',fonts:'Fonts',
-    pixel:'Sprites',code:'Code',sdk:'Settings'}[which]||'';
+    pixel:'Sprites',code:'Code',sdk:'Settings',scenes:'Scenes'}[which]||'';
 }
+
+// ------------------------------------------------------------------------- scenes
+//
+// A scene is the framework's only load point, and it was the one part of the manifest
+// with no editor at all: a map could be drawn, painted and built and still be unreachable
+// from the game. Every control here writes the manifest immediately, the way the legend
+// does, so there is no separate save to forget.
+
+function sceneSay(msg, bad){
+  const el=$('#scenelog');
+  el.className='mini '+(bad===false?'ok':'bad');
+  el.textContent=msg||'';
+}
+
+function drawScenes(){
+  const box=$('#scenelist'); box.innerHTML='';
+  const d=S.data||{};
+  const scenes=d.scenes||[], maps=(d.maps||[]).map(m=>m.name);
+  const sprites=d.sprite_names||[], fonts=(d.fonts||[]).map(f=>f.name);
+
+  // A map nothing loads is the dead end worth naming: it builds, it costs bytes, and the
+  // game has no way to reach it.
+  const loaded=new Set(scenes.map(s=>s.map).filter(Boolean));
+  const orphans=maps.filter(m=>!loaded.has(m));
+
+  if(!scenes.length){
+    box.innerHTML='<small class="dim">No scenes yet. Nothing can be loaded until '
+      +'there is one.</small>';
+  }
+
+  for(const sc of scenes){
+    const card=document.createElement('section');
+    card.className='scenecard';
+    const head=document.createElement('div');
+    head.className='mini';
+    head.innerHTML=`<b>${sc.name}</b>`;
+    card.appendChild(head);
+
+    // Map.
+    const mrow=document.createElement('label');
+    mrow.className='mini';
+    mrow.innerHTML='map ';
+    const msel=document.createElement('select');
+    msel.innerHTML='<option value="">(none)</option>'
+      +maps.map(m=>`<option${m===sc.map?' selected':''}>${m}</option>`).join('');
+    msel.onchange=()=>writeScene(sc,{map:msel.value||null});
+    mrow.appendChild(msel);
+    card.appendChild(mrow);
+
+    // Sprites and fonts, a checkbox each. Listed rather than typed because every name
+    // here has to resolve at build time, and a select cannot be misspelled.
+    for(const [label,all,cur,key] of [['sprites',sprites,sc.sprites,'sprites'],
+                                      ['fonts',fonts,sc.fonts,'fonts']]){
+      const row=document.createElement('div');
+      row.className='mini';
+      row.innerHTML=`<span class="dim">${label}</span> `;
+      if(!all.length) row.innerHTML+='<small class="dim">none defined</small>';
+      for(const n of all){
+        const on=cur.includes(n);
+        const l=document.createElement('label');
+        l.className='mini';
+        l.innerHTML=`<input type="checkbox" ${on?'checked':''}> ${n}`;
+        l.querySelector('input').onchange=ev=>{
+          const next=cur.filter(x=>x!==n);
+          if(ev.target.checked) next.push(n);
+          writeScene(sc,{[key]:next});
+        };
+        row.appendChild(l);
+      }
+      card.appendChild(row);
+    }
+
+    // Dialog is a flag, not a list: the pipeline packs every [dialog.*] into one blob.
+    const drow=document.createElement('label');
+    drow.className='mini';
+    drow.innerHTML=`<input type="checkbox" ${sc.dialog?'checked':''}> dialog`;
+    drow.querySelector('input').onchange=ev=>writeScene(sc,{dialog:ev.target.checked});
+    card.appendChild(drow);
+
+    if(sc.atlases.length){
+      const a=document.createElement('small');
+      a.className='dim';
+      a.textContent=`also loads atlases: ${sc.atlases.join(', ')}`;
+      card.appendChild(a);
+    }
+
+    const foot=document.createElement('div');
+    foot.className='mini';
+    const del=document.createElement('button');
+    del.textContent='Remove';
+    del.onclick=async()=>{
+      if(!confirm(`Remove scene "${sc.name}"?\n\n`
+                  +`Game code loading it by name will stop compiling.`)) return;
+      const r=await post('/api/scene/remove',{name:sc.name});
+      if(!r.ok){ sceneSay(r.error); return }
+      await reload(); drawScenes(); sceneSay(`Removed "${sc.name}".`,false);
+    };
+    foot.appendChild(del);
+    card.appendChild(foot);
+    box.appendChild(card);
+  }
+
+  if(orphans.length){
+    const warn=document.createElement('p');
+    warn.className='mini bad';
+    warn.textContent=`No scene loads: ${orphans.join(', ')}. `
+      +`Those maps cost bytes and cannot be reached.`;
+    box.appendChild(warn);
+  }
+}
+
+// Every field resent, because the endpoint replaces the table rather than patching it --
+// the same reason writeLegend resends. A partial write would drop the fonts when you
+// ticked a sprite.
+async function writeScene(sc,changes){
+  const body={name:sc.name, map:sc.map, sprites:sc.sprites, fonts:sc.fonts,
+              dialog:sc.dialog, atlases:sc.atlases, ...changes};
+  const r=await post('/api/scene',body);
+  if(!r.ok){ sceneSay(r.error); drawScenes(); return }
+  await reload(); drawScenes(); sceneSay('');
+  budget(true);
+}
+
+$('#scnew').onclick=async()=>{
+  const name=prompt('Name the scene.\n\n'
+    +'Game code loads it as PNX_SCENE_<NAME>. Lowercase letters, digits and underscores.');
+  if(!name) return;
+  const maps=(S.data.maps||[]).map(m=>m.name);
+  // Seeded with a map rather than created empty: a scene that loads nothing is refused by
+  // the pipeline, so an empty one could not be saved at all.
+  const first=maps.find(m=>!(S.data.scenes||[]).some(s=>s.map===m))||maps[0];
+  if(!first){ sceneSay('Add a map first — a scene that loads nothing cannot be built.');
+              return }
+  const r=await post('/api/scene',{name:name.trim(), map:first, sprites:[],
+                                   fonts:(S.data.fonts||[]).map(f=>f.name)});
+  if(!r.ok){ sceneSay(r.error); return }
+  await reload(); drawScenes(); sceneSay(`Added "${name.trim()}".`,false);
+};
 
 function statusbar(){
   const d=S.data||{}, e=d.engine||{}, p=d.paths||{};
@@ -4777,6 +5358,7 @@ $('#outtoggle').onclick=()=>{
   $('#outtoggle').textContent=hid?'Show':'Hide';
 };
 $('#tabmaps').onclick=()=>showTab('maps');
+$('#tabscenes').onclick=()=>showTab('scenes');
 $('#tabimport').onclick=()=>showTab('import');
 $('#tabfonts').onclick=()=>showTab('fonts');
 $('#tabsdk').onclick=()=>showTab('sdk');
@@ -5089,10 +5671,15 @@ $('#addatlas').onclick=async()=>{
   // Warnings are said, not enforced: a capped carve or a reduced tile is a legitimate
   // choice about someone's own art.
   // The autopick list is written after the block exists, so adding and editing take the
-  // same path. Left alone when the field is untouched: an empty box on a fresh import
-  // means "the default", not "name nothing".
+  // same path.
+  //
+  // An empty box means different things in the two: on a fresh import the scaffold has
+  // already written the default three, so empty means "leave the default alone". When
+  // EDITING it means "name nothing" -- and it has to be obeyed, because clearing the list
+  // is the only way to hand a name like `floor` over to an explicit [atlas.semantic]
+  // entry. Skipping it here is what made an autopicked role impossible to override.
   const picks=$('#apick').value.split(',').map(s=>s.trim()).filter(Boolean);
-  if(picks.length){
+  if(picks.length||editing){
     const p=await post('/api/autopick',{atlas:body.name,roles:picks});
     if(!p.ok){ log.className='bad'; log.textContent=p.error; return }
   }
@@ -6358,16 +6945,17 @@ def make_handler(session):
                 elif self.path == "/api/legend":
                     d = json.loads(raw)
                     session.proj.save_legend(d["char"], d["tile"], d.get("atlas"),
-                                             d.get("flags", []), d.get("flip", []))
+                                             d.get("flags", []), d.get("flip", []),
+                                             d.get("map"))
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/legend/remove":
                     d = json.loads(raw)
-                    session.proj.remove_legend(d["char"])
+                    session.proj.remove_legend(d["char"], d.get("map"))
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/legend/users":
                     d = json.loads(raw)
                     self._send(200, json.dumps(
-                        {"users": session.proj.legend_users(d["char"])}))
+                        {"users": session.proj.legend_users(d["char"], d.get("map"))}))
                 elif self.path == "/api/flag":
                     d = json.loads(raw)
                     self._send(200, json.dumps(
@@ -6378,8 +6966,8 @@ def make_handler(session):
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/role":
                     d = json.loads(raw)
-                    session.proj.save_role(d["atlas"], d["role"], d["index"])
-                    self._send(200, json.dumps({"ok": True}))
+                    info = session.proj.save_role(d["atlas"], d["role"], d["index"])
+                    self._send(200, json.dumps({"ok": True, **info}))
                 elif self.path == "/api/role/remove":
                     d = json.loads(raw)
                     session.proj.remove_role(d["atlas"], d["role"])
@@ -6427,6 +7015,28 @@ def make_handler(session):
                     session.proj.add_atlas(d["name"], d["sheet"], int(d["tile"]),
                                            d["region"], int(d["max_tiles"]),
                                            d.get("exclude", []), d.get("colorkey"))
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/map/remove":
+                    d = json.loads(raw)
+                    session.proj.remove_map(d["name"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/map/rename":
+                    d = json.loads(raw)
+                    session.proj.rename_map(d["name"], d["to"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/map/users":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(
+                        {"users": session.proj.map_users(d["name"])}))
+                elif self.path == "/api/scene":
+                    d = json.loads(raw)
+                    session.proj.save_scene(d["name"], d.get("map"),
+                                            d.get("sprites", []), d.get("fonts", []),
+                                            bool(d.get("dialog")), d.get("atlases", []))
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/scene/remove":
+                    d = json.loads(raw)
+                    session.proj.remove_scene(d["name"])
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/newmap":
                     d = json.loads(raw)

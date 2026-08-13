@@ -1384,9 +1384,242 @@ def check_editor_roles():
             ("a tile index past the atlas",
              lambda: proj.save_role("second", "far", 999)),
             ("an unknown atlas", lambda: proj.save_role("nope", "x", 0)),
-            ("a name autopick already owns", lambda: proj.save_role("second", "wall", 2)),
             ("moving an existing name to another tile",
              lambda: proj.save_role("second", "gate", 1)),
+        ):
+            try:
+                call()
+                check(f"the editor refuses {label}", False)
+            except ValueError:
+                check(f"the editor refuses {label}", True)
+
+        # Pinning a name `autopick` invented is ALLOWED, and reported. The pipeline
+        # applies `semantic` over `autopick` on purpose -- "a manifest can start auto and
+        # be pinned down later" -- so refusing it here left every autopicked name
+        # unreachable from the editor, with hand-editing the manifest as the only way out.
+        info = proj.save_role("second", "wall", 2)
+        check("the editor pins a name autopick already owns",
+              proj.man["atlas"][1].get("semantic", {}).get("wall") == 2)
+        check("and says that it was autopicked", info.get("pinned") is True)
+
+
+TWO_MAPS = EDITOR_MAP + '''
+[[map]]
+name = "b"
+out = "b.bin"
+start = [2, 1]
+warps = []
+rows = """
+####
+#..#
+####
+"""
+'''
+
+
+TWO_MAPS_WARPED = '''
+[[map]]
+name = "a"
+out = "a.bin"
+start = [2, 1]
+warps = [{ at = [1, 2], to = ["b", 1, 1] }]
+rows = """
+####
+#..#
+#D.#
+####
+"""
+
+[[map]]
+name = "b"
+out = "b.bin"
+start = [1, 1]
+warps = []
+rows = """
+####
+#..#
+####
+"""
+'''
+
+
+def check_map_legend():
+    """A map's own [map.legend], overlaid on the project one.
+
+    One character per cell caps a map at the printable set -- about ninety. Project-wide
+    that ninety was shared by every map and every atlas in the game, which put most of a
+    carved tileset permanently out of reach. Per map it is ninety EACH, and the same
+    character can mean a different tile in each map, which is what these assert.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root, atlas=FLIP_ATLAS, **maps(TWO_MAPS))
+
+        proj.save_legend("%", 1, "tiles", ["solid"], [], map_name="a")
+        proj.save_legend("%", 2, "tiles", [], [], map_name="b")
+
+        by_name = {m["name"]: m for m in proj.man["map"]}
+        check("a map legend entry lands in its own map",
+              by_name["a"]["legend"]["%"]["tile"] == 1
+              and by_name["b"]["legend"]["%"]["tile"] == 2)
+        check("and not in the project legend", "%" not in proj.man.get("legend", {}))
+
+        # The subtable has to be written AFTER `rows`: a subtable closes its parent, so an
+        # entry above it would put the map's remaining keys inside [map.legend] and the
+        # build would fail saying the map has no rows.
+        check("the map still has its rows", "rows" in by_name["a"])
+
+        rows_a = [r for r in by_name["a"]["rows"].strip("\n").split("\n") if r.strip()]
+        rows_a[1] = "#%.#"
+        proj.save_map("a", rows_a, [2, 1], [])
+        check("a map paints its own character", builds(proj.path, root, "out_ml"))
+
+        # Scoped: 'b' does not inherit 'a's characters, only the project's.
+        rows_b = ["####", "#&.#", "####"]
+        proj.save_map("b", rows_b, [2, 1], [])
+        check("a character from another map is not in scope",
+              not builds(proj.path, root, "out_ml2"))
+
+        proj.save_map("b", ["####", "#%.#", "####"], [2, 1], [])
+        check("but the map's own character of the same name is",
+              builds(proj.path, root, "out_ml3"))
+
+        # Removal is scoped too, and refuses while the map still paints it.
+        try:
+            proj.remove_legend("%", "a")
+            check("removing a painted map character is refused", False)
+        except ValueError:
+            check("removing a painted map character is refused", True)
+
+        check("legend_users reports only the owning map",
+              proj.legend_users("%", "a") == ["a"])
+
+
+def check_editor_scenes():
+    """Scene CRUD. A scene is the framework's only load point, and it was the one part of
+    the manifest the editor could not touch -- so a map could be drawn, painted and built
+    and still be unreachable from the game."""
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        make_sheet(os.path.join(root, "hero.png"), tiles_across=1)
+        proj = editor_project(root, sprite='''
+            [[sprite]]
+            name = "hero"
+            sheet = "hero.png"
+            frames = [[0, 0, 16, 16]]
+            out = "hero.bin"
+        ''', scene='''
+            [scene.one]
+            map = "a"
+            # Why this scene does not load the hero, in a comment that has to survive
+            # every rewrite of the table around it.
+            sprites = []
+        ''')
+
+        proj.save_scene("one", "a", ["hero"], [])
+        check("a scene's sprites are rewritten",
+              proj.man["scene"]["one"]["sprites"] == ["hero"])
+        check("and the comment inside the table survives",
+              "has to survive" in open(proj.path).read())
+
+        proj.save_scene("two", "b", [], [])
+        check("a new scene is appended", "two" in proj.man["scene"])
+        check("and the manifest still builds", builds(proj.path, root, "out_sc"))
+
+        for label, call in (
+            ("an unknown map", lambda: proj.save_scene("three", "nope")),
+            ("an unknown sprite", lambda: proj.save_scene("three", "a", ["nope"])),
+            ("an unknown font", lambda: proj.save_scene("three", "a", [], ["nope"])),
+            ("a scene name that is not an identifier",
+             lambda: proj.save_scene("Three Scenes", "a")),
+            ("dialog with no dialog defined",
+             lambda: proj.save_scene("three", "a", [], [], True)),
+            ("a scene that loads nothing", lambda: proj.save_scene("three")),
+            # The clash the pipeline refuses and the editor used to WRITE on every new
+            # map: a scene listing an atlas its own map streams loads a second resident
+            # copy, and nothing at runtime can see that.
+            ("an atlas the map already streams",
+             lambda: proj.save_scene("three", "a", [], [], False, ["tiles"])),
+        ):
+            try:
+                call()
+                check(f"a scene refuses {label}", False)
+            except ValueError:
+                check(f"a scene refuses {label}", True)
+
+        proj.remove_scene("two")
+        check("a scene is removed", "two" not in proj.man["scene"])
+        try:
+            proj.remove_scene("two")
+            check("removing a scene that is gone is refused", False)
+        except ValueError:
+            check("removing a scene that is gone is refused", True)
+
+
+def check_editor_new_map_scene():
+    """A new map has to arrive loadable.
+
+    add_map used to write `atlases = [...]` into the scene it generated, which the
+    pipeline refuses since a map streams its own tilesets -- so every map created in the
+    editor produced a manifest that would not build.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root)
+
+        proj.add_map("fresh", 8, 6, "tiles")
+        scene = proj.man["scene"]["fresh"]
+        check("a new map gets a scene", scene["map"] == "fresh")
+        check("and the scene does not restate the map's atlases",
+              "atlases" not in scene)
+        check("and the new map builds", builds(proj.path, root, "out_nm"))
+
+
+def check_editor_map_lifecycle():
+    """Renaming and deleting a map, which had no editor at all -- so iterating on a test
+    layout meant hand-editing the manifest."""
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        # The flush-left map fixture, because that is the shape the editor writes and the
+        # shape save_map's own block scan expects. `manifest()`'s default maps are indented
+        # -- textwrap.dedent finds no common prefix once BASE_MAP is interpolated -- which
+        # is a fixture artefact rather than anything a real manifest does.
+        proj = editor_project(root, maps=TWO_MAPS_WARPED, scene='''
+[scene.one]
+map = "b"
+''')
+
+        # 'a' warps to 'b', and a scene loads 'b'. Both have to move with the rename or
+        # the build fails a long way from the cause.
+        proj.rename_map("b", "cellar")
+        names = [m["name"] for m in proj.man["map"]]
+        check("a map is renamed", "cellar" in names and "b" not in names)
+        check("the warp aimed at it follows",
+              proj.man["map"][0]["warps"][0]["to"][0] == "cellar")
+        check("the scene loading it follows",
+              proj.man["scene"]["one"]["map"] == "cellar")
+        check("and the manifest still builds", builds(proj.path, root, "out_rn"))
+
+        check("what points at a map is reported",
+              len(proj.map_users("cellar")) == 2)
+        try:
+            proj.remove_map("cellar")
+            check("deleting a map something points at is refused", False)
+        except ValueError:
+            check("deleting a map something points at is refused", True)
+
+        proj.remove_scene("one")
+        proj.save_map("a", ["####", "#..#", "####"], [1, 1], [])
+        proj.remove_map("cellar")
+        check("a map with nothing pointing at it is deleted",
+              [m["name"] for m in proj.man["map"]] == ["a"])
+        check("and the manifest still builds", builds(proj.path, root, "out_del"))
+
+        for label, call in (
+            ("renaming to a name that is taken", lambda: proj.rename_map("a", "a")),
+            ("renaming a map that is gone", lambda: proj.rename_map("gone", "x")),
+            ("deleting a map that is gone", lambda: proj.remove_map("gone")),
+            ("a name that is not an identifier", lambda: proj.rename_map("a", "New Map")),
         ):
             try:
                 call()
@@ -2167,6 +2400,10 @@ def main():
 
     check_editor_atlas_removal()
     check_editor_legend()
+    check_map_legend()
+    check_editor_scenes()
+    check_editor_new_map_scene()
+    check_editor_map_lifecycle()
     check_editor_flags()
     check_editor_roles()
     check_editor_autopick()

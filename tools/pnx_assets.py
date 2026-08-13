@@ -2998,7 +2998,23 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
     for spec in map_specs:
         names = map_atlas_names(spec, roles_by_atlas, default_atlas)
         table, _ = map_tile_bases(spec["name"], names, tile_counts, tile_px)
-        m = compile_map(spec, legend, roles_by_atlas, table, map_names)
+
+        # A map may carry its own `[map.legend]`, overlaid on the project one. The legend
+        # is a character per cell, so the printable set is the real ceiling on how many
+        # DISTINCT tiles can be placed -- about ninety. Project-wide, that ninety was
+        # shared by every map and every atlas in the game, which put most of a carved
+        # tileset permanently out of reach. Per map it is ninety EACH, and the shared
+        # legend still carries the characters that mean the same thing everywhere.
+        #
+        # Overlay rather than replacement so a map can pin one character without
+        # restating the others, and so every existing manifest keeps working untouched.
+        own = spec.get("legend")
+        map_legend = legend
+        if own:
+            map_legend = dict(legend)
+            map_legend.update(parse_legend(own, flag_names))
+
+        m = compile_map(spec, map_legend, roles_by_atlas, table, map_names)
         m["palette"] = spec.get("palette")
         m["tile_px"] = tile_px[names[0]]
 
