@@ -2257,6 +2257,88 @@ def parse_note(token, where):
     return midi
 
 
+# One packed synth instrument. MIRRORED in src/pnx/audio/pnx_music.h
+# (PNX_SYNTH_RECORD_BYTES) and decoded field by field in pnx_music_decode_instrument.
+#
+# Fixed width so the sequencer indexes instruments by number without a scan, and written
+# out longhand at both ends rather than struct-copied: the packed form has no padding and
+# a fixed endianness, while the C struct has whatever the compiler chose.
+SYNTH_RECORD_BYTES = 48
+
+LFO_TARGETS = ["off", "pitch", "volume", "duty", "cutoff"]
+FILTER_MODES = ["off", "lowpass", "highpass", "bandpass"]
+
+
+def pack_synth_instrument(spec, where):
+    """One [[music.X.synth]] entry -> SYNTH_RECORD_BYTES of blob."""
+    oscs = spec.get("osc", [])
+    if not oscs:
+        raise BuildError(f"{where}: a synth instrument needs at least one oscillator")
+    if len(oscs) > 3:
+        raise BuildError(f"{where}: {len(oscs)} oscillators, the voice has 3")
+
+    lfo = str(spec.get("lfo_target", "off"))
+    if lfo not in LFO_TARGETS:
+        raise BuildError(f"{where}: unknown lfo_target {lfo!r} "
+                         f"(known: {', '.join(LFO_TARGETS)})")
+    mode = str(spec.get("filter", "off"))
+    if mode not in FILTER_MODES:
+        raise BuildError(f"{where}: unknown filter {mode!r} "
+                         f"(known: {', '.join(FILTER_MODES)})")
+
+    amp = spec.get("amp", {})
+    cut = spec.get("cutoff", {})
+
+    def u8(v, lo=0, hi=255):
+        v = int(v)
+        if not lo <= v <= hi:
+            raise BuildError(f"{where}: {v} is outside {lo}..{hi}")
+        return v
+
+    r = bytearray(SYNTH_RECORD_BYTES)
+    r[0] = len(oscs)
+    r[1] = FILTER_MODES.index(mode)
+    r[2] = u8(spec.get("cutoff_base", 128))
+    r[3] = u8(spec.get("resonance", 0))
+    r[4] = u8(spec.get("cutoff_env", 0))
+    r[5] = LFO_TARGETS.index(lfo)
+    r[6] = u8(spec.get("lfo_rate", 0))
+    r[7] = u8(spec.get("lfo_depth", 0))
+    pe = int(spec.get("pitch_env", 0))
+    if not -1200 <= pe <= 1200:
+        raise BuildError(f"{where}: pitch_env {pe} is outside -1200..1200 cents")
+    r[8:10] = (pe & 0xFFFF).to_bytes(2, "little")
+    r[10] = u8(spec.get("pitch_env_decay", 0))
+    r[11] = u8(spec.get("reverb", 0))
+    r[12] = u8(spec.get("chorus", 0))
+
+    for base, env, default_sustain in ((14, amp, 180), (22, cut, 128)):
+        r[base:base + 2] = int(env.get("attack", 5)).to_bytes(2, "little")
+        r[base + 2:base + 4] = int(env.get("decay", 80)).to_bytes(2, "little")
+        r[base + 4] = u8(env.get("sustain", default_sustain))
+        r[base + 6:base + 8] = int(env.get("release", 120)).to_bytes(2, "little")
+
+    for i, o in enumerate(oscs):
+        wave = o.get("wave", "square")
+        if wave not in WAVEFORMS:
+            raise BuildError(f"{where}: oscillator {i} has unknown waveform {wave!r} "
+                             f"(known: {', '.join(WAVEFORMS)})")
+        det = int(o.get("detune", 0))
+        if not -1200 <= det <= 1200:
+            raise BuildError(f"{where}: oscillator {i} detune {det} is outside "
+                             f"-1200..1200 cents")
+        octv = int(o.get("octave", 0))
+        if not -4 <= octv <= 4:
+            raise BuildError(f"{where}: oscillator {i} octave {octv} is outside -4..4")
+        at = 30 + i * 6
+        r[at] = WAVEFORMS.index(wave)
+        r[at + 1] = u8(o.get("volume", 200))
+        r[at + 2:at + 4] = (det & 0xFFFF).to_bytes(2, "little")
+        r[at + 4] = octv & 0xFF
+        r[at + 5] = u8(o.get("duty", 128))
+    return bytes(r)
+
+
 def pack_music_names(man):
     """Song names only, for the id ordering, without recompiling them."""
     return [{"name": n} for n in sorted(man.get("music", {}))]
@@ -2333,11 +2415,31 @@ def pack_music(specs, orient=ORIENT_BUTTONS_RIGHT):
         body = (tempo.to_bytes(2, "little") + bytes([channels, 0])
                 + bytes(inst_bytes) + pad4(bytes(order)) + bytes(pattern_bytes))
 
+        # Optional synth table, appended after the patterns. Additive: a song without one
+        # is byte-identical to what this pipeline produced before synth instruments
+        # existed, so nothing already built had to be rebuilt.
+        synth = spec.get("synth", [])
+        if synth:
+            if len(synth) > 255:
+                raise BuildError(f"music {name!r}: too many synth instruments")
+            if len(synth) != len(instruments):
+                raise BuildError(
+                    f"music {name!r}: {len(synth)} synth instruments against "
+                    f"{len(instruments)} plain ones -- a row names ONE instrument index, "
+                    f"so the two tables have to line up or a note would play a different "
+                    f"sound depending on which table it resolved through")
+            body += bytes([len(synth), SYNTH_RECORD_BYTES])
+            for i, ins in enumerate(synth):
+                body += pack_synth_instrument(ins, f"music {name!r} synth {i}")
+
         blob = blob_header(MAGIC_MUSIC, len(patterns), len(order), rows_per,
                            len(instruments), orient=orient) + body
         print(f"  music {name}: {len(patterns)} patterns x {rows_per} rows, "
-              f"{len(instruments)} instruments, {tempo}bpm, {len(blob)} bytes")
-        songs.append({"name": name, "blob": blob, "out": f"music_{name}.bin"})
+              f"{len(instruments)} instruments"
+              + (f" (+{len(synth)} synth)" if synth else "")
+              + f", {tempo}bpm, {len(blob)} bytes")
+        songs.append({"name": name, "blob": blob, "out": f"music_{name}.bin",
+                      "synth": len(synth)})
     return songs
 
 

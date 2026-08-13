@@ -395,3 +395,98 @@ file = "art/laser.wav"
 
 [sample.explosion]
 file = "art/explosion.wav"
+
+
+# ---------------------------------------------------------------- synth instruments
+#
+# One per plain instrument above, and the pipeline REQUIRES that: a pattern row names one
+# instrument index, so if the two tables were different lengths a note would play a
+# different sound depending on which table it resolved through.
+#
+# A build without PNX_USE_SYNTH ignores this table entirely and plays the plain envelopes,
+# so the extension is additive in both directions -- the same song blob works either way.
+# Build the synth path with:
+#
+#     PNX_DEFINES=PNX_USE_SYNTH=1 pebble build
+
+# 0: lead. Three saws a few cents apart through a resonant lowpass -- detune is what makes
+# a lead sound thick, and it is also what stresses the mix headroom hardest.
+[[music.theme.synth]]
+filter = "lowpass"
+cutoff_base = 60
+resonance = 190
+cutoff_env = 180
+lfo_target = "pitch"
+lfo_rate = 40
+lfo_depth = 25
+reverb = 90
+amp = { attack = 5, decay = 200, sustain = 190, release = 150 }
+cutoff = { attack = 2, decay = 300, sustain = 80, release = 200 }
+osc = [
+  { wave = "saw", volume = 200, detune = 0 },
+  { wave = "saw", volume = 190, detune = 7 },
+  { wave = "saw", volume = 190, detune = -9 },
+]
+
+# 1: bass. One narrow pulse an octave down. A 25% duty is hollow in a way a 50% square is
+# not, and it costs nothing -- pulse width is a comparison, not a filter.
+[[music.theme.synth]]
+filter = "lowpass"
+cutoff_base = 40
+resonance = 120
+amp = { attack = 2, decay = 120, sustain = 200, release = 80 }
+cutoff = { attack = 1, decay = 200, sustain = 60, release = 100 }
+osc = [ { wave = "square", volume = 220, duty = 64, octave = -1 } ]
+
+# 2: percussion. Noise plus a fast downward pitch sweep -- this is the whole reason the
+# pitch envelope exists. As PCM the same sound costs 16,000 bytes a second; here it costs
+# 48 bytes once, and the sweep is free (measured at 13 ns/sample on device).
+[[music.theme.synth]]
+filter = "bandpass"
+cutoff_base = 150
+resonance = 200
+pitch_env = 900
+pitch_env_decay = 200
+amp = { attack = 1, decay = 60, sustain = 0, release = 40 }
+cutoff = { attack = 1, decay = 80, sustain = 20, release = 60 }
+osc = [ { wave = "noise", volume = 255 } ]
+
+# 3: pad. Pulse-width modulation under a triangle an octave up -- the LFO routed to duty,
+# which is the most recognisable chiptune texture there is.
+[[music.theme.synth]]
+filter = "lowpass"
+cutoff_base = 90
+resonance = 60
+lfo_target = "duty"
+lfo_rate = 60
+lfo_depth = 60
+chorus = 110
+amp = { attack = 8, decay = 250, sustain = 160, release = 200 }
+cutoff = { attack = 4, decay = 300, sustain = 90, release = 220 }
+osc = [
+  { wave = "square", volume = 200, duty = 96 },
+  { wave = "triangle", volume = 140, octave = 1, detune = 4 },
+]
+
+
+# ----------------------------------------------------------------------------- font
+#
+# The HUD used to draw through `pnx_platform_text_draw`, which goes through the SDK at
+# ~4.3 ms a call. Five calls was 21.5 ms -- 58% of a 37.3 ms frame -- and the diagnostics
+# were quietly the most expensive thing in this app.
+#
+# This is what E7 exists for: a rasterised atlas and a glyph blitter that draws during the
+# frame like a sprite, instead of a system call that can only run after the framebuffer is
+# released.
+#
+# `charset = "auto"` derives its glyph set from [dialog.*] pages, and this app has none --
+# it is an audio test. So the set is explicit, and covers exactly what the HUD prints.
+[[font]]
+name = "hud"
+source = "art/fonts/LiberationSans-Regular.ttf"
+size = 14
+depth = 1              # crisp: at 14px antialiasing muddies more than it smooths
+threshold = 128
+charset = " !%()+-./0123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+license = "SIL Open Font License 1.1"
+out = "font_hud.bin"

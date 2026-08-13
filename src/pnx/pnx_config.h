@@ -43,6 +43,16 @@
 // pnx_platform_poll_event itself and does its own bookkeeping can turn this off; one in
 // landscape almost certainly should not, since it is the only thing that knows the
 // buttons did not rotate with the content.
+// Subtractive synth voices -- three detuned oscillators, a resonant filter with its own
+// envelope, an LFO and sends into a global reverb and chorus.
+//
+// OFF by default, and deliberately: it is a measurement spike until the device says what
+// it costs, and audio is the one category MEASUREMENTS.md names as having no measured
+// cost and the most room to blow the budget. Nothing pays for it until the numbers do.
+#ifndef PNX_USE_SYNTH
+#define PNX_USE_SYNTH 0
+#endif
+
 #ifndef PNX_USE_INPUT
 #define PNX_USE_INPUT 1
 #endif

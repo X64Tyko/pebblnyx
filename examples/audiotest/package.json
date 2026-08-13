@@ -40,6 +40,11 @@
           "type": "raw",
           "name": "LASER",
           "file": "sfx_laser.bin"
+        },
+        {
+          "type": "raw",
+          "name": "HUD",
+          "file": "font_hud.bin"
         }
       ]
     }

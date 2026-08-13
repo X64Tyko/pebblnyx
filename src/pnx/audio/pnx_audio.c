@@ -1,5 +1,9 @@
 #include "pnx_audio.h"
 
+#if PNX_USE_SYNTH
+#include "pnx_synth.h"
+#endif
+
 #if PNX_USE_AUDIO
 
 #include "../core/pnx_diag.h"
@@ -273,10 +277,25 @@ bool pnx_audio_init(PnxAudioFormat format, uint8_t volume) {
   s_lp = 0;
   pnx_audio_set_lowpass(s_cutoff_hz);
   s_on = true;
+#if PNX_USE_SYNTH
+  // The synth renders into this mixer's accumulator, so it is part of this subsystem's
+  // lifecycle rather than a thing the game inits separately.
+  //
+  // It used to be separate, and the failure was silent in the worst way: every synth entry
+  // point begins `if (!s_ready) return`, so a game that inited the mixer and not the synth
+  // routed its music into functions that did nothing. Music vanished, sound effects kept
+  // working because they go through the mixer's own voices, and nothing logged a thing.
+  if (!pnx_synth_init(output_rate())) {
+    pnx_log("audio: synth would not allocate; music will play through plain envelopes");
+  }
+#endif
   return true;
 }
 
 void pnx_audio_shutdown(void) {
+#if PNX_USE_SYNTH
+  pnx_synth_shutdown();
+#endif
   if (!s_on) return;
   pnx_platform_audio_close();
   s_on = false;
@@ -502,6 +521,18 @@ static uint32_t mix(uint32_t count) {
     }
   }
 
+#if PNX_USE_SYNTH
+  // Synth voices sum into the SAME accumulator as the sampled ones, before the shared
+  // clamp and format conversion. That is why pnx_synth_render is additive: one output
+  // stage, one headroom shift, one clamp -- and sound effects and music go through the
+  // identical path, so a synth note and a PCM blip cannot end up at different levels.
+  //
+  // Without this the sequencer triggers synth notes that nothing ever renders. The synth
+  // is a module with no caller, the linker drops the render loop entirely, and the result
+  // is silence with no error anywhere.
+  pnx_synth_render(s_mix, count);
+#endif
+
   // Clamped to 8-bit range even for 16-bit output, which then shifts left 8. The mixer has
   // more resolution than that now the accumulator is the output buffer, but widening the
   // range would change the loudness of every existing instrument.
@@ -516,6 +547,21 @@ static uint32_t mix(uint32_t count) {
       v = s_lp >> 8;
     }
 
+    // Clipping is COUNTED, not merely clamped.
+    //
+    // The clamp has always been here and has always been silent, which means "the mix is
+    // too hot" and "the mix is fine" produce the same clean build and the same clean log
+    // -- the difference is only audible, as harshness that could equally be aliasing, a
+    // bad sample, or an underrun. Guessing between those from a description is exactly
+    // what wasted several device round trips.
+    if (v > 127 || v < -128) {
+      if (s_stats.clipped < 0xFFFFFFFFu) s_stats.clipped++;
+      const uint32_t mag = (uint32_t)(v < 0 ? -v : v);
+      if (mag > s_stats.peak) s_stats.peak = mag;
+    } else {
+      const uint32_t mag = (uint32_t)(v < 0 ? -v : v);
+      if (mag > s_stats.peak) s_stats.peak = mag;
+    }
     const int8_t c = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
     if (s_16bit) s_mix[n] = (int16_t)(c << 8);   // same entry, read above
     else         out8[n]  = c;                   // byte n lives in entry n/2, already read

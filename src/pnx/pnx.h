@@ -43,6 +43,10 @@
 #include "audio/pnx_music.h"
 #endif
 
+#if PNX_USE_SYNTH
+#include "audio/pnx_synth.h"
+#endif
+
 // Later milestones add their headers here behind their own #if guards:
 //   #if PNX_USE_TILEMAP
 //   #include "gfx/pnx_tilemap.h"

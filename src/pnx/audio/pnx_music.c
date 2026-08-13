@@ -66,10 +66,40 @@ bool pnx_music_load(PnxSong *out, uint16_t asset_id) {
   const size_t order_bytes = ((size_t)order_len + 3u) & ~(size_t)3u;
   const size_t row_bytes = (size_t)patterns * rows * channels * 2u;
   const size_t expected = 4 + inst_bytes + order_bytes + row_bytes;
-  if (payload != expected) {
+  if (payload < expected) {
     pnx_log("music %u: needs %u bytes, blob has %u",
             asset_id, (unsigned)expected, (unsigned)payload);
     return false;
+  }
+
+  // Anything beyond the patterns is the optional synth instrument table: a count, the
+  // record width, then the records. Detected by trailing payload rather than by a header
+  // flag, because the music header's four bytes are all spoken for -- and additive, so
+  // every song built before synth instruments existed still loads and still plays.
+  //
+  // The width is carried so a song written by a NEWER pipeline, with a wider record than
+  // this build understands, is refused rather than misread as garbage instruments.
+  out->synth = NULL;
+  out->synth_count = 0;
+  out->synth_stride = 0;
+  const size_t trailing = payload - expected;
+  if (trailing >= 2) {
+    const uint8_t *tail = data + expected;
+    const uint8_t count = tail[0];
+    const uint8_t stride = tail[1];
+    if (count && stride) {
+      if (stride != PNX_SYNTH_RECORD_BYTES) {
+        pnx_log("music %u: synth record is %u bytes, this build reads %u -- skipping",
+                asset_id, stride, (unsigned)PNX_SYNTH_RECORD_BYTES);
+      } else if (trailing < 2u + (size_t)count * stride) {
+        pnx_log("music %u: synth table wants %u bytes, %u remain",
+                asset_id, (unsigned)(2u + (size_t)count * stride), (unsigned)trailing);
+      } else {
+        out->synth = tail + 2;
+        out->synth_count = count;
+        out->synth_stride = stride;
+      }
+    }
   }
 
   const uint8_t *ins = data + 4;
@@ -164,15 +194,87 @@ static void play_row(const PnxSong *s, uint8_t pattern, uint8_t row) {
       pnx_audio_release_in(s_channel_voice[c], PNX_MUSIC_CUT_MS);
       s_channel_voice[c] = PNX_AUDIO_NO_VOICE;
     }
+#if PNX_USE_SYNTH
+    // The synth voice releases rather than being cut, for the same reason: a step to
+    // silence mid-waveform is a click, and the envelope's own release is what a note
+    // ending is supposed to sound like.
+    if (s->synth) pnx_synth_note_off(c);
+#endif
     if (note == PNX_MUSIC_NOTE_OFF) continue;
 
     if (instrument >= s->instrument_count) continue;
     const uint8_t vol = (uint8_t)((255u * s_volume) >> 8);
+
+#if PNX_USE_SYNTH
+    // A song carrying synth instruments plays through them, and a channel maps 1:1 onto a
+    // synth slot -- both are four, and both are the same musical idea.
+    //
+    // The record is decoded at NOTE-ON rather than at load. That costs 48 bytes of work a
+    // few times a second instead of holding a decoded table for the whole song, and it is
+    // what makes "push an instrument into a slot mid-song" fall out for free: the slot is
+    // written just before the note starts, and pnx_synth_note_on copies it, so a note
+    // already sounding keeps the instrument it began with.
+    if (s->synth && instrument < s->synth_count) {
+      PnxInstrument in;
+      pnx_music_decode_instrument(s, instrument, &in);
+      pnx_synth_set_instrument(c, &in);
+      pnx_synth_note_on(c, note, vol);
+      s_channel_voice[c] = PNX_AUDIO_NO_VOICE;   // the synth owns this channel
+      continue;
+    }
+#endif
+
     s_channel_voice[c] = pnx_audio_note((PnxWaveform)s->waveforms[instrument], note,
                                         vol, &s->instruments[instrument],
                                         MUSIC_PRIORITY);
   }
 }
+
+#if PNX_USE_SYNTH
+// Decode one packed synth instrument.
+//
+// Byte offsets, mirrored in tools/pnx_assets.py pack_music_synth. Written out longhand
+// rather than memcpy'd over the struct: the packed form has no padding and a fixed
+// endianness, and the C struct has whatever the compiler chose -- copying one onto the
+// other is the classic way to get a format that works on the machine that wrote it.
+void pnx_music_decode_instrument(const PnxSong *s, uint8_t index, PnxInstrument *out) {
+  const uint8_t *r = s->synth + (size_t)index * s->synth_stride;
+  memset(out, 0, sizeof(*out));
+
+  out->osc_count = r[0] ? r[0] : 1;
+  if (out->osc_count > PNX_SYNTH_OSCILLATORS) out->osc_count = PNX_SYNTH_OSCILLATORS;
+  out->filter_mode = r[1];
+  out->cutoff_base = r[2];
+  out->resonance = r[3];
+  out->cutoff_env_amount = r[4];
+  out->lfo_target = r[5];
+  out->lfo_rate = r[6];
+  out->lfo_depth = r[7];
+  out->pitch_env_amount = (int16_t)(r[8] | (r[9] << 8));
+  out->pitch_env_decay = r[10];
+  out->reverb_send = r[11];
+  out->chorus_send = r[12];
+
+  out->amp.attack_ms  = (uint16_t)(r[14] | (r[15] << 8));
+  out->amp.decay_ms   = (uint16_t)(r[16] | (r[17] << 8));
+  out->amp.sustain    = r[18];
+  out->amp.release_ms = (uint16_t)(r[20] | (r[21] << 8));
+
+  out->cutoff.attack_ms  = (uint16_t)(r[22] | (r[23] << 8));
+  out->cutoff.decay_ms   = (uint16_t)(r[24] | (r[25] << 8));
+  out->cutoff.sustain    = r[26];
+  out->cutoff.release_ms = (uint16_t)(r[28] | (r[29] << 8));
+
+  for (int i = 0; i < PNX_SYNTH_OSCILLATORS; i++) {
+    const uint8_t *o = r + 30 + i * 6;
+    out->osc[i].wave = o[0];
+    out->osc[i].volume = o[1];
+    out->osc[i].detune = (int16_t)(o[2] | (o[3] << 8));
+    out->osc[i].octave = (int8_t)o[4];
+    out->osc[i].duty = o[5];
+  }
+}
+#endif
 
 void pnx_music_update(uint32_t now_ms) {
   if (!s_playing || !s_song) return;

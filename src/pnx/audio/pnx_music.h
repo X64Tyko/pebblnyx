@@ -18,15 +18,35 @@
 #include "pnx_audio.h"
 #include "../assets/pnx_assets.h"
 
+#if PNX_USE_SYNTH
+#include "pnx_synth.h"
+#endif
+
 #define PNX_MUSIC_CHANNELS 4
 #define PNX_MUSIC_NO_NOTE 0
 #define PNX_MUSIC_NOTE_OFF 1
+
+// One packed synth instrument in a song blob. Fixed size, so the sequencer indexes
+// instruments by number without a scan, and self-describing in width so a song carrying a
+// wider record than this build understands is skipped rather than misread.
+//
+// The layout is mirrored in tools/pnx_assets.py pack_music_synth. Changing one without the
+// other produces an instrument that loads and sounds wrong, which is the worst kind of
+// mismatch -- so both sides name this constant.
+#define PNX_SYNTH_RECORD_BYTES 48
 
 typedef struct {
   const uint8_t *rows;        // pattern data, 2 bytes per channel per row
   const uint8_t *order;       // pattern indices to play in sequence
   const PnxEnvelope *instruments;
   const uint8_t *waveforms;   // one PnxWaveform per instrument
+
+  // Optional synth instrument table, appended after the patterns. NULL for a song built
+  // before synth instruments existed, which still plays through the plain mixer -- the
+  // format extension is additive on purpose, so no existing song had to be rebuilt.
+  const uint8_t *synth;
+  uint8_t synth_count;
+  uint8_t synth_stride;
   uint8_t pattern_count;
   uint8_t order_length;
   uint8_t rows_per_pattern;
@@ -35,6 +55,12 @@ typedef struct {
 } PnxSong;
 
 bool pnx_music_load(PnxSong *out, uint16_t asset_id);
+
+#if PNX_USE_SYNTH
+// Decode one packed synth instrument out of a loaded song. Exposed so a game can inspect
+// or pre-load an instrument without waiting for the sequencer to reach a note that uses it.
+void pnx_music_decode_instrument(const PnxSong *s, uint8_t index, PnxInstrument *out);
+#endif
 
 // Starts a song. `loop` restarts from the order list's beginning at the end.
 void pnx_music_play(const PnxSong *song, bool loop);

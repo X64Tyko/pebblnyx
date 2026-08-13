@@ -492,6 +492,56 @@ large maps runs out of *entries* long before it runs out of bytes -- and exceedi
 traceback out of the SDK's packer. The budget report now prints both ceilings and the entry count,
 and refuses a build that would overflow the table with a message naming the banks.
 
+## M4e — Subtractive synth — **SPIKE MEASURED, not landed**
+
+Three detuned oscillators an instrument, a resonant filter with its own envelope, an LFO
+routed to pitch/volume/duty/cutoff, a pitch envelope, and sends into one global reverb and
+one chorus. Four instrument slots, swappable mid-song -- a note finishes on the instrument
+it started with.
+
+Built as a spike and measured on device rather than reasoned about, because audio was the
+one category with no measured cost and the most room to blow the budget. Numbers, the two
+wrong turns, and the headroom finding are in
+[`MEASUREMENTS.md`](MEASUREMENTS.md#synth-cpu-what-a-subtractive-voice-actually-costs-spike).
+
+**It fits: 17.2% of a core, 6.4 ms per 37 ms frame against ~35 ms free.** 5,522 B of heap
+(5,266 B of it effect delay lines) and 3,615 B of app.
+
+What the measurement decided, which reasoning had got wrong in both directions:
+
+- **Resonance and the pitch envelope are free** -- 78 ns and 13 ns. Drums as a pitch sweep
+  rather than PCM, and a filter that actually sounds like one, cost nothing.
+- **A bare voice is the largest single item at 38%**, not the effects. One oscillator and
+  one envelope is 204 cycles; the render loop is sample-major and cycles four voices'
+  state through registers every sample. Voice-major block processing is the untried fix.
+- **Headroom binds before CPU.** Four detuned voices plus wet peaked at 163 against the
+  mixer's 127 and were audibly rough. This is the argument for a 16-bit output format.
+
+**The sequencer drives it.** A song may carry a table of packed 48-byte instruments,
+appended after the patterns and detected by trailing payload -- the music header's four
+bytes were all spoken for. Additive in both directions: a song built before this exists
+still loads, and a song carrying the table still plays through the plain mixer in a build
+with `PNX_USE_SYNTH=0`. The record width is stored, so a song from a newer pipeline is
+refused rather than misread.
+
+A channel maps 1:1 onto a synth slot -- both are four, and both are the same musical idea.
+The instrument is decoded at NOTE-ON rather than at load, which costs 48 bytes of work a
+few times a second instead of a resident decoded table, and makes swapping an instrument
+into a slot mid-song fall out for free: the slot is written just before the note starts and
+`pnx_synth_note_on` copies it, so a note already sounding keeps the instrument it began
+with.
+
+Synth voices sum into the **same accumulator** as sampled ones, before the shared clamp and
+conversion -- one output stage, so a synth note and a PCM blip cannot land at different
+levels. Getting that wrong once produced a synth with no caller: the linker dropped the
+render loop and the result was silence with no error anywhere.
+
+Still to land: `PNX_USE_SYNTH` is 0 by default until the CPU is confirmed on device after
+the voice-major restructure, and the editor (E6) has no UI for any of it.
+
+Done when: the packed instrument round-trips through the editor, and the device confirms
+the render cost after the restructure.
+
 ## M5 — Save
 
 - Chunk packing into 256-byte units, minimum key count

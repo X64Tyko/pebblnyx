@@ -615,7 +615,8 @@ as:
 
 Three consequences. Tiles are affordable but not free at 37%. **Maps were the surprise at
 17.6%**, second only to tilesets — since fixed, see below. And roughly 70KB is left for
-audio, the category with no measured cost yet and the one most able to blow the budget.
+audio, which was long the category with no measured cost; the sequencer's byte costs
+are below, and the synth's CPU and RAM are measured under "Synth CPU".
 
 ### What the NES actually did, and what it costs us not to
 
@@ -1018,6 +1019,127 @@ Worth generalising: on a platform where `.text` and statics share a 64 KB ceilin
 per pipeline stage is the expensive habit, not the code. The audiotest app fell from 21,128 to
 15,420 bytes on the collapse, and to **13,384** once the single remaining buffer moved to the
 heap -- **37% of the whole app** -- with no change to the audio.
+
+## Synth CPU: what a subtractive voice actually costs (spike)
+
+Measured on device with `examples/synthspike`, 16 kHz, four voices sounding, each
+configuration rendering ~19 s of audio and divided down -- `time_ms()` is 1 ms and this is
+nanoseconds, so it is timed by repetition, never by multiplying a millisecond clock.
+
+| Configuration | ns/sample | % of a core |
+|---|---|---|
+| everything on | **10,732** | **17.2%** |
+| bare voice (1 osc, no filter/LFO/effects) | 4,554 | 7.3% |
+| silence (loop, no voices) | 468 | 0.75% |
+
+Attributed by turning each feature off and re-running:
+
+| | ns/sample | share |
+|---|---|---|
+| **four bare voices** | **4,086** | **38%** |
+| filter + its envelope | 2,315 | 22% |
+| reverb | 1,234 | 12% |
+| 2nd oscillator | 1,055 | 10% |
+| 3rd oscillator | 612 | 6% |
+| LFO | 345 | 3% |
+| chorus | 342 | 3% |
+| loop overhead | 468 | 4% |
+| resonance | 78 | 0.7% |
+| pitch envelope | 13 | 0.1% |
+
+**It fits.** 17.2% of a core is 6.4 ms per 37 ms frame against ~35 ms free -- 18% of the
+budget for a full subtractive synth on four channels. RAM is 5,522 B of heap, of which
+**5,266 B is the reverb and chorus delay lines**, and 3,615 B of app.
+
+Three things worth carrying forward:
+
+- **A bare voice is 1,022 ns -- 204 cycles for one oscillator and one envelope.** The
+  largest single item is the thing no feature flag covers. The loop is sample-major
+  (`for each sample: for each voice`), which cycles four voices' state through registers
+  every sample; voice-major block processing is the standard fix and is untried here.
+- **Resonance and the pitch envelope are free**, at 78 ns and 13 ns. A filter that sounds
+  like one, and drums that are a pitch sweep rather than 16,000 bytes a second of PCM,
+  both cost nothing.
+- **Effects must be global sends.** Per-instrument reverb would be four sets of delay
+  lines -- ~20 KB against the 5,266 B one instance costs.
+
+### Two wrong turns, recorded because both looked right
+
+**The pitch was recomputed per sample, per oscillator.** First device run measured 14,573
+ns/sample (23% of a core), ~242 cycles per oscillator. `note_hz_q16` is a table lookup, two
+widening multiplies, three divisions and a conditional shift, and it ran twelve times a
+sample to support an LFO moving at 20 Hz. Recomputing every 32 samples -- a 500 Hz control
+rate, 25 updates per vibrato cycle -- took it to 10,654. That one was a real 27% win.
+
+**The filter's 64-bit multiplies were not the problem.** The filter is the most expensive
+feature, and `(int64_t)a * b` three times per voice per sample looked like the obvious
+cause, so it was rewritten into 32-bit Q12. It changed nothing: 10,654 -> 10,732. GCC was
+already emitting `SMULL`. The rewrite was kept because clamping the filter STATE is a real
+correctness fix -- an unbounded resonant integrator wraps sign and is heard as a burst of
+noise, not as a loud filter -- but it bought no speed, and it was asserted from reading the
+code rather than from a measurement.
+
+### Aliasing: a 64-entry table is not enough on its own
+
+After clipping and underrun were both counted and both zero, the audio was still harsh.
+That leaves aliasing, and the arithmetic says why: a 64-entry table carries harmonics 1..32,
+so at C6 twenty-five of them sit above the 8 kHz Nyquist and fold back as inharmonic noise.
+Three detuned saws -- the example lead -- is the worst case there is for it.
+
+| Note | Harmonics reaching past Nyquist |
+|---|---|
+| C2 65 Hz | 0 of 32 |
+| C4 262 Hz | 2 of 32 |
+| C5 523 Hz | 17 of 32 |
+| C6 1047 Hz | **25 of 32** |
+
+Fixed with band-limited tables, one per waveform per octave, built additively from a Q12
+sine table so no libm is needed. Each octave carries only the harmonics that stay under
+Nyquist at the TOP of its range -- 31 below C4, 4 above C6. Measured after: **at most 0.04%
+of energy above the intended harmonic limit, at every octave.**
+
+Costs 2 KB of tables and a table selection per pitch update, not per sample, so the render
+loop is unchanged. The mip is chosen per OSCILLATOR rather than per voice, because
+`octave` shifts an oscillator away from the played note and a pad an octave up would
+otherwise read the wrong table.
+
+A square with a duty other than 50% still uses the threshold comparison -- pulse width
+cannot be tabled without a table per duty -- so PWM keeps its hard edges, which is the
+chiptune sound and is wanted. A plain 50% square now reads the band-limited table.
+
+### Headroom, not CPU, is what binds
+
+Four detuned voices plus wet effects peaked at **163 against the 127** the mixer clamps its
+accumulator to. Detuned oscillators constructively interfere -- that is what makes them
+sound thick -- and the loud case is exactly the case that clips. It was heard as roughness
+long before any number said so.
+
+One bit of output shift lands the peak at 82-87 of 127, which is loud with room. Three bits
+was the first attempt and was wrong in the other direction: peak 12 of 127 trades clipping
+for quantisation noise, spending three and a half bits of an eight-bit output on silence.
+
+**This is the argument for `PNX_AUDIO_16KHZ_16BIT` for anything using the synth.** Four
+voices plus reverb do not comfortably fit an 8-bit output, and the fix at 8-bit is always
+some flavour of giving up dynamic range.
+
+Measured through the real mixer, on the example song:
+
+| Synth headroom | Peak (127 = full scale) | Samples clipped |
+|---|---|---|
+| `>>0` | **239** | 8,598 of 192,512 — **4.5%** |
+| `>>1` | 120 | 0 |
+
+Four detuned voices at velocity **255** with both sends up still reach 155 and clip at
+`>>1`. That is the ceiling, and it is asserted in `tests/test_audio.c` rather than left to
+be rediscovered: a song using every channel at full velocity does not fit 8 bits, and the
+remedy is a wider output format, not more attenuation.
+
+**The clamp is now counted.** `PnxAudioStats` carries `clipped` and `peak`, because the
+clamp had always been silent -- "the mix is too hot" and "the mix is fine" produced the
+same clean build and the same clean log, and the difference was only audible as harshness
+that could equally have been aliasing, a bad sample, or an underrun. Distinguishing those
+by ear from a description cost several device round trips; `pk120 clip0` on the watch
+settles it without one.
 
 ## Audio streaming: short writes are normal, discarding them is not
 

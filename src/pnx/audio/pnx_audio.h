@@ -69,6 +69,12 @@ typedef struct {
   uint32_t capacity;       // bytes accepted before the first short write -- the device's
                            // buffer depth, which it offers no way to query
   uint32_t carried;        // bytes currently held over from a short write
+  // Samples the output clamp actually had to cut, and the loudest value seen going into
+  // it. Two numbers that separate "too hot" from every other cause of harshness -- and the
+  // clamp was silent before, so those were indistinguishable from a log.
+  uint32_t clipped;
+  uint32_t peak;           // pre-clamp magnitude; 127 is full scale
+
   uint16_t left_playing;   // times the speaker stopped being in Playing state. Each one
                            // is playback halting and resuming, which is heard as the
                            // sound starting over.

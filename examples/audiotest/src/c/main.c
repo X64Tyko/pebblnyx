@@ -17,6 +17,8 @@
 
 typedef struct {
   PnxArena persistent, scene;
+  PnxFont hud_font;
+  bool has_font;
   PnxSong song;
   PnxEnvelope tone_env;
   uint8_t held;
@@ -52,6 +54,8 @@ static const int8_t *load_sample(uint16_t asset, uint32_t *len, uint32_t *hz) {
   return (const int8_t *)(d + 8);
 }
 
+static void draw_hud(App *a, PnxTarget *target);
+
 static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
   App *a = (App *)ctx;
   const uint32_t now = pnx_platform_now_ms();
@@ -66,8 +70,26 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
       a->cut_index = (uint8_t)((a->cut_index + 1) % 5);
       pnx_audio_set_lowpass(cuts[a->cut_index]);
     } else if (ev.button == PNX_BUTTON_SELECT) {
-      a->sfx_on = !a->sfx_on;
+      // Four states on one button, covering the two questions that separate causes of
+      // harshness the counters cannot tell apart:
+      //
+      //   is it QUANTISATION?  8-bit against 16-bit, same everything else.
+      //   is it the MIX?       music alone against music plus effects.
+      //
+      // `fmt_index` and `lead_index` sat here unused for a long time, which is how the
+      // format A/B ended up being something claimed rather than something available.
+      a->fmt_index = (uint8_t)((a->fmt_index + 1) % 4);
+      const bool want16 = (a->fmt_index >= 2);
+      a->sfx_on = (a->fmt_index & 1) == 0;
       a->next_auto_ms = now + 400;
+
+      const PnxAudioFormat want = want16 ? PNX_AUDIO_16KHZ_16BIT : PNX_AUDIO_16KHZ_8BIT;
+      if (want != pnx_audio_format()) {
+        // Reopening drops whatever was queued, so the stream restarts -- audible once, and
+        // not a fault.
+        if (!pnx_audio_reopen(want, 85)) pnx_log("reopen to %s failed",
+                                                 want16 ? "16-bit" : "8-bit");
+      }
     } else if (ev.button == PNX_BUTTON_DOWN && a->boom) {
       pnx_audio_play_pri(a->boom, a->boom_len, PNX_AUDIO_NO_LOOP, a->boom_hz,
                          255, 5, NULL);
@@ -113,12 +135,16 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
     [PNX_AUDIO_16KHZ_16BIT] = "16k/16", [PNX_AUDIO_16KHZ_8BIT] = "16k/8",
     [PNX_AUDIO_8KHZ_16BIT]  = "8k/16",  [PNX_AUDIO_8KHZ_8BIT]  = "8k/8",
   };
-  pnx_format(a->hud, sizeof(a->hud), "%s lp%u gap%u v%u",
-             FMT[pnx_audio_format() & 3], pnx_audio_lowpass(),
+  // peak/clip/dry together, because "it sounds bad" has three causes that are identical
+  // by ear: too hot (peak > 127, clip rising), the stream running dry (dry rising), and
+  // aliasing (both zero and it still sounds harsh). One line separates them.
+  pnx_format(a->hud, sizeof(a->hud), "pk%u clip%u dry%u  g%u v%u",
+             (unsigned)au->peak, (unsigned)au->clipped, (unsigned)au->left_playing,
              au->gap_ms, au->active_voices);
-  pnx_format(a->hud3, sizeof(a->hud3), "%s%u r%2u  feed %u-%u",
+  pnx_format(a->hud3, sizeof(a->hud3), "%s%u r%2u %s  %s %s",
              a->seq_on ? "pat " : "off ", pnx_music_pattern(), pnx_music_row(),
-             au->feed_min, au->feed_max);
+             a->song.synth_count ? "SYN" : "env", FMT[pnx_audio_format() & 3],
+             a->sfx_on ? "+sfx" : "solo");
   pnx_format(a->hud2, sizeof(a->hud2), "%u.%ufps  work %uus  %s",
              fs ? (unsigned)(fs->fps_x10 / 10) : 0,
              fs ? (unsigned)(fs->fps_x10 % 10) : 0,
@@ -128,18 +154,21 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
 
   if (a->ticks % 250 == 0) {
     if (a->ticks == 50) pnx_diag_flush();
-    pnx_log("audio: %s | %s | %s | short %u/%u carry %u", a->hud, a->hud3, a->hud2,
+    pnx_log("audio: %s | %s | %s | short %u/%u carry %u dry %u",
+            a->hud, a->hud3, a->hud2,
             (unsigned)au->short_writes, (unsigned)au->feeds,
-            (unsigned)au->carried);
+            (unsigned)au->carried, (unsigned)au->left_playing);
   }
+
+  draw_hud(a, target);
 
   pnx_diag_frame(elapsed_ms, pnx_platform_now_ms() - work_start);
 }
 
-// Runs after the framebuffer is released. Both the audio feed and the text draw live here
-// because both talk to the system, and the capture window is the wrong place for either.
-// Driven by the audio timer, not the frame loop: every few milliseconds rather than every
-// 37ms, so the buffer stays full on a small lead.
+// The audio feed, on its own timer rather than the frame loop: every few milliseconds
+// instead of every 37 ms, so the buffer stays full on a small lead. The text draw used to
+// share this hook because the SDK path could only run after the framebuffer was released;
+// the glyph blitter has no such constraint and draws in the frame.
 static void audio_tick(void *ctx) {
   App *a = (App *)ctx;
   const uint32_t now = pnx_platform_now_ms();
@@ -147,17 +176,28 @@ static void audio_tick(void *ctx) {
   pnx_audio_update(now);
 }
 
-static void post_frame(void *ctx) {
-  App *a = (App *)ctx;
+// Drawn with the framework's own glyph blitter, into the frame target.
+//
+// This used to be five `pnx_platform_text_draw` calls, which go through the SDK at ~4.3 ms
+// each -- 21.5 ms, 58% of a 37.3 ms frame. The diagnostics were the most expensive thing
+// in the app, and enabling the synth was merely what pushed the total past the deadline.
+//
+// Two things change by moving to the framework font. It is a blit rather than a system
+// call, so it costs a fraction as much; and it draws DURING the frame instead of after the
+// framebuffer is released, which is why this is no longer a post-frame hook at all. That
+// second property is what E7 was for: anything can now be drawn over the text.
+static void draw_hud(App *a, PnxTarget *target) {
+  if (!a->has_font) return;
 
-
-  pnx_platform_text_draw("pnx audio test", PNX_TEXT_MEDIUM, 0xFF, 6, 20, 190, 26);
-  pnx_platform_text_draw(a->hud, PNX_TEXT_SMALL, 0xFF, 6, 56, 190, 20);
-  pnx_platform_text_draw(a->hud2, PNX_TEXT_SMALL, 0xFF, 6, 76, 190, 20);
-  pnx_platform_text_draw(a->hud3, PNX_TEXT_SMALL, 0xFF, 6, 96, 190, 20);
-  pnx_platform_text_draw("0 one tone   1 chromatic\n2 density    3 all four\n\n"
-                        "UP     low-pass cutoff\nSELECT sfx auto-fire\nDOWN   one explosion",
-                        PNX_TEXT_SMALL, 0xFF, 6, 118, 190, 100);
+  char screen[288];
+  pnx_format(screen, sizeof(screen),
+             "pnx audio test\n%s\n%s\n%s\n\n"
+             "UP     low-pass cutoff\n"
+             "SELECT 8bit/16bit x music/+sfx\n"
+             "DOWN   one explosion",
+             a->hud, a->hud2, a->hud3);
+  pnx_text_draw_wrapped(target, &a->hud_font, screen,
+                        6, FONT_HUD_BASELINE + 6, 188, 0, 0xFF, PNX_ALIGN_LEFT);
 }
 
 int main(void) {
@@ -175,9 +215,25 @@ int main(void) {
     pnx_log("audio would not open");
   }
 
+#if PNX_USE_SYNTH
+  // A longer lead, because the synth changed what a late feed COSTS.
+  //
+  // The lead absorbs a late timer tick, and the default 60 ms was sized when a catch-up
+  // mixed 768 samples of plain wavetable voices -- effectively free. A synth voice is
+  // ~10,900 ns a sample, so the same catch-up is now 8.4 ms of solid compute inside a
+  // timer callback, and one late tick can cost enough to make the next one late as well.
+  // That feedback is heard as crackle with occasional dropouts.
+  //
+  // Lead is SFX latency, which is a game-design knob rather than an implementation
+  // detail -- 180 ms is a lot for a twitch game and nothing for music.
+  pnx_audio_set_lead(180);
+#endif
+
   a.laser = load_sample(PNX_ASSET_SAMPLE_LASER, &a.laser_len, &a.laser_hz);
   a.boom = load_sample(PNX_ASSET_SAMPLE_EXPLOSION, &a.boom_len, &a.boom_hz);
   a.ready = pnx_music_load(&a.song, PNX_ASSET_MUSIC_THEME);
+  a.has_font = pnx_font_load(&a.hud_font, PNX_ASSET_FONT_HUD);
+  if (!a.has_font) pnx_log("hud font would not load");
 
   // Start with a bare sustained note and NO sequencer. If this is clean and enabling the
   // sequencer introduces blips, the sequencer is the cause; if it blips on its own, the
@@ -192,12 +248,23 @@ int main(void) {
     a.held = pnx_audio_note(PNX_WAVE_TRIANGLE, 69, 255, &a.tone_env, 1);
   }
   a.sfx_on = true;
+  // Which audio path this build actually took. A song carrying synth instruments plays
+  // through the plain envelopes when PNX_USE_SYNTH is 0 -- it sounds fine, it is just not
+  // the thing you were listening for, and nothing else would say so.
+#if PNX_USE_SYNTH
+  pnx_log("synth: ON, song carries %u synth instrument(s)%s",
+          a.song.synth_count,
+          a.song.synth_count ? "" : " -- none, so the plain envelopes play");
+#else
+  pnx_log("synth: OFF (PNX_USE_SYNTH=0) -- plain envelopes, even if the song has a "
+          "synth table");
+#endif
   pnx_log("start: song=%d (%u patterns, %ubpm) laser=%u boom=%u arena %u/%u",
           (int)a.ready, a.song.pattern_count, a.song.tempo_bpm,
           (unsigned)a.laser_len, (unsigned)a.boom_len,
           (unsigned)a.scene.used, (unsigned)a.scene.capacity);
 
-  pnx_platform_set_post_frame_fn(post_frame);
+
   pnx_platform_set_audio_timer(audio_tick, &a, 10);
   pnx_platform_run(frame, &a);
 

@@ -1,0 +1,26 @@
+{
+  "name": "pnx-synthspike",
+  "author": "tyton",
+  "version": "1.0.0",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "pnx synth",
+    "uuid": "7f3c1d94-6a28-4e5b-9c07-2b8fd6a31e45",
+    "sdkVersion": "3",
+    "enableMultiJS": false,
+    "targetPlatforms": [
+      "emery"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [],
+    "resources": {
+      "media": []
+    }
+  }
+}

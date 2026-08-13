@@ -45,21 +45,11 @@ def build(ctx):
     # PNX_DEFINES lets a build override pnx_config.h without editing it, which is what
     # makes "does turning this module off actually reclaim the bytes?" a one-line check:
     #     PNX_DEFINES=PNX_USE_DIAGNOSTICS=0 pebble build
-    #
-    # This example's song carries synth instruments, so it defaults to building the synth:
-    # omit that and the song still builds, still plays, and quietly uses the plain
-    # envelopes instead -- a silent difference in what you HEAR.
-    #
-    # But the default must be OVERRIDABLE, because the single most useful thing to do when
-    # the synth sounds wrong is to build the same song without it and hear the difference.
-    # Hardcoding the flag took that away, which is the opposite of what a test app is for:
-    #
-    #     PNX_DEFINES=PNX_USE_SYNTH=0 pebble build     # the control
-    #
-    override = [d for d in os.environ.get('PNX_DEFINES', '').split() if d]
-    extra = list(override)
-    if not any(d.startswith('PNX_USE_SYNTH') for d in override):
-        extra.append('PNX_USE_SYNTH=1')
+    # The synth is off by default in pnx_config.h -- it is a measurement spike, and
+    # nothing pays for it until the numbers say it is worth having. This project is the
+    # thing producing those numbers, so it turns it on unconditionally.
+    extra = ['PNX_USE_SYNTH=1']
+    extra += [d for d in os.environ.get('PNX_DEFINES', '').split() if d]
 
     binaries = []
     cached_env = ctx.env

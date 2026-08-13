@@ -6,6 +6,7 @@
 // the audio simply gaps -- so this is the only place it can be caught cheaply.
 
 #include "../src/pnx/audio/pnx_audio.h"
+#include "../src/pnx/audio/pnx_synth.h"
 #include "../src/pnx/platform/pnx_platform_host.h"
 
 #include <stdio.h>
@@ -33,6 +34,144 @@ extern int s_checks;
   } while (0)
 
 void test_audio(void);
+
+#if PNX_USE_SYNTH
+// The synth renders into the mixer's accumulator, so opening the mixer has to open it too.
+//
+// This exists because the opposite shipped: every synth entry point begins
+// `if (!s_ready) return`, so a game that called pnx_audio_init and not pnx_synth_init
+// routed its music into functions that silently did nothing. Sound effects kept working
+// -- they go through the mixer's own voices -- so the symptom was "music is gone" with a
+// clean log and a passing build.
+static void test_synth_shares_the_mixer_lifecycle(void) {
+  pnx_audio_shutdown();
+  AU_CHECK(pnx_synth_bytes() == 0);
+  AU_CHECK(pnx_audio_init(PNX_AUDIO_16KHZ_8BIT, 200));
+  AU_CHECK(pnx_synth_bytes() > 0);       // opening the mixer opened the synth
+
+  // And a note routed through it actually reaches the output, which is the property the
+  // shipped bug broke -- the allocation alone would not have caught it.
+  PnxInstrument in;
+  memset(&in, 0, sizeof(in));
+  in.osc_count = 1;
+  in.osc[0].wave = PNX_WAVE_SAW;
+  in.osc[0].volume = 255;
+  in.amp.attack_ms = 1;
+  in.amp.decay_ms = 500;
+  in.amp.sustain = 255;
+  in.amp.release_ms = 100;
+  pnx_synth_all_off();
+  pnx_synth_set_instrument(0, &in);
+  pnx_synth_note_on(0, 60, 255);
+
+  const uint32_t before = pnx_host_audio_total();
+  for (int i = 0; i < 8; i++) pnx_audio_update(100u + (uint32_t)i * 40u);
+  AU_CHECK(pnx_host_audio_total() > before);
+
+  size_t bytes = 0;
+  const int8_t *last = (const int8_t *)pnx_host_audio_last(&bytes);
+  bool sounded = false;
+  for (size_t i = 0; i < bytes; i++) if (last[i]) sounded = true;
+  AU_CHECK(sounded);                      // the synth is IN the stream, not just alive
+
+  pnx_synth_all_off();
+  pnx_audio_shutdown();
+  AU_CHECK(pnx_synth_bytes() == 0);       // and closing it closes the synth
+}
+
+// Four synth voices plus effects must not overdrive the mixer's output clamp.
+//
+// This shipped broken and the symptom was "it sounds staticy", which is the same thing
+// aliasing, an underrun and a bad sample all sound like -- so it cost device round trips
+// to identify. Measured on the real song it was peak 239 against 127 with 4.5% of samples
+// clipped. The clamp is silent by design, so nothing but a counter can tell the difference.
+static void test_synth_does_not_overdrive_the_mixer(void) {
+  AU_CHECK(pnx_audio_init(PNX_AUDIO_16KHZ_8BIT, 200));
+
+  PnxInstrument in;
+  memset(&in, 0, sizeof(in));
+  in.osc_count = 3;
+  for (int i = 0; i < 3; i++) {
+    in.osc[i].wave = PNX_WAVE_SAW;
+    in.osc[i].volume = 200;
+    in.osc[i].duty = 128;
+  }
+  in.osc[1].detune = 7;
+  in.osc[2].detune = -9;
+  in.amp.attack_ms = 5;
+  in.amp.decay_ms = 200;
+  in.amp.sustain = 200;
+  in.amp.release_ms = 150;
+  in.filter_mode = PNX_FILTER_LOWPASS;
+  in.cutoff_base = 60;
+  in.resonance = 190;
+  in.cutoff_env_amount = 180;
+  in.cutoff.attack_ms = 2;
+  in.cutoff.decay_ms = 300;
+  in.cutoff.sustain = 80;
+  in.cutoff.release_ms = 200;
+  in.reverb_send = 90;
+  in.chorus_send = 70;
+
+  // Four voices at the velocity a real song uses. Detuned oscillators drift in and out of
+  // phase and their sum peaks well above any one of them, so this is already the awkward
+  // case -- the example song measures 120 of 127 here.
+  pnx_synth_all_off();
+  for (int v = 0; v < PNX_SYNTH_SLOTS; v++) {
+    pnx_synth_set_instrument((uint8_t)v, &in);
+    pnx_synth_note_on((uint8_t)v, (uint8_t)(48 + v * 5), 200);
+  }
+  for (uint32_t ms = 0; ms < 4000; ms += 10) pnx_audio_update(ms);
+
+  const PnxAudioStats *st = pnx_audio_stats();
+  AU_CHECK(st->peak <= 127);
+  AU_CHECK(st->clipped == 0);
+  // And not so quiet that the headroom was bought with dynamic range: an 8-bit output has
+  // none to spare, and over-attenuating trades clipping for quantisation noise.
+  AU_CHECK(st->peak > 48);
+  printf("  ... synth into mixer: peak %u/127, %u clipped\n",
+         (unsigned)st->peak, (unsigned)st->clipped);
+  pnx_synth_all_off();
+  pnx_audio_shutdown();
+
+  // And the LIMIT, asserted rather than left to be discovered.
+  //
+  // Four detuned voices at velocity 255 with both sends up genuinely exceed an 8-bit
+  // output -- measured at peak 153. More attenuation is not the fix: every bit of headroom
+  // is a bit of an eight-bit output spent on silence. This is the case MEASUREMENTS.md
+  // names as the argument for a 16-bit format, and it is pinned here so that "the synth
+  // can clip" stays a known, counted property rather than a mystery someone re-derives
+  // from a description of static.
+  AU_CHECK(pnx_audio_init(PNX_AUDIO_16KHZ_8BIT, 200));
+  pnx_synth_all_off();
+  for (int v = 0; v < PNX_SYNTH_SLOTS; v++) {
+    pnx_synth_set_instrument((uint8_t)v, &in);
+    pnx_synth_note_on((uint8_t)v, (uint8_t)(48 + v * 5), 255);
+  }
+  for (uint32_t ms = 0; ms < 4000; ms += 10) pnx_audio_update(ms);
+  const PnxAudioStats *hot = pnx_audio_stats();
+  AU_CHECK(hot->clipped > 0);            // the ceiling is real
+  AU_CHECK(hot->peak > 127);             // and the counter sees it
+  printf("  ... at full velocity: peak %u/127, %u clipped -- the 8-bit ceiling\n",
+         (unsigned)hot->peak, (unsigned)hot->clipped);
+
+  pnx_synth_all_off();
+  pnx_audio_shutdown();
+
+  // Reopening in another FORMAT must carry the synth's sample rate with it. Everything
+  // the synth derives -- phase increment, envelope ramps, the band limit of every
+  // wavetable -- is a function of the rate, so a stale one is wrong pitch and wrong
+  // aliasing at once, with nothing to indicate it.
+  AU_CHECK(pnx_audio_init(PNX_AUDIO_16KHZ_8BIT, 200));
+  const uint32_t at16 = pnx_synth_bytes();
+  AU_CHECK(at16 > 0);
+  AU_CHECK(pnx_audio_reopen(PNX_AUDIO_8KHZ_8BIT, 200));
+  AU_CHECK(pnx_synth_bytes() > 0);       // still up after the reopen
+  AU_CHECK(pnx_audio_reopen(PNX_AUDIO_16KHZ_8BIT, 200));
+  AU_CHECK(pnx_synth_bytes() == at16);
+  pnx_audio_shutdown();
+}
+#endif
 
 void test_audio(void) {
   printf("audio\n");
@@ -208,4 +347,8 @@ void test_audio(void) {
 
   pnx_audio_stop_all();
   pnx_audio_shutdown();
+#if PNX_USE_SYNTH
+  test_synth_shares_the_mixer_lifecycle();
+  test_synth_does_not_overdrive_the_mixer();
+#endif
 }

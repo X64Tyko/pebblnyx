@@ -101,12 +101,37 @@ def classify(symbol_type):
     return SECTION_KINDS.get(lower)
 
 
-def module_of(source_path, elf_dir):
-    """Attribute a source file to a module name.
+# Source file -> the pnx_config.h switch that compiles it in.
+#
+# The report used to group by DIRECTORY, on the stated premise that a directory was the
+# granularity pnx_config.h switches at. That stopped being true: src/pnx/audio holds three
+# independently switchable modules (PNX_USE_AUDIO, PNX_USE_SEQUENCER, PNX_USE_SYNTH) and
+# src/pnx/gfx holds four. Grouping them together means the report cannot answer the one
+# question it exists to answer -- "does turning this off reclaim the bytes?" -- because
+# the answer is buried inside a line covering two other modules.
+#
+# So attribution follows the SWITCH, not the folder. Every row is now something a project
+# can turn off, which is what makes the number actionable.
+MODULE_OF_FILE = {
+    "pnx_audio":    "pnx/audio",          # PNX_USE_AUDIO
+    "pnx_music":    "pnx/sequencer",      # PNX_USE_SEQUENCER
+    "pnx_synth":    "pnx/synth",          # PNX_USE_SYNTH
+    "pnx_tilemap":  "pnx/tilemap",        # PNX_USE_TILEMAP
+    "pnx_sprite":   "pnx/sprites",        # PNX_USE_SPRITES
+    "pnx_text":     "pnx/text",           # PNX_USE_TEXT
+    "pnx_diag":     "pnx/diagnostics",    # PNX_USE_DIAGNOSTICS
+    "pnx_assets":   "pnx/assets",         # PNX_USE_ASSETS
+    "pnx_input":    "pnx/input",          # PNX_USE_INPUT
+    "pnx_gfx":      "pnx/gfx",
+}
 
-    Framework sources are grouped by their directory under src/pnx -- core, gfx, audio
-    and so on -- because that is the granularity pnx_config.h switches at. Anything else
-    is either the game itself or the SDK.
+
+def module_of(source_path, elf_dir):
+    """Attribute a source file to the module its pnx_config.h switch names.
+
+    Falls back to the containing directory for anything not in the table, so a source
+    file added tomorrow lands somewhere sensible instead of vanishing into a bucket --
+    and shows up under a directory name, which is the hint that it wants an entry here.
     """
     if source_path is None:
         return "(unattributed)"
@@ -115,6 +140,10 @@ def module_of(source_path, elf_dir):
 
     # Matches both the framework tree (src/pnx/core/...) and a game that reaches it
     # through a symlink (src/c/pnx/core/...), which is how examples/ is laid out.
+    stem = re.search(r"/pnx/(?:[^/]+/)?([^/]+)\.c$", normalised)
+    if stem and stem.group(1) in MODULE_OF_FILE:
+        return MODULE_OF_FILE[stem.group(1)]
+
     match = re.search(r"/pnx/([^/]+)/", normalised)
     if match:
         return "pnx/" + match.group(1)
