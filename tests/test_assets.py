@@ -1575,6 +1575,606 @@ def check_editor_new_map_scene():
         check("and the new map builds", builds(proj.path, root, "out_nm"))
 
 
+def check_editor_sprites():
+    """Declaring a sprite, which the Sprites tab could not do -- it painted PNGs and
+    stopped, so the art existed and nothing could load it."""
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        # 16 wide, 48 tall: three stacked 16x16 frames.
+        Image.new("RGBA", (16, 48), (30, 90, 200, 255)).save(
+            os.path.join(root, "hero.png"))
+        proj = editor_project(root, sprite='''
+[[sprite]]
+name = "npc"
+sheet = "hero.png"
+frames = [[0, 0, 16, 16]]
+out = "npc.bin"
+# Why this sprite has no anim table, in a comment that has to survive a rewrite.
+''')
+
+        proj.save_sprite("hero", "hero.png",
+                         [[0, 0, 16, 16], [0, 16, 16, 16], [0, 32, 16, 16]],
+                         {"stand": 0, "step_a": 1, "step_b": 2})
+        got = {s["name"]: s for s in proj.sprites()}
+        check("a sprite is declared", got["hero"]["frames"] == [[0, 0, 16, 16],
+                                                                [0, 16, 16, 16],
+                                                                [0, 32, 16, 16]])
+        check("with its anim names", got["hero"]["anim"]["step_b"] == 2)
+        check("and the manifest builds", builds(proj.path, root, "out_sp"))
+        check("the anim names reach the header",
+              "HERO_ANIM_STEP_B" in open(os.path.join(root, "out_sp", "gen.h")).read()
+              or "STEP_B" in open(os.path.join(root, "out_sp", "gen.h")).read())
+
+        # Rewriting an existing sprite keeps the comment inside its block.
+        proj.save_sprite("npc", "hero.png", [[0, 0, 16, 16]], {"idle": 0})
+        check("rewriting a sprite keeps its comments",
+              "has to survive a rewrite" in open(proj.path).read())
+        check("and can add an anim table",
+              {s["name"]: s for s in proj.sprites()}["npc"]["anim"] == {"idle": 0})
+        proj.save_sprite("npc", "hero.png", [[0, 0, 16, 16]], {})
+        check("and can take it away again",
+              {s["name"]: s for s in proj.sprites()}["npc"]["anim"] == {})
+        check("and still builds", builds(proj.path, root, "out_sp2"))
+
+        for label, call in (
+            ("frames that disagree on size",
+             lambda: proj.save_sprite("bad", "hero.png",
+                                      [[0, 0, 16, 16], [0, 16, 8, 16]])),
+            ("a frame running off the sheet",
+             lambda: proj.save_sprite("bad", "hero.png", [[0, 0, 16, 99]])),
+            ("an odd pixel count",
+             lambda: proj.save_sprite("bad", "hero.png", [[0, 0, 3, 5]])),
+            ("an anim naming a frame that does not exist",
+             lambda: proj.save_sprite("bad", "hero.png", [[0, 0, 16, 16]], {"x": 4})),
+            ("no frames at all", lambda: proj.save_sprite("bad", "hero.png", [])),
+            ("a name that is not an identifier",
+             lambda: proj.save_sprite("Bad Sprite", "hero.png", [[0, 0, 16, 16]])),
+            ("an anim name that is not an identifier",
+             lambda: proj.save_sprite("bad", "hero.png", [[0, 0, 16, 16]],
+                                      {"step one": 0})),
+        ):
+            try:
+                call()
+                check(f"a sprite refuses {label}", False)
+            except ValueError:
+                check(f"a sprite refuses {label}", True)
+
+        proj.save_scene("s1", "a", ["hero"], [])
+        check("what loads a sprite is reported", proj.sprite_users("hero") == ["scene s1"])
+        try:
+            proj.remove_sprite("hero")
+            check("removing a sprite a scene loads is refused", False)
+        except ValueError:
+            check("removing a sprite a scene loads is refused", True)
+
+        proj.remove_sprite("npc")
+        check("an unused sprite is removed",
+              [s["name"] for s in proj.sprites()] == ["hero"])
+        check("and the manifest builds", builds(proj.path, root, "out_sp3"))
+
+
+def check_mapfile_format():
+    """The `.pnxmap` container, on its own before anything builds with it."""
+    import pnx_mapfile as mf
+
+    with tempfile.TemporaryDirectory() as root:
+        path = os.path.join(root, "m.pnxmap")
+        tiles = [{"atlas": "tiles", "index": 0, "flags": 0, "flip": ""},
+                 {"atlas": "tiles", "index": "wall", "flags": 1, "flip": "x"},
+                 {"atlas": "water", "index": 900, "flags": 2, "flip": "xy"}]
+        cells = [0, 1, 2, 0, 1, 1]
+        warps = [{"at": [1, 1], "to": ["cave", 3, 4], "gated": True}]
+        mf.write(path, 3, 2, [2, 1], tiles, cells, warps)
+        doc = mf.read(path)
+
+        check("a map file round-trips its grid",
+              (doc["w"], doc["h"], doc["start"], doc["cells"]) == (3, 2, [2, 1], cells))
+        check("and its tile table", doc["tiles"] == tiles)
+        check("and its warps", doc["warps"] == warps)
+        # A role survives as a role. Freezing it to whatever number it held at conversion
+        # is the one thing that would make migrating a manifest a silent downgrade.
+        check("a role stays symbolic", doc["tiles"][1]["index"] == "wall")
+        # 1024 is what the compiled cell's 10-bit index reaches; the container is wider so
+        # it is never the thing that binds.
+        check("an index past the old ~90 character ceiling survives",
+              doc["tiles"][2]["index"] == 900)
+
+        rows, legend = mf.to_rows(doc)
+        check("a small map converts back to text", rows == [".,:", ".,,"])
+        check("and the text carries a legend", len(legend) == 3)
+        big = {"w": 1, "h": 1, "cells": [0],
+               "tiles": [{"atlas": "a", "index": i, "flags": 0, "flip": ""}
+                         for i in range(200)]}
+        check("a map with more tiles than characters does not pretend to convert",
+              mf.to_rows(big)[0] is None)
+
+        for label, call in (
+            ("a cell count that does not match the size",
+             lambda: mf.write(path, 3, 2, [0, 0], tiles, [0])),
+            ("a cell naming a tile that is not in the table",
+             lambda: mf.write(path, 1, 1, [0, 0], tiles, [9])),
+            ("an empty tile table", lambda: mf.write(path, 1, 1, [0, 0], [], [0])),
+            ("a size the format cannot store",
+             lambda: mf.write(path, 300, 1, [0, 0], tiles, [0] * 300)),
+            ("a file that is not a map", lambda: mf.loads(b"XXXX" + bytes(30))),
+            ("a truncated file", lambda: mf.loads(b"PNXM" + bytes(4))),
+        ):
+            try:
+                call()
+                check(f"the map format refuses {label}", False)
+            except mf.MapFileError:
+                check(f"the map format refuses {label}", True)
+
+
+def check_source_maps():
+    """A map authored in a file rather than in the manifest.
+
+    The claim worth testing is not "it loads" -- it is that a source map goes through the
+    SAME checks a text map does. A second authoring path that quietly skipped the flood
+    fill or the warp checks would be worse than no second path.
+    """
+    import pnx_mapfile as mf
+
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        os.makedirs(os.path.join(root, "maps"))
+
+        def write_map(cells, w=6, h=5, start=(1, 1), warps=(), tiles=None):
+            tiles = tiles or [
+                {"atlas": "tiles", "index": "floor", "flags": 0, "flip": ""},
+                {"atlas": "tiles", "index": "wall", "flags": 1, "flip": ""},
+                {"atlas": "tiles", "index": "accent", "flags": 2, "flip": ""}]
+            mf.write(os.path.join(root, "maps", "a.pnxmap"), w, h, start, tiles,
+                     cells, warps)
+
+        def room(w=6, h=5, fill=0):
+            return [1 if (x in (0, w - 1) or y in (0, h - 1)) else fill
+                    for y in range(h) for x in range(w)]
+
+        src = '''
+[[map]]
+name = "a"
+out = "a.bin"
+source = "maps/a.pnxmap"
+'''
+        # manifest() always writes the same filename, so every variant is copied to a name
+        # of its own. Without that the later cases build whichever manifest was written
+        # last -- which is what made seven refusal tests silently pass by testing nothing.
+        def variant(tag, body):
+            import shutil as _sh
+            dst = os.path.join(root, f"{tag}.toml")
+            _sh.copy(manifest(root, maps=body), dst)
+            return dst
+
+        write_map(room())
+        path = variant("src", src)
+        check("a map authored in a file builds", builds(path, root, "out_src"))
+
+        # Byte-for-byte the same as the text form. If these ever diverge, one of the two
+        # authoring paths is lying about what it produces.
+        text = variant("txt", '''
+[[map]]
+name = "a"
+out = "a.bin"
+start = [1, 1]
+warps = []
+rows = """
+######
+#....#
+#....#
+#....#
+######
+"""
+''')
+        with contextlib.redirect_stdout(io.StringIO()):
+            pnx_assets.build(path, os.path.join(root, "b_src"),
+                             os.path.join(root, "b_src", "gen.h"))
+            pnx_assets.build(text, os.path.join(root, "b_txt"),
+                             os.path.join(root, "b_txt", "gen.h"))
+        check("and compiles to the same bytes as the text form",
+              open(os.path.join(root, "b_src", "a.bin"), "rb").read()
+              == open(os.path.join(root, "b_txt", "a.bin"), "rb").read())
+
+        # The shared checks, reached through the file rather than through rows.
+        write_map(room(), start=(0, 0))
+        check("a start inside a wall is refused", not builds(path, root, "out_s1"))
+
+        write_map(room(), start=(9, 9))
+        check("a start outside the map is refused", not builds(path, root, "out_s2"))
+
+        cells = room()
+        cells[2 * 6 + 2] = 2                      # an accent tile, which carries `warp`
+        write_map(cells, warps=[{"at": [2, 2], "to": ["a", 1, 1], "gated": False}])
+        check("a warp on a warp-flagged tile builds", builds(path, root, "out_s3"))
+
+        write_map(room(), warps=[{"at": [1, 1], "to": ["a", 1, 1], "gated": False}])
+        check("a warp on a tile with no warp flag is refused",
+              not builds(path, root, "out_s4"))
+
+        # Sealed off: a solid ring around the warp, so the flood fill cannot reach it.
+        cells = room()
+        for x, y in ((3, 1), (3, 2), (3, 3), (4, 1), (4, 3), (5, 2)):
+            cells[y * 6 + x] = 1
+        cells[2 * 6 + 4] = 2
+        write_map(cells, warps=[{"at": [4, 2], "to": ["a", 1, 1], "gated": False}])
+        check("an unreachable warp is refused", not builds(path, root, "out_s5"))
+        write_map(cells, warps=[{"at": [4, 2], "to": ["a", 1, 1], "gated": True}])
+        check("and `gated` declares it deliberate", builds(path, root, "out_s6"))
+
+        write_map(room(), tiles=[
+            {"atlas": "tiles", "index": "floor", "flags": 0, "flip": ""},
+            {"atlas": "nope", "index": 0, "flags": 1, "flip": ""}])
+        check("a tile drawing from an atlas the map does not use is refused",
+              not builds(path, root, "out_s7"))
+
+        write_map(room(), tiles=[
+            {"atlas": "tiles", "index": "floor", "flags": 0, "flip": ""},
+            {"atlas": "tiles", "index": 9999, "flags": 1, "flip": ""}])
+        check("a tile index past what the atlas packed is refused",
+              not builds(path, root, "out_s8"))
+
+        write_map(room(), tiles=[
+            {"atlas": "tiles", "index": "floor", "flags": 0, "flip": ""},
+            {"atlas": "tiles", "index": "nosuchrole", "flags": 1, "flip": ""}])
+        check("a role the atlas does not define is refused",
+              not builds(path, root, "out_s9"))
+
+        # Both formats at once is two descriptions of one grid with nothing keeping them
+        # in step, so the build refuses rather than silently picking.
+        both = variant("both", '''
+[[map]]
+name = "a"
+out = "a.bin"
+source = "maps/a.pnxmap"
+rows = """
+###
+#.#
+###
+"""
+''')
+        write_map(room())
+        check("a map with both `source` and `rows` is refused",
+              not builds(both, root, "out_s10"))
+
+        neither = variant("neither", '''
+[[map]]
+name = "a"
+out = "a.bin"
+start = [1, 1]
+''')
+        check("a map with neither is refused", not builds(neither, root, "out_s11"))
+
+        missing = variant("missing", '''
+[[map]]
+name = "a"
+out = "a.bin"
+source = "maps/gone.pnxmap"
+''')
+        check("a source file that is not there is refused",
+              not builds(missing, root, "out_s12"))
+
+
+def check_editor_map_migration():
+    """Moving a `rows` map into its own file, through the editor."""
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        # A multi-line warps array, which is what the worldtiles example writes and what
+        # the first version of this got wrong: it dropped the `warps = [` line and left
+        # the continuation lines behind as bare TOML.
+        proj = editor_project(root, maps='''
+[[map]]
+name = "a"
+out = "a.bin"
+start = [2, 1]
+warps = [
+  { at = [1, 2], to = ["b", 1, 1] },
+]
+rows = """
+####
+#..#
+#D.#
+####
+"""
+
+[[map]]
+name = "b"
+out = "b.bin"
+start = [1, 1]
+warps = []
+rows = """
+####
+#..#
+####
+"""
+''')
+        before = {m["name"]: m for m in proj.maps()}["a"]
+        info = proj.migrate_map("a")
+        check("a map moves into its own file", info["source"] == "maps/a.pnxmap")
+        check("and the file is on disk",
+              os.path.exists(os.path.join(root, "maps", "a.pnxmap")))
+
+        after = {m["name"]: m for m in proj.maps()}["a"]
+        check("the manifest still parses", after["format"] == "source")
+        check("the cells are unchanged", after["cells"] == before["cells"])
+        check("the start comes with it", after["start"] == before["start"])
+        check("the multi-line warps come with it",
+              [w["to"][0] for w in after["warps"]] == ["b"])
+        check("and it still builds", builds(proj.path, root, "out_mig"))
+
+        try:
+            proj.migrate_map("a")
+            check("migrating a map that is already a file is refused", False)
+        except ValueError:
+            check("migrating a map that is already a file is refused", True)
+
+        # Editing a source map writes the file and leaves the manifest alone.
+        stamp = os.path.getmtime(proj.path)
+        cells = list(after["cells"])
+        cells[1 * after["w"] + 1] = 0
+        proj.save_source_map("a", after["w"], after["h"], cells, after["tiles"],
+                             after["start"], after["warps"])
+        check("editing a source map writes the file",
+              {m["name"]: m for m in proj.maps()}["a"]["cells"] == cells)
+        check("and does not touch the manifest",
+              os.path.getmtime(proj.path) == stamp)
+
+        # New maps take the new format; the old one stays reachable on request.
+        proj.add_map("fresh", 8, 6, "tiles")
+        proj.add_map("oldstyle", 8, 6, "tiles", text=True)
+        got = {m["name"]: m for m in proj.maps()}
+        check("a new map is authored as a file", got["fresh"]["format"] == "source")
+        check("and text is still available", got["oldstyle"]["format"] == "rows")
+        check("both build", builds(proj.path, root, "out_mig2"))
+
+
+def check_editor_sheet_frames():
+    """Picking frames off a sheet, and editing one of them in place.
+
+    The declare form could only describe a vertical stack, and the pixel canvas could only
+    open whole files -- so a sheet laid out in a grid meant writing the rectangles by hand,
+    and touching one pose of eight meant loading all eight.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+
+        # Four 8x8 frames in a 2x2 grid, each a different flat colour, so a frame written
+        # into one cell is provably not landing in another.
+        cols = [(200, 40, 40), (40, 200, 40), (40, 40, 200), (200, 200, 40)]
+        im = Image.new("RGBA", (16, 16), (0, 0, 0, 255))
+        for i, c in enumerate(cols):
+            for y in range(8):
+                for x in range(8):
+                    im.putpixel(((i % 2) * 8 + x, (i // 2) * 8 + y), c + (255,))
+        im.save(os.path.join(root, "grid.png"))
+        proj = editor_project(root)
+
+        g = proj.sheet_frames("grid.png", 8, 8)
+        check("a sheet slices into a grid of frames",
+              (g["cols"], g["rows"], len(g["cells"])) == (2, 2, 4))
+        check("and the cells carry their rects",
+              [(c["x"], c["y"]) for c in g["cells"]]
+              == [(0, 0), (8, 0), (0, 8), (8, 8)])
+
+        # Origin and gap, for sheets with a border or gutters.
+        g2 = proj.sheet_frames("grid.png", 4, 4, ox=2, oy=2, gx=2, gy=2)
+        check("origin and gap move the grid",
+              g2["cells"][0]["x"] == 2 and g2["cells"][1]["x"] == 8)
+
+        before = [proj.frame_read("grid.png", c["x"], c["y"], 8, 8)["pixels"]
+                  for c in g["cells"]]
+        check("a single frame reads back at its own size", len(before[0]) == 64)
+
+        # Overwrite frame 2 only.
+        proj.frame_write("grid.png", 0, 8, 8, 8, [0] * 64)
+        after = [proj.frame_read("grid.png", c["x"], c["y"], 8, 8)["pixels"]
+                 for c in g["cells"]]
+        check("writing a frame changes that frame", after[2] != before[2])
+        check("and leaves every other frame alone",
+              after[0] == before[0] and after[1] == before[1]
+              and after[3] == before[3])
+        check("and does not resize the sheet",
+              Image.open(os.path.join(root, "grid.png")).size == (16, 16))
+
+        # Picked frames go straight into a declaration, in the picked order.
+        picked = [[c["x"], c["y"], c["w"], c["h"]] for c in (g["cells"][1], g["cells"][3])]
+        proj.save_sprite("walk", "grid.png", picked, {"a": 0, "b": 1})
+        got = {s["name"]: s for s in proj.sprites()}["walk"]
+        check("frames picked off a grid become a sprite", got["frames"] == picked)
+        check("and the manifest builds", builds(proj.path, root, "out_sh"))
+
+        for label, call in (
+            ("a frame outside the sheet",
+             lambda: proj.frame_read("grid.png", 0, 12, 8, 8)),
+            ("a write outside the sheet",
+             lambda: proj.frame_write("grid.png", 12, 12, 8, 8, [0] * 64)),
+            ("a pixel count that does not match the rect",
+             lambda: proj.frame_write("grid.png", 0, 0, 8, 8, [0] * 10)),
+            ("a sheet that is not there",
+             lambda: proj.frame_write("gone.png", 0, 0, 8, 8, [0] * 64)),
+        ):
+            try:
+                call()
+                check(f"frame editing refuses {label}", False)
+            except ValueError:
+                check(f"frame editing refuses {label}", True)
+
+
+def check_editor_dialog():
+    """Text is content and lives in the manifest, so it needed an editor and had none."""
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root, dialog='''
+[dialog.greeting]
+pages = ["Careful in there."]
+''')
+
+        proj.save_dialog("greeting", ["Careful in there.", "The lamps went out."])
+        check("a conversation's pages are rewritten",
+              len(proj.dialogs()[0]["pages"]) == 2)
+        proj.save_dialog("smith", ["Need a blade?"])
+        check("a new conversation is added",
+              [d["name"] for d in proj.dialogs()] == ["greeting", "smith"])
+        check("and the manifest builds", builds(proj.path, root, "out_dl"))
+
+        for label, call in (
+            # pack_dialog encodes ASCII with errors="replace", so anything else becomes a
+            # literal '?' on the watch with nothing said.
+            ("text that is not ASCII", lambda: proj.save_dialog("x", ["café"])),
+            ("a page holding a newline", lambda: proj.save_dialog("x", ["a\nb"])),
+            ("no pages at all", lambda: proj.save_dialog("x", [])),
+            ("a name that is not an identifier",
+             lambda: proj.save_dialog("Bad Name", ["a"])),
+        ):
+            try:
+                call()
+                check(f"dialog refuses {label}", False)
+            except ValueError:
+                check(f"dialog refuses {label}", True)
+
+        proj.remove_dialog("smith")
+        check("a conversation is removed",
+              [d["name"] for d in proj.dialogs()] == ["greeting"])
+
+        # `dialog = true` loads the whole blob, so removing an entry only strands a scene
+        # when it is the last one.
+        proj.save_scene("s1", "a", [], [], dialog=True)
+        try:
+            proj.remove_dialog("greeting")
+            check("removing the last dialog a scene needs is refused", False)
+        except ValueError:
+            check("removing the last dialog a scene needs is refused", True)
+
+
+def check_editor_map_props():
+    """The M4b palette variant and the M4d streaming controls, none of which save_map
+    touched -- so the streaming work M4d measured could not be tuned from the editor."""
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root)
+
+        proj.set_map_props("a", worldtile=16, bank_bytes=2048, resident=True)
+        got = {m["name"]: m for m in proj.maps()}["a"]
+        check("worldtile is set", got["worldtile"] == 16)
+        check("bank_bytes is set", got["bank_bytes"] == 2048)
+        check("resident is set", got["resident"] is True)
+        check("and the manifest builds", builds(proj.path, root, "out_mp"))
+
+        # "" is how a key goes back to the pipeline's own choice, which is distinct from
+        # leaving it alone -- the reason these take a string rather than None for unset.
+        proj.set_map_props("a", bank_bytes="", resident=False)
+        got = {m["name"]: m for m in proj.maps()}["a"]
+        check("a cleared key goes back to the default", got["bank_bytes"] is None)
+        check("and resident comes off", got["resident"] is False)
+        check("and it still builds", builds(proj.path, root, "out_mp2"))
+
+        for label, call in (
+            ("a worldtile that is not a power of two",
+             lambda: proj.set_map_props("a", worldtile=12)),
+            ("a worldtile past the format's range",
+             lambda: proj.set_map_props("a", worldtile=64)),
+            ("more atlas slots than the map has tilesets",
+             lambda: proj.set_map_props("a", atlas_slots=9)),
+            ("a bank under one WorldTile's cells",
+             lambda: proj.set_map_props("a", bank_bytes=100)),
+            ("a palette no tileset of this map defines",
+             lambda: proj.set_map_props("a", palette="nope")),
+            ("an unknown map", lambda: proj.set_map_props("gone", worldtile=8)),
+        ):
+            try:
+                call()
+                check(f"map properties refuse {label}", False)
+            except ValueError:
+                check(f"map properties refuse {label}", True)
+
+
+def check_editor_atlas_extras():
+    """metatiles and variants, the two atlas keys the Import form never owned."""
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root)
+
+        proj.set_atlas_extras("tiles", metatiles="true")
+        check("metatiles is forced on", proj.atlas_spec("tiles")["metatiles"] is True)
+        proj.set_atlas_extras("tiles", metatiles=0.25)
+        check("a threshold fraction is written",
+              proj.atlas_spec("tiles")["metatiles"] == 0.25)
+        proj.set_atlas_extras("tiles", metatiles="auto")
+        check("and it goes back to auto",
+              proj.atlas_spec("tiles")["metatiles"] == "auto")
+        check("the manifest builds throughout", builds(proj.path, root, "out_ae"))
+
+        for label, call in (
+            ("a threshold outside 0..1",
+             lambda: proj.set_atlas_extras("tiles", metatiles=1.5)),
+            ("an unknown atlas", lambda: proj.set_atlas_extras("gone", metatiles="true")),
+            ("a variant file that is not there",
+             lambda: proj.set_atlas_extras("tiles", variants=["nope.png"])),
+        ):
+            try:
+                call()
+                check(f"atlas extras refuse {label}", False)
+            except ValueError:
+                check(f"atlas extras refuse {label}", True)
+
+        # A variant has to be a RECOLOUR of the base, which is not answerable from the
+        # manifest -- so the candidate is packed to find out.
+        Image.new("RGBA", (8, 8), (200, 30, 30, 255)).save(os.path.join(root, "wrong.png"))
+        try:
+            proj.set_atlas_extras("tiles", variants=["wrong.png"])
+            check("a variant that is not the base's layout is refused", False)
+        except ValueError:
+            check("a variant that is not the base's layout is refused", True)
+
+
+def check_editor_fonts_and_project():
+    """remove_font, which add_font never had a counterpart for, and the [project] keys."""
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        # CI fails rather than skips when no TTF is present -- a suite that quietly
+        # stops testing a feature is worse than one that fails.
+        if not TEST_TTF:
+            check("a TTF is available to test font removal", False)
+            return
+        proj = editor_project(root)
+        proj.add_font({"name": "hud", "source": TEST_TTF, "size": 12, "depth": 1,
+                       "threshold": 128, "charset": "ABC", "license": "OFL 1.1"})
+        check("a font is declared", [f["name"] for f in proj.fonts()] == ["hud"])
+
+        proj.save_scene("s1", "a", [], ["hud"])
+        check("what loads a font is reported", proj.font_users("hud") == ["scene s1"])
+        try:
+            proj.remove_font("hud")
+            check("removing a font a scene loads is refused", False)
+        except ValueError:
+            check("removing a font a scene loads is refused", True)
+
+        proj.save_scene("s1", "a", [], [])
+        proj.remove_font("hud")
+        check("an unused font is removed", proj.fonts() == [])
+        check("and the TTF copied into the project is left alone",
+              os.path.isdir(os.path.join(root, "art", "fonts")))
+
+        proj.set_project("budget_bytes", 300000)
+        proj.set_project("name", "demo project")
+        check("the budget is rewritten", proj.project["budget_bytes"] == 300000)
+        check("and the name", proj.project["name"] == "demo project")
+        check("and the manifest builds", builds(proj.path, root, "out_pj"))
+
+        for label, call in (
+            ("a budget past the device ceiling",
+             lambda: proj.set_project("budget_bytes", 99999999)),
+            ("an empty name", lambda: proj.set_project("name", "")),
+            ("an absolute resources path",
+             lambda: proj.set_project("resources", "/tmp/x")),
+            ("a key it does not own", lambda: proj.set_project("nope", "x")),
+        ):
+            try:
+                call()
+                check(f"project settings refuse {label}", False)
+            except ValueError:
+                check(f"project settings refuse {label}", True)
+
+
 def check_editor_map_lifecycle():
     """Renaming and deleting a map, which had no editor at all -- so iterating on a test
     layout meant hand-editing the manifest."""
@@ -2404,6 +3004,15 @@ def main():
     check_editor_scenes()
     check_editor_new_map_scene()
     check_editor_map_lifecycle()
+    check_editor_sprites()
+    check_mapfile_format()
+    check_source_maps()
+    check_editor_map_migration()
+    check_editor_sheet_frames()
+    check_editor_dialog()
+    check_editor_map_props()
+    check_editor_atlas_extras()
+    check_editor_fonts_and_project()
     check_editor_flags()
     check_editor_roles()
     check_editor_autopick()

@@ -26,6 +26,11 @@ import re
 import sys
 import tomllib
 
+# The `.pnxmap` source format. Its own module because both this pipeline and the editor
+# read and write it, and the format is the contract between them.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pnx_mapfile as mapfile                                  # noqa: E402
+
 try:
     from PIL import Image, ImageDraw, ImageFont
 except ImportError:
@@ -1366,6 +1371,105 @@ def compile_map(spec, legend, roles_by_atlas, atlas_table, map_names):
             tiles[(y * w + x) * 2 + 1] = entry >> 8
             flags[y * w + x] = flag
 
+    return finish_compile(name, spec, w, h, tiles, flags, atlas_table, map_names,
+                          spec.get("warps", []),
+                          flipped={a: [c for c in chars if c in painted]
+                                   for a, chars in flipped.items()
+                                   if any(c in painted for c in chars)})
+
+
+def compile_source_map(spec, root, roles_by_atlas, atlas_table, map_names):
+    """Compile a map whose cells live in a `.pnxmap` file rather than in the manifest.
+
+    The tile table is the legend, indexed by number instead of by character -- so this
+    resolves each entry exactly as compile_map resolves a legend char, and then hands the
+    same cells and flags to the same checks. Nothing about reachability, warps or the
+    blob layout knows which authoring format a map came from.
+
+    Why a file at all is argued in tools/pnx_mapfile.py; the short version is that one
+    character per cell capped a map at ~90 distinct tiles against the runtime's 1024, and
+    a 255x255 map is 65KB of text sitting in the middle of a manifest.
+    """
+    name = spec["name"]
+    path = os.path.join(root, spec["source"])
+    if not os.path.exists(path):
+        raise BuildError(f"map {name!r}: no such source file {spec['source']!r}")
+    try:
+        doc = mapfile.read(path)
+    except mapfile.MapFileError as e:
+        raise BuildError(f"map {name!r}: {e}") from None
+
+    w, h = doc["w"], doc["h"]
+    bases = {a: first for a, first, _ in atlas_table}
+    counts = {a: n for a, _, n in atlas_table}
+
+    # Resolved once per TABLE ENTRY, not per cell: a map is thousands of cells over a few
+    # dozen entries, and an entry that cannot resolve is worth reporting whether or not
+    # some cell happens to use it.
+    resolved, flipped = [], {}
+    for i, t in enumerate(doc["tiles"]):
+        which = t["atlas"]
+        if which not in bases:
+            raise BuildError(
+                f"map {name!r}: tile {i} draws from atlas {which!r}, which this map does "
+                f"not use. It draws from: {', '.join(a for a, _, _ in atlas_table)}")
+        idx = t["index"]
+        if isinstance(idx, str):
+            roles = roles_by_atlas[which]
+            if idx not in roles:
+                raise BuildError(
+                    f"map {name!r}: tile {i} names role {idx!r}, which atlas {which!r} "
+                    f"does not define. That atlas provides: "
+                    f"{', '.join(sorted(roles)) or '(none)'}")
+            idx = roles[idx]
+        if idx >= counts[which]:
+            raise BuildError(
+                f"map {name!r}: tile {i} names index {idx} of atlas {which!r}, which "
+                f"packed {counts[which]} tiles (0-{counts[which] - 1})")
+
+        flip = 0
+        for axis in t.get("flip", ""):
+            flip |= MAP_FLIP_X if axis == "x" else MAP_FLIP_Y
+        if flip:
+            flipped.setdefault(which, []).append(str(i))
+        resolved.append((((bases[which] + idx) & MAP_INDEX_MASK) | flip,
+                         t.get("flags", 0)))
+
+    cells = doc["cells"]
+    tiles = bytearray(w * h * 2)
+    flags = bytearray(w * h)
+    used = set()
+    for i, c in enumerate(cells):
+        used.add(c)
+        entry, flag = resolved[c]
+        tiles[i * 2] = entry & 0xFF
+        tiles[i * 2 + 1] = entry >> 8
+        flags[i] = flag
+
+    # `start` and `warps` come from the FILE, not the manifest: they are positions in a
+    # grid the file owns, and a manifest that could disagree with it would be a second
+    # place to look when a warp lands in the wrong room.
+    spec = dict(spec)
+    spec["start"] = doc["start"]
+
+    return finish_compile(name, spec, w, h, tiles, flags, atlas_table, map_names,
+                          doc["warps"],
+                          flipped={a: [c for c in labels if int(c) in used]
+                                   for a, labels in flipped.items()
+                                   if any(int(c) in used for c in labels)})
+
+
+def finish_compile(name, spec, w, h, tiles, flags, atlas_table, map_names, warp_specs,
+                   flipped=None):
+    """Everything a compiled map is checked for, whatever it was authored in.
+
+    Split out when maps gained a binary source format. The checks below -- a start inside
+    a wall, a warp on a tile with no warp flag, a warp sealed off from the start -- are
+    the pipeline's whole reason for existing, and a second authoring path that quietly
+    skipped them would be worse than no second path at all. So `rows` and `.pnxmap` both
+    resolve to cells and flags and then arrive here.
+    """
+    flipped = flipped or {}
     sx, sy = spec["start"]
     if not (0 <= sx < w and 0 <= sy < h):
         raise BuildError(f"map {name!r}: start {(sx, sy)} is outside the {w}x{h} map")
@@ -1403,7 +1507,7 @@ def compile_map(spec, legend, roles_by_atlas, atlas_table, map_names):
     sealed = walkable - len(reachable)
 
     warps = []
-    for wp in spec.get("warps", []):
+    for wp in warp_specs:
         tx, ty = wp["at"]
         dest_name, dtx, dty = wp["to"]
         if not (0 <= tx < w and 0 <= ty < h):
@@ -1443,13 +1547,12 @@ def compile_map(spec, legend, roles_by_atlas, atlas_table, map_names):
     return {"name": name, "w": w, "h": h, "start": (sx, sy), "tiles": bytes(tiles),
             "out": spec["out"], "warps": warps, "reachable": reachable,
             "flags": flags, "atlas_table": atlas_table,
-            # {atlas: [chars]} for the characters this map PAINTED flipped, kept only so
+            # {atlas: [label]} for the tiles this map PAINTED flipped, kept only so
             # check_flip_metatiles can name them once the atlases are packed. A flipped
             # entry nobody used is nobody's problem, the same view taken of an entry that
-            # does not resolve.
-            "flipped": {a: [c for c in chars if c in painted]
-                        for a, chars in flipped.items()
-                        if any(c in painted for c in chars)},
+            # does not resolve. Labels are legend characters for a `rows` map and tile
+            # table indices for a `.pnxmap` -- whatever names the thing to go and fix.
+            "flipped": flipped,
             "atlases": [a for a, _, _ in atlas_table]}
 
 
@@ -3014,7 +3117,22 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
             map_legend = dict(legend)
             map_legend.update(parse_legend(own, flag_names))
 
-        m = compile_map(spec, map_legend, roles_by_atlas, table, map_names)
+        # `source` and `rows` are the two authoring formats, and a map may not have both:
+        # they would be two descriptions of the same grid with nothing keeping them in
+        # step, and the build would silently pick one.
+        has_source, has_rows = "source" in spec, "rows" in spec
+        if has_source and has_rows:
+            raise BuildError(
+                f"map {spec['name']!r} has both `source` and `rows`. A map is authored in "
+                f"one or the other -- delete whichever is not the real one.")
+        if not (has_source or has_rows):
+            raise BuildError(
+                f"map {spec['name']!r} has neither `rows` nor `source`, so it has no cells")
+
+        if has_source:
+            m = compile_source_map(spec, root, roles_by_atlas, table, map_names)
+        else:
+            m = compile_map(spec, map_legend, roles_by_atlas, table, map_names)
         m["palette"] = spec.get("palette")
         m["tile_px"] = tile_px[names[0]]
 

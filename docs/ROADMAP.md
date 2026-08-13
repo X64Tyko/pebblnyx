@@ -797,6 +797,25 @@ any runtime code. Staged so each piece is independently useful:
 | **E13** | IDE shell: activity rail, contextual toolbar, shared output panel, status bar | E12 | **DONE** |
 | **E14** | Live budget while editing; per-tile import selection; opt-in engine editing; C highlighting and symbol checking | E13 | **DONE** |
 | **E15** | Remove an atlas, refusing while anything still draws with it; multi-atlas maps in the preview and the tile picker | E14, M4d | **DONE** |
+| **E16** | Everything the manifest could express and the editor could not: scenes, dialog, sprite declarations, map delete/rename, map palette and streaming keys, atlas metatiles and variants, font removal, project settings | E14 | **DONE** |
+| **E17** | Per-map legend, then maps in their own `.pnxmap` files; sprite frames picked off a sheet, and single-frame editing in place | E16 | **DONE** |
+
+**E16 was an audit, not a feature.** The editor could paint maps and import tilesets, and
+everything else the manifest holds was reachable only by hand-editing TOML — scenes above
+all, which are the framework's *only* load point, so a map could be drawn, painted and
+built and still be unreachable from the game. Two bugs fell out of that audit and both had
+been committed: the `overworld` example did not build on `main` (a legend character pinned
+to an atlas one of its maps does not use), and **every map created in the editor produced
+an unbuildable manifest**, because the generated scene restated the atlases the map already
+streams — which M4d had made an error.
+
+**E17 removed the format's own ceiling.** One character per cell capped a map at ~90
+distinct tiles while the compiled cell already carried a 10-bit index the runtime resolves
+against 1024. Making the legend per-map bought a factor of the project's map count; moving
+cells into a `.pnxmap` removed the ceiling. `rows` is not deprecated — `overworld` stays in
+it as the readable example — and both formats go through the same checks, verified by
+compiling one map each way and comparing the bytes. Migrating `worldtiles` took its
+manifest from 81 KB to 7 KB.
 
 **E7 exists because a font is the one asset a person cannot author by hand at this scale.** At
 6x12 most typefaces are illegible -- hinting dominates at small sizes -- so the editor has to

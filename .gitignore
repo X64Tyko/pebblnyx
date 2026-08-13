@@ -12,6 +12,11 @@ examples/*/resources/*.bin
 examples/*/resources/preview_*.png
 examples/*/src/c/assets_gen.h
 
+# NOT ignored, and deliberately so: examples/*/maps/*.pnxmap. A `.pnxmap` is a map's
+# SOURCE -- the thing an author edits -- and it is binary only because a character grid
+# cannot hold the tile count. The compiled map_*.bin above IS derived and is ignored. A
+# binary file in a repository invites the opposite assumption, which is why this says so.
+
 # Editor and preview output
 preview.html
 tools/__pycache__/

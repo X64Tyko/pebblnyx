@@ -45,6 +45,7 @@ import webbrowser
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pnx_preview as pv                                    # noqa: E402
 import pnx_assets as pa                                     # noqa: E402
+import pnx_mapfile as mf                                    # noqa: E402
 import pnx_project as pp                                    # noqa: E402
 import size_report as sr                                    # noqa: E402
 
@@ -916,18 +917,108 @@ class Project:
                               else list(e.get("flip", [])))}
                 for ch, e in raw.items()}
 
+    def map_doc(self, m):
+        """One map as cells + a tile table, whatever it was authored in.
+
+        The page used to hold a map as an array of STRINGS and index it by legend
+        character, which cannot represent a `.pnxmap` at all -- a binary map has no
+        characters, and above ~90 tiles there are not enough to invent. So both formats
+        are normalised to the same shape here and the canvas only knows one.
+
+        For a `rows` map each table entry carries the character it came from, so saving
+        writes back the author's own glyphs rather than reassigning them -- a map whose
+        diff churned every time it was opened would not be worth keeping in text.
+        """
+        names = self.map_atlases(m)
+        default = names[0] if names else None
+
+        if "source" in m:
+            path = self._safe(m["source"])
+            doc = mf.read(path)
+            for t in doc["tiles"]:
+                t.setdefault("flags", 0)
+            return {"format": "source", "source": m["source"],
+                    "w": doc["w"], "h": doc["h"], "cells": doc["cells"],
+                    "tiles": doc["tiles"], "start": doc["start"],
+                    "warps": [{"at": wp["at"], "to": wp["to"], "gated": wp["gated"]}
+                              for wp in doc["warps"]]}
+
+        rows = [r for r in m.get("rows", "").strip("\n").split("\n") if r.strip()]
+        legend = dict(self.man.get("legend", {}))
+        legend.update(m.get("legend", {}))
+
+        tiles, seen, cells = [], {}, []
+        h = len(rows)
+        w = len(rows[0]) if rows else 0
+        for row in rows:
+            for ch in row:
+                e = legend.get(ch)
+                if e is None:
+                    # An unknown character is carried as a placeholder rather than
+                    # refused: the page has to be able to OPEN a broken map to fix it,
+                    # and the build is what says no.
+                    key = ("?", ch)
+                    if key not in seen:
+                        seen[key] = len(tiles)
+                        tiles.append({"atlas": default, "index": 0, "flip": "",
+                                      "flags": 0, "ch": ch, "missing": True})
+                    cells.append(seen[key])
+                    continue
+                flip = e.get("flip", [])
+                flip = [flip] if isinstance(flip, str) else list(flip)
+                key = (ch,)
+                if key not in seen:
+                    seen[key] = len(tiles)
+                    tiles.append({"atlas": e.get("atlas") or default,
+                                  "index": e["tile"],
+                                  "flip": "".join(sorted(flip)),
+                                  "flags": self._flag_byte(e.get("flags", [])),
+                                  "flag_names": list(e.get("flags", [])),
+                                  "ch": ch})
+                cells.append(seen[key])
+
+        return {"format": "rows", "w": w, "h": h, "cells": cells, "tiles": tiles,
+                "start": list(m.get("start", [1, 1])),
+                "warps": [dict(wp) for wp in m.get("warps", [])]}
+
+    def _flag_byte(self, names):
+        known = self.flag_names()
+        out = 0
+        for n in names:
+            out |= known.get(n, 0)
+        return out
+
     def maps(self):
         out = []
         for m in self.man.get("map", []):
-            rows = [r for r in m["rows"].strip("\n").split("\n") if r.strip()]
+            doc = self.map_doc(m)
+            rows = [r for r in m.get("rows", "").strip("\n").split("\n") if r.strip()]
             names = self.map_atlases(m)
             out.append({"name": m["name"], "rows": rows,
-                        "start": m.get("start", [1, 1]),
-                        "warps": m.get("warps", []),
+                        # The normalised form the canvas actually draws: cells indexing a
+                        # tile table, for a `rows` map and a `.pnxmap` alike.
+                        "format": doc["format"],
+                        "source": doc.get("source"),
+                        "w": doc["w"], "h": doc["h"],
+                        "cells": doc["cells"], "tiles": doc["tiles"],
+                        # A source map owns its own start and warps -- they are positions
+                        # in a grid the file holds, so the manifest does not get a second,
+                        # disagreeing copy.
+                        "start": doc["start"],
+                        "warps": doc["warps"],
                         # `atlas` stays for everything that only wants the first one; the
                         # list is what a map drawing from several is actually described by.
                         "atlas": names[0] if names else None,
                         "atlases": names,
+                        # The M4b palette variant and the M4d streaming controls. Sent as
+                        # what the manifest says rather than as the effective value, so
+                        # "auto" and an explicit size stay distinguishable in the form.
+                        "palette": m.get("palette"),
+                        "palettes": self.map_palettes(m["name"]),
+                        "worldtile": m.get("worldtile", "auto"),
+                        "atlas_slots": m.get("atlas_slots"),
+                        "bank_bytes": m.get("bank_bytes"),
+                        "resident": bool(m.get("resident", False)),
                         # This map's own [map.legend], overlaid on the project one. Sent
                         # separately rather than pre-merged because the page has to be able
                         # to say which table an entry lives in: editing a project character
@@ -957,15 +1048,23 @@ class Project:
                     self.root, self.project.get("header", "src/c/assets_gen.h")),
             },
             "project_file": self.meta,
+            # As the manifest states them -- relative to the root. `paths` holds the
+            # resolved absolute versions, which are the wrong thing to write back.
+            "project_resources": self.project.get("resources", "resources"),
+            "project_header": self.project.get("header", "src/c/assets_gen.h"),
             "engine": pp.framework_state(self.root, self.meta),
             "legend": legend,
             "atlases": self.atlases(),
             "palettes": self.palette_swatches(),
             "maps": self.maps(),
             "fonts": self.fonts(),
+            # Keyed by name for the font preview, which picks a page to render; the list
+            # form carries the per-entry cost the Dialog tab shows.
             "dialog": {k: v.get("pages", [])
                        for k, v in self.man.get("dialog", {}).items()},
+            "dialogs": self.dialogs(),
             "scenes": self.scenes(),
+            "sprites": self.sprites(),
             "sprite_names": [s.get("name") for s in self.man.get("sprite", [])
                              if s.get("name")],
             # The canvas the author is working on, which is the device's display turned
@@ -1527,6 +1626,102 @@ class Project:
                 "pixels": [pa.to_gcolor8(px[x, y])
                            for y in range(im.height) for x in range(im.width)]}
 
+    def sheet_frames(self, rel, fw, fh, ox=0, oy=0, gx=0, gy=0, colorkey=None):
+        """Every frame-sized cell of a sheet, rendered, so frames can be PICKED.
+
+        The declare form could only describe a vertical stack, which is the layout the
+        engine's own examples happen to use and not the layout most sheets ship in -- a
+        run of poses across a row, several rows to a character. Anything else meant
+        writing `frames = [[x, y, w, h], ...]` by hand.
+
+        Cells are read through the colour key, so a cell that is nothing but background
+        reads as blank here exactly as it will when packed -- which is what makes the
+        empty cells of a ragged sheet obvious before they are picked by mistake.
+        """
+        from PIL import Image
+        im = Image.open(self._safe(rel)).convert("RGBA")
+        px = im.load()
+        W, H = im.size
+        fw, fh = max(1, int(fw)), max(1, int(fh))
+        ox, oy, gx, gy = int(ox), int(oy), int(gx), int(gy)
+
+        cols = max(0, (W - ox + gx) // (fw + gx))
+        rows = max(0, (H - oy + gy) // (fh + gy))
+
+        # A large sheet at a small frame size is thousands of PNGs. Capped and reported
+        # rather than quietly hanging the browser, the same way the atlas slicer is.
+        LIMIT = 512
+        capped = cols * rows > LIMIT
+
+        cells = []
+        for j in range(rows):
+            for i in range(cols):
+                if len(cells) >= LIMIT:
+                    break
+                x, y = ox + i * (fw + gx), oy + j * (fh + gy)
+                if x + fw > W or y + fh > H:
+                    continue
+                buf = [pa.to_gcolor8(px[x + a, y + b], colorkey)
+                       for b in range(fh) for a in range(fw)]
+                img = Image.new("RGBA", (fw, fh), (0, 0, 0, 0))
+                ip = img.load()
+                for b in range(fh):
+                    for a in range(fw):
+                        rgb = pv.gcolor_rgb(buf[b * fw + a])
+                        if rgb:
+                            ip[a, b] = rgb + (255,)
+                scale = max(1, min(4, 64 // max(fw, fh) or 1))
+                cells.append({"i": len(cells), "x": x, "y": y, "w": fw, "h": fh,
+                              "blank": not any(buf),
+                              "img": pv.data_uri(img.resize((fw * scale, fh * scale),
+                                                            Image.NEAREST))})
+        return {"cols": cols, "rows": rows, "cells": cells, "capped": capped,
+                "limit": LIMIT, "sheet": [W, H]}
+
+    def frame_read(self, rel, x, y, w, h):
+        """One frame of a sheet as ARGB2222 indices, so a single pose can be edited.
+
+        The pixel editor could only open a whole PNG, so touching one frame of an eight
+        pose sheet meant loading all eight and finding the right one by eye.
+        """
+        from PIL import Image
+        im = Image.open(self._safe(rel)).convert("RGBA")
+        W, H = im.size
+        x, y, w, h = int(x), int(y), int(w), int(h)
+        if x < 0 or y < 0 or x + w > W or y + h > H:
+            raise ValueError(f"frame {x},{y} {w}x{h} runs past the sheet ({W}x{H})")
+        px = im.load()
+        return {"w": w, "h": h,
+                "pixels": [pa.to_gcolor8(px[x + a, y + b])
+                           for b in range(h) for a in range(w)]}
+
+    def frame_write(self, rel, x, y, w, h, pixels):
+        """Composite an edited frame back into its sheet, leaving the rest untouched.
+
+        A write rather than a replace: the other frames on the sheet are someone else's
+        work, and saving one pose should not be able to lose the row it sits in.
+        """
+        from PIL import Image
+        full = self._safe(rel)
+        if not os.path.exists(full):
+            raise ValueError(f"no such sheet: {rel}")
+        x, y, w, h = int(x), int(y), int(w), int(h)
+        if len(pixels) != w * h:
+            raise ValueError(f"expected {w * h} pixels, got {len(pixels)}")
+
+        im = Image.open(full).convert("RGBA")
+        W, H = im.size
+        if x < 0 or y < 0 or x + w > W or y + h > H:
+            raise ValueError(f"frame {x},{y} {w}x{h} runs past the sheet ({W}x{H})")
+
+        put = im.load()
+        for i, v in enumerate(pixels):
+            rgb = pv.gcolor_rgb(int(v))
+            put[x + i % w, y + i // w] = (rgb + (255,)) if rgb else (0, 0, 0, 0)
+        im.save(full)
+        return {"ok": True, "path": os.path.relpath(full, self.root),
+                "bytes": os.path.getsize(full)}
+
     def sprite_write(self, rel, w, h, pixels):
         """Write ARGB2222 values back out as an ordinary RGBA PNG.
 
@@ -1931,6 +2126,100 @@ class Project:
             f.write("\n".join(lines))
         self.reload()
 
+    def font_users(self, name):
+        """The scenes that load this face, so removing it can refuse and say which."""
+        return [f"scene {s}" for s, spec in self.man.get("scene", {}).items()
+                if name in spec.get("fonts", [])]
+
+    def remove_font(self, name):
+        """Delete a [[font]], once no scene loads it.
+
+        `add_font` had no counterpart, so a face imported to try it out could only be
+        taken out again by hand. The TTF it was rasterised from is left on disk: it was
+        copied into the project deliberately, and deleting someone's licensed typeface
+        because they dropped one derived asset would be well beyond what was asked.
+        """
+        lines = open(self.path).read().split("\n")
+        start = None
+        for i, line in enumerate(lines):
+            if line.strip() == "[[font]]":
+                nxt = next((j for j in range(i + 1, len(lines))
+                            if lines[j].lstrip().startswith("[")), len(lines))
+                if any(re.match(rf'^name\s*=\s*"{re.escape(name)}"', lines[j].strip())
+                       for j in range(i + 1, nxt)):
+                    start = i
+                    break
+        if start is None:
+            raise ValueError(f"no font named {name!r}")
+
+        users = self.font_users(name)
+        if users:
+            raise ValueError(f"cannot remove {name!r} — {', '.join(users)} loads it. "
+                             f"Drop it there first.")
+
+        end = next((j for j in range(start + 1, len(lines))
+                    if lines[j].lstrip().startswith("[")), len(lines))
+        while end < len(lines) and lines[end].strip() == "":
+            end += 1
+        while start > 0 and lines[start - 1].strip() == "":
+            start -= 1
+        lines[start:end] = [""]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    # --------------------------------------------------------------- project keys
+    #
+    # [project] was readable everywhere and settable nowhere except `orientation`, so the
+    # appstore budget the whole status bar is measured against could not be changed from
+    # the thing doing the measuring.
+
+    def set_project(self, key, value):
+        """Rewrite one key of [project], creating it if the table lacks it."""
+        if key not in ("name", "budget_bytes", "resources", "header"):
+            raise ValueError(f"{key!r} is not a [project] key the editor sets")
+
+        if key == "budget_bytes":
+            value = int(value)
+            # The device ceiling, not the appstore one: someone shipping outside the
+            # appstore may legitimately want the larger cap, and the pipeline already
+            # reports against both. Below a floor the number stops meaning anything.
+            if not 1024 <= value <= 1048576:
+                raise ValueError("the budget must be between 1 KB and the device's 1 MB "
+                                 "ceiling")
+            line = f"budget_bytes = {value}"
+        else:
+            value = str(value).strip()
+            if not value:
+                raise ValueError(f"{key} cannot be empty")
+            if key == "name" and not re.fullmatch(r"[A-Za-z0-9 _.-]+", value):
+                raise ValueError("a project name may hold letters, digits, spaces, "
+                                 "underscores, dots and hyphens")
+            if key in ("resources", "header") and os.path.isabs(value):
+                raise ValueError(f"{key} is a path inside the project, not an absolute "
+                                 f"one")
+            line = f'{key} = "{value}"'
+
+        lines = open(self.path).read().split("\n")
+        start = next((i for i, l in enumerate(lines) if l.strip() == "[project]"), None)
+        if start is None:
+            raise ValueError("the manifest has no [project] table")
+        end = next((j for j in range(start + 1, len(lines))
+                    if lines[j].lstrip().startswith("[")), len(lines))
+
+        at = next((j for j in range(start + 1, end)
+                   if re.match(rf"\s*{key}\s*=", lines[j])), None)
+        if at is not None:
+            lines[at] = line
+        else:
+            at = end
+            while at > start and lines[at - 1].strip() == "":
+                at -= 1
+            lines[at:at] = [line]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
     # ----------------------------------------------------------------- importing
 
     def sheets(self):
@@ -2227,6 +2516,9 @@ class Project:
                 "colorkey": spec.get("colorkey"),
                 "autopick": list(spec.get("autopick", [])),
                 "semantic": {k: int(v) for k, v in spec.get("semantic", {}).items()},
+                # Sent as written, so "auto" and a forced true/false stay tellable apart.
+                "metatiles": spec.get("metatiles", "auto"),
+                "variants": list(spec.get("variants", [])),
                 "exclude": [int(e) for e in spec.get("exclude", [])
                             if not isinstance(e, (list, tuple))]}
 
@@ -2826,6 +3118,74 @@ class Project:
             f.write("\n".join(lines))
         self.reload()
 
+    def set_atlas_extras(self, name, metatiles=None, variants=None):
+        """The two atlas keys the Import form never owned.
+
+        `metatiles` composes each tile from four deduplicated quadrants -- a real saving
+        on a full sheet and a loss on a small carve, which is why the pipeline's default
+        is "auto" and why forcing it either way has to be possible. `variants` are palette
+        swaps: the same art recoloured costs a 16-byte palette instead of another copy of
+        every tile, and the pipeline verifies they really are recolours.
+
+        Validated by building the candidate, because "is this actually a recolour" is not
+        a question that can be answered from the manifest.
+        """
+        spec = next((a for a in self.man.get("atlas", []) if a.get("name") == name), None)
+        if not spec:
+            raise ValueError(f"no atlas named {name!r}")
+
+        want = []
+        if metatiles is not None:
+            if metatiles in ("", "auto"):
+                want.append(("metatiles", 'metatiles = "auto"' if metatiles == "auto"
+                             else None))
+            elif metatiles in (True, False, "true", "false"):
+                on = metatiles in (True, "true")
+                want.append(("metatiles", f"metatiles = {'true' if on else 'false'}"))
+            else:
+                frac = float(metatiles)
+                if not 0.0 < frac < 1.0:
+                    raise ValueError("a metatiles threshold is a fraction between 0 and "
+                                     "1 -- the saving quadrants must reach to be worth "
+                                     "taking")
+                want.append(("metatiles", f"metatiles = {frac}"))
+
+        if variants is not None:
+            for v in variants:
+                if not os.path.exists(self._safe(v)):
+                    raise ValueError(f"no such file: {v}")
+            probe = dict(spec)
+            probe["variants"] = list(variants)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    pa.pack_atlas(self.root, probe, self.orientation)
+            except pa.BuildError as e:
+                raise ValueError(str(e)) from None
+            want.append(("variants", "variants = " + json.dumps(list(variants))
+                         if variants else None))
+
+        if not want:
+            return
+
+        lines, start, end = self._atlas_block(name)
+        for key, value in want:
+            at = next((j for j in range(start, end)
+                       if re.match(rf"\s*{key}\s*=", lines[j])), None)
+            if at is not None and value:
+                lines[at] = value
+            elif at is not None:
+                del lines[at]
+                end -= 1
+            elif value:
+                at = end
+                while at > start and lines[at - 1].strip() == "":
+                    at -= 1
+                lines[at:at] = [value]
+                end += 1
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
     def add_atlas(self, name, rel, tile, region, max_tiles, exclude=(),
                   colorkey=None):
         """Append an [[atlas]] block. Appending keeps every existing comment intact."""
@@ -2883,7 +3243,74 @@ autopick = ["floor", "wall", "accent"]
                 floor = ch
         return floor, wall
 
-    def add_map(self, name, w, h, atlas, with_scene=True):
+    def add_map(self, name, w, h, atlas, with_scene=True, text=False):
+        """Create a map. New maps get their own `.pnxmap` unless `text` asks otherwise.
+
+        The default flipped when the source format landed: a map made in the editor is
+        going to be painted in the editor, where the ~90-character ceiling is the thing
+        that bites first and a readable diff buys nothing. `text=True` is the escape hatch
+        for a map meant to be hand-written, which is what the overworld example is.
+        """
+        if text:
+            return self._add_text_map(name, w, h, atlas, with_scene)
+
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise ValueError("name must be lowercase letters, digits and underscores")
+        if any(m["name"] == name for m in self.man.get("map", [])):
+            raise ValueError(f"a map named {name!r} already exists")
+        if not (3 <= w <= 255 and 3 <= h <= 255):
+            raise ValueError("width and height must be between 3 and 255")
+        specs = self.man.get("atlas", [])
+        atlas = atlas or (specs[0]["name"] if specs else None)
+        if not atlas:
+            raise ValueError("a map needs a tileset to draw with — import one first")
+
+        # Two entries, floor and wall, named by ROLE rather than index: every atlas the
+        # importer creates autopicks both, and a role survives the sheet being re-carved
+        # where a number would silently start pointing at different art.
+        tiles = [{"atlas": atlas, "index": "floor", "flip": "", "flags": 0},
+                 {"atlas": atlas, "index": "wall", "flip": "", "flags": pa.FLAG_SOLID}]
+        cells = []
+        for y in range(h):
+            for x in range(w):
+                edge = x in (0, w - 1) or y in (0, h - 1)
+                cells.append(1 if edge else 0)
+
+        source = f"maps/{name}.pnxmap"
+        path = self._safe(source)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        mf.write(path, w, h, [1, 1], tiles, cells, [])
+
+        block = f'''
+
+[[map]]
+name = "{name}"
+atlas = "{atlas}"
+out = "map_{name}.bin"
+# Cells, start and warps live in the file. See tools/pnx_mapfile.py for why.
+source = "{source}"
+'''
+        if with_scene:
+            block += self._scene_block_for(name)
+        with open(self.path, "a") as f:
+            f.write(block)
+        self.reload()
+
+    def _scene_block_for(self, name):
+        """A scene that loads a new map plus whatever makes it testable."""
+        refs = ""
+        sprites = [s["name"] for s in self.man.get("sprite", []) if s.get("name")]
+        fonts = [f["name"] for f in self.man.get("font", []) if f.get("name")]
+        if sprites:
+            refs += f"sprites = {json.dumps(sprites)}\n"
+        if fonts:
+            refs += f"fonts = {json.dumps(fonts)}\n"
+        return f'''
+[scene.{name}]
+map = "{name}"
+{refs}'''
+
+    def _add_text_map(self, name, w, h, atlas, with_scene=True):
         """Append a [[map]] block holding a walled, empty room, plus a scene for it.
 
         A map with no scene cannot be loaded, so creating one without the other would
@@ -2925,24 +3352,301 @@ rows = """
             # NOT `atlases`: the map declares its own tilesets, sizes its atlas pool and
             # streams them (M4d). A scene listing them too loads a second resident copy,
             # which the pipeline refuses -- so generating one made every new map unbuildable.
-            #
-            # Sprites and fonts are listed in full rather than left empty, because a scene
-            # that loads a map and nothing else draws no character and no text, which is
-            # not something anyone can test. Trim it in the Scenes tab: what is listed here
-            # is resident for the whole scene.
-            refs = ""
-            sprites = [s["name"] for s in self.man.get("sprite", []) if s.get("name")]
-            fonts = [f["name"] for f in self.man.get("font", []) if f.get("name")]
-            if sprites:
-                refs += f"sprites = {json.dumps(sprites)}\n"
-            if fonts:
-                refs += f"fonts = {json.dumps(fonts)}\n"
-            block += f'''
-[scene.{name}]
-map = "{name}"
-{refs}'''
+            block += self._scene_block_for(name)
         with open(self.path, "a") as f:
             f.write(block)
+        self.reload()
+
+    # ---------------------------------------------------------------------- dialog
+    #
+    # Text is content, so it lives in the manifest rather than as string literals in C --
+    # and until now that meant a text editor, because the tab that reads dialog (Fonts,
+    # for `charset = "auto"`) could only read it.
+
+    def dialogs(self):
+        """Every [dialog.*] and its pages, with what the text costs."""
+        out = []
+        for name, spec in sorted(self.man.get("dialog", {}).items()):
+            pages = list(spec.get("pages", []))
+            out.append({"name": name, "pages": pages,
+                        # What the blob will hold: each page NUL-terminated, plus its u16
+                        # offset and the entry's own index pair.
+                        "bytes": sum(len(p) + 1 for p in pages) + len(pages) * 2 + 4})
+        return out
+
+    def _dialog_block(self, name):
+        """(lines, start, end) for one [dialog.x] table, or None."""
+        lines = open(self.path).read().split("\n")
+        want = f"[dialog.{name}]"
+        for i, line in enumerate(lines):
+            if line.strip() == want:
+                end = next((j for j in range(i + 1, len(lines))
+                            if lines[j].lstrip().startswith("[")), len(lines))
+                return lines, i, end
+        return None
+
+    def dialog_users(self, name):
+        """Scenes that load dialog at all.
+
+        `dialog = true` loads the whole blob rather than one conversation, so removing an
+        entry only strands a scene when it is the LAST one -- which is the case worth
+        refusing, and the only one this reports.
+        """
+        if len(self.man.get("dialog", {})) > 1:
+            return []
+        return [f"scene {s}" for s, spec in self.man.get("scene", {}).items()
+                if spec.get("dialog")]
+
+    def save_dialog(self, name, pages):
+        """Create or rewrite one [dialog.*] entry."""
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise ValueError("a dialog name must be lowercase letters, digits and "
+                             "underscores -- it becomes a C identifier")
+        pages = [p for p in pages]
+        if not pages:
+            raise ValueError("a dialog entry with no pages cannot be built")
+        for p in pages:
+            # The packer encodes ASCII with errors="replace", so anything else becomes a
+            # literal '?' on the watch with nothing said. Refused here instead, where the
+            # character that will not survive is still on screen.
+            try:
+                p.encode("ascii")
+            except UnicodeEncodeError as e:
+                raise ValueError(
+                    f"{p[e.start:e.end]!r} is not ASCII, and the packer would replace it "
+                    f"with '?' — the glyph atlas has no room for a character no font was "
+                    f"asked to rasterise") from None
+            if "\n" in p:
+                raise ValueError("a page is one screenful and cannot contain a newline; "
+                                 "split it into two pages")
+
+        body = [f"[dialog.{name}]", "pages = ["]
+        body += [f'  {json.dumps(p)},' for p in pages]
+        body += ["]"]
+
+        block = self._dialog_block(name)
+        if block:
+            lines, start, end = block
+            gap = 0
+            while end - gap > start and lines[end - gap - 1].strip() == "":
+                gap += 1
+            lines[start:end] = body + [""] * gap
+        else:
+            lines = open(self.path).read().split("\n") + [""] + body
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def remove_dialog(self, name):
+        """Delete a conversation, once removing it would not strand a scene."""
+        block = self._dialog_block(name)
+        if not block:
+            raise ValueError(f"no dialog named {name!r}")
+        users = self.dialog_users(name)
+        if users:
+            raise ValueError(f"cannot remove {name!r} — it is the only dialog, and "
+                             f"{', '.join(users)} asks for dialog. Untick it there first.")
+        lines, start, end = block
+        while end < len(lines) and lines[end].strip() == "":
+            end += 1
+        while start > 0 and lines[start - 1].strip() == "":
+            start -= 1
+        lines[start:end] = [""]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    # ------------------------------------------------------------------ sprite specs
+    #
+    # The Sprites tab painted PNGs and stopped there, so a sprite drawn in the editor
+    # still had to be declared by hand before anything could load it -- the same dead end
+    # a map without a scene has. These are the declaration half: frames, the anim names
+    # game code uses, and palette variants.
+
+    def sprites(self):
+        """Every [[sprite]], with its built size where a build exists."""
+        out = []
+        for spec in self.man.get("sprite", []):
+            frames = [list(f) for f in spec.get("frames", [])]
+            entry = {"name": spec.get("name"), "sheet": spec.get("sheet"),
+                     "frames": frames,
+                     "anim": dict(spec.get("anim", {})),
+                     "variants": list(spec.get("variants", [])),
+                     "colorkey": list(spec["colorkey"]) if spec.get("colorkey") else None,
+                     "w": frames[0][2] if frames else None,
+                     "h": frames[0][3] if frames else None,
+                     "bytes": None}
+            blob = os.path.join(self.res, spec.get("out", f"{entry['name']}.bin"))
+            if os.path.exists(blob):
+                entry["bytes"] = os.path.getsize(blob)
+            out.append(entry)
+        return out
+
+    def validate_sprite(self, name, sheet, frames, anim=None, variants=(),
+                        colorkey=None):
+        """Run a candidate sprite through the REAL pack_sprite and report what it says.
+
+        Same bargain as validate_atlas: not a second implementation of the frame checks,
+        the actual one -- so a frame running off the sheet, a set of frames that disagree
+        on size, an odd pixel count that cannot pack at 4bpp, or an anim naming a frame
+        that does not exist all fail here rather than after the block is in the manifest.
+        """
+        spec = {"name": name or "candidate", "sheet": sheet,
+                "frames": [list(f) for f in frames],
+                "out": f"{name or 'candidate'}.bin"}
+        if anim:
+            spec["anim"] = dict(anim)
+        if variants:
+            spec["variants"] = list(variants)
+        if colorkey:
+            spec["colorkey"] = list(colorkey)
+        if not spec["frames"]:
+            return {"ok": False, "error": "a sprite needs at least one frame"}
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                built = pa.pack_sprite(self.root, spec, self.orientation)
+        except pa.BuildError as e:
+            return {"ok": False, "error": str(e)}
+        except Exception as e:                           # noqa: BLE001
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        return {"ok": True, "frames": len(spec["frames"]),
+                "w": built["w"], "h": built["h"],
+                "variants": len(spec.get("variants", []))}
+
+    def _sprite_block(self, name):
+        """(lines, start, end) for one [[sprite]], stepping over its [sprite.anim]."""
+        lines = open(self.path).read().split("\n")
+        start = None
+        for i, line in enumerate(lines):
+            if line.strip() == "[[sprite]]":
+                nxt = next((j for j in range(i + 1, len(lines))
+                            if lines[j].lstrip().startswith("[")), len(lines))
+                if any(re.match(rf'^name\s*=\s*"{re.escape(name)}"', lines[j].strip())
+                       for j in range(i + 1, nxt)):
+                    start = i
+                    break
+        if start is None:
+            return None
+        end = len(lines)
+        for j in range(start + 1, len(lines)):
+            s = lines[j].lstrip()
+            if s.startswith("[") and not s.startswith("[sprite."):
+                end = j
+                break
+        return lines, start, end
+
+    def sprite_users(self, name):
+        """The scenes that load this sprite, so removing it can refuse and say which."""
+        return [f"scene {s}" for s, spec in self.man.get("scene", {}).items()
+                if name in spec.get("sprites", [])]
+
+    def save_sprite(self, name, sheet, frames, anim=None, variants=(), colorkey=None):
+        """Create or rewrite one [[sprite]] block, validated the way the build will."""
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise ValueError("name must be lowercase letters, digits and underscores")
+
+        anim = dict(anim or {})
+        for a in anim:
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", a):
+                raise ValueError(f"anim name {a!r} must be lowercase letters, digits and "
+                                 f"underscores -- it becomes a C identifier")
+
+        check = self.validate_sprite(name, sheet, frames, anim, variants, colorkey)
+        if not check["ok"]:
+            raise ValueError(check["error"])
+
+        frame_line = ("frames = ["
+                      + ", ".join("[" + ", ".join(str(int(v)) for v in f) + "]"
+                                  for f in frames) + "]")
+        want = [
+            ("name", f'name = "{name}"'),
+            ("sheet", f'sheet = "{sheet}"'),
+            ("frames", frame_line),
+            ("out", f'out = "{name}.bin"'),
+            ("colorkey", ("colorkey = [" + ", ".join(str(int(c)) for c in colorkey) + "]")
+                         if colorkey else None),
+            ("variants", "variants = " + json.dumps(list(variants)) if variants else None),
+        ]
+
+        block = self._sprite_block(name)
+        if not block:
+            body = [v for _, v in want if v]
+            # The subtable goes last, because it closes the block: any simple key written
+            # after it would land in [sprite.anim] instead of on the sprite.
+            if anim:
+                body += ["", "[sprite.anim]"] + [f"{k} = {int(v)}" for k, v in anim.items()]
+            lines = open(self.path).read().split("\n") + ["", "[[sprite]]"] + body
+            with open(self.path, "w") as f:
+                f.write("\n".join(lines))
+            self.reload()
+            return
+
+        # Key at a time, for the same reason save_scene does it: replacing the block would
+        # be shorter and would eat the comments inside it. The example's npc sprite
+        # explains its palette variants in two lines sitting directly above the key.
+        lines, start, end = block
+        anim_at = next((j for j in range(start + 1, end)
+                        if lines[j].strip() == "[sprite.anim]"), None)
+        simple_end = anim_at if anim_at is not None else end
+
+        for key, value in want:
+            at = next((j for j in range(start + 1, simple_end)
+                       if re.match(rf"\s*{key}\s*=", lines[j])), None)
+            if at is not None and value:
+                lines[at] = value
+            elif at is not None:
+                del lines[at]
+                simple_end -= 1
+                end -= 1
+                if anim_at is not None:
+                    anim_at -= 1
+            elif value:
+                at = simple_end
+                while at > start and lines[at - 1].strip() == "":
+                    at -= 1
+                lines[at:at] = [value]
+                simple_end += 1
+                end += 1
+                if anim_at is not None:
+                    anim_at += 1
+
+        # The anim subtable is replaced wholesale rather than key by key: an anim name is
+        # a bare `name = index` pair with nothing to explain, and the set of them changes
+        # as a set when frames are added or removed.
+        if anim_at is not None:
+            stop = next((j for j in range(anim_at + 1, end)
+                         if lines[j].lstrip().startswith("[")), end)
+            lines[anim_at:stop] = (["[sprite.anim]"]
+                                   + [f"{k} = {int(v)}" for k, v in anim.items()]
+                                   if anim else [])
+        elif anim:
+            at = end
+            while at > start and lines[at - 1].strip() == "":
+                at -= 1
+            lines[at:at] = ["", "[sprite.anim]"] + [f"{k} = {int(v)}"
+                                                    for k, v in anim.items()]
+
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def remove_sprite(self, name):
+        """Delete a [[sprite]], once no scene loads it. The art on disk is left alone."""
+        block = self._sprite_block(name)
+        if not block:
+            raise ValueError(f"no sprite named {name!r}")
+        users = self.sprite_users(name)
+        if users:
+            raise ValueError(f"cannot remove {name!r} — {', '.join(users)} loads it. "
+                             f"Drop it there first.")
+        lines, start, end = block
+        while end < len(lines) and lines[end].strip() == "":
+            end += 1
+        while start > 0 and lines[start - 1].strip() == "":
+            start -= 1
+        lines[start:end] = [""]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
         self.reload()
 
     # ------------------------------------------------------------------ map lifecycle
@@ -2951,6 +3655,120 @@ map = "{name}"
     # trying a layout and throwing it away -- meant hand-editing the manifest. Both refuse
     # while something still points at the map, because a dangling warp destination and a
     # scene naming a map that is gone both fail the build a long way from the cause.
+
+    def map_palettes(self, name):
+        """The palette variants a map may pick, from the atlases it draws with.
+
+        A variant is named for its file, which is how the pipeline names it too -- so the
+        list here is exactly the set `palette =` will accept.
+        """
+        spec = next((m for m in self.man.get("map", []) if m["name"] == name), None)
+        if not spec:
+            return []
+        drawn = set(self.map_atlases(spec))
+        out = []
+        for a in self.man.get("atlas", []):
+            if a.get("name") not in drawn:
+                continue
+            for v in a.get("variants", []):
+                vname = os.path.splitext(os.path.basename(v))[0]
+                if vname not in out:
+                    out.append(vname)
+        return out
+
+    def set_map_props(self, name, palette=None, worldtile=None, atlas_slots=None,
+                      bank_bytes=None, resident=None):
+        """The map keys save_map never touched: the M4b palette variant and the M4d
+        streaming controls.
+
+        Every one of these was reachable only by hand, which meant the streaming work M4d
+        measured so carefully could not be tuned from the editor that reports its cost.
+        A None leaves the key alone; the string "" removes it, which is how a map goes
+        back to the pipeline's own choice.
+        """
+        spec = next((m for m in self.man.get("map", []) if m["name"] == name), None)
+        if not spec:
+            raise ValueError(f"no map named {name!r}")
+
+        want = []
+        if palette is not None:
+            if palette == "":
+                want.append(("palette", None))
+            else:
+                known = self.map_palettes(name)
+                if palette not in known:
+                    raise ValueError(
+                        f"{palette!r} is not a palette variant of this map's tilesets "
+                        f"(available: {', '.join(known) or 'none'})")
+                want.append(("palette", f'palette = "{palette}"'))
+
+        if worldtile is not None:
+            if worldtile in ("", "auto"):
+                want.append(("worldtile", 'worldtile = "auto"' if worldtile == "auto"
+                             else None))
+            else:
+                wt = int(worldtile)
+                # Power of two, because a cell finds its WorldTile by shifting rather than
+                # dividing -- which is what makes it free per drawn tile.
+                if not pa.WORLDTILE_MIN <= wt <= pa.WORLDTILE_MAX or wt & (wt - 1):
+                    raise ValueError(
+                        f"worldtile must be a power of two between {pa.WORLDTILE_MIN} "
+                        f"and {pa.WORLDTILE_MAX}")
+                want.append(("worldtile", f"worldtile = {wt}"))
+
+        if atlas_slots is not None:
+            if atlas_slots == "":
+                want.append(("atlas_slots", None))
+            else:
+                n = int(atlas_slots)
+                count = len(self.map_atlases(spec))
+                if not 1 <= n <= count:
+                    raise ValueError(
+                        f"atlas_slots must be between 1 and {count}, the number of "
+                        f"tilesets this map declares -- outside that it is either a pool "
+                        f"too small for one atlas or one that can never fill")
+                want.append(("atlas_slots", f"atlas_slots = {n}"))
+
+        if bank_bytes is not None:
+            if bank_bytes == "":
+                want.append(("bank_bytes", None))
+            else:
+                b = int(bank_bytes)
+                if b < 512:
+                    raise ValueError(
+                        "bank_bytes below 512 is under one WorldTile's worth of cells, so "
+                        "every bank would hold a single tile and the map would cost a "
+                        "resource each")
+                want.append(("bank_bytes", f"bank_bytes = {b}"))
+
+        if resident is not None:
+            want.append(("resident", "resident = true" if resident else None))
+
+        if not want:
+            return
+
+        lines, start, end = self._map_block(name)
+        # Anchored after `name`, which is always the first key: inserting further down
+        # risks landing inside the `rows = """..."""` block, and anything after a
+        # [map.legend] subtable would bind to the subtable instead of the map.
+        anchor = next((j for j in range(start + 1, end)
+                       if re.match(r"\s*name\s*=", lines[j])), start)
+        for key, value in want:
+            at = next((j for j in range(start + 1, end)
+                       if re.match(rf"\s*{key}\s*=", lines[j])), None)
+            if at is not None and value:
+                lines[at] = value
+            elif at is not None:
+                del lines[at]
+                end -= 1
+                if at <= anchor:
+                    anchor -= 1
+            elif value:
+                lines[anchor + 1:anchor + 1] = [value]
+                end += 1
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
 
     def map_users(self, name):
         """What still points at this map: warps aimed at it, and scenes that load it."""
@@ -3161,6 +3979,102 @@ map = "{name}"
         self.reload()
 
     # ------------------------------------------------------------------- saving
+
+    def save_source_map(self, name, w, h, cells, tiles, start, warps):
+        """Write a `.pnxmap` map back to its own file.
+
+        The manifest is not touched at all: a source map's grid, start and warps live in
+        the file, so there is nothing here for TOML to hold and nothing that could drift
+        out of step with it.
+        """
+        spec = next((m for m in self.man.get("map", []) if m["name"] == name), None)
+        if not spec:
+            raise ValueError(f"no map named {name!r}")
+        if "source" not in spec:
+            raise ValueError(f"map {name!r} is authored as `rows`, not a source file")
+
+        path = self._safe(spec["source"])
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            mf.write(path, w, h, start, tiles, cells, warps)
+        except mf.MapFileError as e:
+            raise ValueError(str(e)) from None
+        self.reload()
+
+    def migrate_map(self, name, source=None):
+        """Move a `rows` map into its own `.pnxmap`, leaving the manifest pointing at it.
+
+        The one-way door this is NOT: `to_rows` in pnx_mapfile turns a small binary map
+        back into text, so a project that tries this and dislikes it is not stuck. What it
+        does cost is the readable git diff, which is why `rows` stays supported and why
+        the overworld example is deliberately left in it.
+        """
+        spec = next((m for m in self.man.get("map", []) if m["name"] == name), None)
+        if not spec:
+            raise ValueError(f"no map named {name!r}")
+        if "source" in spec:
+            raise ValueError(f"map {name!r} already has a source file")
+
+        doc = self.map_doc(spec)
+        missing = [t["ch"] for t in doc["tiles"] if t.get("missing")]
+        if missing:
+            raise ValueError(
+                f"map {name!r} paints {', '.join(repr(c) for c in sorted(set(missing)))}, "
+                f"which the legend does not define — fix that before converting, or the "
+                f"tiles would be frozen as index 0")
+
+        source = source or f"maps/{name}.pnxmap"
+        path = self._safe(source)
+        if os.path.exists(path):
+            raise ValueError(f"{source} already exists")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Roles travel as roles rather than being resolved to whatever number they hold
+        # today, which is the property `autopick` gives and the one thing a table of raw
+        # indices would quietly lose.
+        try:
+            mf.write(path, doc["w"], doc["h"], doc["start"],
+                     [{k: t[k] for k in ("atlas", "index", "flip", "flags")}
+                      for t in doc["tiles"]],
+                     doc["cells"], doc["warps"])
+        except mf.MapFileError as e:
+            raise ValueError(str(e)) from None
+
+        # The manifest keeps everything that is about the map's PLACE in the project --
+        # its atlases, palette and streaming keys -- and loses only what the file now owns.
+        lines, start_i, end_i = self._map_block(name)
+        out = []
+        # `rows` is a triple-quoted block and `warps` is routinely a multi-line array --
+        # the worldtiles example writes one warp per line. Dropping only the line the key
+        # sits on left the continuation lines behind as bare TOML, which parses as
+        # nonsense; so each dropped key is consumed to its real end.
+        depth, in_rows, drop = 0, False, False
+        for line in lines[start_i:end_i]:
+            if in_rows:
+                if '"""' in line:
+                    in_rows = False
+                continue
+            if depth:
+                depth += line.count("[") - line.count("]")
+                continue
+
+            key = (re.match(r"\s*([a-z_]+)\s*=", line) or [None, None])[1]
+            if key in ("rows", "start", "warps"):
+                value = line.split("=", 1)[1]
+                if key == "rows":
+                    in_rows = '"""' not in value.strip()[3:]
+                    out.append(f'source = "{source}"')
+                else:
+                    depth = value.count("[") - value.count("]")
+                continue
+            if line.lstrip().startswith("[map.legend."):
+                break
+            out.append(line)
+        lines[start_i:end_i] = out
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+        return {"source": source, "tiles": len(doc["tiles"]),
+                "bytes": os.path.getsize(path)}
 
     def save_map(self, name, rows, start, warps, atlas=None, atlases=None):
         """Rewrite one map's rows/start/warps in place, touching nothing else.
@@ -3664,6 +4578,10 @@ button:disabled{opacity:.45;cursor:not-allowed}
        pipeline's own checks exist to catch everywhere else. -->
   <button id="tabscenes" class="act" data-t="scenes"><i>◳</i><em>Scenes</em></button>
   <button id="tabpixel" class="act" data-t="pixel"><i>✎</i><em>Sprites</em></button>
+  <!-- Dialog sits with the content tabs rather than under Fonts, even though `charset =
+       "auto"` derives a font's glyph set from it: what a character says is content, and
+       which typeface says it is not. -->
+  <button id="tabdialog" class="act" data-t="dialog"><i>❝</i><em>Dialog</em></button>
   <button id="tabfonts" class="act" data-t="fonts"><i>A</i><em>Fonts</em></button>
   <button id="tabimport" class="act" data-t="import"><i>⇥</i><em>Import</em></button>
   <button id="tabcode" class="act" data-t="code"><i>&lt;/&gt;</i><em>Code</em></button>
@@ -3751,7 +4669,28 @@ button:disabled{opacity:.45;cursor:not-allowed}
         <button id="renmap" title="rename this map, carrying warps and scenes with it"
                 >Rename…</button>
         <button id="delmap" title="delete this map">Delete…</button>
+        <button id="cvtmap" title="move this map into its own .pnxmap file"
+                >Convert…</button>
       </div>
+      <!-- The M4b palette variant and the M4d streaming controls. Reachable only by hand
+           until now, so the streaming work M4d measured could not be tuned from the tool
+           that reports its cost. "auto" is the pipeline's own choice and the default. -->
+      <div class="fields col" style="margin-top:.5rem">
+        <label>Palette<select id="mppal"></select></label>
+        <label>WorldTile<select id="mpwt">
+          <option value="auto">auto</option>
+          <option value="4">4</option><option value="8">8</option>
+          <option value="16">16</option><option value="32">32</option>
+        </select></label>
+        <label>Atlas slots<input id="mpslots" type="number" min="1" max="255"
+          placeholder="auto" title="how many of the map's tilesets stay resident"></label>
+        <label>Bank bytes<input id="mpbank" type="number" min="512" step="512"
+          placeholder="default" title="how large a WorldTile bank resource may get"></label>
+        <label class="check"><input id="mpres" type="checkbox"> hold whole
+          <span class="dim" title="a slot per WorldTile: nothing is ever evicted, which is
+            what a map cost before WorldTiles existed">(resident)</span></label>
+      </div>
+      <small id="mplog" class="dim">—</small>
     </section>
     <!-- What the watch actually shows of this map. Drag the blue grip to move it. -->
     <section><h2>Camera</h2>
@@ -3796,6 +4735,21 @@ button:disabled{opacity:.45;cursor:not-allowed}
              named per tile in the tile picker, which needs a packed atlas to point at. -->
         <label title="roles picked from the art at build time, comma separated"
                >Autopick<input id="apick" placeholder="floor, wall, accent"
+                               autocomplete="off"></label>
+        <!-- Metatiles compose each tile from four deduplicated quadrants: a real saving on
+             a full sheet, a loss on a small carve, which is why "auto" weighs it per atlas
+             rather than picking once for the project. A metatiled atlas cannot be drawn
+             mirrored, so forcing it off is what makes flipped tiles available. -->
+        <label title="compose tiles from four deduplicated 8x8 quadrants"
+               >Metatiles<select id="ameta">
+          <option value="auto">auto</option>
+          <option value="true">always</option>
+          <option value="false">never</option>
+        </select></label>
+        <!-- Palette swaps: the same art recoloured costs a 16-byte palette instead of
+             another copy of every tile. The pipeline checks they really are recolours. -->
+        <label title="comma-separated PNGs, same layout as the base sheet"
+               >Variants<input id="avars" placeholder="art/dungeon_ice.png"
                                autocomplete="off"></label>
         <!-- Typing the name of an atlas that already exists turns this into an edit.
              Before, Add was the only door: a carve you got wrong was in the manifest for
@@ -3851,6 +4805,24 @@ button:disabled{opacity:.45;cursor:not-allowed}
   <!-- Fonts. The layout puts the device-sized canvas next to the controls rather than
        below them, because the whole point is watching the text change as you drag the
        threshold -- a preview you have to scroll to is a preview you stop looking at. -->
+  <!-- Dialog. One blob for every conversation, because a resource read costs ~29us per
+       CALL regardless of size -- so the cost shown per entry is text, not overhead. -->
+  <div id="dialog" style="display:none;flex:1;overflow:auto;padding:1.25rem">
+    <section>
+      <h2>Dialog</h2>
+      <p class="dim" style="max-width:60ch">
+        One page per line. A page is one screenful — the engine does not scroll them.
+        Fonts with <code>charset = "auto"</code> rasterise exactly the characters used
+        here, so adding a word can add a glyph.
+      </p>
+      <div id="dialoglist"></div>
+      <div class="mini" style="margin-top:.8rem">
+        <button id="dlgnew">New conversation…</button>
+      </div>
+      <div id="dialoglog" class="mini"></div>
+    </section>
+  </div>
+
   <!-- Scenes. The framework's only load point, and the unit the scene arena is sized
        from -- so each row carries its own resident cost rather than leaving that to a
        build. Everything listed here is held for the whole scene. -->
@@ -3938,6 +4910,17 @@ button:disabled{opacity:.45;cursor:not-allowed}
             is copied into <code>art/fonts/</code> so the build works elsewhere.</small>
           <button id="faddbtn" class="primary">Add font</button>
         </section>
+
+        <!-- `add_font` had no counterpart, so a face imported to try it out could only be
+             taken out by hand. The TTF it was rasterised from is deliberately left on
+             disk. -->
+        <section><h2>Declared fonts</h2>
+          <div class="fields col">
+            <label>Font<select id="fdelsel"></select></label>
+          </div>
+          <button id="fdelbtn">Remove font</button>
+          <small id="fdellog">The TTF stays in <code>art/fonts/</code>.</small>
+        </section>
       </div>
 
       <div class="fontview">
@@ -3999,10 +4982,64 @@ button:disabled{opacity:.45;cursor:not-allowed}
           <button id="pxsave" class="primary">Save PNG</button>
           <small id="pxnote">Saved into the project, then importable as a sprite.</small>
         </section>
+
+        <!-- Frames picked off a sheet. The declare form below can only describe a
+             vertical stack, which is the layout this engine's own examples happen to use
+             and not the one most sheets ship in — a run of poses across a row, several
+             rows to a character. Anything else meant writing the rectangles by hand. -->
+        <section><h2>From sheet</h2>
+          <div class="fields col">
+            <label>Sheet<select id="shsheet"></select></label>
+            <label>Frame w<input id="shfw" type="number" value="16" min="1" max="255"></label>
+            <label>Frame h<input id="shfh" type="number" value="24" min="1" max="255"></label>
+            <label>Origin x<input id="shox" type="number" value="0" min="0"
+              title="where the grid starts, for sheets with a border"></label>
+            <label>Origin y<input id="shoy" type="number" value="0" min="0"></label>
+            <label>Gap x<input id="shgx" type="number" value="0" min="0"
+              title="spacing between frames, for sheets drawn on a grid with gutters"></label>
+            <label>Gap y<input id="shgy" type="number" value="0" min="0"></label>
+          </div>
+          <div class="row" style="margin-top:.4rem">
+            <button id="shslice" class="primary">Slice</button>
+            <button id="shclear">Clear picks</button>
+          </div>
+          <small id="shlog">Click frames in the order the animation plays.</small>
+        </section>
+
+        <!-- The declaration half. Painting a PNG left the sprite undeclared, so nothing
+             could load it — the same dead end a map without a scene has. Frames come from
+             the picks above when there are any, and from the canvas size otherwise. -->
+        <section><h2>Declare</h2>
+          <div class="fields col">
+            <label>Sprite<select id="spsel"><option value="">— new —</option></select></label>
+            <label>Name<input id="spname" placeholder="hero" size="10"></label>
+            <label>Sheet<select id="spsheet"></select></label>
+            <label>Frame w<input id="spfw" type="number" value="16" min="1" max="255"></label>
+            <label>Frame h<input id="spfh" type="number" value="24" min="1" max="255"></label>
+            <label>Frames<input id="spn" type="number" value="1" min="1" max="64"
+              title="stacked vertically down the sheet"></label>
+            <label>Anim<input id="spanim" placeholder="stand,step_a,step_b" size="12"
+              title="one name per frame, in order — these become C identifiers"></label>
+          </div>
+          <div class="row" style="margin-top:.4rem">
+            <button id="spsave" class="primary">Save sprite</button>
+            <button id="spdel">Remove</button>
+          </div>
+          <small id="splog">—</small>
+        </section>
       </div>
 
       <div class="fontview">
-        <div class="plate wide"><h3>Canvas</h3>
+        <!-- The sliced sheet. Clicking a cell picks it as the next frame; clicking a
+             picked one drops it and renumbers the rest, because the order IS the anim
+             index and a gap in it would be a frame nobody can name. -->
+        <div class="plate wide" id="shplate" style="display:none">
+          <h3>Sheet frames <small id="shcount" class="dim"></small></h3>
+          <div id="shgrid" class="tiles"></div>
+          <small class="dim">Click to pick in order · double-click a picked frame to
+            edit it on the canvas</small>
+        </div>
+        <div class="plate wide"><h3 id="pxtitle">Canvas</h3>
           <div id="pxwrap"><canvas id="pxcv"></canvas></div>
         </div>
         <div class="plate wide"><h3>Actual size</h3>
@@ -4048,6 +5085,24 @@ button:disabled{opacity:.45;cursor:not-allowed}
        weight as the things you use every minute. -->
   <div id="sdk" style="display:none;flex:1;overflow:auto;padding:1.5rem">
     <div class="sdkwrap">
+      <!-- [project]. Readable everywhere and settable nowhere, which meant the appstore
+           budget the whole status bar measures against could not be changed from the
+           thing doing the measuring. -->
+      <div class="plate wide"><h3>Project</h3>
+        <div class="fields col">
+          <label>Name<input id="prname" size="18"></label>
+          <label>Budget bytes<input id="prbudget" type="number" min="1024"
+            max="1048576" step="1024"
+            title="the appstore cap is 262144; the device ceiling is 1048576"></label>
+          <label>Resources<input id="prres" size="18"></label>
+          <label>Header<input id="prhdr" size="24"></label>
+        </div>
+        <button id="prsave" class="primary">Save project</button>
+        <small id="prlog">The appstore rejects bundles over 262,144 B. The device's own
+          ceiling is 1,048,576 B — shipping is the constraint that binds. Changing
+          Resources or Header relocates build output; the blobs already written stay
+          where they are.</small>
+      </div>
       <!-- Updates. The editor is a file someone downloaded once; without this, a fix
            reaches them only if they think to check a releases page they may never have
            seen. Three steps with the user between each, deliberately: this binary carries
@@ -4214,7 +5269,10 @@ function say(text,bad){
 // to come back through /api/state rather than being invented in the page -- otherwise
 // the palette shows a tile the manifest does not have.
 async function reload(){
-  const keep=S.map&&S.map.name, dirty=S.dirty, rows=S.map&&S.map.rows;
+  const keep=S.map&&S.map.name, dirty=S.dirty;
+  // Cells, not rows: painting writes the cell grid now, so preserving `rows` across a
+  // reload would restore the state the map had before the last brush stroke.
+  const cells=S.map&&S.map.cells, tiles=S.map&&S.map.tiles;
   const start=S.map&&S.map.start, warps=S.map&&S.map.warps;
   const sets=S.map&&S.map.atlases;
   S.data=await (await fetch('/api/state')).json();
@@ -4224,10 +5282,16 @@ async function reload(){
   // Unsaved painting survives the round trip. Reloading state to pick up one new legend
   // character would otherwise throw away every edit made since the last save, which is
   // the kind of loss that teaches people not to touch a feature.
-  if(dirty&&rows&&haveMap()){
-    S.map.rows=rows; S.map.start=start; S.map.warps=warps;
+  if(dirty&&cells&&haveMap()){
+    // The tile table is merged rather than replaced: a character just minted through the
+    // picker arrives from the server as a NEW entry, and dropping the server's copy would
+    // throw the new tile away the moment it was added.
+    if(tiles&&S.map.tiles&&S.map.tiles.length>=tiles.length) {
+      tiles.forEach((old,i)=>{ if(S.map.tiles[i]) Object.assign(S.map.tiles[i],old) });
+    }
+    S.map.cells=cells; S.map.start=start; S.map.warps=warps;
     if(sets){ S.map.atlases=sets; S.map.atlas=sets[0] }
-    S.dirty=true; mark(); draw(); info();
+    S.dirty=true; mark(); drawLegend(); draw(); info();
   }
 }
 
@@ -4331,14 +5395,21 @@ function drawLegend(){
   const list=mapAtlases();
   if(!list.length){ el.innerHTML='<small>No atlas built yet — press Build.</small>'; return }
 
-  // Grouped by the atlas each character draws from, because with several tilesets in one
-  // map an ungrouped strip of tiles is just a pile: which tileset a tile came from is the
-  // thing you are actually choosing between.
-  const chars=Object.keys(LEG());
-  const usable=chars.filter(c=>resolve(c));
-  const missing=chars.filter(c=>!resolve(c));
+  // The palette is the map's TILE TABLE, not the project legend -- which is what lets one
+  // canvas draw both authoring formats. A `rows` map's entries carry the character they
+  // came from and show it; a `.pnxmap`'s show their index, because there is no character
+  // and above ~90 tiles there could not be one.
+  //
+  // Grouped by atlas, because with several tilesets in one map an ungrouped strip is just
+  // a pile: which tileset a tile came from is the thing you are choosing between.
+  const tiles=(S.map&&S.map.tiles)||[];
+  const usable=[], missing=[];
+  tiles.forEach((t,i)=>{ (resolveTile(t)?usable:missing).push(i) });
   const groups=new Map(list.map(a=>[a.name,[]]));
-  for(const ch of usable) groups.get(resolve(ch).atlas).push(ch);
+  for(const i of usable){
+    const r=resolveTile(tiles[i]);
+    if(groups.has(r.atlas)) groups.get(r.atlas).push(i);
+  }
 
   for(const [name,members] of groups){
     if(list.length>1){
@@ -4348,32 +5419,78 @@ function drawLegend(){
     }
     if(!members.length){
       const p=document.createElement('small');
-      p.className='dim'; p.textContent='no characters yet';
+      p.className='dim'; p.textContent='no tiles yet';
       el.appendChild(p);
     }
-    for(const ch of members){
-      const r=resolve(ch);
-      const img=new Image(); img.src=r.uri; S.img[ch]=img;
+    for(const i of members){
+      const t=tiles[i], r=resolveTile(t);
+      const img=new Image(); img.src=r.uri; S.img[i]=img;
       img.onload=draw;
 
+      const label=t.ch!==undefined?t.ch:String(i);
       const b=document.createElement('button');
-      b.className='tile'+(S.ch===ch?' sel':'');
-      b.title=`${ch} → ${r.role?r.role:'tile '+r.index} of ${r.atlas}`
+      b.className='tile'+(S.ti===i?' sel':'');
+      b.title=`${label} → ${r.role?r.role:'tile '+r.index} of ${r.atlas}`
         +(r.flip.length?` flipped ${r.flip.join('')}`:'')
         +(r.flags.length?` [${r.flags.join(' ')}]`:'')
-        +(scopeOf(ch)==='map'?' — this map only':' — project-wide');
-      b.innerHTML=`<img src="${r.uri}" alt="${ch}" style="${flipCss(r.flip)}"><b>${ch}</b>`
+        +(t.ch!==undefined?(scopeOf(t.ch)==='map'?' — this map only':' — project-wide'):'');
+      b.innerHTML=`<img src="${r.uri}" alt="${label}" style="${flipCss(r.flip)}">`
+        +`<b>${label}</b>`
         +(r.flags.length?`<i class="fmark">${flagMark(r.flags)}</i>`:'');
-      b.onclick=()=>{S.ch=ch;S.mode='paint';drawLegend();tool();tileInfo()};
+      b.onclick=()=>{ selectTile(i) };
       el.appendChild(b);
     }
   }
-  if(!usable.length||!S.img[S.ch]) S.ch=usable[0]||null;
+  // Re-derived every time, not only when the index has gone stale. `ti` can stay valid
+  // across a change that makes `ch` wrong -- converting a map to a file keeps index 1 and
+  // takes its character away -- and a leftover `ch` sends the tile panel down the legend
+  // path for a map that has no legend.
+  if(!usable.length||S.img[S.ti]===undefined) selectTile(usable.length?usable[0]:null,true);
+  else selectTile(S.ti,true);
 
   $('#painthint').innerHTML = missing.length
-    ? `<span style="color:var(--bad)">${missing.map(whyMissing).join('; ')}.</span>`
+    ? `<span style="color:var(--bad)">${missing.map(i=>whyTileMissing(tiles[i],i))
+        .join('; ')}.</span>`
     : 'Click to paint. <kbd>W</kbd> sets a warp, <kbd>S</kbd> the start.';
   tileInfo();
+}
+
+// One selection, two names. `ti` is what paints; `ch` is the legend character behind it,
+// which only a `rows` map has and which the legend sidebar still edits. Keeping both in
+// step here is what stops the two halves of the Maps tab disagreeing about what is
+// selected.
+function selectTile(i,quiet){
+  S.ti=i;
+  const t=(S.map&&S.map.tiles&&i!=null)?S.map.tiles[i]:null;
+  S.ch=(t&&t.ch!==undefined)?t.ch:null;
+  if(quiet) return;
+  S.mode='paint'; drawLegend(); tool(); tileInfo();
+}
+
+// A tile table entry resolved against the built atlases: the same job resolve(ch) does
+// for a legend character, minus the character.
+function resolveTile(t){
+  if(!t) return null;
+  const a=atlas(t.atlas);
+  if(!a) return null;
+  const byIndex=typeof t.index==='number';
+  const idx=byIndex?t.index:a.roles[String(t.index).toLowerCase()];
+  if(idx===undefined||idx<0||idx>=a.tiles.length) return null;
+  const flip=[...((t.flip)||'')];
+  return {uri:a.tiles[idx], index:idx, atlas:a.name, role:byIndex?null:t.index,
+          flags:t.flag_names||[], flip};
+}
+
+function whyTileMissing(t,i){
+  const label=t.ch!==undefined?`'${t.ch}'`:`tile ${i}`;
+  if(t.missing) return `${label} has no legend entry`;
+  if(t.atlas && !mapAtlases().some(a=>a.name===t.atlas))
+    return `${label} draws from ${t.atlas}, which this map does not use`;
+  const a=atlas(t.atlas);
+  if(!a) return `${label} has no atlas to draw from`;
+  if(typeof t.index==='number')
+    return `${label} names tile ${t.index} of ${a.name}, which packed ${a.tiles.length}`;
+  return `${label} names role "${t.index}", which ${a.name} does not define`;
 }
 
 // One glyph per flag, so the palette shows behaviour without a tooltip. Solid and warp
@@ -4389,8 +5506,77 @@ function flagMark(flags){
 // project-wide, and a flag change means something to every map that paints the character,
 // not just the one on screen. Save map saves the ROWS; this is not part of them.
 
+// The tile panel for a map whose cells live in a file. Everything here edits the map's
+// own tile table and is saved with the map -- no legend, no project-wide effect, and no
+// character to run out of.
+function tileInfoSource(){
+  const box=$('#tileinfo');
+  const t=S.map.tiles[S.ti], r=resolveTile(t);
+  if(!r){ box.innerHTML='<small class="dim">no tile selected</small>'; return }
+  const known=S.data.flags||{solid:1,warp:2};
+  box.innerHTML='';
+
+  const head=document.createElement('div');
+  head.className='mini';
+  head.innerHTML=`<img src="${r.uri}" style="width:32px;height:32px;`
+    +`image-rendering:pixelated;${flipCss(r.flip)}">`
+    +`<small><b>#${S.ti}</b> → ${r.role?'role "'+r.role+'"':'tile '+r.index}`
+    +`<br><span class="dim">${r.atlas}</span></small>`;
+  box.appendChild(head);
+
+  const flags=document.createElement('div');
+  flags.style.margin='.4rem 0';
+  for(const name of Object.keys(known)){
+    const on=(t.flag_names||[]).includes(name);
+    const l=document.createElement('label');
+    l.className='mini';
+    l.innerHTML=`<input type="checkbox" ${on?'checked':''}> ${name}`
+      +` <span class="dim">0x${known[name].toString(16).padStart(2,'0')}</span>`;
+    l.querySelector('input').onchange=ev=>{
+      const next=(t.flag_names||[]).filter(f=>f!==name);
+      if(ev.target.checked) next.push(name);
+      t.flag_names=next;
+      // The byte is what the file stores; the names are what the page shows. Both are
+      // kept so a reload does not have to re-derive one from the other.
+      t.flags=next.reduce((b,n)=>b|(known[n]||0),0);
+      S.dirty=true; mark(); drawLegend(); draw(); budget();
+    };
+    flags.appendChild(l);
+  }
+  box.appendChild(flags);
+
+  const a=atlas(r.atlas);
+  if(!(a&&a.metatiled)){
+    const flip=document.createElement('div');
+    for(const axis of ['x','y']){
+      const on=[...(t.flip||'')].includes(axis);
+      const l=document.createElement('label');
+      l.className='mini';
+      l.innerHTML=`<input type="checkbox" ${on?'checked':''}> flip ${axis.toUpperCase()}`;
+      l.querySelector('input').onchange=ev=>{
+        const set=new Set([...(t.flip||'')]);
+        ev.target.checked?set.add(axis):set.delete(axis);
+        t.flip=[...set].sort().join('');
+        S.dirty=true; mark(); drawLegend(); draw();
+      };
+      flip.appendChild(l);
+    }
+    box.appendChild(flip);
+  }
+
+  const foot=document.createElement('small');
+  foot.className='dim';
+  foot.textContent='this map only — saved into '+(S.map.source||'its map file');
+  box.appendChild(foot);
+}
+
 function tileInfo(){
   const box=$('#tileinfo'), ch=S.ch;
+  // A `.pnxmap` has no legend characters, so its tiles are edited on the table entry
+  // itself and saved with the map. A `rows` map keeps going through the legend, because
+  // there the character IS the thing and it is shared with other maps.
+  if(S.ti!=null && !ch && S.map && S.map.format==='source'){ tileInfoSource(); return }
+
   const r=ch?resolve(ch):null;
   if(!r){ box.innerHTML='<small class="dim">no tile selected</small>'; return }
 
@@ -4458,7 +5644,7 @@ function tileInfo(){
     // than guessed from the map currently open.
     const r2=await post('/api/legend/remove',{char:ch, map:own?S.map.name:null});
     if(!r2.ok){ say(r2.error); return }
-    S.ch=null; await reload();
+    S.ti=null; S.ch=null; await reload();
     say(`Removed ${ch} from ${own?`map "${S.map.name}"`:'the project legend'}.`,false);
   };
   // Which table this character lives in, said plainly next to the button that deletes it.
@@ -4506,7 +5692,9 @@ async function writeLegend(ch,changes){
   const res=await post('/api/legend',body);
   if(!res.ok){ say(res.error); tileInfo(); return }
   await reload();
-  S.ch=ch; drawLegend(); draw();
+  const at=(S.map.tiles||[]).findIndex(t=>t.ch===ch);
+  selectTile(at>=0?at:S.ti, true);
+  drawLegend(); draw();
 }
 
 // ------------------------------------------------------------------- the tile picker
@@ -4626,7 +5814,12 @@ async function nameTile(atlasName,index,current){
 // manifest rather than holding the binding in the page, so what you painted is what
 // builds.
 async function bindTile(name,index,flip,bound){
-  if(bound){ S.ch=bound; S.mode='paint'; drawLegend(); tool(); drawTilePicker(); return }
+  if(bound){
+    // Already in this map's table: select it rather than adding a second entry for the
+    // same tile, which would paint identically and read as a duplicate in the palette.
+    const at=(S.map.tiles||[]).findIndex(t=>t.ch===bound);
+    selectTile(at>=0?at:S.ti); drawTilePicker(); return;
+  }
 
   const ch=freeChar();
   if(!ch){ say('every legend character is taken.'); return }
@@ -4643,8 +5836,10 @@ async function bindTile(name,index,flip,bound){
     {char:ch, tile:index, atlas:name, flags:[], flip:flip, map:S.map.name});
   if(!r.ok){ say(r.error); return }
   await reload();
-  S.ch=ch; S.mode='paint';
-  drawLegend(); tool(); drawTilePicker();
+  // The new character arrives in the map's tile table via reload(); select it there.
+  const at=(S.map.tiles||[]).findIndex(t=>t.ch===ch);
+  selectTile(at>=0?at:null);
+  drawTilePicker();
   say(`${ch} now paints tile ${index} of ${name}.`);
 }
 
@@ -4828,7 +6023,9 @@ function paintBudget(e){
     (worst.warn?'#a8701f':'var(--accent)');
 }
 function tool(){
-  $('#tool').innerHTML=S.mode==='paint'?`painting <kbd>${S.ch}</kbd>`:
+  const lbl=(S.map&&S.map.tiles&&S.ti!=null&&S.map.tiles[S.ti])
+    ?(S.map.tiles[S.ti].ch!==undefined?S.map.tiles[S.ti].ch:'#'+S.ti):'—';
+  $('#tool').innerHTML=S.mode==='paint'?`painting <kbd>${lbl}</kbd>`:
     S.mode==='warp'?'<kbd>click a door to add/remove a warp</kbd>':'<kbd>click to set start</kbd>';
 }
 function selectMap(i){
@@ -4851,14 +6048,14 @@ function selectMap(i){
   S.cam.y=Math.max(0,(S.map.start[1]+0.5)*S.T-r.h/2);
   for(const id of ['#tilesets','#pick','#save']) $(id).disabled=false;
   S.dirty=false; mark(); drawLegend(); renderWarps(); warpForm(null); info(); draw();
-  camInfo();
+  camInfo(); drawMapProps();
 }
 // What the Maps view shows when there is nothing to show. Says which of the two things is
 // missing, because "add a map" is useless advice to a project with no tileset to draw one
 // with -- the server refuses that, and refusing without saying so is how the old dead
 // window felt.
 function noMaps(){
-  S.map=null; S.ch=null; S.dirty=false; mark();
+  S.map=null; S.ch=null; S.ti=null; S.dirty=false; mark();
   const cv=$('#cv'); cv.width=cv.height=0;
   $('#legend').innerHTML='';
   $('#warps').innerHTML='<small>—</small>';
@@ -4875,7 +6072,10 @@ function noMaps(){
 
 // Every Maps control needs a map. They are re-enabled here rather than at each call site
 // so a control added later cannot forget.
-function haveMap(){ return !!(S.map && S.map.rows && S.map.rows.length) }
+// Every Maps control needs a map, and a map is now cells rather than rows -- a
+// `.pnxmap` has no rows at all, so testing for them would have declared every source map
+// missing and greyed out the whole tab.
+function haveMap(){ return !!(S.map && S.map.cells && S.map.cells.length) }
 
 $('#camon').onchange=e=>{
   if(!S.cam) S.cam={on:true,x:0,y:0};
@@ -4928,7 +6128,7 @@ function info(){
   if(!haveMap()) return;
   const m=S.map;
   const sets=(m.atlases&&m.atlases.length?m.atlases:[m.atlas]).filter(Boolean);
-  $('#mapinfo').innerHTML=`<small>${m.rows[0].length}×${m.rows.length} · `+
+  $('#mapinfo').innerHTML=`<small>${m.w}×${m.h} · `+
     `${sets.length>1?'tilesets':'tileset'} <b>${sets.join(', ')||'—'}</b> · `+
     `start (${m.start})<br>`+
     (m.warps.length?m.warps.map(w=>`warp (${w.at}) → ${w.to[0]} (${w.to[1]},${w.to[2]})`).join('<br>'):'no warps')+'</small>';
@@ -4939,17 +6139,17 @@ function draw(){
   // project or a state with no map.
   if(!haveMap()) return;
   const m=S.map,T=S.T,cv=$('#cv'),g=cv.getContext('2d');
-  cv.width=m.rows[0].length*T; cv.height=m.rows.length*T;
+  cv.width=m.w*T; cv.height=m.h*T;
   g.imageSmoothingEnabled=false;
   g.fillStyle='#000'; g.fillRect(0,0,cv.width,cv.height);
-  for(let y=0;y<m.rows.length;y++)for(let x=0;x<m.rows[y].length;x++){
-    const ch=m.rows[y][x], im=S.img[ch];
+  for(let y=0;y<m.h;y++)for(let x=0;x<m.w;x++){
+    const ti=m.cells[y*m.w+x], im=S.img[ti];
     if(!im||!im.complete) continue;
-    // A flipped character has to be drawn flipped HERE too. The watch mirrors it from
-    // two bits in the cell, so an editor that drew it upright would be showing a map
-    // that does not exist -- and mirrored tiles are placed precisely because the
-    // mirroring is what you are looking at.
-    const flip=(LEG()[ch]&&LEG()[ch].flip)||[];
+    // A flipped tile has to be drawn flipped HERE too. The watch mirrors it from two bits
+    // in the cell, so an editor that drew it upright would be showing a map that does not
+    // exist -- and mirrored tiles are placed precisely because the mirroring is what you
+    // are looking at.
+    const flip=[...(((m.tiles[ti]||{}).flip)||'')];
     if(!flip.length){ g.drawImage(im,x*T,y*T,T,T); continue }
     const sx=flip.includes('x')?-1:1, sy=flip.includes('y')?-1:1;
     g.save();
@@ -5039,11 +6239,11 @@ addEventListener('mouseup',()=>{ camDrag=null });
 
 $('#cv').addEventListener('mousemove',e=>{if(e.buttons&&!camDrag)paint(e,false)});
 function paint(e,click){
-  if(!haveMap()||!S.ch) return;
+  if(!haveMap()||S.ti==null) return;
   const r=e.target.getBoundingClientRect();
   const x=Math.floor((e.clientX-r.left)/S.T), y=Math.floor((e.clientY-r.top)/S.T);
   const m=S.map;
-  if(x<0||y<0||y>=m.rows.length||x>=m.rows[y].length) return;
+  if(x<0||y<0||y>=m.h||x>=m.w) return;
 
   if(S.mode==='start'){ if(!click)return; m.start=[x,y]; S.mode='paint'; }
   else if(S.mode==='warp'){
@@ -5052,9 +6252,11 @@ function paint(e,click){
     if(i>=0){ m.warps.splice(i,1); S.mode='paint'; warpForm(null); }
     else warpForm([x,y]);
   } else {
-    const row=m.rows[y];
-    if(row[x]===S.ch) return;
-    m.rows[y]=row.slice(0,x)+S.ch+row.slice(x+1);
+    // A cell is an index into the map's tile table, which is what both authoring formats
+    // reduce to -- so painting is the same operation whether the map is text or a file.
+    const at=y*m.w+x;
+    if(m.cells[at]===S.ti) return;
+    m.cells[at]=S.ti;
   }
   S.dirty=true; mark(); info(); tool(); draw(); budget();
 }
@@ -5081,11 +6283,30 @@ $('#mapsel').onchange=e=>{
 };
 $('#save').onclick=async()=>{
   if(!haveMap()) return;
+  const body=JSON.parse(JSON.stringify(S.map));
+  if(body.format!=='source'){
+    // A text map is stored as characters, so the cell grid is rendered back through each
+    // tile's own character -- which is why the table carries it. Reassigning characters
+    // here instead would churn the whole map's diff every time it was opened.
+    const missing=body.tiles.findIndex(t=>t.ch===undefined);
+    if(missing>=0){
+      say(`tile #${missing} has no legend character, so this map cannot be saved as text.`);
+      return;
+    }
+    body.rows=[];
+    for(let y=0;y<body.h;y++){
+      let row='';
+      for(let x=0;x<body.w;x++) row+=body.tiles[body.cells[y*body.w+x]].ch;
+      body.rows.push(row);
+    }
+  }
   const r=await (await fetch('/api/map',{method:'POST',
-    headers:{'content-type':'application/json'},body:JSON.stringify(S.map)})).json();
+    headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
   const log=$('#log');
   log.className=r.ok?'ok':'bad';
-  log.textContent=r.ok?`Saved ${S.map.name} to the manifest.`:r.error;
+  log.textContent=r.ok
+    ?`Saved ${S.map.name} to ${S.map.format==='source'?S.map.source:'the manifest'}.`
+    :r.error;
   if(r.ok){S.dirty=false;mark()}
 };
 $('#newmap').onclick=async()=>{
@@ -5107,6 +6328,65 @@ $('#newmap').onclick=async()=>{
   const i=S.data.maps.findIndex(m=>m.name===name);
   $('#mapsel').value=i; selectMap(i);
 };
+// Map properties. Written on change rather than behind a Save, matching the legend and
+// the scene panel: every one of these goes straight into the manifest.
+function drawMapProps(){
+  if(!S.map||!$('#mppal')) return;
+  const m=S.map;
+  $('#mppal').innerHTML='<option value="">— none —</option>'
+    +(m.palettes||[]).map(p=>`<option${p===m.palette?' selected':''}>${p}</option>`)
+      .join('');
+  $('#mppal').value=m.palette||'';
+  $('#mpwt').value=String(m.worldtile==null?'auto':m.worldtile);
+  $('#mpslots').value=m.atlas_slots==null?'':m.atlas_slots;
+  $('#mpbank').value=m.bank_bytes==null?'':m.bank_bytes;
+  $('#mpres').checked=!!m.resident;
+  $('#mplog').className='dim';
+  $('#mplog').textContent=(m.palettes&&m.palettes.length)?'':
+    'no palette variants on this map’s tilesets';
+}
+
+async function writeMapProps(changes){
+  if(!S.map) return;
+  const r=await post('/api/map/props',{name:S.map.name,...changes});
+  const log=$('#mplog');
+  if(!r.ok){ log.className='bad'; log.textContent=r.error; drawMapProps(); return }
+  await load();
+  const i=S.data.maps.findIndex(x=>x.name===S.map.name);
+  if(i>=0) selectMap(i);
+  log.className='ok'; log.textContent='Saved. Press Build.';
+  budget(true);
+}
+
+// An empty box means "unset", which is how a map goes back to the pipeline's own choice
+// -- distinct from a number, and the reason these send "" rather than omitting the key.
+$('#mppal').onchange =()=>writeMapProps({palette:$('#mppal').value});
+$('#mpwt').onchange  =()=>writeMapProps({worldtile:$('#mpwt').value});
+$('#mpslots').onchange=()=>writeMapProps({atlas_slots:$('#mpslots').value});
+$('#mpbank').onchange =()=>writeMapProps({bank_bytes:$('#mpbank').value});
+$('#mpres').onchange  =()=>writeMapProps({resident:$('#mpres').checked});
+
+// Moving a map out of the manifest and into its own file. Offered rather than done for
+// you, and never in reverse automatically: the trade is real in both directions -- a file
+// gets you the tile ceiling and the manifest back, and costs you a readable git diff.
+$('#cvtmap').onclick=async()=>{
+  if(!S.map){ say('No map selected.'); return }
+  if(S.map.format==='source'){
+    say(`"${S.map.name}" already lives in ${S.map.source}.`); return;
+  }
+  if(S.dirty){ say('Save this map first — converting reads what is on disk.'); return }
+  if(!confirm(`Move "${S.map.name}" into its own .pnxmap file?\n\n`
+      +`Its grid, start and warps leave the manifest. Tilesets, palette and streaming `
+      +`settings stay.\n\nYou gain the ~90-tile ceiling and a smaller manifest. You `
+      +`lose a readable diff on map changes.`)) return;
+  const r=await post('/api/map/migrate',{name:S.map.name});
+  if(!r.ok){ say(r.error); return }
+  await load();
+  const i=S.data.maps.findIndex(m=>m.name===S.map.name);
+  if(i>=0){ $('#mapsel').value=i; selectMap(i) }
+  say(`Moved to ${r.source} — ${r.tiles} tile entries, ${r.bytes} B.`,false);
+};
+
 $('#renmap').onclick=async()=>{
   if(!S.map){ say('No map selected.'); return }
   const to=prompt(`Rename map "${S.map.name}" to:\n\n`
@@ -5172,15 +6452,18 @@ let sheets=[];
 function showTab(which){
   const imp=which==='import', fnt=which==='fonts', maps=which==='maps',
         sdk=which==='sdk', pix=which==='pixel', cod=which==='code',
-        scn=which==='scenes';
+        scn=which==='scenes', dlg=which==='dialog';
   $('#import').style.display=imp?'block':'none';
   $('#fonts').style.display=fnt?'block':'none';
   $('#sdk').style.display=sdk?'block':'none';
   $('#pixel').style.display=pix?'block':'none';
   $('#code').style.display=cod?'block':'none';
   $('#scenes').style.display=scn?'block':'none';
+  $('#dialog').style.display=dlg?'block':'none';
   if(scn) drawScenes();
-  if(sdk){ sdkStatus(); updCheck() }
+  if(dlg) drawDialog();
+  if(fnt) drawFontList();
+  if(sdk){ sdkStatus(); updCheck(); drawProject() }
   if(pix&&!PX.data){ pxPalette(); pxInit(+$('#pxw').value,+$('#pxh').value,1); pxLoadList() }
   if(cod&&!$('#codelist').children.length) codeTree();
   $('#stage').style.display=maps?'flex':'none';
@@ -5199,8 +6482,316 @@ function showTab(which){
   for(const b of document.querySelectorAll('.act'))
     b.classList.toggle('on', b.dataset.t===which);
   $('#ctxtitle').textContent={maps:'Maps',import:'Import',fonts:'Fonts',
-    pixel:'Sprites',code:'Code',sdk:'Settings',scenes:'Scenes'}[which]||'';
+    pixel:'Sprites',code:'Code',sdk:'Settings',scenes:'Scenes',
+    dialog:'Dialog'}[which]||'';
 }
+
+// ------------------------------------------------------- declaring a sprite
+//
+// The Sprites tab could paint a PNG and not declare it, so the art existed and nothing
+// could load it. Frames are derived from a width, a height and a count rather than typed
+// as rectangles: a sheet is frames stacked vertically, which is the layout both the
+// painter above and `[[sprite]] frames` already assume.
+
+// Frames picked off a sheet, in click order. Null means "none picked", which is different
+// from an empty list and is why this is not just an array: with no picks the declare form
+// falls back to deriving a vertical stack from the canvas size, which is what it did
+// before and is still right for art painted here.
+const SH={cells:null, picks:[], sheet:null};
+
+function spFrames(){
+  if(SH.picks.length) return SH.picks.map(i=>{
+    const c=SH.cells[i]; return [c.x,c.y,c.w,c.h];
+  });
+  const w=+$('#spfw').value, h=+$('#spfh').value, n=+$('#spn').value;
+  return Array.from({length:n},(_,i)=>[0,i*h,w,h]);
+}
+
+function shLog(msg,bad){
+  const el=$('#shlog');
+  el.className=bad===false?'ok':(bad?'bad':'');
+  el.textContent=msg;
+}
+
+function drawSheetGrid(){
+  const grid=$('#shgrid'); grid.innerHTML='';
+  if(!SH.cells){ $('#shplate').style.display='none'; return }
+  $('#shplate').style.display='';
+  $('#shcount').textContent=`${SH.cells.length} cells · ${SH.picks.length} picked`;
+  SH.cells.forEach((c,i)=>{
+    const at=SH.picks.indexOf(i);
+    const b=document.createElement('button');
+    b.className='tile'+(at>=0?' sel':'')+(c.blank?' used':'');
+    b.title=`${c.x},${c.y} ${c.w}x${c.h}`+(c.blank?' — blank':'')
+      +(at>=0?` — frame ${at}`:'');
+    b.innerHTML=`<img src="${c.img}" alt="">`
+      +`<b>${at>=0?at:(c.blank?'·':'')}</b>`;
+    b.onclick=()=>{
+      const k=SH.picks.indexOf(i);
+      if(k>=0) SH.picks.splice(k,1); else SH.picks.push(i);
+      drawSheetGrid();
+      // The declare form's size boxes follow the picks, so what is about to be written
+      // and what is on screen cannot disagree.
+      if(SH.picks.length){
+        $('#spfw').value=c.w; $('#spfh').value=c.h; $('#spn').value=SH.picks.length;
+      }
+      shLog(SH.picks.length?`${SH.picks.length} frame(s) picked — they become anim `
+            +`indices 0..${SH.picks.length-1}.`
+            :'Click frames in the order the animation plays.');
+    };
+    // Editing one pose out of a sheet, which the canvas could not do: it opened whole
+    // files, so touching one frame of an eight-pose sheet meant loading all eight.
+    b.ondblclick=async ev=>{
+      ev.preventDefault();
+      const r=await post('/api/frame/read',
+        {sheet:SH.sheet, x:c.x, y:c.y, w:c.w, h:c.h});
+      if(r.error){ shLog(r.error,true); return }
+      PX.w=r.w; PX.h=r.h; PX.frames=1;
+      PX.data=Uint8Array.from(r.pixels); PX.undo=[];
+      PX.origin={sheet:SH.sheet, x:c.x, y:c.y};
+      $('#pxw').value=r.w; $('#pxh').value=r.h; $('#pxframes').value=1;
+      $('#pxtitle').textContent=`Canvas — ${SH.sheet} @ ${c.x},${c.y}`;
+      $('#pxnote').textContent=`Editing one frame. Save writes it back into the sheet.`;
+      pxDraw();
+      shLog(`Editing frame at ${c.x},${c.y}.`,false);
+    };
+    grid.appendChild(b);
+  });
+}
+
+$('#shslice').onclick=async()=>{
+  const sheet=$('#shsheet').value;
+  if(!sheet){ shLog('No PNG in the project to slice.',true); return }
+  const r=await post('/api/sheet/frames',{sheet, fw:+$('#shfw').value, fh:+$('#shfh').value,
+    ox:+$('#shox').value, oy:+$('#shoy').value,
+    gx:+$('#shgx').value, gy:+$('#shgy').value});
+  if(r.error){ shLog(r.error,true); return }
+  SH.cells=r.cells; SH.picks=[]; SH.sheet=sheet;
+  $('#spsheet').value=sheet;
+  drawSheetGrid();
+  shLog(`${r.cols}x${r.rows} of ${$('#shfw').value}x${$('#shfh').value}`
+    +(r.capped?` — showing the first ${r.limit}`:'')
+    +'. Click frames in play order.');
+};
+
+$('#shclear').onclick=()=>{
+  SH.picks=[]; drawSheetGrid();
+  shLog('Picks cleared — the declare form is back to a vertical stack.');
+};
+
+function spLog(msg,bad){
+  const el=$('#splog');
+  el.className=bad===false?'ok':(bad?'bad':'');
+  el.textContent=msg||'—';
+}
+
+function drawSpriteForm(){
+  const sel=$('#spsel'), cur=sel.value;
+  const list=(S.data&&S.data.sprites)||[];
+  sel.innerHTML='<option value="">— new —</option>'
+    +list.map(s=>`<option${s.name===cur?' selected':''}>${s.name}</option>`).join('');
+  const sheets=$('#spsheet');
+  const arts=(S.art||[]).map(a=>a.path);
+  sheets.innerHTML=arts.map(p=>`<option>${p}</option>`).join('');
+}
+
+// Loading an existing sprite back into the form. Frame rectangles collapse to w/h/count
+// only when they really are a vertical stack; anything else is left to the manifest
+// rather than silently rewritten into a shape it never had.
+$('#spsel').onchange=()=>{
+  const name=$('#spsel').value;
+  if(!name){ spLog(''); return }
+  const s=(S.data.sprites||[]).find(x=>x.name===name);
+  if(!s) return;
+  $('#spname').value=s.name;
+  $('#spsheet').value=s.sheet;
+  const f=s.frames||[];
+  $('#spfw').value=s.w||16; $('#spfh').value=s.h||24; $('#spn').value=f.length||1;
+  const stacked=f.every((r,i)=>r[0]===0&&r[1]===i*(s.h||0)&&r[2]===s.w&&r[3]===s.h);
+  // The anim map is name -> frame index; the box takes them in frame order.
+  const byIndex=[];
+  for(const [k,v] of Object.entries(s.anim||{})) byIndex[v]=k;
+  $('#spanim').value=byIndex.filter(Boolean).join(',');
+  spLog(stacked?'':'frames are not a vertical stack — saving will rewrite them as one',
+        stacked?null:true);
+};
+
+$('#spsave').onclick=async()=>{
+  const name=$('#spname').value.trim();
+  if(!name){ spLog('Name the sprite first.',true); return }
+  const sheet=$('#spsheet').value;
+  if(!sheet){ spLog('No PNG in the project to point at. Paint and save one first.',true);
+              return }
+  const names=$('#spanim').value.split(',').map(s=>s.trim()).filter(Boolean);
+  const anim={};
+  names.forEach((n,i)=>{ anim[n]=i });
+
+  const frames=spFrames();
+  // Frames picked off the sheet win over the vertical stack, and they carry their own
+  // sheet with them: picking poses out of one file and declaring them against another
+  // would validate and then draw the wrong art.
+  const useSheet=SH.picks.length?SH.sheet:sheet;
+  // Validated through the real pack_sprite before anything is written, the same way an
+  // atlas carve is: a frame running off the sheet used to go into the manifest and only
+  // fail when Build was pressed, leaving a broken block to remove by hand.
+  const v=await post('/api/sprite/validate',{name,sheet:useSheet,frames,anim});
+  if(!v.ok){ spLog(v.error,true); return }
+
+  const r=await post('/api/sprite/save',{name,sheet:useSheet,frames,anim});
+  if(!r.ok){ spLog(r.error,true); return }
+  await load(); drawSpriteForm(); $('#spsel').value=name;
+  spLog(`Saved "${name}" — ${v.frames} frame(s) of ${v.w}x${v.h}`
+    +`${SH.picks.length?' picked from '+useSheet:''}. Press Build.`,false);
+  budget(true);
+};
+
+$('#spdel').onclick=async()=>{
+  const name=$('#spsel').value||$('#spname').value.trim();
+  if(!name){ spLog('Pick a sprite to remove.',true); return }
+  const u=await post('/api/sprite/users',{name});
+  if(u.users&&u.users.length){
+    spLog(`Cannot remove "${name}" — ${u.users.join(', ')} loads it.`,true); return;
+  }
+  if(!confirm(`Remove sprite "${name}" from the manifest?\n\n`
+              +`Nothing loads it. The PNG on disk is left alone.`)) return;
+  const r=await post('/api/sprite/remove',{name});
+  if(!r.ok){ spLog(r.error,true); return }
+  await load(); drawSpriteForm(); $('#spsel').value='';
+  spLog(`Removed "${name}". Press Build.`,false);
+  budget(true);
+};
+
+// --------------------------------------------------------- removing a font
+//
+// The list is rebuilt from state rather than held, so a font added in the panel above
+// appears here without a reload.
+
+function drawFontList(){
+  const sel=$('#fdelsel');
+  if(!sel) return;
+  const cur=sel.value;
+  const list=(S.data&&S.data.fonts)||[];
+  sel.innerHTML=list.map(f=>`<option${f.name===cur?' selected':''}>${f.name}</option>`)
+    .join('')||'<option value="">— none —</option>';
+}
+
+$('#fdelbtn').onclick=async()=>{
+  const name=$('#fdelsel').value;
+  const log=$('#fdellog');
+  if(!name){ log.className='bad'; log.textContent='No font to remove.'; return }
+  // Asked before confirming, so the dialog names the scene rather than offering a delete
+  // that is then refused.
+  const u=await post('/api/font/users',{name});
+  if(u.users&&u.users.length){
+    log.className='bad';
+    log.textContent=`Cannot remove "${name}" — ${u.users.join(', ')} loads it.`;
+    return;
+  }
+  if(!confirm(`Remove font "${name}" from the manifest?\n\n`
+              +`Nothing loads it. The TTF in art/fonts/ is left alone.`)) return;
+  const r=await post('/api/font/remove',{name});
+  if(!r.ok){ log.className='bad'; log.textContent=r.error; return }
+  await load(); drawFontList();
+  log.className='ok';
+  log.textContent=`Removed "${name}". Press Build.`;
+  budget(true);
+};
+
+// ------------------------------------------------------------------ project keys
+
+function drawProject(){
+  const d=S.data||{}, p=d.paths||{};
+  if(!$('#prname')||d.no_project) return;
+  $('#prname').value=d.name||'';
+  $('#prbudget').value=d.budget||262144;
+  // Shown relative to the project root, which is how the manifest states them -- an
+  // absolute path here would be written back as one and stop building elsewhere.
+  $('#prres').value=d.project_resources||'';
+  $('#prhdr').value=d.project_header||'';
+}
+
+$('#prsave').onclick=async()=>{
+  const log=$('#prlog');
+  const want=[['name',$('#prname').value],['budget_bytes',$('#prbudget').value],
+              ['resources',$('#prres').value],['header',$('#prhdr').value]];
+  for(const [key,value] of want){
+    const r=await post('/api/project/set',{key,value});
+    if(!r.ok){ log.className='bad'; log.textContent=`${key}: ${r.error}`; return }
+  }
+  await load(); drawProject(); statusbar(); budget(true);
+  log.className='ok';
+  log.textContent='Saved. The budget strip and status bar now measure against it.';
+};
+
+// ------------------------------------------------------------------------- dialog
+//
+// A textarea per conversation, one page per line. Saved on blur rather than per
+// keystroke: every write goes through the manifest and re-derives the glyph set of every
+// `charset = "auto"` font, which is not work to do between two letters of a word.
+
+function dlgSay(msg,bad){
+  const el=$('#dialoglog');
+  el.className='mini '+(bad===false?'ok':'bad');
+  el.textContent=msg||'';
+}
+
+function drawDialog(){
+  const box=$('#dialoglist'); box.innerHTML='';
+  const list=(S.data&&S.data.dialogs)||[];
+  if(!list.length){
+    box.innerHTML='<small class="dim">No conversations yet.</small>';
+    return;
+  }
+  for(const d of list){
+    const card=document.createElement('section');
+    card.className='scenecard';
+    const head=document.createElement('div');
+    head.className='mini';
+    head.innerHTML=`<b>${d.name}</b> <span class="dim">${d.pages.length} page`
+      +`${d.pages.length===1?'':'s'} · ${d.bytes} B</span>`;
+    card.appendChild(head);
+
+    const ta=document.createElement('textarea');
+    ta.rows=Math.max(3,d.pages.length+1);
+    ta.style.width='100%';
+    ta.value=d.pages.join('\n');
+    ta.onblur=async()=>{
+      const pages=ta.value.split('\n').map(s=>s.trim()).filter(Boolean);
+      if(!pages.length){ dlgSay('A conversation needs at least one page.'); return }
+      if(pages.join('\n')===d.pages.join('\n')) return;
+      const r=await post('/api/dialog',{name:d.name,pages});
+      if(!r.ok){ dlgSay(r.error); return }
+      await reload(); drawDialog(); dlgSay('');
+      budget(true);
+    };
+    card.appendChild(ta);
+
+    const foot=document.createElement('div');
+    foot.className='mini';
+    const del=document.createElement('button');
+    del.textContent='Remove';
+    del.onclick=async()=>{
+      if(!confirm(`Remove conversation "${d.name}"?`)) return;
+      const r=await post('/api/dialog/remove',{name:d.name});
+      if(!r.ok){ dlgSay(r.error); return }
+      await reload(); drawDialog(); dlgSay(`Removed "${d.name}".`,false);
+      budget(true);
+    };
+    foot.appendChild(del);
+    card.appendChild(foot);
+    box.appendChild(card);
+  }
+}
+
+$('#dlgnew').onclick=async()=>{
+  const name=prompt('Name the conversation.\n\n'
+    +'Game code reaches it as PNX_DIALOG_<NAME>. Lowercase letters, digits and '
+    +'underscores.');
+  if(!name) return;
+  const r=await post('/api/dialog',{name:name.trim(),pages:['...']});
+  if(!r.ok){ dlgSay(r.error); return }
+  await reload(); drawDialog(); dlgSay(`Added "${name.trim()}".`,false);
+};
 
 // ------------------------------------------------------------------------- scenes
 //
@@ -5359,6 +6950,7 @@ $('#outtoggle').onclick=()=>{
 };
 $('#tabmaps').onclick=()=>showTab('maps');
 $('#tabscenes').onclick=()=>showTab('scenes');
+$('#tabdialog').onclick=()=>showTab('dialog');
 $('#tabimport').onclick=()=>showTab('import');
 $('#tabfonts').onclick=()=>showTab('fonts');
 $('#tabsdk').onclick=()=>showTab('sdk');
@@ -5614,6 +7206,13 @@ $('#aload').onclick=async()=>{
   set('sheet',s.sheet); set('tile',s.tile); set('maxt',s.max_tiles);
   set('rx',s.region[0]); set('ry',s.region[1]); set('rw',s.region[2]); set('rh',s.region[3]);
   set('apick',(s.autopick||[]).join(', '));
+  // `metatiles` arrives as written: "auto", a bool, or a fraction that is this atlas's
+  // own threshold. The select carries the three named choices; a fraction is left as
+  // "auto" in the box and preserved in the file unless it is deliberately changed.
+  const mt=s.metatiles;
+  set('ameta', (mt===true||mt==='true')?'true'
+             : (mt===false||mt==='false')?'false':'auto');
+  set('avars',(s.variants||[]).join(', '));
   KEY=s.colorkey||null; keyLabel();
   IMPEX=new Set(s.exclude||[]); impRegion=impRegionKey();
   $('#log').className=''; $('#log').textContent=
@@ -5678,6 +7277,14 @@ $('#addatlas').onclick=async()=>{
   // EDITING it means "name nothing" -- and it has to be obeyed, because clearing the list
   // is the only way to hand a name like `floor` over to an explicit [atlas.semantic]
   // entry. Skipping it here is what made an autopicked role impossible to override.
+  // Metatiles and variants are written after the block exists, for the same reason
+  // autopick is: both are decisions about a packed atlas, and the block has to be there
+  // to hold them.
+  const vars=$('#avars').value.split(',').map(s=>s.trim()).filter(Boolean);
+  const x=await post('/api/atlas/extras',
+    {name:body.name, metatiles:$('#ameta').value, variants:vars});
+  if(!x.ok){ log.className='bad'; log.textContent=x.error; return }
+
   const picks=$('#apick').value.split(',').map(s=>s.trim()).filter(Boolean);
   if(picks.length||editing){
     const p=await post('/api/autopick',{atlas:body.name,roles:picks});
@@ -6140,11 +7747,20 @@ $('#sdkrefresh').onclick=()=>sdkStatus(true);
 // Pixels are held as ARGB2222 bytes -- the device's own encoding -- not as CSS colours.
 // Painting in the target colour space means the canvas cannot show a colour the watch
 // cannot, so nothing collapses on import.
-const PX={w:16,h:24,frames:1,zoom:12,data:null,colour:0xFF,tool:'pen',undo:[]};
+// `origin` is set when the canvas holds ONE FRAME cut out of a sheet rather than a whole
+// file. Saving then composites it back at that rect instead of replacing the file, because
+// the other poses on that sheet are someone else's work and editing one should not be able
+// to lose the row it sits in.
+const PX={w:16,h:24,frames:1,zoom:12,data:null,colour:0xFF,tool:'pen',undo:[],
+          origin:null};
 
 function pxTotalH(){ return PX.h*PX.frames }
 
 function pxInit(w,h,frames){
+  // A fresh canvas is not a frame of anything, so the sheet it came from stops applying.
+  // Leaving it set is how Save would composite an unrelated drawing into someone's sheet.
+  PX.origin=null;
+  if($('#pxtitle')) $('#pxtitle').textContent='Canvas';
   PX.w=w; PX.h=h; PX.frames=frames;
   PX.data=new Uint8Array(w*pxTotalH());   // 0 is transparent, as everywhere else
   PX.undo=[];
@@ -6259,6 +7875,16 @@ async function pxLoadList(){
   const files=await (await fetch('/api/art')).json();
   $('#pxopen').innerHTML='<option value="">—</option>'+
     files.map(f=>`<option value="${f.path}">${f.path}</option>`).join('');
+  // Kept on S so the Declare panel can offer the same PNGs without a second request:
+  // the sheet a sprite points at is nearly always the one just painted.
+  S.art=files;
+  const sh=$('#shsheet');
+  if(sh){
+    const cur=sh.value;
+    sh.innerHTML=files.map(f=>`<option${f.path===cur?' selected':''}>${f.path}</option>`)
+      .join('');
+  }
+  drawSpriteForm();
 }
 
 $('#pxopen').addEventListener('change',async()=>{
@@ -6269,6 +7895,8 @@ $('#pxopen').addEventListener('change',async()=>{
   // Height is assumed to be whole frames of the current frame height where it divides
   // cleanly -- the importer's own convention -- and one frame otherwise.
   const frames=(PX.h && r.h % PX.h===0) ? r.h/PX.h : 1;
+  PX.origin=null;
+  if($('#pxtitle')) $('#pxtitle').textContent='Canvas';
   PX.w=r.w; PX.h=r.h/frames; PX.frames=frames;
   $('#pxw').value=PX.w; $('#pxh').value=PX.h; $('#pxframes').value=frames;
   PX.data=Uint8Array.from(r.pixels); PX.undo=[];
@@ -6278,6 +7906,21 @@ $('#pxopen').addEventListener('change',async()=>{
 });
 
 $('#pxsave').onclick=async()=>{
+  // A frame cut out of a sheet goes back where it came from. Falling through to the
+  // whole-file write would replace an eight-pose sheet with one 16x24 pose, which is a
+  // loss no undo in this editor reaches.
+  if(PX.origin){
+    const o=PX.origin;
+    const r=await post('/api/frame/write',{sheet:o.sheet, x:o.x, y:o.y,
+      w:PX.w, h:PX.h, pixels:Array.from(PX.data)});
+    if(r.error){ $('#pxnote').textContent=r.error; return }
+    $('#pxnote').textContent=`Wrote the frame back into ${o.sheet} at ${o.x},${o.y}.`;
+    // Re-slice so the grid shows what was just painted rather than the stale thumbnail.
+    if(SH.sheet===o.sheet){ const keep=SH.picks.slice(); await $('#shslice').onclick();
+                            SH.picks=keep; drawSheetGrid() }
+    return;
+  }
+
   let path=$('#pxname').value.trim();
   if(!path){ $('#pxnote').textContent='Give it a filename first.'; return }
   if(!path.includes('/')) path='art/'+path;
@@ -6285,8 +7928,15 @@ $('#pxsave').onclick=async()=>{
     headers:{'content-type':'application/json'},
     body:JSON.stringify({path,w:PX.w,h:pxTotalH(),pixels:Array.from(PX.data)})})).json();
   $('#pxnote').textContent=r.error?r.error
-    :`Saved ${r.path} (${r.bytes} B). Import it from the Import tab.`;
-  if(r.ok) pxLoadList();
+    :`Saved ${r.path} (${r.bytes} B). Declare it below, or import it as a tileset.`;
+  if(r.ok){
+    await pxLoadList();
+    // The sheet just saved, at the size just painted: the Declare panel underneath is
+    // almost always about this PNG, and retyping what the canvas already knows is the
+    // step that used to send people to the manifest.
+    $('#spsheet').value=r.path;
+    $('#spfw').value=PX.w; $('#spfh').value=PX.h; $('#spn').value=PX.frames;
+  }
 };
 
 // -------------------------------------------------------------------- code editor
@@ -6939,9 +8589,23 @@ def make_handler(session):
                     return
                 if self.path == "/api/map":
                     m = json.loads(raw)
-                    session.proj.save_map(m["name"], m["rows"], m["start"], m["warps"],
-                                  m.get("atlas"), m.get("atlases"))
+                    # Two authoring formats, one endpoint: the page holds every map as
+                    # cells plus a tile table, and which file that lands in is the map's
+                    # business rather than the canvas's.
+                    if m.get("format") == "source":
+                        session.proj.save_source_map(
+                            m["name"], m["w"], m["h"], m["cells"], m["tiles"],
+                            m["start"], m["warps"])
+                    else:
+                        session.proj.save_map(m["name"], m["rows"], m["start"],
+                                              m["warps"], m.get("atlas"),
+                                              m.get("atlases"))
                     self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/map/migrate":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(
+                        {"ok": True, **session.proj.migrate_map(d["name"],
+                                                                d.get("source"))}))
                 elif self.path == "/api/legend":
                     d = json.loads(raw)
                     session.proj.save_legend(d["char"], d["tile"], d.get("atlas"),
@@ -7002,6 +8666,11 @@ def make_handler(session):
                                               d["region"], int(d["max_tiles"]),
                                               d.get("exclude", []), d.get("colorkey"))
                     self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/atlas/extras":
+                    d = json.loads(raw)
+                    session.proj.set_atlas_extras(d["name"], d.get("metatiles"),
+                                                  d.get("variants"))
+                    self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/atlas/users":
                     d = json.loads(raw)
                     self._send(200, json.dumps(
@@ -7015,6 +8684,64 @@ def make_handler(session):
                     session.proj.add_atlas(d["name"], d["sheet"], int(d["tile"]),
                                            d["region"], int(d["max_tiles"]),
                                            d.get("exclude", []), d.get("colorkey"))
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/font/remove":
+                    d = json.loads(raw)
+                    session.proj.remove_font(d["name"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/font/users":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(
+                        {"users": session.proj.font_users(d["name"])}))
+                elif self.path == "/api/project/set":
+                    d = json.loads(raw)
+                    session.proj.set_project(d["key"], d["value"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/dialog":
+                    d = json.loads(raw)
+                    session.proj.save_dialog(d["name"], d["pages"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/dialog/remove":
+                    d = json.loads(raw)
+                    session.proj.remove_dialog(d["name"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/sheet/frames":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(session.proj.sheet_frames(
+                        d["sheet"], d["fw"], d["fh"], d.get("ox", 0), d.get("oy", 0),
+                        d.get("gx", 0), d.get("gy", 0), d.get("colorkey"))))
+                elif self.path == "/api/frame/read":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(session.proj.frame_read(
+                        d["sheet"], d["x"], d["y"], d["w"], d["h"])))
+                elif self.path == "/api/frame/write":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(session.proj.frame_write(
+                        d["sheet"], d["x"], d["y"], d["w"], d["h"], d["pixels"])))
+                elif self.path == "/api/sprite/validate":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(session.proj.validate_sprite(
+                        d.get("name"), d["sheet"], d["frames"], d.get("anim"),
+                        d.get("variants", []), d.get("colorkey"))))
+                elif self.path == "/api/sprite/save":
+                    d = json.loads(raw)
+                    session.proj.save_sprite(d["name"], d["sheet"], d["frames"],
+                                             d.get("anim"), d.get("variants", []),
+                                             d.get("colorkey"))
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/sprite/remove":
+                    d = json.loads(raw)
+                    session.proj.remove_sprite(d["name"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/sprite/users":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(
+                        {"users": session.proj.sprite_users(d["name"])}))
+                elif self.path == "/api/map/props":
+                    d = json.loads(raw)
+                    session.proj.set_map_props(
+                        d["name"], d.get("palette"), d.get("worldtile"),
+                        d.get("atlas_slots"), d.get("bank_bytes"), d.get("resident"))
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/map/remove":
                     d = json.loads(raw)

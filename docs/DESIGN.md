@@ -171,6 +171,41 @@ binary looked wrong. Checks: ragged map rows, unknown legend characters, a start
 position inside a solid tile, a warp not on a door tile, **a warp unreachable from the
 start (flood fill)**, and a warp whose destination is solid in the target map.
 
+### A map is authored in one of two formats, and checked identically in both
+
+`rows` is an ASCII grid in the manifest, resolved through a legend. It is legible at a
+glance — walls look like walls — and the sealed-door bug above was *visible* in the text.
+It stays the right choice for a small, hand-written map, which is why the `overworld`
+example still uses it.
+
+It has two ceilings. One character per cell caps a map at the printable set, about
+**ninety distinct tiles**, while the compiled cell is a u16 carrying a 10-bit index the
+runtime resolves against **1024**. And a 255×255 map is ~65 KB of text: the `worldtiles`
+manifest was 81 KB, of which 91% was two maps.
+
+So a map may instead name a `source` file — a `.pnxmap`, described in
+[`tools/pnx_mapfile.py`](../tools/pnx_mapfile.py). Cells are u16 indices into a per-map
+**tile table**, and each entry is *(atlas, index-or-role, flip, flags)* — which is exactly
+what a legend character resolves to. The legend did not go away; it stopped being spelled
+in ASCII and stopped being shared across every map in the project. An entry may still name
+a **role** rather than an index, so migrating a manifest does not silently downgrade a
+symbolic reference that survives re-carving a sheet into a number that does not.
+
+Two things this deliberately is not:
+
+- **Not the compiled resource.** `map_*.bin` is derived from the source: rotated at build
+  time for a landscape orientation, sliced into WorldTiles, its flag plane computed. The
+  same source compiles differently per orientation, which is why the source cannot be the
+  thing that ships — and why `.pnxmap` files are committed while `map_*.bin` is ignored.
+- **Not a second set of rules.** Both formats resolve to cells and flags and then go
+  through the *same* `finish_compile`: start-in-a-wall, warp-without-a-warp-flag,
+  unreachable-warp and destination checks all apply. A second authoring path that quietly
+  skipped them would be worse than no second path.
+
+The trade is stated rather than hidden: a file buys the tile ceiling and the manifest
+back, and costs a readable git diff on map changes. `pnx_mapfile.to_rows` converts a small
+map back to text, so it is not a one-way door.
+
 ### Colour: device-independent source, device-specific build
 
 Art is authored in full colour and **stays** full colour in the manifest. Quantisation to
