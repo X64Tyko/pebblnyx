@@ -205,6 +205,24 @@ class BuildError(Exception):
 
 # --------------------------------------------------------------------------- colour
 
+def parse_colorkey(spec, where):
+    """`colorkey = [r, g, b]`, or nothing at all.
+
+    Absent is not a missing value, it is a choice: art with a real alpha channel needs no
+    key, and most of it has one. The key exists for the sheets that do not -- the ones
+    drawn on magenta or on a flat background colour, which is how a great deal of tile art
+    is still distributed.
+    """
+    key = spec.get("colorkey")
+    if key is None:
+        return None
+    if (not isinstance(key, (list, tuple)) or len(key) != 3
+            or not all(isinstance(c, int) and 0 <= c <= 255 for c in key)):
+        raise BuildError(f"{where}: colorkey must be three integers 0-255 -- "
+                         f"e.g. colorkey = [255, 0, 255] -- not {key!r}")
+    return tuple(key)
+
+
 def to_gcolor8(rgba, colorkey=None):
     r, g, b, a = rgba
     if a < 128:
@@ -273,6 +291,8 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
     # Excluded before dedup, not after, because that is what the author is looking at:
     # a grid of sheet positions. Dropping a deduplicated tile instead would silently take
     # every other position that happens to share its pixels.
+    key = parse_colorkey(spec, f"atlas {name!r}")
+
     excluded = set()
     for e in spec.get("exclude", []):
         if isinstance(e, (list, tuple)) and len(e) == 2:
@@ -310,7 +330,7 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
             for j in range(T):
                 for i in range(T):
                     ri, rj = rotate_point(i, j, T, T, orient)
-                    buf[rj * T + ri] = to_gcolor8(px[tx * T + i, ty * T + j])
+                    buf[rj * T + ri] = to_gcolor8(px[tx * T + i, ty * T + j], key)
             key = bytes(buf)
             if not any(key):
                 empty += 1
@@ -370,7 +390,7 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
                     # can find in their PNG.
                     ri, rj = rotate_point(i, j, T, T, orient)
                     b = base_tile[rj * T + ri]
-                    v = to_gcolor8(vpx[tx * T + i, ty * T + j])
+                    v = to_gcolor8(vpx[tx * T + i, ty * T + j], key)
                     if (b == TRANSPARENT) != (v == TRANSPARENT):
                         raise BuildError(
                             f"atlas {name!r}: variant {vpath!r} differs in TRANSPARENCY at sheet "
@@ -801,7 +821,7 @@ def pack_sprite(root, spec, orient=ORIENT_BUTTONS_RIGHT):
     name = spec["name"]
     im = load_sheet(root, spec["sheet"])
     px = im.load()
-    key = spec.get("colorkey")
+    key = parse_colorkey(spec, f"sprite {name!r}")
     sheet_w, sheet_h = im.size
 
     frames, fw, fh = [], None, None

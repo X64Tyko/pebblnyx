@@ -242,6 +242,63 @@ def check(label, cond):
         failures += 1
 
 
+def check_colorkey():
+    """A keyed colour becomes transparent, and index 0 is what transparent means.
+
+    Tile art is still routinely distributed drawn on a flat background -- magenta, or
+    whatever the artist used -- with no alpha channel at all. Without a key those pixels
+    are opaque background: they cost palette entries, they defeat the blitter's early-out,
+    and they draw a rectangle around every sprite.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        sheet = os.path.join(root, "sheet.png")
+        make_sheet(sheet)
+
+        # Paint one tile's corner magenta, the classic key colour.
+        img = Image.open(sheet).convert("RGBA")
+        px = img.load()
+        for y in range(4):
+            for x in range(4):
+                px[x, y] = (255, 0, 255, 255)
+        img.save(sheet)
+
+        keyed = '''
+            [[atlas]]
+            name = "tiles"
+            sheet = "sheet.png"
+            tile = 16
+            region = [0, 0, 2, 2]
+            max_tiles = 16
+            out = "tiles.bin"
+            autopick = ["floor", "wall", "accent"]
+            colorkey = [255, 0, 255]
+        '''
+        out = build_at(root, "portrait", atlas=keyed)
+
+        # Atlas layout: header, then one palette slot per tile, then flags, then pixels
+        # at 4bpp. The keyed corner must be index 0 -- transparent -- in tile 0.
+        b = read_blob(out, "tiles.bin")
+        tile_count = b[4]
+        pixels = 8 + pnx_assets.pad4(bytes(tile_count)).__len__() * 2
+        first = b[pixels:pixels + 8]
+        check("keyed pixels are palette index 0",
+              all(byte == 0 for byte in first[:2]))
+
+    # And a key that is not a colour is a build failure, not a silent no-op.
+    expect_fail("colorkey that is not three numbers", "colorkey must be three integers",
+                atlas='''
+        [[atlas]]
+        name = "tiles"
+        sheet = "sheet.png"
+        tile = 16
+        region = [0, 0, 2, 2]
+        max_tiles = 16
+        out = "tiles.bin"
+        autopick = ["floor", "wall", "accent"]
+        colorkey = "magenta"
+    ''')
+
+
 def check_orientation():
     """One manifest, three orientations, compared against each other."""
     with tempfile.TemporaryDirectory() as root:
@@ -417,6 +474,7 @@ def main():
     # --- orientation. Runs early because everything after it assumes the portrait build
     # it has been comparing against is the one the rest of these tests describe.
     check_orientation()
+    check_colorkey()
 
     # --- map geometry
     expect_fail("ragged rows", "ragged", **maps('''

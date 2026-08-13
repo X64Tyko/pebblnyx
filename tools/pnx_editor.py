@@ -1728,7 +1728,7 @@ class Project:
                 break
         return sorted(out, key=lambda s: s["name"])[:60]
 
-    def slice_grid(self, rel, tile, region, exclude=()):
+    def slice_grid(self, rel, tile, region, exclude=(), colorkey=None):
         """Every cell of a slice, rendered, so the author can pick what gets packed.
 
         The strip of *kept* tiles told you what the pipeline decided. It did not let you
@@ -1759,7 +1759,10 @@ class Project:
                 if idx >= LIMIT:
                     break
                 tx, ty = rx + i, ry + j
-                buf = tuple(pa.to_gcolor8(px[tx * tile + a, ty * tile + b])
+                # Read through the key, so a cell that is nothing BUT background reads as
+                # empty here exactly as it will in the pipeline -- which is the whole
+                # reason to pick a key before committing to a carve.
+                buf = tuple(pa.to_gcolor8(px[tx * tile + a, ty * tile + b], colorkey)
                             for b in range(tile) for a in range(tile))
                 if not any(buf):
                     state = "empty"
@@ -1877,6 +1880,21 @@ class Project:
         }
 
     @staticmethod
+    def _colorkey_block(colorkey):
+        """Record the key, or say nothing at all.
+
+        No key is a legitimate answer and the common one -- art with a real alpha channel
+        needs none -- so an absent key writes no line rather than `colorkey = []`, which
+        would read as a setting someone chose and left empty.
+        """
+        if not colorkey:
+            return ""
+        r, g, b = (int(c) for c in colorkey)
+        return (f"# Pixels of this exact colour become transparent. Sheets drawn on a "
+                f"flat\n# background with no alpha channel need this; art with real "
+                f"alpha does not.\ncolorkey = [{r}, {g}, {b}]\n")
+
+    @staticmethod
     def _exclude_block(exclude):
         """Render the dropped-tile list, wrapped, with a note on what the numbers mean."""
         idx = sorted({int(e) for e in exclude})
@@ -1896,7 +1914,8 @@ class Project:
                 "with it.\n"
                 f"exclude = [\n  {body}\n]\n")
 
-    def add_atlas(self, name, rel, tile, region, max_tiles, exclude=()):
+    def add_atlas(self, name, rel, tile, region, max_tiles, exclude=(),
+                  colorkey=None):
         """Append an [[atlas]] block. Appending keeps every existing comment intact."""
         if any(a["name"] == name for a in self.man.get("atlas", [])):
             raise ValueError(f"an atlas named {name!r} already exists")
@@ -1913,7 +1932,7 @@ tile = {tile}
 region = [{region[0]}, {region[1]}, {region[2]}, {region[3]}]
 max_tiles = {max_tiles}
 out = "{name}.bin"
-{self._exclude_block(exclude)}
+{self._colorkey_block(colorkey)}{self._exclude_block(exclude)}
 metatiles = "auto"
 # Roles the legend can name. Autopicked so the atlas is usable the moment it is
 # imported; replace with an explicit [atlas.semantic] table once you know which tiles
@@ -2286,6 +2305,18 @@ select.sw{font:11px ui-monospace,monospace}
   box-shadow:0 0 0 9999px rgba(0,0,0,.55);pointer-events:none;display:none}
 .zoom{display:flex;align-items:center;gap:.4rem;font-size:.78rem;color:var(--dim)}
 .zoom input{width:7rem}
+/* `.fields label` stacks its children in a column and outspecifies a bare `.keypick`,
+   so this row of controls needs the same specificity to stay a row. */
+.fields label.keypick{flex-direction:row;align-items:center;gap:.4rem}
+/* Checkerboarded when there is no key, because "no colour" and "black" must not look the
+   same -- black is a perfectly ordinary key to choose. */
+#keyswatch{width:1.1rem;height:1.1rem;border-radius:3px;border:1px solid var(--line);
+  display:inline-block}
+#keyswatch.none{background:repeating-conic-gradient(var(--line) 0 25%,transparent 0 50%)
+  50%/8px 8px}
+#keyval{font:11px ui-monospace,Menlo,monospace;color:var(--dim);min-width:6.5rem}
+#sheetwrap.picking{cursor:crosshair}
+#sheetwrap.picking img{outline:2px dashed var(--accent);outline-offset:2px}
 #slice{display:grid;gap:2px;overflow:auto;max-height:60vh}
 #slice button{padding:0;border:2px solid transparent;border-radius:3px;background:none;
   line-height:0;cursor:pointer;position:relative}
@@ -2522,6 +2553,15 @@ button:disabled{opacity:.45;cursor:not-allowed}
         <label>h<input id="rh" type="number" value="16" min="1"></label>
         <label>Max tiles<input id="maxt" type="number" value="64" min="1"></label>
         <label>Name<input id="aname" placeholder="cave_env"></label>
+        <!-- The colour key. Picked off the sheet with the eyedropper rather than typed,
+             because the value that matters is the one actually in the art -- a
+             background that looks like magenta is often not 255,0,255. -->
+        <label class="keypick">Transparent
+          <button id="keypick" title="click, then click the sheet">⌖ pick</button>
+          <i id="keyswatch" class="none"></i>
+          <span id="keyval">none</span>
+          <button id="keynone" title="no colour key">clear</button>
+        </label>
         <button id="addatlas" class="primary">Add atlas</button>
       </div>
       <div id="stats" class="stats"></div>
@@ -3345,7 +3385,7 @@ async function drawSlice(){
   if(key!==impRegion){ IMPEX=new Set(); impRegion=key }
   const body={sheet:$('#sheet').value,tile:+$('#tile').value,
     region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
-    exclude:[...IMPEX]};
+    exclude:[...IMPEX], colorkey:KEY};
   if(!body.sheet) return;
   const g=await (await fetch('/api/slice',{method:'POST',
     headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
@@ -3380,7 +3420,7 @@ $('#sldropdup').onclick=async()=>{
     headers:{'content-type':'application/json'},
     body:JSON.stringify({sheet:$('#sheet').value,tile:+$('#tile').value,
       region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
-      exclude:[]})})).json();
+      exclude:[],colorkey:KEY})})).json();
   // Duplicates already cost nothing -- dedup collapses them -- so this is about a
   // shorter grid to read, not about bytes.
   for(const c of g.cells) if(c.state==='dup') IMPEX.add(c.i);
@@ -3391,7 +3431,7 @@ $('#sldropempty').onclick=async()=>{
     headers:{'content-type':'application/json'},
     body:JSON.stringify({sheet:$('#sheet').value,tile:+$('#tile').value,
       region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
-      exclude:[]})})).json();
+      exclude:[],colorkey:KEY})})).json();
   for(const c of g.cells) if(c.state==='empty') IMPEX.add(c.i);
   drawSlice(); analyse();
 };
@@ -3402,7 +3442,7 @@ function analyse(){
   pending=setTimeout(async()=>{
     const body={sheet:$('#sheet').value,tile:+$('#tile').value,
       region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
-      max_tiles:+$('#maxt').value,exclude:[...IMPEX]};
+      max_tiles:+$('#maxt').value,exclude:[...IMPEX],colorkey:KEY};
     if(!body.sheet) return;
     const r=await (await fetch('/api/analyse',{method:'POST',
       headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
@@ -3437,6 +3477,53 @@ $('#slzoom').addEventListener('input',()=>{
   drawSlice();
 });
 
+// ------------------------------------------------------------- the colour key
+//
+// A great deal of tile art is distributed with no alpha channel at all, drawn on a flat
+// background -- magenta by convention, but often not exactly magenta. Without a key those
+// pixels are ordinary opaque colour: they eat palette entries, they defeat the blitter's
+// early-out for transparent pixels, and they draw a rectangle around every sprite.
+//
+// Picked off the sheet rather than typed, because the value that matters is the one
+// actually in the file. The thumbnail is resized with NEAREST, so its pixels are the
+// source's pixels and reading one is exact.
+let KEY=null;
+
+function keyLabel(){
+  const sw=$('#keyswatch');
+  sw.classList.toggle('none', !KEY);
+  sw.style.background=KEY?`rgb(${KEY[0]},${KEY[1]},${KEY[2]})`:'';
+  $('#keyval').textContent=KEY?`${KEY[0]}, ${KEY[1]}, ${KEY[2]}`:'none';
+}
+
+$('#keypick').onclick=()=>{
+  $('#sheetwrap').classList.toggle('picking');
+  $('#cropnote').textContent=$('#sheetwrap').classList.contains('picking')
+    ? 'click a pixel on the sheet — usually the background behind a sprite'
+    : '';
+};
+
+$('#keynone').onclick=()=>{
+  // No key is a real answer, not an empty field: art that already has alpha needs none.
+  KEY=null; keyLabel(); analyse(); drawSlice();
+};
+
+$('#sheetimg').addEventListener('click',e=>{
+  if(!$('#sheetwrap').classList.contains('picking')) return;
+  const img=e.target, r=img.getBoundingClientRect();
+  const x=Math.floor((e.clientX-r.left)/r.width*img.naturalWidth);
+  const y=Math.floor((e.clientY-r.top)/r.height*img.naturalHeight);
+  const c=document.createElement('canvas');
+  c.width=img.naturalWidth; c.height=img.naturalHeight;
+  const g=c.getContext('2d', {willReadFrequently:true});
+  g.imageSmoothingEnabled=false;
+  g.drawImage(img,0,0);
+  const p=g.getImageData(Math.max(0,x),Math.max(0,y),1,1).data;
+  KEY=[p[0],p[1],p[2]];
+  $('#sheetwrap').classList.remove('picking');
+  keyLabel(); analyse(); drawSlice();
+});
+
 // The region as a box on the sheet. Percentages of the sheet's size in TILES, which is
 // the same fraction as pixels and survives the thumbnail being scaled to fit.
 function drawCrop(sheetTiles){
@@ -3467,7 +3554,7 @@ $('#addatlas').onclick=async()=>{
   if(!name){alert('Name the atlas first.');return}
   const r=await (await fetch('/api/atlas',{method:'POST',
     headers:{'content-type':'application/json'},
-    body:JSON.stringify({name,sheet:$('#sheet').value,tile:+$('#tile').value,
+    body:JSON.stringify({name,sheet:$('#sheet').value,tile:+$('#tile').value,colorkey:KEY,
       region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
       max_tiles:+$('#maxt').value,exclude:[...IMPEX]})})).json();
   const log=$('#log'); log.className=r.ok?'ok':'bad';
@@ -4637,12 +4724,12 @@ def make_handler(session):
                     d = json.loads(raw)
                     self._send(200, json.dumps(session.proj.slice_grid(
                         d["sheet"], int(d["tile"]), d["region"],
-                        d.get("exclude", []))))
+                        d.get("exclude", []), d.get("colorkey"))))
                 elif self.path == "/api/atlas":
                     d = json.loads(raw)
                     session.proj.add_atlas(d["name"], d["sheet"], int(d["tile"]),
                                            d["region"], int(d["max_tiles"]),
-                                           d.get("exclude", []))
+                                           d.get("exclude", []), d.get("colorkey"))
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/newmap":
                     d = json.loads(raw)
