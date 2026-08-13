@@ -127,6 +127,7 @@ flags = []
 
 [legend."#"]
 tile = "wall"
+atlas = "tiles"
 flags = ["solid"]
 
 [legend."~"]
