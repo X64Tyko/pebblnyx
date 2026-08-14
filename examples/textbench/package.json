@@ -1,0 +1,42 @@
+{
+  "name": "pnx-textbench",
+  "author": "tyton",
+  "version": "1.0.0",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "pnx textbench",
+    "uuid": "54706615-c744-42db-ba01-52a929f97741",
+    "sdkVersion": "3",
+    "enableMultiJS": false,
+    "targetPlatforms": [
+      "emery"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [],
+    "resources": {
+      "media": [
+        {
+          "type": "raw",
+          "name": "PALETTES",
+          "file": "palettes.bin"
+        },
+        {
+          "type": "raw",
+          "name": "BENCH",
+          "file": "font_bench.bin"
+        },
+        {
+          "type": "raw",
+          "name": "BENCH2",
+          "file": "font_bench2.bin"
+        }
+      ]
+    }
+  }
+}

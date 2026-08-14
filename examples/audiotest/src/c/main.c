@@ -5,6 +5,12 @@
 // without the stream running dry -- so this reports underrun on screen and in the log,
 // and fires effects hard enough to force voice stealing.
 //
+// Also, since M4's own "Done when" is specifically about a covered app (a notification
+// arriving mid-play): FOCUS_LOST snapshots PnxAudioStats, FOCUS_GAINED snapshots again and
+// logs the delta -- left_playing (audible restarts), worst_gap_ms and short_writes -- so
+// covering the watch with a real notification answers "did anything glitch" directly,
+// rather than needing to infer it from a HUD nobody was watching while it was covered.
+//
 // SELECT fires a laser. DOWN fires an explosion. UP toggles the music.
 
 #include "pnx/pnx.h"
@@ -39,6 +45,11 @@ typedef struct {
   char hud[48];
   char hud2[48];
   char hud3[48];
+
+  // The covered-period check -- see the header comment.
+  bool covered;
+  uint32_t t_lost;
+  PnxAudioStats stats_at_lost;
 } App;
 
 static const uint32_t RESOURCES[] = PNX_ASSET_RESOURCE_TABLE;
@@ -63,6 +74,31 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
 
   PnxEvent ev;
   while (pnx_platform_poll_event(&ev)) {
+    // ev.time_ms, not `now` -- stamped at delivery. While covered the app is throttled
+    // and may not get a frame callback until both FOCUS_LOST and FOCUS_GAINED are already
+    // queued, so draining them in the same instant and timing against `now` would report
+    // a near-zero gap that never happened. This bit a real run once already.
+    if (ev.type == PNX_EVENT_FOCUS_LOST) {
+      a->covered = true;
+      a->t_lost = ev.time_ms;
+      a->stats_at_lost = *pnx_audio_stats();
+      pnx_log("audio: FOCUS_LOST -- snapshot g%u wg%u short%u",
+              (unsigned)a->stats_at_lost.left_playing, (unsigned)a->stats_at_lost.worst_gap_ms,
+              (unsigned)a->stats_at_lost.short_writes);
+      continue;
+    }
+    if (ev.type == PNX_EVENT_FOCUS_GAINED) {
+      if (a->covered) {
+        const PnxAudioStats *now_stats = pnx_audio_stats();
+        pnx_log("audio: FOCUS_GAINED after %ums -- g +%u wg %u->%u short +%u",
+                (unsigned)(ev.time_ms - a->t_lost),
+                (unsigned)(now_stats->left_playing - a->stats_at_lost.left_playing),
+                (unsigned)a->stats_at_lost.worst_gap_ms, (unsigned)now_stats->worst_gap_ms,
+                (unsigned)(now_stats->short_writes - a->stats_at_lost.short_writes));
+      }
+      a->covered = false;
+      continue;
+    }
     if (ev.type != PNX_EVENT_BUTTON_DOWN) continue;
     if (ev.button == PNX_BUTTON_UP) {
       // Sweeps the low-pass cutoff. 0 is off, which is what every earlier build did.
@@ -152,8 +188,13 @@ static void frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target) {
              a->seq_on ? (a->sfx_on ? "seq+sfx" : "seq")
                        : (a->sfx_on ? "tone+sfx" : "TONE ONLY"));
 
+  // Was `if (a->ticks % 250 == 0) { if (a->ticks == 50) pnx_diag_flush(); ... }` -- the
+  // inner check was unreachable, since 50 is never a multiple of 250 for any tick value
+  // that also satisfies the outer gate. pnx_diag_flush() was never called via this path
+  // at all, so nothing logged before the ring's 24-line capacity filled ever left the
+  // device via `pebble install --logs`. Two separate checks now, on purpose.
+  if (a->ticks == 50) pnx_diag_flush();
   if (a->ticks % 250 == 0) {
-    if (a->ticks == 50) pnx_diag_flush();
     pnx_log("audio: %s | %s | %s | short %u/%u carry %u dry %u",
             a->hud, a->hud3, a->hud2,
             (unsigned)au->short_writes, (unsigned)au->feeds,

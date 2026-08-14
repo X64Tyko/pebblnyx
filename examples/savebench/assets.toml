@@ -1,0 +1,24 @@
+# Save timing benchmark: the real pnx_save API (M5), on real hardware, for the first time.
+#
+# Host tests cover the chunking logic against a mocked persist store. The timing the whole
+# design was SIZED against -- ~7ms/chunk, ~297ms of will_focus warning -- came from an
+# earlier probe project measuring raw persist_write_data calls directly, not from this
+# module running on a watch. This app closes that gap: real pnx_save_write/begin/step
+# calls, at several payload sizes, plus an armed test that saves against a REAL
+# notification (you cover the watch; the app times FOCUS_LOST to save-complete).
+
+[project]
+name = "savebench"
+resources = "resources"
+header = "src/c/assets_gen.h"
+budget_bytes = 262144
+
+[[font]]
+name = "bench"
+source = "art/fonts/LiberationSans-Regular.ttf"
+size = 14
+depth = 1
+threshold = 128
+charset = " !%()+-./0123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+license = "SIL Open Font License 1.1"
+out = "font_bench.bin"

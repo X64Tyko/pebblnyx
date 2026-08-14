@@ -1,0 +1,42 @@
+{
+  "name": "pnx-stressbench",
+  "author": "tyton",
+  "version": "1.0.0",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "pnx stressbench",
+    "uuid": "4caab00a-2d3c-4e75-94f0-66c4e0bfd082",
+    "sdkVersion": "3",
+    "enableMultiJS": false,
+    "targetPlatforms": [
+      "emery"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [],
+    "resources": {
+      "media": [
+        {
+          "type": "raw",
+          "name": "PALETTES",
+          "file": "palettes.bin"
+        },
+        {
+          "type": "raw",
+          "name": "TONE",
+          "file": "sfx_tone.bin"
+        },
+        {
+          "type": "raw",
+          "name": "BENCH",
+          "file": "font_bench.bin"
+        }
+      ]
+    }
+  }
+}

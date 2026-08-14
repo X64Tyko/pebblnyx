@@ -3,14 +3,18 @@
 Current state: **M0-M4d complete**, editor through E17 (E1-E5 and E7-E17 done; E3 was
 superseded, E6 not started). [v0.1.0-beta.1](https://github.com/X64Tyko/pebblnyx/releases/tag/v0.1.0-beta.1)
 shipped installers for Linux, Windows and both macOS architectures at editor E15; E16 and
-E17 have landed since. **M5 (save) and
-M6 (app framework) are built and host-tested**, landed together because M6's lifecycle is
-what save-on-blur actually hangs off of; both still want the same device confirmation
-M4/M4c/M4d are already waiting on. M7 (publish) next. `platform`, `core`, `assets`, `gfx`,
-`audio` and `input` run on device; `save` and `app` are built and host-tested but not yet
-run on one. 724 host checks plus 361 pipeline-validation checks cover all of it. Audio,
-landscape, map streaming, save and the app-state stack still want hardware confirmation. No
-emulator is possible for PT2 — see [`EDITOR.md`](EDITOR.md).
+E17 have landed since. **M5 (save) and M6 (app framework) are built and host-tested**,
+landed together because M6's lifecycle is what save-on-blur actually hangs off of. M5's
+core claim -- save-on-blur finishes before a real notification covers the app -- is now
+confirmed on device (`examples/savebench`); M6's own code (`pnx_app`'s throttle-aware
+pausing specifically) is not yet, since the device probes so far talk to
+`pnx_platform_run` directly rather than through `pnx_app`. M4d's device confirmation is
+done (`examples/worldtiles` on hardware, see below). M7 (publish) next. `platform`,
+`core`, `assets`, `gfx`, `audio` and `input` run on device; `save` has a real device
+result now; `app` is still host-tested only. 726 host checks plus 361 pipeline-validation
+checks cover all of it. Audio, landscape/screen-lock and the app-state stack (`pnx_app`
+specifically) still want direct hardware confirmation. No emulator is possible for PT2 —
+see [`EDITOR.md`](EDITOR.md).
 
 The ordering principle: a framework with no consumer gets the abstractions wrong in ways
 nobody discovers until someone tries to use it. PGE (the 2014 Pebble game engine) failed
@@ -251,7 +255,7 @@ Outstanding: device confirmation. A host cannot tell you whether a landscape scr
 the hand, whether the backlight hold survives a notification, or whether swallowing BACK feels like
 protection or a trap.
 
-## M4d — Multi-atlas maps and WorldTile streaming — **DONE** (pending device confirmation)
+## M4d — Multi-atlas maps and WorldTile streaming — **DONE, confirmed on hardware**
 
 Three limits arrived together as content grew past the first example's scale: a map could draw
 from exactly one atlas, a map was resident whole or not at all, and an atlas imported by mistake
@@ -415,7 +419,7 @@ the voice-major restructure, and the editor (E6) has no UI for any of it.
 Done when: the packed instrument round-trips through the editor, and the device confirms
 the render cost after the restructure.
 
-## M5 — Save — **DONE** (pending device confirmation)
+## M5 — Save — **DONE, core claim confirmed on device**
 
 **The chunk size was never a choice.** `PNX_PERSIST_KEY_BYTES` (256) is the platform's own
 per-key cap, so a save larger than one key had no option but to spend more calls -- and a
@@ -459,8 +463,16 @@ several chunks. `tools/host_harness.c`'s "save" section proves the game-level cl
 end-to-end: save-on-blur mid-walk, into a **different** `Game` struct simulating a cold
 start, CONTINUE landing on the exact saved tile with the exact saved stats.
 
-Outstanding: device confirmation of the actual persist timing this was sized against, and
-`PAUSE_SAVE`'s checkpoint path once resonant has a beat that places one.
+**Confirmed on device** (`examples/savebench`, see `MEASUREMENTS.md`'s "M5 confirmed on
+device"): real `pnx_save_write` costs ~5.4ms/chunk, close to the persist probe's own "same
+key" figure; and the actual claim this milestone rests on -- save-on-blur finishing before
+the app is covered -- held against a REAL notification, not a synthetic event: `FOCUS_LOST
+-> save done in 4ms`, enormous margin against the ~297ms warning.
+
+Outstanding: the incremental spread's worst single frame ran 39ms in one device run --
+right at the ~35/40ms budget, not comfortably under it, and worth more samples before
+calling the spread's own worst case settled. `PAUSE_SAVE`'s checkpoint path remains
+unbuilt until resonant has a beat that places a save point.
 
 Done when: the game saves and restores across a cold start — **yes**, proven on host. A
 save spread across frames shows no visible hitch — proven at the framework level (a
@@ -699,9 +711,20 @@ Costs on the overworld example: HUD 12px 1bpp **757 B / 40 glyphs**, dialogue 16
 **902 B / 27 glyphs**. Engine growth is 662 B in `gfx` and 993 B in `assets`; the app is
 **14,784 of 65,535 bytes (22.6%)**.
 
-**Not yet measured on hardware.** The glyph blit should be far cheaper than 4.3 ms -- it writes
-one byte per set pixel with no palette read -- but that is reasoning, not a number, and the whole
-justification for this work is a measurement. It wants timing on a watch before the claim is made.
+**Measured on hardware, across three string lengths** (`examples/textbench`, built for
+exactly this; see `MEASUREMENTS.md`'s "Glyph blitter vs SDK text"). The reasoning behind
+"should be far cheaper" was right, and turned out to undersell it: SDK text carries **a
+~700us fixed cost per call before a single glyph is drawn**, against the blitter's ~17us --
+so the glyph blitter's advantage is not a flat multiple, it is largest for the SHORT
+strings a HUD actually draws (16.8x at 5 glyphs) and settles toward ~9.8x for a full
+dialogue-length line. The SDK path also turned out to be the noisier of the two by a wide
+margin (13% run-to-run against the blitter's 0.7%) rather than merely slower.
+
+**Verdict: unambiguously worth the 1.66 KB it cost.** 662 B in `gfx` plus 993 B in `assets`,
+against a 65,535 B budget (2.5%), buys a path that is cheaper on every string length
+tested, steadier call to call, and able to draw during the frame rather than only after
+the framebuffer is released -- the SDK hook can never have anything drawn over its output
+at all. There is no length or use case in this data where SDK text draws even.
 
 **E8** falls out of the same goal: the editor is one ~20 MB executable with a native window, so
 using it needs no Python, no Pillow and no terminal. It drives the OS's own webview rather than

@@ -1,0 +1,28 @@
+# Combined-load frame cost: audio + graphics + text + an incremental save step, all in the
+# same frame, on real hardware.
+#
+# DESIGN.md's open questions name this directly: "Combined-load frame cost. Each subsystem
+# is measured; the sum, everything running at once against a single frame budget, never
+# has been." This app is that sum. Graphics is synthesised (a fill_rect grid, not a real
+# tilemap -- see main.c) rather than measured again; audio, text and save are the real
+# framework paths, run together on purpose.
+
+[project]
+name = "stressbench"
+resources = "resources"
+header = "src/c/assets_gen.h"
+budget_bytes = 262144
+
+[[font]]
+name = "bench"
+source = "art/fonts/LiberationSans-Regular.ttf"
+size = 14
+depth = 1
+threshold = 128
+charset = " !%()+-./0123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+license = "SIL Open Font License 1.1"
+out = "font_bench.bin"
+
+# Just something continuously streaming -- a loudness or musicality is not the point here.
+[sample.tone]
+file = "art/laser.wav"

@@ -641,12 +641,21 @@ harness** (it is how every milestone since M1 has been verified before touching 
    hours. Also probably the wrong question — `light_enable(true)` "will rapidly deplete
    the battery" per the docs, and a reflective screen needs it indoors, which likely
    dwarfs any rendering difference.
-3. **Combined-load frame cost.** Each subsystem's cost is measured; the sum, everything
-   running at once against a single frame budget, never has been.
-4. **Device confirmation for M4-M6.** Audio, landscape/screen-lock, map streaming, save
-   and the app-state lifecycle are all built and pass their host tests; none has been
-   watched running on a Pebble Time 2 yet. See `ROADMAP.md`'s "pending device
-   confirmation" tags.
+3. **Device confirmation for M6's own code.** M5's core save-on-blur claim is now
+   confirmed on device (`examples/savebench`); `pnx_app`'s throttle-aware pausing has not
+   been, since the device probes so far talk to `pnx_platform_run` directly rather than
+   through `pnx_app`. Landscape/screen-lock (M4c) and full audio-under-load (M4) are
+   likewise still unconfirmed. See `ROADMAP.md`'s milestone tags.
+4. **Why `examples/flashbench`'s single-large-resource read cost grew over a stress run
+   rather than staying flat** (`examples/stressbench`). Thermal, heap fragmentation, and a
+   specific costly chunk index are all plausible; none is confirmed. See
+   `MEASUREMENTS.md`'s "Combined load" section.
+
+Resolved rather than dropped: **combined-load frame cost** (`examples/stressbench`
+measured it directly -- worst frame grew to 43ms under a save step, audio's own worst gap
+moved with it, and zero audible glitches across the run) and the isolated glyph-blitter
+and flash-offset numbers this list used to carry as open (`examples/textbench`,
+`examples/flashbench` -- see `MEASUREMENTS.md`).
 
 ## 12. Decisions rejected, with evidence
 

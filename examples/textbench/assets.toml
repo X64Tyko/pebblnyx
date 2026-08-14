@@ -1,0 +1,46 @@
+# Text draw benchmark: SDK text (`pnx_platform_text_draw`, PNX_USE_SDK_TEXT) against the
+# glyph blitter (`pnx_text_draw`, E7), under identical conditions and on real hardware.
+#
+# MEASUREMENTS.md already has the SDK side, ~4,300 us/call, from graphics_draw_text
+# directly. It never had a clean, isolated number for the glyph blitter -- every existing
+# figure came from whole-frame totals in an example that was doing other work at the same
+# time (see MEASUREMENTS.md's "The frame rate drop was debug text, not the synth"). This
+# app exists to draw the SAME string through both paths, back to back, on the same watch,
+# and report both isolated per-call costs.
+#
+# One font, one size, matching PNX_TEXT_SMALL (Gothic 14) as closely as a custom face can:
+# neither side gets an unfair size advantage.
+
+[project]
+name = "textbench"
+resources = "resources"
+header = "src/c/assets_gen.h"
+budget_bytes = 262144
+
+[[font]]
+name = "bench"
+source = "art/fonts/LiberationSans-Regular.ttf"
+size = 14
+depth = 1              # crisp, matching the HUD faces this framework actually ships
+threshold = 128
+# Exactly what BENCH_STRING in main.c uses, plus digits and a few extras for any status
+# line drawn alongside it. charset = "auto" is not used here on purpose: this app has no
+# [dialog.*] pages to derive one from, and the string is fixed and known.
+charset = " !%()+-./0123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+license = "SIL Open Font License 1.1"
+out = "font_bench.bin"
+
+# Same face, same size, depth 2 -- antialiased, matching resonant's actual dialogue font
+# (16px 2bpp; 14px chosen here purely to keep this identical to `bench` in every way
+# except the one thing being isolated). MEASUREMENTS.md's Render cost table has flagged
+# 2bpp as "strictly more expensive" than 1bpp by reasoning -- destination reads and a
+# three-channel blend per pixel -- but never quantified it; this is what quantifies it.
+[[font]]
+name = "bench2"
+source = "art/fonts/LiberationSans-Regular.ttf"
+size = 14
+depth = 2
+threshold = 128
+charset = " !%()+-./0123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+license = "SIL Open Font License 1.1"
+out = "font_bench2.bin"

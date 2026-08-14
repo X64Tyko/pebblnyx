@@ -21,12 +21,13 @@ cost to find out.
 | App binary ceiling | **65,535 B** — a u16 that fails obscurely | [memory](#memory) |
 | Resource bytes | 256 KB appstore, **1 MB** device | [memory](#memory) |
 | Resource entries | **256** per `.pbpack` | [memory](#memory) |
-| Flash read | **cost scales with OFFSET**, not length | [flash](#flash--resource-reads) |
+| Flash read | scales with OFFSET within a resource; a single **large** resource (220KB) reads flat at ~40ms regardless of offset -- open | [flash](#flash--resource-reads) |
 | Persist write | **~7 ms per call**, any size | [persist](#persist-writes-are-116x-slower-than-reads-replicated-3-runs) |
 | Throttled when covered | **~0.4 fps**, not suspended | [lifecycle](#lifecycle-throttled-not-suspended) |
 | Button latency | +27 ms systematic, 31 ms spread | [input](#input-timing-m0-spike) |
 | Touch latency | half of buttons | [input](#input-timing-m0-spike) |
 | Tile encoding | 16x16, 4bpp, metatiles at scale | [tiles](#tile-encoding-16x16-with-metatiles-measured-against-the-alternatives) |
+| Text draw | glyph blit **~17us + ~8us/glyph**, SDK **~703us + ~51us/glyph** (10-17x) | [text](#glyph-blitter-vs-sdk-text-measured-on-device-examplestextbench) |
 | Framework baseline | **6,452 B** empty, 2,528 without diagnostics | [baseline](#baseline-framework-cost-m1-examplesempty) |
 | Audio | batch API unusable; **stream and mix** | [audio](#audio) |
 
@@ -83,22 +84,22 @@ above rather than measured itself.
 | 64 sprites 16x16, masked, + clear | 1,350–1,600 µs | 4% |
 | 725 tile blits (full-screen 16px tilemap) | 2,350 µs | 7% |
 | Computed value per pixel (pessimal) | 3,100 µs | 9% |
-| One SDK text draw (`graphics_draw_text`) | ~4,300 µs | 12% |
+| One SDK text draw (`graphics_draw_text`), one HUD line | ~1,367-4,300 µs, length-dependent | 4-12% |
 | **4bpp tilemap + sprites, full screen** | **~5,100 µs** | **14.5%** |
-| One glyph-blitter text draw | **not yet measured** | — |
+| One glyph-blitter text draw, one HUD line | **~146-177 µs** | 0.4-0.5% |
 
 `LayerUpdateProc` is the **only** way to obtain a `GContext` — there is no
 `graphics_context_create()`. Rendering goes through `graphics_capture_frame_buffer()`
 plus `gbitmap_get_data_row_info()`, writing `GBitmapFormat8Bit` bytes directly.
 
-**The glyph blitter (E7) has no device number yet, and the gap in that table is
-deliberate.** The reasoning says it should be far cheaper than the SDK path — 1bpp writes
-one byte per set pixel with no palette read, against `span_4bpp`'s unpack-and-index — but
-that is an argument, not a measurement, and the M3 blit estimate was wrong by 2.4x for
-exactly this kind of reasoning. The replacement's whole justification is the 4,300 µs it
-is supposed to remove, so the number wants taking before the claim is repeated. It also
-needs a 2bpp figure, which is strictly more expensive: intermediate levels read the
-destination and blend three channels.
+**The glyph blitter (E7) is measured now, at both depths** -- see "Glyph blitter vs SDK
+text" below for the full breakdown (it scales with string length on both paths, from very
+different starting costs, so a single number was never going to be the honest answer).
+The reasoning that it should be far cheaper than the SDK path held up, and undersold it:
+SDK text carries a several-hundred-µs fixed cost before a single glyph is drawn. 2bpp is
+confirmed more expensive than 1bpp, as reasoned -- intermediate coverage levels read the
+destination and blend three channels -- but both remain an order of magnitude or more
+cheaper than SDK text at every length tested.
 
 ## Memory
 
@@ -187,9 +188,51 @@ a frame at 725 tiles; a 516-byte WorldTile amortises one call over 256 cells and
 a boundary rather than every frame. That is why `pnx_assets.h` still says
 residency-not-streaming and maps stream anyway — the rule is unchanged, the unit is not.
 
-**Still wanted: a real probe.** The above is read off session logs, where loads carry other
-scene assets and frame boundaries are coarse. Sweeping offset independently of length over
-a large resource would settle the model properly.
+**The probe landed, and it did not settle the model -- it complicated it.**
+`examples/flashbench` reads one 220KB raw resource at seven offsets (0-200KB, fixed 256B)
+plus two longer reads (2048B) at the first and last offset, each point averaged over 30
+calls. Measured on `emery`, 2026-08-14:
+
+| Offset | Length | Cost |
+|---|---|---|
+| 0 KB | 256 B | 40.4 ms |
+| 25 KB | 256 B | 40.4 ms |
+| 50 KB | 256 B | 41.9 ms |
+| 75 KB | 256 B | 41.0 ms |
+| 100 KB | 256 B | 40.8 ms |
+| 150 KB | 256 B | 40.1 ms |
+| 200 KB | 256 B | 40.7 ms |
+| 0 KB | 2,048 B | 41.0 ms |
+| 200 KB | 2,048 B | 41.2 ms |
+
+**Flat.** ±5% across the whole sweep, independent of both offset and length -- the
+`cost ≈ Σoffset ÷ T` model fitted above predicts near-zero at 0KB and ~73ms at 200KB for
+this resource, and neither happened. This is not the O(offset) pattern; it is something
+else, and the something else is expensive: ~40ms is roughly **1,400x** the ~29µs baseline
+and higher than even the worst pre-banking WorldTile read (305ms, but for a 22KB window
+across 19 calls -- **per call** that read was ~16ms, still half of flashbench's flat 40ms).
+
+**Best explanation, not a confirmed one:** this is the largest single resource anything in
+this repo has read from directly -- 220KB, against ~8KB for a WorldTile bank and a few KB
+for everything else. `pbpack.py` stores a CRC per resource entry at build time
+(`ResourcePackTableEntry`). If the device validates that CRC by hashing the resource's
+**entire content** on every access, rather than just the requested range, that is
+O(total resource size) and would produce exactly this: flat across offset and length
+within one resource, scaling with that resource's own size, and reproducing the observed
+magnitude at a plausible ~5.6 MB/s hash throughput (220KB / 40ms). Not verified against
+PebbleOS firmware source, which was not available to check directly.
+
+**Actionable regardless of the mechanism: a single large resource is expensive to read
+from at all, uniformly across it.** This lands on the same answer M4d's banking already
+gave -- split large payloads into several smaller resources -- for a second, independent
+reason. The O(offset) finding above says why a small streaming unit beats one big
+resource for a *given offset*; this says a large single resource is expensive even at
+offset 0.
+
+**Still wanted:** a sweep across resource SIZE at a fixed offset (say four resources at
+8KB/32KB/128KB/220KB, all read at offset 0) would confirm or kill the CRC hypothesis
+directly -- if flat-per-resource cost scales with that resource's own size, the hypothesis
+holds; if the four come back similar, it does not and the real mechanism is still open.
 
 ## Persist: writes are ~116x slower than reads **(replicated, 3 runs)**
 
@@ -205,6 +248,50 @@ a large resource would settle the model properly.
 **Cost is per call, not per byte.** Four bytes costs half of 256 — 877 µs/byte versus
 28 µs/byte, **31x worse per byte**. Rewriting one key beats spreading across keys,
 implying per-key index work. Extrapolated: 8KB = 229 ms, 32KB = ~918 ms.
+
+### M5 confirmed on device (`examples/savebench`)
+
+The numbers above are from an earlier probe measuring raw `persist_write_data` calls
+directly. `pnx_save` (M5) was sized against them, but had never itself run on a watch --
+host tests prove its chunking against a mocked persist store, not real timing. This is
+the module's own real cost, measured with `pnx_save_write`/`begin`/`step` doing their own
+chunking, versioning and checksum work on top of the raw writes:
+
+| Payload | Chunks | Cost | 
+|---|---|---|
+| 24 B | 1 | 4.6 ms |
+| 256 B | 2 | 6.6 ms |
+| 1,024 B | 5 | 18.2 ms |
+| 4,000 B | 16 | 85.2 ms |
+
+Implied **~5.4 ms/chunk** (from the 1-chunk and 16-chunk points) -- close to the probe's
+"same key" figure above (5.0 ms) rather than its "rotating keys" one (7.3 ms), which
+tracks: `pnx_save` always writes the same small run of keys for a given slot, never a
+genuinely fresh key each time. The module's own overhead (chunk header, checksum) is
+small next to the underlying persist cost, not a second cost worth separating out.
+
+**Incremental spread** (`pnx_save_begin` + one `pnx_save_step` per frame, the 15 chunks
+after the first): 15 frames, worst single frame **39 ms** -- against a ~35ms nominal free
+budget and the 40ms locked frame period, that one frame used essentially the whole
+period with nothing to spare. One chunk in fifteen costing 5-8x the ~5.4ms average is a
+real tail, not a rounding error, and worth watching rather than dismissing as noise from
+one sample.
+
+**The core M5 claim, confirmed against a REAL notification, not a synthetic event:**
+armed, then the watch was actually covered --
+
+```
+FOCUS_LOST -> save done in 4ms (ok)
+```
+
+Four milliseconds, against the ~297ms `will_focus` warning above -- enormous margin, and
+the first time this specific claim ("save-on-blur finishes before the app is actually
+covered") has been checked against real firmware rather than reasoned from the probe's
+297ms/106ms comparison. The reported total covered duration for this run is not quoted
+here -- a bug in the benchmark (timing from when the event was *processed* rather than
+its own delivery timestamp) meant it could understate a throttled app's true covered
+time, and is fixed for the next run. It does not affect the 4ms figure above, which is
+bracketed entirely inside one callback with no dependency on event timing.
 
 ## Lifecycle: throttled, not suspended
 
@@ -227,6 +314,55 @@ Two frames where 37 ms cadence would give ~123: the app is throttled to roughly
   off the render loop onto `app_timer`: had it stayed there, every notification would have
   stalled the mixer for seconds. It also means the sequencer's 4-row catch-up clamp never
   fires for notifications, only for something that stalls timers outright.
+
+**Corroborated on the real module**, not just this probe: `examples/audiotest`, extended
+to snapshot `PnxAudioStats` across a real `FOCUS_LOST`/`FOCUS_GAINED`, was covered by a
+real notification with music playing and reported no change worth trusting either way --
+the run's own event-timing had a bug (see "M5 confirmed on device" above; the same
+`ev.time_ms` fix applies here) that could make a genuinely long cover read as near-zero,
+so the quantitative delta is not reported. What is worth recording: nothing paused,
+stopped or audibly glitched during the cover, by direct observation while it happened.
+Consistent with the finding above; not yet a second independent confirmation of it.
+
+## Combined load: does everything at once fit the frame? (`examples/stressbench`)
+
+DESIGN.md's open questions used to name this directly: every subsystem's cost is measured
+alone; the sum, everything running at once against one frame budget, never was.
+`examples/stressbench` runs a synthetic full-screen graphics load (a fill_rect
+checkerboard, not a real tilemap -- that is already measured on its own above) plus a
+continuously looping audio sample plus a glyph HUD line every frame, and fires a real
+~2000-byte incremental save (one `pnx_save_step` per frame, ~8 chunks) every three
+seconds on top of all of it. `emery`, 2026-08-14:
+
+| | Worst frame | Audio worst-gap trend |
+|---|---|---|
+| No save step active | 28 ms | -- |
+| Save step active | grew 28 -> 31 -> **43 ms** over ~15 save cycles | 43 -> 51 -> 54 ms |
+| Audio restarts (`left_playing`) the whole run | **0** | -- |
+
+**A save step landing in the same frame as graphics and text measurably costs more, and
+it crept up rather than staying flat** -- 28ms early in the run, 43ms by the fifteenth
+save cycle, against a 35ms nominal free budget and a 40ms locked frame period: that worst
+frame used effectively the whole period. The audio timer's own worst gap moved in step
+with it (43 -> 51 -> 54ms across the same cycles that produced the worse frame times) --
+a real, if modest, contention signal: heavy frame-side work does measurably compete with
+the audio timer for the CPU, exactly the mechanism `MEASUREMENTS.md`'s own audio section
+already names as a risk ("a 10ms audio timer measured at 54-59ms on device" when
+something else flooded the event loop).
+
+**And it never produced an audible glitch.** `left_playing` (a restart the ear would
+catch) stayed at exactly 0 for the entire run, across every save cycle including the ones
+with the worst frame times. The stream's buffer depth is what absorbs a longer gap
+without it becoming silence -- see "Streaming audio" below for why a gap and an audible
+glitch are different claims. So the honest read is: combined load is a real, growing cost
+worth watching (the 43ms frame is not nothing), but it did not cross into the failure
+mode -- audible discontinuity -- this milestone actually cares about, at least across
+this one run's ~15 cycles.
+
+**Not yet done:** why the worst frame grew over the run rather than staying flat is
+unexplained -- thermal, heap fragmentation in the mixer, or something specific to a
+particular chunk index are all plausible and none is confirmed. A longer run, and reading
+which chunk index correlates with the worst frames, would settle it.
 
 ## Input timing (M0 spike)
 
@@ -728,6 +864,139 @@ Engine cost of the whole feature: **+662 B in `gfx`** (the blitter, both span wr
 32-byte blend table, wrapping and measuring) and **+993 B in `assets`** (the loader, its
 validation, and two more scene slots). The overworld example went from 12,208 to
 **14,784 of 65,535 bytes (22.6%)**.
+
+## Glyph blitter vs SDK text: measured, on device (`examples/textbench`)
+
+Every figure touching the glyph blitter's own cost until now was inferred from a
+whole-FRAME total in an app that was also doing other work at the same time (the ~4.3 ms
+SDK figure above, `~4.3 ms a call` in the audio section below) -- bounding the answer
+without isolating it. `examples/textbench` exists to isolate it: the same one-line
+HUD-shaped string (`"LV5  HP 42/60"`, 13 chars, matching Gothic 14 / `PNX_TEXT_SMALL`)
+drawn through both paths, back to back on the same watch, each call bracketed with
+`pnx_platform_now_ms()` and repeated many times to smooth the 1ms clock (see
+"Manufactured precision" above) -- 270 SDK calls and 2,700 glyph calls per run, interleaved
+in three rounds (SDK, glyph, SDK, glyph, SDK, glyph) so a slow drift across the ~8s run
+lands on both conditions rather than favouring whichever went first.
+
+**(replicated, 3 runs)** on `emery`, 2026-08-14:
+
+| | Run 1 | Run 2 | Run 3 | Mean |
+|---|---|---|---|---|
+| SDK text (`pnx_platform_text_draw`) | 1,374 us | 1,451 us | 1,277 us | **1,367 us** |
+| Glyph blit (`pnx_text_draw`) | 147 us | 146 us | 146 us | **146 us** |
+
+**SDK is the noisier of the two by a wide margin** -- 174 us run-to-run spread (13% of its
+mean) against the glyph blitter's 1 us (0.7%), consistent with one being a real OS text
+layout call and the other a tight blit loop with nothing else to vary. Run 3's own three
+rounds show the same pattern in miniature and confirm the interleaving is doing its job:
+SDK 1,355 / 1,222 / 1,255 us against glyph's 147 / 144 / 146 us -- the SDK side visibly
+noisier round to round, the glyph side barely moving, in the same run.
+
+**The glyph blitter costs ~146 us/call. SDK text costs ~1,367 us/call for this string --
+9.4x more.** At the locked 37.33 ms frame floor that is 0.4% of a frame for the blitter
+against 3.7% for SDK text.
+
+**This does not simply replace the ~4.3 ms figure elsewhere in this document.** That
+number came from `examples/audiotest`'s pre-E7 HUD, which drew a taller, multi-line block
+through 5 separate `graphics_draw_text` calls with word-wrap -- more glyphs and more
+layout work per call than one short line. SDK text's cost scales with content the way any
+text layout does; 146 us for the glyph blitter is the isolated, controlled number, and the
+~4.3 ms figure remains the honest cost of what that specific older HUD actually drew. The
+two are different content, not a contradiction -- and the ratio (SDK several times more
+expensive than the blitter, whatever the string, and noticeably less consistent call to
+call) is the number that generalises, not either absolute figure alone.
+
+**What this settles for E7:** the roadmap's "should be far cheaper... but that is
+reasoning, not a number" is now a number. A game drawing HUD text every frame through the
+glyph blitter pays a fraction of a percent of the frame budget for it, reliably; the same
+text through the SDK hook would cost several percent AND vary by double digits run to run,
+and can only run after the framebuffer is released besides.
+
+### Does it scale with glyph count? Yes, on both paths -- but from very different starts
+
+The single-string number above answers "how much does one call cost", not "is that call
+mostly overhead or mostly content" -- and a game draws text of very different lengths in
+very different places, so that distinction matters more than the headline ratio does.
+`examples/textbench` was extended to run three string lengths (5, 13 and 20 glyphs, the
+13-glyph one being the exact string measured above) through both paths in one run:
+
+| Glyphs | SDK | Glyph blit | Ratio |
+|---|---|---|---|
+| 5 | 958 us | 57 us | **16.8x** |
+| 13 | 1,466 us | 149 us | 9.8x |
+| 20 | 1,733 us | 177 us | 9.8x |
+
+Per call, deliberately -- the app batches 3 SDK calls and 30 glyph calls per frame (the
+SDK side is already ~2.9ms/frame at that batch size; the glyph side is cheap enough that
+more calls just buys better averaging), so a subphase's TOTAL wall-clock time is not this
+ratio: 120 SDK calls at 958us against 1,200 glyph calls at 57us is 114,960us against
+68,400us, only 1.68x, because the glyph subphase did 10x the draws in that same wall time.
+That is the batch-size choice showing through, not a second finding -- the per-call number
+is the one that means anything for a game, since it answers "what does drawing this string
+once cost", independent of how many times either path happens to run in a frame.
+
+Single run, not yet replicated the way the 13-glyph figure above is -- but the 13-glyph
+column here (1,466 us / 149 us) lands close to that run's 1,367/146 us mean, well inside
+the ~13%/~1% run-to-run noise already characterised, so it is read as consistent with it
+rather than a contradiction.
+
+**Both paths scale with length -- neither cost is flat per-call overhead.** A two-point
+fit between the 5- and 20-glyph tiers (not a regression; three points is thin for one, but
+enough to separate "mostly overhead" from "mostly content"):
+
+| | Fixed, per call | Marginal, per glyph |
+|---|---|---|
+| SDK text | **~703 us** | ~51 us |
+| Glyph blit | **~17 us** | ~8 us |
+
+**The SDK's fixed cost alone (~703 us) is already larger than the glyph blitter's ENTIRE
+cost at 20 glyphs (177 us).** That is what the ratio column above is actually showing:
+it is not roughly constant, it is highest for the SHORTEST string (16.8x at 5 glyphs) and
+settles toward ~9.8x as strings get longer, because SDK's large fixed cost dominates a
+short call disproportionately while the marginal, per-glyph term is where the two paths
+are closest (~51 us against ~8 us, still 6.4x, but the least dramatic comparison in this
+data). A two-digit HP number is the case the glyph blitter wins hardest; a full dialogue
+line is where it wins least, and even there it is still an order of magnitude.
+
+### 2bpp (antialiased) against 1bpp: confirmed more expensive, still an order of magnitude better than SDK
+
+`examples/textbench` was extended again to add a second font built at `depth = 2` (the
+same setting resonant's actual dialogue face uses) alongside the existing `depth = 1`
+one, run through the same three string lengths in the same session. `emery`,
+2026-08-14, a separate run from the SDK-vs-1bpp table above:
+
+| Glyphs | SDK | Glyph blit 1bpp | Glyph blit 2bpp |
+|---|---|---|---|
+| 5 | 816 us | 61 us | 64 us |
+| 13 | 1,333 us | 152 us | 194 us |
+| 20 | 1,641 us | 190 us | 250 us |
+
+Two-point fit (5/20 glyphs, same method as above):
+
+| | Fixed, per call | Marginal, per glyph |
+|---|---|---|
+| SDK text | ~541 us | ~55 us |
+| Glyph blit 1bpp | ~21 us | ~8 us |
+| Glyph blit 2bpp | ~4 us | ~12 us |
+
+This SDK run (816/1,333/1,641) landed noticeably below the earlier one (958/1,466/1,733)
+-- another data point for "SDK is the noisier path," not a new finding. The 1bpp glyph
+numbers (61/152/190) sit close to the earlier 1bpp-only run (57/149/177), consistent with
+the tight run-to-run spread already characterised for that path.
+
+**2bpp costs 5-32% more than 1bpp, growing with string length** -- 1.05x at 5 glyphs,
+1.28x at 13, 1.32x at 20 -- which is what "reads the destination, blends three channels"
+predicts: a per-PIXEL cost that scales with how much is drawn, not a fixed tax per call.
+The marginal-cost row shows it cleanest (2bpp ~12us/glyph against 1bpp's ~8us/glyph, a
+50% premium) and is the more trustworthy of the two fitted numbers -- the fixed-cost split
+is noisy at this sample size, visibly so here: it puts 2bpp's fixed cost BELOW 1bpp's
+(~4us against ~21us), which has no physical explanation and is exactly the kind of
+two-point-fit artifact the method's own caveat warns about when the two tiers land close
+together, as they do here at 5 glyphs (64us vs 61us, 3us apart).
+
+**Even 2bpp remains an order of magnitude cheaper than SDK text at every length tested**
+-- 12.8x at 5 glyphs, 6.9x at 13 (resonant's dialogue face's own depth), 6.6x at 20. The
+E7 verdict in `ROADMAP.md` holds at both depths.
 
 ## Asset pipeline (M2)
 
