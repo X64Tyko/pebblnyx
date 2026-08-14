@@ -1740,6 +1740,60 @@ class Project:
         return {"cols": cols, "rows": rows, "cells": cells, "capped": capped,
                 "limit": LIMIT, "sheet": [W, H]}
 
+    def sprite_frames(self, name):
+        """Every DECLARED frame of a [[sprite]], rendered, so a sprite can be opened.
+
+        The canvas could only open a whole PNG and guess the frame split from the file
+        height against whatever height the canvas happened to be showing. For a stacked
+        24x144 sheet with the canvas left at 24 that guess is six frames of 24x24, when
+        the manifest sitting next to it says four of 24x36 -- and the editor never asked.
+
+        So this asks. Frame rectangles come from the declaration rather than from a slicer,
+        which also means a sprite whose frames are scattered across a sheet opens exactly
+        as well as a stacked one: there is no layout to re-derive, only rects to read.
+
+        Same cell shape as sheet_frames, so the picker markup and styling are shared.
+        """
+        from PIL import Image
+        spec = next((sp for sp in self.man.get("sprite", [])
+                     if sp.get("name") == name), None)
+        if not spec:
+            raise ValueError(f"no sprite named {name!r}")
+        rel = spec.get("sheet")
+        if not rel:
+            raise ValueError(f"sprite {name!r} declares no sheet")
+
+        key = spec.get("colorkey")
+        im = Image.open(self._safe(rel)).convert("RGBA")
+        px = im.load()
+        W, H = im.size
+
+        cells, bad = [], []
+        for i, f in enumerate(spec.get("frames", [])):
+            x, y, w, h = (int(v) for v in f)
+            # Reported rather than raised: a sprite whose sheet was re-imported smaller is
+            # exactly when someone needs to open it and look, and refusing the whole list
+            # because frame 5 hangs off the edge would deny them that.
+            if x < 0 or y < 0 or x + w > W or y + h > H:
+                bad.append(i)
+                continue
+            buf = [pa.to_gcolor8(px[x + a, y + b], key)
+                   for b in range(h) for a in range(w)]
+            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            ip = img.load()
+            for b in range(h):
+                for a in range(w):
+                    rgb = pv.gcolor_rgb(buf[b * w + a])
+                    if rgb:
+                        ip[a, b] = rgb + (255,)
+            scale = max(1, min(4, 64 // max(w, h) or 1))
+            cells.append({"i": i, "x": x, "y": y, "w": w, "h": h,
+                          "blank": not any(buf),
+                          "img": pv.data_uri(img.resize((w * scale, h * scale),
+                                                        Image.NEAREST))})
+        return {"name": name, "sheet": rel, "cells": cells,
+                "out_of_bounds": bad, "sheet_size": [W, H]}
+
     def frame_read(self, rel, x, y, w, h):
         """One frame of a sheet as ARGB2222 indices, so a single pose can be edited.
 
@@ -5821,6 +5875,14 @@ button:disabled{opacity:.45;cursor:not-allowed}
             <button id="spdel">Remove</button>
           </div>
           <small id="splog">—</small>
+
+          <!-- The declared sprite's OWN frames. Opening art used to mean going to the
+               sheet slicer and re-deriving, by hand, the frame geometry the manifest
+               already states -- and for a sprite whose frames are scattered rather than
+               stacked there was no slicer setting that could reproduce them at all.
+               These rects come from the declaration, so every layout opens alike. -->
+          <div id="spframes" class="cells" style="margin-top:.5rem"></div>
+          <small id="spframelog" class="dim">Pick a sprite to open its frames.</small>
         </section>
       </div>
 
@@ -7390,6 +7452,9 @@ function drawSpriteForm(){
   const sheets=$('#spsheet');
   const arts=(S.art||[]).map(a=>a.path);
   sheets.innerHTML=arts.map(p=>`<option>${p}</option>`).join('');
+  // The strip follows the selection through a reload, so saving a declaration does not
+  // silently leave the frames of the sprite that was selected before it.
+  if(typeof spShowFrames==='function') spShowFrames(sel.value);
 }
 
 // Loading an existing sprite back into the form. Frame rectangles collapse to w/h/count
@@ -7411,7 +7476,62 @@ $('#spsel').onchange=()=>{
   $('#spanim').value=byIndex.filter(Boolean).join(',');
   spLog(stacked?'':'frames are not a vertical stack — saving will rewrite them as one',
         stacked?null:true);
+  spShowFrames(name);
 };
+
+// The declared sprite's frames, opened straight into the canvas.
+//
+// Rects come from the manifest rather than from a slicer, which is the whole point: the
+// canvas used to guess the frame split from file height against whatever height it
+// happened to be showing, so a 24x144 sheet opened as six frames of 24x24 while the
+// declaration next to it said four of 24x36.
+//
+// Clicking one sets PX.origin, so Save composites that pose back into the sheet at its own
+// rect and leaves the others alone -- the path the sheet slicer already proved.
+async function spShowFrames(name){
+  const box=$('#spframes'), log=$('#spframelog');
+  box.innerHTML='';
+  if(!name){ log.className='dim'; log.textContent='Pick a sprite to open its frames.'; return }
+
+  const r=await post('/api/sprite/frames',{name});
+  if(r.error){ log.className='bad'; log.textContent=r.error; return }
+
+  r.cells.forEach(c=>{
+    const b=document.createElement('button');
+    b.className='cell'+(c.blank?' blank':'');
+    b.title=`frame ${c.i} — ${c.w}x${c.h} at ${c.x},${c.y}\nclick to edit it`;
+    b.innerHTML=`<img src="${c.img}" alt=""><span>${c.i}</span>`;
+    b.onclick=async()=>{
+      const f=await post('/api/frame/read',{sheet:r.sheet,x:c.x,y:c.y,w:c.w,h:c.h});
+      if(f.error){ log.className='bad'; log.textContent=f.error; return }
+      PX.w=f.w; PX.h=f.h; PX.frames=1;
+      PX.data=Uint8Array.from(f.pixels); PX.undo=[];
+      PX.origin={sheet:r.sheet, x:c.x, y:c.y};
+      $('#pxw').value=f.w; $('#pxh').value=f.h; $('#pxframes').value=1;
+      $('#pxtitle').textContent=`Canvas — ${name} frame ${c.i}`;
+      $('#pxnote').textContent='Editing one frame. Save writes it back into the sheet.';
+      pxDraw();
+      log.className='dim';
+      log.textContent=`Editing ${name} frame ${c.i} (${c.w}x${c.h} at ${c.x},${c.y}).`;
+      // The canvas is above the fold on a watch-sized window; scrolling to it is the
+      // difference between "nothing happened" and "it opened".
+      $('#pxcv').scrollIntoView({block:'nearest'});
+    };
+    box.appendChild(b);
+  });
+
+  // A frame hanging off its sheet is reported rather than hidden: it is exactly what a
+  // re-imported, smaller sheet looks like, and it will fail the build later with less
+  // context than this.
+  if(r.out_of_bounds && r.out_of_bounds.length){
+    log.className='bad';
+    log.textContent=`frame(s) ${r.out_of_bounds.join(', ')} run past `
+      +`${r.sheet} (${r.sheet_size[0]}x${r.sheet_size[1]}) and cannot be opened.`;
+  }else{
+    log.className='dim';
+    log.textContent=`${r.cells.length} frame(s) of ${r.sheet}. Click one to edit it.`;
+  }
+}
 
 $('#spsave').onclick=async()=>{
   const name=$('#spname').value.trim();
@@ -9581,6 +9701,10 @@ $('#pxsave').onclick=async()=>{
     // Re-slice so the grid shows what was just painted rather than the stale thumbnail.
     if(SH.sheet===o.sheet){ const keep=SH.picks.slice(); await $('#shslice').onclick();
                             SH.picks=keep; drawSheetGrid() }
+    // And the declared-frame strip, for the same reason: it is the other view of the same
+    // pixels, and a thumbnail that still shows the pose you just repainted reads as a save
+    // that did not happen.
+    if($('#spsel') && $('#spsel').value) await spShowFrames($('#spsel').value);
     return;
   }
 
@@ -10558,6 +10682,9 @@ def make_handler(session):
                 elif self.path == "/api/sprite/read":
                     d = json.loads(raw)
                     self._send(200, json.dumps(session.proj.sprite_read(d["path"])))
+                elif self.path == "/api/sprite/frames":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(session.proj.sprite_frames(d["name"])))
                 elif self.path == "/api/sprite/write":
                     d = json.loads(raw)
                     self._send(200, json.dumps(session.proj.sprite_write(
