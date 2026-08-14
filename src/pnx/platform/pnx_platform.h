@@ -14,6 +14,12 @@
 
 #pragma once
 
+// The config, because this header is now conditional on part of it. Without it a
+// PNX_USE_* guard here reads as 0 while the same guard in a .c that DID include the config
+// reads as 1 -- so a declaration vanishes and its definition does not, and the error names
+// a missing type rather than a missing setting.
+#include "../pnx_config.h"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -134,6 +140,8 @@ static inline uint32_t pnx_audio_byte_rate(PnxAudioFormat f) {
 // Measured at ~4.3 ms per draw, 12% of the frame budget, so it belongs in dialog and
 // menus rather than anywhere per-entity.
 
+#if PNX_USE_SDK_TEXT
+
 typedef enum {
   PNX_TEXT_SMALL = 0,
   PNX_TEXT_MEDIUM,
@@ -142,8 +150,14 @@ typedef enum {
 
 // Valid only inside a frame callback: on device it needs the graphics context that only
 // exists during the layer update, which is the same reason the target does.
+//
+// The ESCAPE HATCH, not the text path -- see PNX_USE_SDK_TEXT in pnx_config.h. Games with
+// fonts should build with it off, which removes this declaration and turns any remaining
+// call into a compile error rather than a silently expensive draw.
 void pnx_platform_text_draw(const char *text, PnxTextSize size, uint8_t colour,
                             int32_t x, int32_t y, int16_t w, int16_t h);
+
+#endif  // PNX_USE_SDK_TEXT
 
 // ------------------------------------------------------------------------- input
 

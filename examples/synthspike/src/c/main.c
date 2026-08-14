@@ -59,13 +59,29 @@
 
 // A short phrase so there is something to listen to. Four channels, a note each, moving
 // slowly enough that the timbre is what you hear rather than the tune.
-static const uint8_t PHRASE[8][4] = {
+//
+// One note per SLOT. Slots and voices are not the same count and have not been since
+// voice-pairing landed: PNX_SYNTH_VOICES is PNX_SYNTH_SLOTS * 2, because each slot owns a
+// pair so a new note can overlap the one it displaces instead of cutting it. Every API
+// here -- note_on, note_off, set_instrument -- is addressed by SLOT; the pair is the
+// synth's business.
+//
+// The loops below iterated PNX_SYNTH_VOICES and read four notes off the end of every row.
+// The synth's own slot bounds check swallowed the extra calls, so it was inaudible, and it
+// stayed that way until -Werror=aggressive-loop-optimizations named it.
+static const uint8_t PHRASE[8][PNX_SYNTH_SLOTS] = {
   { 45, 57, 64, 69 }, { 45, 57, 64, 72 },
   { 43, 55, 62, 67 }, { 43, 55, 62, 70 },
   { 41, 53, 60, 65 }, { 41, 53, 60, 69 },
   { 40, 52, 59, 64 }, { 40, 52, 59, 67 },
 };
 #define STEP_MS 500u
+
+// So the table and the loops cannot drift apart again. If the slot count ever changes,
+// this fails at compile time naming the actual problem rather than at run time naming a
+// loop iteration.
+_Static_assert(sizeof(PHRASE[0]) / sizeof(PHRASE[0][0]) == PNX_SYNTH_SLOTS,
+               "PHRASE carries one note per synth SLOT, not per voice");
 
 typedef struct {
   const char *name;
@@ -254,7 +270,7 @@ static void advance_phrase(App *a, uint32_t now) {
   if (!a->audio_on || now < a->next_step_ms) return;
   a->next_step_ms = now + STEP_MS;
   a->step = (uint8_t)((a->step + 1u) % 8u);
-  for (int v = 0; v < PNX_SYNTH_VOICES; v++)
+  for (int v = 0; v < PNX_SYNTH_SLOTS; v++)
     pnx_synth_note_on((uint8_t)v, PHRASE[a->step][v], 200);
 }
 
@@ -267,14 +283,14 @@ static void audio_tick(void *ctx) {
 static void run_case(App *a, uint8_t i) {
   if (i >= a->case_count) return;
   PnxInstrument inst = worst_instrument();
-  for (int v = 0; v < PNX_SYNTH_VOICES; v++) pnx_synth_set_instrument((uint8_t)v, &inst);
+  for (int v = 0; v < PNX_SYNTH_SLOTS; v++) pnx_synth_set_instrument((uint8_t)v, &inst);
 
   pnx_synth_set_config(&a->cases[i].cfg);
   // Re-triggered per configuration so every run measures four sounding voices. A voice
   // whose envelope had ended between cases would silently make that case look cheap.
   pnx_synth_all_off();
   if (!a->cases[i].silent) {
-    for (int v = 0; v < PNX_SYNTH_VOICES; v++)
+    for (int v = 0; v < PNX_SYNTH_SLOTS; v++)
       pnx_synth_note_on((uint8_t)v, (uint8_t)(48 + v * 5), 220);
   }
 
@@ -305,7 +321,7 @@ static void measure_peak(App *a) {
   PnxSynthConfig w = pnx_synth_worst_case();
   pnx_synth_set_config(&w);
   pnx_synth_all_off();
-  for (int v = 0; v < PNX_SYNTH_VOICES; v++)
+  for (int v = 0; v < PNX_SYNTH_SLOTS; v++)
     pnx_synth_note_on((uint8_t)v, (uint8_t)(48 + v * 5), 220);
 
   a->peak = 0;
@@ -473,7 +489,7 @@ int main(void) {
   if (!app.audio_on) pnx_log("synth spike: speaker would not open");
   else {
     PnxInstrument inst = worst_instrument();
-    for (int v = 0; v < PNX_SYNTH_VOICES; v++) {
+    for (int v = 0; v < PNX_SYNTH_SLOTS; v++) {
       pnx_synth_set_instrument((uint8_t)v, &inst);
       pnx_synth_note_on((uint8_t)v, PHRASE[0][v], 200);
     }

@@ -165,6 +165,8 @@ PnxAudioState pnx_platform_audio_state(void) {
 
 // -------------------------------------------------------------------------- text
 
+#if PNX_USE_SDK_TEXT
+
 void pnx_platform_text_draw(const char *text, PnxTextSize size, uint8_t colour,
                             int32_t x, int32_t y, int16_t w, int16_t h) {
   // The framebuffer must be released before the SDK will draw into it, so text is
@@ -181,6 +183,8 @@ void pnx_platform_text_draw(const char *text, PnxTextSize size, uint8_t colour,
                      GRect((int16_t)x, (int16_t)y, w, h),
                      GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 }
+
+#endif  // PNX_USE_SDK_TEXT
 
 // ------------------------------------------------------------------------- input
 

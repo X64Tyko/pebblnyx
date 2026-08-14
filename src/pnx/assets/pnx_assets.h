@@ -361,6 +361,29 @@ bool pnx_assets_expect_orientation(uint8_t orientation);
 // What the loaded resources say they were built for, or 0xFF before anything is loaded.
 uint8_t pnx_assets_orientation(void);
 
+// ------------------------------------------------------- loading past a scene
+//
+// Routes subsequent loads to the PERSISTENT arena instead of the scene one. Returns the
+// previous setting, so a caller can restore rather than assume.
+//
+//     const bool was = pnx_assets_persistent(true);
+//     pnx_music_load(&song, PNX_ASSET_MUSIC_BATTLE);
+//     pnx_assets_persistent(was);
+//
+// This exists because a scene is not the only lifetime a game has. Music is the clear
+// case: it is not scene-declared, it plays across a scene boundary by design -- a battle
+// theme starts as the field scene unloads -- and loaded into the scene arena it is freed
+// out from under the sequencer by the very transition it is scoring. That does not fail
+// loudly; the song plays on through whatever now occupies those bytes.
+//
+// It is a narrow hook rather than a third arena because the persistent arena already has
+// exactly the right lifetime. What was missing was any way for a game to reach it, which
+// pnx_scenes_load has needed internally since it was written.
+//
+// Keep what goes here small and bounded. The persistent arena is never reset, so anything
+// loaded into it is loaded for the life of the app -- load once at boot, not per scene.
+bool pnx_assets_persistent(bool on);
+
 // ---------------------------------------------------------------------- scenes
 //
 // A scene is the only load point. Loading one resets the scene arena, then loads exactly

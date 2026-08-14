@@ -27,6 +27,19 @@ __pycache__/
 # so they belong on a release page rather than in the history.
 dist/
 
+# The Resonant game, symlinked to ../resonant so the framework and the game it is built
+# for can be opened, edited and pushed from one place. It is its OWN repository with its
+# own history -- this link is a convenience for the person working on both, not a
+# submodule and not a vendored copy.
+#
+# No trailing slash, deliberately: git sees a symlink as a file, and `resonant/` would
+# match a directory and let the link itself be committed. Committing it would put a path
+# that only exists on this machine into a public repo, and clone it as a dangling link.
+#
+# The pair is circular by design -- resonant/src/c/pnx points back at src/pnx here -- and
+# it terminates, because src/pnx contains no link onward.
+resonant
+
 # Local environments and IDE state
 .venv/
 venv/

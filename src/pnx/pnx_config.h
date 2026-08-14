@@ -71,6 +71,24 @@
 #define PNX_USE_TIMING 1
 #endif
 
+// The SDK text hook: `pnx_platform_text_draw`, drawing through the system font.
+//
+// It is an ESCAPE HATCH and not the text path. gfx/pnx_text.h is, and has been since E7 --
+// a glyph blit happens during the frame like any other blit, while this costs ~4.3 ms
+// (12% of a frame) and can only run AFTER the framebuffer is released, so nothing can ever
+// be drawn over its output.
+//
+// Set this to 0 and the hook does not exist. That turns "we use the glyph blitter" from a
+// convention somebody has to keep into a link error the moment anyone does not -- which is
+// the only version of that promise worth having, because SDK text does not look broken, it
+// just quietly costs a frame and refuses to be overdrawn.
+//
+// Default 1 because `examples/synthspike` still draws its readout this way and predates
+// the font pipeline. A game with fonts should set it to 0.
+#ifndef PNX_USE_SDK_TEXT
+#define PNX_USE_SDK_TEXT 1
+#endif
+
 // On-screen performance overlay and deferred logging. Should be 0 in a release build:
 // a text draw costs ~4.3ms, 12% of a frame.
 #ifndef PNX_USE_DIAGNOSTICS

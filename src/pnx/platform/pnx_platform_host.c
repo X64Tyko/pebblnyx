@@ -184,6 +184,8 @@ static bool s_screen_locked;
 void pnx_platform_set_screen_lock(bool locked) { s_screen_locked = locked; }
 bool pnx_platform_screen_locked(void) { return s_screen_locked; }
 
+#if PNX_USE_SDK_TEXT
+
 // No text rendering on the host: it exists to test logic, and the device's font metrics
 // are not reproducible here anyway. Recorded so a test can assert a call happened.
 static char s_last_text[128];
@@ -196,6 +198,8 @@ void pnx_platform_text_draw(const char *text, PnxTextSize size, uint8_t colour,
 }
 
 const char *pnx_host_last_text(void) { return s_last_text; }
+
+#endif  // PNX_USE_SDK_TEXT
 
 void pnx_platform_set_post_frame_fn(PnxPostFrameFn fn) { (void)fn; }
 

@@ -37,7 +37,12 @@ static bool s_have_map, s_have_dialog;
 
 static PnxPalette *s_palettes;
 static uint16_t s_palette_count;
+// s_arena is where the NEXT load allocates; s_scene and s_persistent are the two it can
+// point at. Kept as three so pnx_assets_persistent can return to the scene arena without
+// the caller having to hand it back -- and so the temporary swap pnx_scenes_load already
+// does has something to restore to by name rather than by saved value.
 static PnxArena *s_arena;
+static PnxArena *s_scene;
 static const uint32_t *s_resources;
 static uint16_t s_resource_count;
 static uint32_t s_bytes_loaded;
@@ -46,6 +51,7 @@ bool pnx_assets_init(PnxArena *persistent, PnxArena *scene,
                      const uint32_t *resources, uint16_t count) {
   if (!persistent || !scene || !resources || count == 0) return false;
   s_persistent = persistent;
+  s_scene = scene;
   s_arena = scene;
   s_resources = resources;
   s_resource_count = count;
@@ -65,6 +71,12 @@ bool pnx_assets_expect_orientation(uint8_t orientation) {
 }
 
 uint8_t pnx_assets_orientation(void) { return s_orientation; }
+
+bool pnx_assets_persistent(bool on) {
+  const bool was = (s_arena == s_persistent);
+  s_arena = on ? s_persistent : s_scene;
+  return was;
+}
 
 // ---------------------------------------------------------------------- palettes
 
