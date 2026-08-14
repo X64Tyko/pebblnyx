@@ -147,7 +147,7 @@ Against `basalt`'s 64 KB that is 29% for a finished game. Against `emery`'s 128 
 
 **Fonts are 9,060 bytes -- 36% of their resource payload**, the single largest line item, and
 bigger than every tile in the game combined. We have no font strategy written down anywhere,
-and `Resonant/Budget.md` guesses 4,000 bytes for "UI and font glyphs". That guess is probably
+and Resonant's `Budget.md` guesses 4,000 bytes for "UI and font glyphs". That guess is probably
 low by a factor of two, and it is the number most worth replacing with a measurement.
 
 **Our tiles cost 8x theirs, each.** 4bpp at 16x16 is 128 bytes per tile; 2bpp at 8x8 is 16.

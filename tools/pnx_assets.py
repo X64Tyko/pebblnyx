@@ -640,10 +640,10 @@ def finish_atlas(atlas, tile_flags, shared, orient=ORIENT_BUTTONS_RIGHT):
     reuses or extends what already exists instead of building its own.
     """
     tiles, T = atlas["tiles"], atlas["tile_px"]
-    sets = [frozenset(c for c in t if c != TRANSPARENT) for t in tiles]
+    sets = atlas_colour_sets(atlas)
 
     before = len(shared)
-    palettes, assign = merge_palettes(sets, shared)
+    palettes, assign = merge_palettes(sets, shared, frozen=True)
     shared[:] = palettes
 
     if any(a is None for a in assign):
@@ -805,7 +805,7 @@ class Ordered(tuple):
     """
 
 
-def merge_palettes(colour_sets, existing=None):
+def merge_palettes(colour_sets, existing=None, frozen=False):
     """Greedy merge of per-unit colour sets into palettes of PALETTE_USABLE colours.
 
     Merging rather than deduplicating is the whole trick. Deduplicating identical sets
@@ -815,6 +815,14 @@ def merge_palettes(colour_sets, existing=None):
 
     `existing` lets a later atlas reuse or extend palettes an earlier one built, which is
     how sharing is discovered rather than declared.
+
+    `frozen` forbids growing or adding a palette: a set may only be assigned to one that
+    ALREADY contains it. That is what packing needs, and the distinction is not academic.
+    A palette's entries are sorted by `palette_bytes` and `pack_unit_4bpp` derives each
+    colour's 4bpp index from that same sort -- so growing a palette after something has
+    been packed against it renumbers every entry, and every pixel already written now
+    names a different colour. It does not fail; the atlas simply draws in a sprite's
+    colours. See settle_palettes for the two-phase order that makes this safe.
     """
     # Ordered palettes pass through untouched. Merging one would reorder it, which silently
     # remaps every pixel of the sprite that depends on its positions.
@@ -833,15 +841,57 @@ def merge_palettes(colour_sets, existing=None):
         for pi, p in enumerate(palettes):
             if isinstance(p, Ordered):
                 continue
-            if len(p | colours) <= PALETTE_USABLE:
+            if frozen:
+                if colours <= p:
+                    assign[i] = pi
+                    break
+            elif len(p | colours) <= PALETTE_USABLE:
                 palettes[pi] = p | colours
                 assign[i] = pi
                 break
         else:
+            if frozen:
+                # settle_palettes ran over exactly these sets, so one must contain this
+                # one. Reaching here means the two passes disagreed, which would corrupt
+                # pixel data silently -- so it is an error rather than a new palette.
+                raise BuildError("palette planning is inconsistent: a unit's colours fit "
+                                 "no settled palette. This is a pipeline bug, not a "
+                                 "content one.")
             palettes.append(set(colours))
             assign[i] = len(palettes) - 1
 
     return palettes, [assign[i] for i in range(len(colour_sets))]
+
+
+def atlas_colour_sets(atlas):
+    return [frozenset(c for c in t if c != TRANSPARENT) for t in atlas["tiles"]]
+
+
+def sprite_colour_sets(sprite):
+    return [frozenset(c for c in f if c != TRANSPARENT) for f in sprite["frames"]]
+
+
+def settle_palettes(atlases, sprites, shared):
+    """Grow `shared` to cover every atlas and sprite BEFORE any pixel data is packed.
+
+    This exists because packing and merging cannot be interleaved. Packing an atlas fixes
+    its 4bpp indices against the sort order of the palette it was assigned; a later sprite
+    whose colours merge into that same palette changes the sort, and the atlas is now
+    drawing someone else's colours. The symptom is a map rendered in the wrong palette --
+    no error, no crash, and nothing in the build output suggesting where to look.
+
+    Two passes make it impossible: this one settles every palette, then packing runs with
+    `frozen=True` and cannot move anything under an asset already written.
+
+    Sprites WITH variants are skipped: those build Ordered palettes and only ever append,
+    and appending is safe -- it cannot renumber an existing entry.
+    """
+    for a in atlases:
+        shared[:] = merge_palettes(atlas_colour_sets(a), shared)[0]
+    for sp in sprites:
+        if sp.get("variants"):
+            continue
+        shared[:] = merge_palettes(sprite_colour_sets(sp), shared)[0]
 
 
 def palette_bytes(palette):
@@ -1132,10 +1182,10 @@ def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT):
     if sprite.get("variants"):
         return finish_sprite_with_variants(sprite, shared, orient)
 
-    sets = [frozenset(c for c in f if c != TRANSPARENT) for f in frames]
+    sets = sprite_colour_sets(sprite)
 
     before = len(shared)
-    palettes, assign = merge_palettes(sets, shared)
+    palettes, assign = merge_palettes(sets, shared, frozen=True)
     shared[:] = palettes
 
     if any(a is None for a in assign):
@@ -3345,7 +3395,10 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
     # Atlases finish BEFORE maps now: a map that names a palette variant needs the table the
     # atlas builds while assigning palettes, so the order is a dependency rather than a habit.
     print("palettes:")
+    # Two phases, and the order is a correctness requirement rather than a habit -- see
+    # settle_palettes. Every palette is settled first; only then is a pixel packed.
     shared = []
+    settle_palettes(atlases, sprites, shared)
     for a in atlases:
         finish_atlas(a, flags_by_atlas[a["name"]], shared, orient)
     # The first point at which both halves are known: which atlases chose metatiles, and

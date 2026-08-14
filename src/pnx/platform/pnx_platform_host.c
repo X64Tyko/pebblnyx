@@ -143,7 +143,17 @@ size_t pnx_platform_resource_read(uint32_t resource_id, size_t offset,
 // ------------------------------------------------------------------------- input
 
 bool pnx_platform_poll_event(PnxEvent *out) {
-  if (s_queued_read >= s_queued_count) return false;
+  if (s_queued_read >= s_queued_count) {
+    // Drained: rewind, so the next frame's events start at the front of the array.
+    //
+    // Without this the queue is a one-shot buffer of 32 events for the whole process, and
+    // the 33rd is dropped by pnx_host_queue_event with no error -- fine for a test that
+    // queues a handful, silently wrong for anything that drives a game over hundreds of
+    // frames. A harness hit it as "the button stops working after a while", which is the
+    // worst possible presentation of a full buffer.
+    s_queued_read = s_queued_count = 0;
+    return false;
+  }
   *out = s_queued[s_queued_read++];
   return true;
 }
