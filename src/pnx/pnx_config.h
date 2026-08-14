@@ -61,6 +61,14 @@
 #define PNX_USE_SAVE 1
 #endif
 
+// The app-state stack: push/pop/replace, and the lifecycle a game would otherwise hand-roll
+// -- a clamped fixed-timestep accumulator, and OS focus events turned into suspend/resume so
+// a covered app stops ticking instead of fast-forwarding on return. A game that wants to
+// drive pnx_platform_run itself can leave this off; resonant does not.
+#ifndef PNX_USE_APP
+#define PNX_USE_APP 1
+#endif
+
 #ifndef PNX_USE_DIALOG
 #define PNX_USE_DIALOG 1
 #endif
@@ -127,6 +135,22 @@
 // Maximum ticks consumed in one frame. NOT defensive padding: while covered by a modal
 // the app is throttled to ~0.4fps, so a frame can arrive carrying several seconds of
 // elapsed time. Without this clamp the sim fast-forwards on every notification.
+//
+// Belt and braces with pnx_app's focus handling (M6): that stops ticks outright between
+// FOCUS_LOST and FOCUS_GAINED, so this clamp firing at all now means a frame ran long or
+// the platform coalesced two, not "we were covered" -- see pnx_app.h.
 #ifndef PNX_MAX_CATCHUP_TICKS
 #define PNX_MAX_CATCHUP_TICKS 4
+#endif
+
+// The render period on device, locked rather than requested as fast as the display will
+// take it. The display gates at ~37.33ms (26.8fps) no matter what is asked for -- see
+// docs/MEASUREMENTS.md -- and asking for exactly that leaves nothing to absorb a frame
+// that runs a little long: it just arrives late, one for one. Asking for 40ms (25fps)
+// instead banks the ~2.67ms between the two as slack every single frame, which is what
+// keeps a minor per-frame dip from becoming a dropped frame. It also lines the render
+// cadence up with PNX_TICK_MS, so a rendered frame carries almost exactly one sim tick
+// instead of the old ~1-frame-in-14 that carried none.
+#ifndef PNX_FRAME_MS
+#define PNX_FRAME_MS 40
 #endif

@@ -1,12 +1,16 @@
 # Roadmap
 
-Current state: **M0-M4d complete**, editor through E15, shipped as
-[v0.1.0-beta.1](https://github.com/X64Tyko/pebblnyx/releases/tag/v0.1.0-beta.1) —
-installers for Linux, Windows and both macOS architectures, engine inside. M5 (save)
-next. `platform`, `core`, `assets`, `gfx`, `audio` and `input` run on device and are
-covered by 562 host checks plus 121 pipeline checks. Audio, landscape and map streaming
-still want hardware confirmation. No emulator is possible for PT2 — see
-[`EDITOR.md`](EDITOR.md).
+Current state: **M0-M4d complete**, editor through E17 (E1-E5 and E7-E17 done; E3 was
+superseded, E6 not started). [v0.1.0-beta.1](https://github.com/X64Tyko/pebblnyx/releases/tag/v0.1.0-beta.1)
+shipped installers for Linux, Windows and both macOS architectures at editor E15; E16 and
+E17 have landed since. **M5 (save) and
+M6 (app framework) are built and host-tested**, landed together because M6's lifecycle is
+what save-on-blur actually hangs off of; both still want the same device confirmation
+M4/M4c/M4d are already waiting on. M7 (publish) next. `platform`, `core`, `assets`, `gfx`,
+`audio` and `input` run on device; `save` and `app` are built and host-tested but not yet
+run on one. 724 host checks plus 361 pipeline-validation checks cover all of it. Audio,
+landscape, map streaming, save and the app-state stack still want hardware confirmation. No
+emulator is possible for PT2 — see [`EDITOR.md`](EDITOR.md).
 
 The ordering principle: a framework with no consumer gets the abstractions wrong in ways
 nobody discovers until someone tries to use it. PGE (the 2014 Pebble game engine) failed
@@ -347,150 +351,19 @@ Two real bugs, both found by `tests/test_stream.c` walking the field end to end:
 painted legend character still depends on the atlas and saying which. A legend entry nobody paints
 with is a dangling reference rather than a dependency, the same view the pipeline takes.
 
-### Device confirmation: the RAM claim holds, the flash model does not
+### Device confirmation found a second problem, and it's fixed
 
-`examples/worldtiles` ran on hardware. **The memory result is exactly as designed** -- 23,514 B
-streamed against 97,351 B held whole, 26.8 fps held while walking, the streamer never once behind
-(`missing` stayed 0 even at eight tiles per tick), and `Still allocated <0B>` at exit.
-
-**The read cost is another matter.** Loads came in 50-280x over the predicted figure, and the
-multiplier grows with how deep into the resource the read starts: the same 16-WorldTile window costs
-46 ms near the map's origin and 305 ms two thirds of the way through it. That points at
-`resource_load_byte_range` being **O(offset)** -- streaming from the start of the resource on every
-call -- which the original 29 µs/call figure could not have caught, having been measured over a 16KB
-resource where every offset is small. Numbers and the fit in [`MEASUREMENTS.md`](MEASUREMENTS.md).
-
-In practice: walking is unaffected, crossing a WorldTile boundary drops one frame (47-63 ms against
-8 ms of ordinary work, 24.2 fps while sprinting), and scene loads pay for it -- 305 ms for a warp
-into the middle of the field, 2 s to hold the world whole.
-
-### The layout answer: banks, and batched runs
-
-Two changes, both aimed at the term that actually dominates.
-
-**WorldTile payloads left the map's resource.** They live in **bank resources** of ~8KB, whose asset
-ids run consecutively from a `first_bank_asset` in the map header, so bank *i* is that plus *i*. A
-seek is now capped by the bank rather than by the map: 4KB instead of 74KB on the field, and the
-map's own resource drops from 75,232 bytes to 1,000 -- it holds only what stays resident.
-
-**Payloads are padded to the pool's slot stride**, which pays for itself twice. A WorldTile's home
-becomes arithmetic -- bank `i >> bank_shift`, offset `(i & mask) * slot_bytes` -- so the per-tile
-offset table leaves the resident preamble entirely. And a run of consecutive WorldTiles is then
-contiguous at *both* ends, in the bank and in the pool, which is what makes **batching** a single
-ranged read: a whole-map load is one read per bank instead of one per tile (18 against 144), and a
-streaming window fetches each row-run in one call.
-
-Banks are stamped like every other blob and checked once at map load rather than per read -- M4c's
-rule holds, and a bank is geometry, so one left from a build in the other orientation would be a
-scrambled world. Checking per read would have put a seek to offset 0 in front of every fetch, on the
-one platform where the seek *is* the cost.
-
-**A side effect worth having**: `field` and `plain` are the same world, so their banks are
-byte-identical and the `.pbpack` deduplicates them. The example ships two 192x192 worlds for 103 KB
-rather than 177 KB.
-
-**Confirmed on hardware, and it settled the diagnosis.** Same watch, same content:
-
-| | Before | After | |
-|---|---|---|---|
-| hold the 192x192 world | 1,984 ms | **74 ms** | 26.8x |
-| warp into the middle of the field | 305 ms | **12 ms** | 25.4x |
-| worst frame while walking | 47-63 ms | **8-12 ms** | 5.2x |
-| frames dropped crossing a WorldTile | one, every time | **none** | -- |
-
-Nothing about the byte count changed and the call count only fell 148 to 41, so neither explains a
-27x drop. What changed is how far into a resource each read starts. Per read: **1.8 ms against
-13.4 ms**. Walking now holds 26.8 fps -- the PT2 ceiling -- with the worst frame at 12 ms of a
-37.33 ms budget, and the held-whole world reads nothing at all once loaded.
-
-One observation to keep: the streamer's backlog reached 3 WorldTiles on a diagonal crossing a
-WorldTile *corner*, which asks for tiles in two directions at once. No holes, no dropped frame, so
-`PNX_MAP_STREAM_BUDGET` at 4 has room to spare -- and raising it is now cheap if a game wants it.
-
-Still wanted: the flash probe that sweeps offset independently of length. The before/after is strong
-but still read off session logs, and `MEASUREMENTS.md` says so.
-
-### Footprint: the WorldTile size is chosen, not defaulted
-
-`worldtile = "auto"` is now the default, and the pipeline picks by arithmetic -- the same bargain the
-atlas `metatiles` key already offers, and for the same reason: the cheapest size depends on the
-screen and the map, so a constant is right for one shape of content and quietly wrong for the rest.
-
-Three terms, pulling different ways. The pool grows as the SQUARE of the size; the per-slot
-descriptors follow it; the lookup array is one byte per WorldTile in the whole map and grows as the
-size shrinks. **Which way the answer goes depends on whether the map streams.** A streaming map holds
-a fixed window, so a bigger WorldTile means a bigger margin ring of world nobody can see -- it wants
-*small*. A map held whole has no ring, every term scales with the count, and it wants *large*.
-
-On the 192x192 field, 200x228 screen, 16px tiles:
-
-| | Picked | Resident | Was (fixed 16) |
-|---|---|---|---|
-| streaming | **8** | 17,967 B | 22,491 B |
-| held whole | **32** | 93,715 B | 94,255 B |
-
-The WorldTile part of the streamed scene halved -- 8,720 B to 4,376 B -- and the scene fell 20%. What
-it exposed is that **WorldTiles were never the expensive part**: the atlas pool is a flat 12,496 B of
-the field's 18 KB, so the remaining footprint question is about tilesets, not tiling.
-
-**A caution the example makes visible.** `field` and `plain` now tile differently, so their banks are
-no longer byte-identical and the `.pbpack` stopped deduplicating them -- resources went 103 KB to
-178 KB. That is an artifact of shipping the same world twice to compare it, not a property of
-auto-sizing, but it is the kind of thing worth seeing before it surprises someone.
-
-**And smaller WorldTiles exposed a bug batching had introduced.** `PNX_MAP_STREAM_BUDGET` counted
-WorldTiles, but a run of consecutive ones is a single read -- so a batched fetch was charged four or
-five times over and the streamer ran at a quarter of the I/O it was paying for. Invisible while
-WorldTiles were large and few; on device at eight tiles a tick the backlog went from 3 to **12** the
-moment the pipeline started choosing smaller ones, for no extra reads. The budget now counts reads.
-`tests/test_stream.c` sprints 40 WorldTiles and asserts the backlog stays at zero, because nothing
-about this shows up in a frame time or a byte count.
-
-### Is it worth the space?
-
-The engine cost is **3,076 bytes** -- `pnx/assets` grew 2,596 and `pnx/gfx` 480, measured from the
-device size report. Against the RAM it buys, on a 16px grid and a 200x228 screen:
-
-| Map | Streamed | Held whole | |
-|---|---|---|---|
-| 16x16 | 537 | 537 | fits its pool: held whole, streaming never runs |
-| 32x24 | 1,836 | 1,836 | same |
-| 48x48 | 2,888 | 4,833 | 1,945 B cheaper |
-| 96x96 | 3,320 | 18,657 | 15,337 B cheaper |
-| 192x192 | 4,376 | 74,628 | **70,252 B cheaper** |
-| 255x255 | 4,824 | 132,672 | 127,848 B cheaper |
-
-**Streaming never costs more RAM than holding whole, at any size.** Below the pool it is the same
-number, because a map that fits its pool IS held whole and the streaming path never executes; above
-it, streaming is strictly cheaper by a margin that grows quadratically. Streamed residency is
-O(screen), held-whole is O(map area).
-
-So the 3,076 bytes is the only cost, it is paid once by the framework rather than per map, and the
-question is just whether a project has any map above roughly 48x48 cells. If it does, the saving
-passes the code cost almost immediately and then runs away with it -- 23x over on the 192x192 field.
-If every map fits one screen, the feature is inert rather than expensive: no pool, no eviction, no
-reads, the same bytes as before it existed.
-
-*(An earlier version of this table called 64x48 a "break-even" and said smaller maps "cost more than
-they save". That was comparing per-map RAM against a one-time binary cost, which is not a comparison
-that means anything -- and it read as though streaming penalised small maps, which it does not.)*
-
-### While confirming that: the resource ceilings, read from the SDK
-
-Three limits, two of them spelled 256, and the pipeline was only reporting one:
-
-| | | |
-|---|---|---|
-| `MAX_RESOURCES_SIZE_APPSTORE` | 256 KB | bytes in the whole `.pbpack` -- a warning |
-| `MAX_RESOURCES_SIZE` | **1 MB** | bytes -- the hard error |
-| pbpack `table_size` | **256 entries** | resources, whatever they weigh |
-
-The byte limits apply to the pack as a whole (`os.stat(resources_path).st_size` in the SDK's
-`report_memory_usage.py`), not to any single resource. The entry count is the one that started
-mattering with banking: a map is now one resource plus a bank per few WorldTiles, so a project of
-large maps runs out of *entries* long before it runs out of bytes -- and exceeding it was a bare
-traceback out of the SDK's packer. The budget report now prints both ceilings and the entry count,
-and refuses a build that would overflow the table with a message naming the banks.
+The RAM design landed exactly as measured. Flash reads did not: loads came in 50-280x over
+the predicted figure, because `resource_load_byte_range` turned out to be **O(offset)**, not
+O(length) -- invisible in the original per-call estimate, which was measured over a resource
+small enough that every offset was small. Fixed by moving WorldTile payloads into ~8KB bank
+resources (capping the seek) and padding them to the pool's slot stride, which turns a run of
+consecutive WorldTiles into one batched read instead of one per tile. Confirmed on hardware
+at **26.8x** faster to hold the 192x192 world and **5.2x** on the worst per-frame read.
+`worldtile = "auto"` now picks the tiling granularity by the same cost model that motivated
+banking, and the pipeline enforces the two resource-count ceilings banking made newly
+reachable. Full numbers, both diagnoses, and the footprint table are in
+[`MEASUREMENTS.md`](MEASUREMENTS.md#worldtile-streaming-m4d).
 
 ## M4e — Subtractive synth — **SPIKE MEASURED, not landed**
 
@@ -542,23 +415,125 @@ the voice-major restructure, and the editor (E6) has no UI for any of it.
 Done when: the packed instrument round-trips through the editor, and the device confirms
 the render cost after the restructure.
 
-## M5 — Save
+## M5 — Save — **DONE** (pending device confirmation)
 
-- Chunk packing into 256-byte units, minimum key count
-- Incremental writer, one chunk per frame
-- Save-on-blur via the focus hook
-- Versioning with refusal to load a newer save
+**The chunk size was never a choice.** `PNX_PERSIST_KEY_BYTES` (256) is the platform's own
+per-key cap, so a save larger than one key had no option but to spend more calls -- and a
+persist write costs ~7ms per call almost regardless of size (`docs/MEASUREMENTS.md`), so
+the thing worth minimising is calls, not bytes. The header rides inside chunk 0 (8 bytes:
+magic, version, chunk count, payload length, checksum) rather than spending a key of its
+own, which is why `PNX_SAVE_CHUNKS_PER_SLOT` (16) times a key lands almost exactly on
+MEASUREMENTS.md's *"realistic 4KB save, 16 keys"* case -- that measurement sized this
+constant, not the other way round.
 
-Done when: the game saves and restores across a cold start, and a save spread across
-frames shows no visible hitch.
+**Two slots, one writer.** `PNX_SAVE_SLOT_RESUME` and `PNX_SAVE_SLOT_CHECKPOINT` each get a
+fixed range of keys so they can never collide, but only one save may be in flight at a
+time -- a second `pnx_save_begin` abandons the first rather than interleaving their chunks.
+That is a deliberate simplification: a game does not save two things at once, and modelling
+that it could would cost a queue nobody would ever fill.
 
-## M6 — App framework
+**Two ways to drive it, because the two situations that call for a write have opposite
+budgets.** `pnx_save_begin` + `pnx_save_step` once per frame spreads the ~7ms/chunk cost
+across rendered frames, for the interactive case (a player choosing SAVE) where a stall is
+visible. `pnx_save_write` (begin + a blocking flush) is for save-on-blur, where the ~297ms
+`will_focus` warning against a ~106ms 4KB save (MEASUREMENTS.md) means there is room to just
+finish it, and no frame left to protect anyway -- the display is about to stop accepting
+them.
 
-- Scene stack with enter/exit/suspend
-- Lifecycle: focus handling, clamped accumulator, throttle-aware pausing
-- Optional on-screen diagnostics overlay, compiled out in release
+**Versioning refuses a save it does not understand**, not one it merely predates: a stored
+version newer than the caller's is rejected outright; older or equal loads as-is, with no
+migration built in -- that is the game's problem to solve if it ever needs to.
 
-Done when: the game handles a notification mid-play and resumes correctly.
+**resonant's own save is deliberately thin.** `SaveData` (game.h) is a beat, Van's stats, a
+tile and a facing, and `game_save_on_blur` (main.c) only ever builds one while `g->beat` is
+`BEAT_WALK` or `BEAT_DONE` with no dialog open -- every other beat is a dialog page or a
+battle turn, states this format was never asked to describe. `enter_sector4` took a starting
+tile so `game_continue` re-enters through the exact setup a fresh game does rather than a
+second copy of it. `PAUSE_SAVE` (the interactive `CHECKPOINT` write) stays dimmed in
+`menu.c` -- not because save does not exist any more, but because the cold open has no
+author-placed save point yet ("NO POINT"); that gate arrives with the content that needs it.
+
+**Result:** `tests/test_save.c` proves the chunking, the checksum catching a torn write, and
+version refusal, all at the framework level with synthetic payloads sized to actually span
+several chunks. `tools/host_harness.c`'s "save" section proves the game-level claim
+end-to-end: save-on-blur mid-walk, into a **different** `Game` struct simulating a cold
+start, CONTINUE landing on the exact saved tile with the exact saved stats.
+
+Outstanding: device confirmation of the actual persist timing this was sized against, and
+`PAUSE_SAVE`'s checkpoint path once resonant has a beat that places one.
+
+Done when: the game saves and restores across a cold start — **yes**, proven on host. A
+save spread across frames shows no visible hitch — proven at the framework level (a
+600-byte host-test payload spans multiple chunks, one `pnx_save_step` per simulated frame);
+resonant's own save is small enough to finish inside `pnx_save_begin`'s first chunk, so it
+does not itself exercise the multi-frame spread, only the framework does.
+
+## M6 — App framework — **DONE** (pending device confirmation)
+
+**Called a STATE, not a scene.** `assets/pnx_assets.h` already owns `pnx_scene_*` for a
+loaded content chunk; reusing the name for "a mode of play" would have made every sentence
+about either one ambiguous. `pnx_app.c` is a fixed-depth stack (`PNX_APP_MAX_DEPTH`, 4) of
+states, each an ops table of eight optional hooks: `enter`/`exit` for push/pop, `suspend`/
+`resume`, and `input`/`tick`/`frame`/`draw` for the frame loop.
+
+**The fixed-timestep loop moved from every game's `main.c` into the framework.** The clamped
+accumulator (`PNX_MAX_CATCHUP_TICKS`) is unchanged math, just owned in one place now instead
+of hand-rolled per project. What is new is **throttle-aware pausing**: between `FOCUS_LOST`
+and `FOCUS_GAINED` the accumulator is not fed at all, so a covered app stops ticking outright
+rather than accruing seconds to spend in a burst on return -- stricter than the old
+clamp-only approach, which still let a few catch-up ticks through.
+
+**`suspend`/`resume` fire for two different reasons on purpose.** A state is suspended when
+something is pushed on top of it (the pause menu opening over the field) or when the OS
+takes focus from the whole app. Most hooks do not need to tell the two apart; one that does
+calls `pnx_app_covered()`. This is what lets resonant's `game_save_on_blur` be the exact same
+function pointer on both `resonant_base_state` and menu.c's `pause_state` -- a notification
+during the pause menu saves exactly as one in the field would, and neither ever saves just
+because the *other* one opened.
+
+**`frame` is the one hook that runs even while covered**, for the one thing found that must
+not stop: resonant's sequencer, which advances against the wall clock specifically so a
+notification does not slow the music down with it (`audio.c`).
+
+**resonant's integration is honest about its own shape.** `main.c`'s old hand-rolled
+accumulator and mode-switch dispatch are gone, replaced by `pnx_app_frame`; boot pushes one
+state, `resonant_base_state`, wrapping the title/story/options mode-switch exactly as it
+already existed. The pause/characters overlay in `menu.c` is the one place that became a
+*genuinely* pushed second state -- "nothing simulates behind the menu" (`docs/Menu.md`) used
+to be a rule every mode-handler had to remember, and is now just what NOT being on top of
+the stack means. Depth stops at 2, not 5: OPTIONS is reachable from both the title and the
+pause menu, and turning it into a third stack entry either loses the pause-menu cursor
+position on the way back (`pnx_app_push` re-enters through `enter`, which resets it) or
+needs real surgery on `title.c`/`menu.c` input -- not worth the regression risk on a working
+cold open this pass. Left as follow-up, not silently dropped.
+
+**The optional diagnostics overlay was already done and undocumented.** `PNX_USE_DIAGNOSTICS`
+compiles the frame-stats machinery out entirely; `Options.show_fps` and `ui_fps_draw`
+(gated behind it, drawn through the glyph blitter like everything else) are the on-screen
+half. Nothing new was needed here — this milestone's bullet was unchecked only because
+nobody had written down that the pieces already satisfied it.
+
+**Result:** `tests/test_app.c` asserts exact enter/exit/suspend/resume ordering across two
+synthetic states, push-overflow refusal (and that the state suspended for a refused push is
+correctly resumed rather than left paused), accumulator reset on every transition, ticks
+stopping at zero on `FOCUS_LOST` regardless of how much elapsed time that frame carries, and
+that non-lifecycle events are forwarded intact while focus events never are. `tools/
+host_harness.c` exercises push/pop for real through the pause menu and confirms both halves
+of the "Done when" below.
+
+Outstanding: device confirmation -- the covered-means-zero-ticks behaviour is new and has
+not been watched against a real notification -- and the deeper stack integration noted
+above, if a later milestone decides it is worth the risk.
+
+Also landed in the same pass, because it touches the same frame loop: the render period on
+device is now locked to a fixed 40ms (25fps) rather than requested as fast as the display
+will allow. See `docs/MEASUREMENTS.md`'s Frame pacing section for why that trades a small,
+never-realised ceiling for slack that actually protects against a frame running long.
+
+Done when: the game handles a notification mid-play and resumes correctly — proven on host
+via the same `FOCUS_LOST`/`FOCUS_GAINED` sequence M5's harness scenario uses: ticks stop,
+save-on-blur fires, and `FOCUS_GAINED` resumes ticking from a zeroed accumulator rather than
+a caught-up one. Device confirmation is the one thing a host cannot give this.
 
 ## M7 — Publish
 
@@ -624,202 +599,29 @@ The work, in dependency order:
 7. **Tests.** Parameterise the host target over the matrix instead of hardcoding one screen.
 
 Done when: one game source builds and runs on `emery`, one round platform and one 1-bit
-platform, with the size report inside each ceiling.
+platform, with the size report inside each ceiling. Broader done-when, once the packaging
+mechanics in `PORTING.md` are actually used: one game source with no `#if` in it, one
+build, one `.pbw`, running on `emery`, `gabbro` and `flint` -- colour rect, colour round,
+and 1-bit; per-platform compilation makes `#if PBL_*` the right tool inside `src/pnx`
+itself, and the point of the stub rule below is that none of it reaches game source.
 
 **Sequencing.** This has to land before M7 ships to the appstore, or the game ships for one
 watch out of seven. But it wants M6 settled first, since the app framework is what a port
-would otherwise churn.
+would otherwise churn. (M6 is now done -- see above.)
 
 **The real risk is content, not code.** 1-bit art is a separate art pass, not a downscale of
 colour art, and three of seven platforms need it. Decide whether those platforms get their
 own art or are simply out of scope before building the 1-bit path, not after.
 
-### Author once: one game, one build, seven watches
-
-The goal is not seven ports. It is one set of sprites, one set of game logic, one
-`pebble build`, and a single `.pbw` that installs everywhere. What varies, and how each
-difference is absorbed without the game knowing:
-
-| Varies | Absorbed by | Art or logic change |
-|---|---|---|
-| Screen 144x168 to 260x260 | camera shows more or less world | none |
-| Round corners | safe-area rect from per-row bounds | none |
-| 64 colour vs 1-bit | **palette ink mask** (below) | none |
-| Speaker or not | API stubs to a no-op | none |
-| Touch or not | abstract actions, not buttons or taps | none |
-| 24 KB app RAM (`aplite`) | per-platform compilation, maybe -- see below | open question |
-
-**1-bit is a palette property, not an art asset.** This falls out of a decision already
-made: art is 4bpp indexed, so shape and colour are already separate. A 1-bit platform needs
-one extra field per palette -- a 16-bit mask saying which of the 16 indices are ink and which
-are paper. Two bytes. Index 0 stays transparent as it already is, so nothing else changes:
-tile and sprite blobs ship **byte-identical to all seven platforms**, and only the palette
-resource and the span writer differ. The pipeline proposes a split by luminance and the
-editor lets you flip individual entries against a live 1-bit preview, because thresholding
-by luminance alone will vanish any figure that matches its ground.
-
-Note what this avoids. Per-pixel thresholding needs separate 1-bit art; dithering survives
-on backgrounds but shimmers on anything that moves and destroys readability at 16x16. Neither
-is necessary when the decision can be made 16 entries at a time.
-
-**Blocker to clear first: opt-outs must stub, not delete.** `PNX_USE_AUDIO=0` removes the
-declarations, so game code calling `pnx_music_play` fails to compile rather than doing
-nothing -- which forces `#if` into game logic and breaks author-once immediately. The same
-fault already breaks `PNX_USE_DIAGNOSTICS=0` in two of the three examples. The rule the
-framework needs: **a disabled subsystem keeps its entire API as inline no-ops returning a
-safe value.** Cheap to do, and it is what makes `gabbro` having no speaker a non-event for
-the game.
-
-**Packaging.** One bundle via `targetPlatforms` plus the SDK's per-platform resources. The
-pipeline has to budget per platform rather than once, since the appstore resource cap is
-131,072 bytes on `aplite` against 262,144 everywhere else.
-
-### `~` tagging: how "per-platform resources" actually works
-
-The mechanism the paragraph above waves at has a name, and it is worth writing down before
-the 1-bit work starts, because it decides how much of that work is naming and how much is
-engine. Read from `sdk-core/pebble/common/waftools/resources/find_resource_filename.py`,
-not recalled.
-
-**A resource is declared once, untagged, and the SDK picks the file per platform.**
-`package.json` names `tiles.bin`; the build globs for `tiles*.bin`, reads `~`-separated tags
-off each candidate, and takes the one matching the target platform most closely. So
-`tiles.bin` beside `tiles~bw.bin` ships 4bpp to the colour watches and 1-bit to the others,
-from one manifest entry, with no `#if` anywhere and one `pebble build`.
-
-The resolution rules, all of which bite:
-
-- **Specificity is a count**, not a priority order: the number of the candidate's tags that
-  appear in the platform's tag set. Most matches wins.
-- **Any unknown tag disqualifies a candidate outright.** `tiles~bw.bin` is not merely
-  outranked on `emery`, it is invisible -- which is what makes the untagged file a genuine
-  fallback rather than a tie-breaker.
-- **A tie is a hard build failure**, naming the ambiguous files. This is the trap: `bw` and
-  `144w` both apply to `diorite`, so shipping `tiles~bw.bin` *and* `tiles~144w.bin` fails
-  the build rather than picking one. Combine into `tiles~bw~144w.bin` or stay on one axis.
-- **The generic name may not contain `~`** -- `bld.fatal`, immediately.
-- No match at all falls back to the untagged file, so adding a tagged variant can never
-  break a platform that has none.
-
-Those four are not read off the source and assumed: the resolution was re-run over the tag
-tables for all seven platforms. `tiles.bin` + `tiles~bw.bin` resolves to the tagged file on
-`flint`, `diorite` and `aplite` and to the untagged one everywhere else, and adding
-`tiles~144w.bin` to that pair fails the build on exactly the three `bw` platforms.
-
-The media entry itself does not change: this project already declares resources as
-`{"type": "raw", "name": "PALETTES", "file": "palettes.bin"}`, and that stays untagged
-whatever variants sit beside it. `targetPlatforms` is `["emery"]` in every example today and
-is the other half of the packaging change.
-
-The tags each platform answers to, read from `pebble_platforms[...]["TAGS"]`:
-
-| Platform | Colour | Shape | Size | Other |
-|---|---|---|---|---|
-| `emery` | `color` | `rect` | `200w` `228h` | `speaker` `touch` `mic` `strap` `strappower` `health` `compass` |
-| `gabbro` | `color` | `round` | `260w` `260h` | `touch` `mic` `health` `compass` |
-| `flint` | `bw` | `rect` | `144w` `168h` | `speaker` `mic` `health` `compass` |
-| `basalt` | `color` | `rect` | `144w` `168h` | `mic` `strap` `strappower` `health` `compass` |
-| `chalk` | `color` | `round` | `180w` `180h` | `mic` `strap` `strappower` `health` `compass` |
-| `diorite` | `bw` | `rect` | `144w` `168h` | `mic` `strap` `health` |
-| `aplite` | `bw` | `rect` | `144w` `168h` | `compass` |
-
-Each platform also answers to its own name as a tag. **This table is the source for the
-capability columns above**: `gabbro` carrying no `speaker` tag is where "the flagship round
-watch cannot use M4" comes from, and `touch` appearing only on `emery` and `gabbro` is the
-same fact for input.
-
-**What it changes for this pipeline.** Three things, in the order they matter:
-
-1. **It is the answer to per-platform atlas carves** (item 6 above). A 144x168 screen wanting
-   a different carve than 260x260 is `world~144w.bin` beside `world~260w.bin`, not a second
-   build.
-2. **It makes a 1-bit pixel plane affordable.** The current plan ships blobs byte-identical
-   to all seven platforms and absorbs 1-bit in the palette, which is right while resources
-   fit. If `aplite`'s 131,072 cap ever binds, `~bw` is the escape hatch that does not cost
-   author-once: measured on `examples/overworld`, packing pixels 4bpp -> 1bpp saves ~54 KB
-   of its 78 KB, against ~300 bytes for dropping palette data.
-3. **The pipeline has to emit the tags itself.** Tagging is resolved by the SDK's waf over
-   files on disk, so `pnx_assets` would write `tiles~bw.bin` and keep the `package.json`
-   media entry untagged. That is a real change to blob naming and to the size report, which
-   would need to total per platform rather than once -- not merely a file-naming convention.
-
-**Unverified.** Whether `flint` and `gabbro` accept these tags on real hardware, and whether
-the SDK's own `bw` output path expects 1-bit resources in a particular format. Both are read
-from SDK 4.17 on this machine and neither has been run on a watch.
-
-### The `.pbw` is seven apps in a zip, not one app that adapts
-
-This is the other half of `~` tagging and the more consequential half, because it applies to
-the **engine** rather than to the content. `targetPlatforms` does not select which platforms
-one binary claims to support -- it selects how many times the C is compiled.
-
-Read from `examples/audiotest/build/audiotest.pbw`, which is a zip containing:
-
-```
-appinfo.json
-emery/pebble-app.bin          <- compiled for emery
-emery/app_resources.pbpack    <- resources resolved for emery
-emery/manifest.json
-```
-
-Add `flint` to `targetPlatforms` and there is a second directory beside it with its own
-binary and its own pack. `~` tags choose what goes in the pack; **the preprocessor chooses
-what goes in the binary**, and the SDK hands each compile its own defines:
-
-| Platform | Defines beyond the platform name |
-|---|---|
-| `emery` | `PBL_COLOR` `PBL_RECT` `PBL_TOUCH` `PBL_SPEAKER` `PBL_MICROPHONE` `PBL_SMARTSTRAP` `PBL_SMARTSTRAP_POWER` `PBL_HEALTH` `PBL_COMPASS` `PBL_RGB_BACKLIGHT` `PBL_DISPLAY_WIDTH=200` `PBL_DISPLAY_HEIGHT=228` |
-| `gabbro` | `PBL_COLOR` `PBL_ROUND` `PBL_TOUCH` `PBL_MICROPHONE` `PBL_HEALTH` `PBL_COMPASS` `PBL_DISPLAY_WIDTH=260` `PBL_DISPLAY_HEIGHT=260` |
-| `flint` | `PBL_BW` `PBL_RECT` `PBL_SPEAKER` `PBL_MICROPHONE` `PBL_HEALTH` `PBL_COMPASS` `PBL_DISPLAY_WIDTH=144` `PBL_DISPLAY_HEIGHT=168` |
-| `basalt` | `PBL_COLOR` `PBL_RECT` `PBL_MICROPHONE` `PBL_SMARTSTRAP` `PBL_SMARTSTRAP_POWER` `PBL_HEALTH` `PBL_COMPASS` `PBL_SDK_FROZEN` `144x168` |
-| `chalk` | `PBL_COLOR` `PBL_ROUND` `PBL_MICROPHONE` `PBL_SMARTSTRAP` `PBL_SMARTSTRAP_POWER` `PBL_HEALTH` `PBL_COMPASS` `PBL_SDK_FROZEN` `180x180` |
-| `diorite` | `PBL_BW` `PBL_RECT` `PBL_MICROPHONE` `PBL_SMARTSTRAP` `PBL_HEALTH` `PBL_SDK_FROZEN` `144x168` |
-| `aplite` | `PBL_BW` `PBL_RECT` `PBL_COMPASS` `PBL_SDK_FROZEN` `144x168` |
-
-**What this changes, in the order it matters:**
-
-1. **The 1-bit path and the 4bpp path never coexist.** Item 3 above calls 1-bit "the largest
-   engine change" and assumes a sibling to the indexed path. It is still a second path, but
-   it is `#if PBL_BW` and the colour watches never carry a byte of it. The cost is source
-   complexity, not size on any device.
-2. **`aplite` being out of scope deserves re-measuring before it is believed.** The ~13.4 KB
-   static figure was measured on `emery` with audio, touch, colour blitting and diagnostics
-   all compiled in. On `aplite` every one of those is absent from the defines. The 24 KB
-   conclusion below rests on a number that does not describe the binary `aplite` would
-   actually get, and nobody has built one.
-3. **Capability gating stops being the game's problem.** `PNX_USE_AUDIO` is a hand-set
-   opt-out today; `PBL_SPEAKER` is present on exactly `emery` and `flint`, so the engine can
-   gate itself and be right by construction. Same for `PBL_TOUCH` and the input layer.
-4. **`PBL_DISPLAY_WIDTH`/`HEIGHT` are compile-time constants, not runtime values.** Item 1's
-   resolution independence can keep statically sized buffers -- a screen-sized array stays a
-   fixed-size array, sized differently per binary, with no allocation added.
-
-**And it raises the stakes on the blocker below.** "Opt-outs must stub, not delete" is
-currently written as a tidiness problem. It is not: once the engine really does compile
-subsystems out per platform, the stub rule is the only thing keeping one game source
-compiling for seven targets. It should land before any `#if PBL_*` goes into the engine, not
-after.
-
-**Unverified, and worth an experiment before M9 is planned in detail.** Nothing here has
-been compiled for a second platform -- every example is `targetPlatforms: ["emery"]`. The
-cheap test is to add `diorite` or `flint`, build, and read the size report the wscript
-already prints per platform (`for platform in ctx.env.TARGET_PLATFORMS`). That answers the
-`aplite` question with a number instead of an estimate, and it is a one-line manifest change
-plus whatever the compile turns up.
-
-**What author-once cannot absorb.** `aplite`'s 24 KB was called a hard exclusion rather than
-a tuning problem. **That is now an open question, not a conclusion** -- it was reasoned from
-an `emery` build carrying audio, touch and colour blitting, none of which `aplite` compiles
-at all. Settle it with a build, not an argument. What does not change is screen size: it is
-only free for a game that can show more or less world -- a fixed play area would have to
-letterbox or scale, and integer scaling is the only kind that stays crisp. An RPG absorbs
-this; a puzzle grid would not.
-
-Done when: one game source with no `#if` in it, one build, one `.pbw`, running on `emery`,
-`gabbro` and `flint` -- colour rect, colour round, and 1-bit. Note "no `#if` in it" is a
-constraint on the **game**, not the engine: per-platform compilation makes `#if PBL_*` the
-right tool inside `src/pnx`, and the point of the stub rule is that none of it reaches game
-source.
+**Before writing any of this code, read [`PORTING.md`](PORTING.md).** It works out how the
+SDK's own packaging (`~`-tagged per-platform resources, and the fact that `targetPlatforms`
+compiles the C once per platform rather than once total) has to shape the pipeline and the
+`PNX_USE_*` opt-out rule, gathered before the work starts specifically so it does not have
+to be re-derived during it. Headline findings: 1-bit is a **palette** property, not a
+second art pass, so tile/sprite blobs stay byte-identical across all seven platforms; and
+`aplite`'s 24KB verdict was reasoned from an `emery` build carrying subsystems `aplite`
+would never compile in, so it is an open question a real build must settle, not a
+conclusion already reached.
 
 ---
 
@@ -832,12 +634,12 @@ any runtime code. Staged so each piece is independently useful:
 
 | | | Depends on | Land it |
 |---|---|---|---|
-| **E1** | Inspector: tilesets with ids, rendered maps, budget, validation errors | M2 | alongside M2 |
-| **E2** | Map editor: paint tiles, place entities, wire warps, live reachability | E1 | once real maps exist |
-| **E3** | Emulator panel: noVNC + build/install/run/logs | E1 | after M3 |
-| **E4** | Asset import: sheet slicing, colour key, quantisation and dedup preview | E1 | when the pain justifies it |
-| **E5** | Package button: validate, build, enforce budget, emit `.pbw` | E1 | with E3 |
-| **E6** | Music editor: tracker view over the sequencer model | M4 | last |
+| **E1** | Inspector: tilesets with ids, rendered maps, budget, validation errors | M2 | **DONE** |
+| **E2** | Map editor: paint tiles, place entities, wire warps, live reachability | E1 | **DONE** |
+| **E3** | Emulator panel: noVNC + build/install/run/logs | E1 | **SUPERSEDED** -- no QEMU target exists for this platform, see `EDITOR.md` |
+| **E4** | Asset import: sheet slicing, colour key, quantisation and dedup preview | E1 | **DONE** |
+| **E5** | Package button: validate, build, enforce budget, emit `.pbw` | E1 | **DONE** |
+| **E6** | Music editor: tracker view over the sequencer model | M4 | not started |
 | **E7** | Font import: drop a TTF, rasterise glyphs at a chosen pixel size, preview legibility, emit an atlas plus width table. **Multiple fonts** -- a small one for the HUD, a larger one for dialogue -- are the same system with a glyph map each, so plan for N from the start rather than retrofitting | E4 | **DONE** |
 | **E8** | One-file editor executable with a native window | E1 | **DONE** |
 | **E9** | Settings tab: detect the Pebble SDK, show its licence, install it on request | E8 | **DONE** |

@@ -61,6 +61,20 @@ Because the period is fixed, CPU work is absorbed into idle wait rather than cos
 frame rate. Decomposing a frame, the parts always summed to the same total: as
 in-proc time rose, render-wait fell by exactly as much.
 
+**Consequence for the frame loop (M6): request 40ms, not "as soon as possible."**
+Asking for the next frame immediately after drawing converges on the 37.33ms floor with
+no slack -- a frame that runs a millisecond long arrives a millisecond late, one for one,
+because there was nothing held back to absorb it into. `PNX_FRAME_MS` (pnx_config.h)
+locks the request to a fixed 40ms grid instead, ~2.67ms looser than the floor, banked as
+slack on every single frame rather than spent chasing a ceiling that cannot move. It also
+happens to land render cadence almost exactly on `PNX_TICK_MS` (also 40ms), so a rendered
+frame now carries close to exactly one sim tick instead of the roughly-one-frame-in-
+fourteen that carried none before this. See `pnx_platform_pebble.c`'s frame loop for the
+scheduler (targets the grid, not a flat offset from "now," so it self-corrects rather than
+drifting) and `docs/ROADMAP.md`'s M6 for how it fits with the rest of the app lifecycle.
+Not yet confirmed on device -- like the rest of M5/M6, it is sized against the numbers
+above rather than measured itself.
+
 ## Render cost (full screen, 200x228 = 45,600 px)
 
 | Workload | Cost | % of ~35 ms |
@@ -524,6 +538,141 @@ per-cell palette needs a per-map palette table first.
 only the pipeline made the runtime guard refuse every blob, which is correct behaviour -- but the
 host test then continued past the failed load and segfaulted on a NULL palette table, which
 reads as a code bug and is not one.
+
+## WorldTile streaming (M4d)
+
+`examples/worldtiles` is a 192x192 field -- 73,728 bytes of cell plane, more than half
+`emery`'s app RAM -- built specifically to exercise the streaming path a smaller example
+never touches. Design in `docs/ROADMAP.md`'s M4d; the numbers below are what confirming it
+on hardware actually found.
+
+**The RAM design landed exactly as measured.** 23,514 B streamed against 97,351 B held
+whole, 26.8fps held while walking, the streamer never once behind (`missing` stayed 0 at
+eight WorldTiles/tick), `Still allocated <0B>` at exit.
+
+### The flash-read model was wrong
+
+Loads came in **50-280x over the predicted figure**, and the multiplier grew with how deep
+into the resource the read started: the same 16-WorldTile window cost 46 ms near the map's
+origin and 305 ms two thirds of the way through it. That points at
+`resource_load_byte_range` being **O(offset)**, not O(length) -- streaming from the start
+of the resource on every call. The original ~29 µs/call figure (see Flash / resource reads
+above) could not have caught this: it was measured over a 16KB resource where every offset
+is small.
+
+In practice: walking itself was unaffected, crossing a WorldTile boundary dropped one frame
+(47-63 ms against 8 ms of ordinary work, 24.2fps while sprinting), and scene loads paid for
+it directly -- 305 ms for a warp into the middle of the field, 2 s to hold the world whole.
+
+### The fix: banks, and batched runs
+
+Two changes, aimed at the term that actually dominates:
+
+- **WorldTile payloads left the map's resource for bank resources of ~8KB**, whose asset
+  ids run consecutively from a `first_bank_asset` in the map header. A seek is now capped
+  by the bank rather than by the map -- 4KB instead of 74KB on the field -- and the map's
+  own resource dropped from 75,232 bytes to 1,000.
+- **Payloads are padded to the pool's slot stride.** A WorldTile's home becomes arithmetic
+  (bank `i >> bank_shift`, offset `(i & mask) * slot_bytes`), which drops the per-tile
+  offset table, and makes a run of consecutive WorldTiles contiguous at both ends -- in the
+  bank and in the pool -- which is what turns a run into one **batched** ranged read: a
+  whole-map load became one read per bank instead of one per tile (18 against 144).
+
+Confirmed on hardware, same watch, same content:
+
+| | Before | After | |
+|---|---|---|---|
+| hold the 192x192 world | 1,984 ms | **74 ms** | 26.8x |
+| warp into the middle of the field | 305 ms | **12 ms** | 25.4x |
+| worst frame while walking | 47-63 ms | **8-12 ms** | 5.2x |
+| frames dropped crossing a WorldTile | one, every time | **none** | -- |
+
+The byte count barely moved and the call count only fell 148 to 41 -- neither explains a
+27x drop. What changed is how far into a resource each read starts: **1.8 ms/read against
+13.4 ms** before. Walking now holds 26.8fps, the PT2 ceiling, with the worst frame at 12 ms
+of a 37.33 ms budget.
+
+One thing to keep watching: the streamer's backlog reached 3 WorldTiles crossing a WorldTile
+*corner* (tiles needed in two directions at once). No holes, no dropped frame, so
+`PNX_MAP_STREAM_BUDGET` at 4 has room to spare. Still wanted: a flash probe that sweeps
+offset independently of length -- the before/after above is strong but still read off
+session logs, not a dedicated instrument.
+
+A side effect worth having: `field` and `plain` (the same world, drawn two ways) have
+byte-identical banks, so the `.pbpack` deduplicates them -- two 192x192 worlds for 103 KB
+rather than 177 KB.
+
+### WorldTile size is chosen, not defaulted
+
+`worldtile = "auto"` picks the size by arithmetic, the same bargain the atlas `metatiles`
+key already offers: the pool grows as the SQUARE of the size, the per-slot descriptors
+follow it, and the per-WorldTile lookup array grows as the size SHRINKS -- and which way the
+answer goes depends on whether the map streams. A streaming map holds a fixed window, so a
+bigger WorldTile means a bigger margin ring of world nobody can see (wants *small*); a map
+held whole has no ring and every term scales with the count (wants *large*).
+
+On the 192x192 field, 200x228 screen, 16px tiles:
+
+| | Picked | Resident | Was (fixed 16) |
+|---|---|---|---|
+| streaming | **8** | 17,967 B | 22,491 B |
+| held whole | **32** | 93,715 B | 94,255 B |
+
+The streamed scene's WorldTile cost halved (8,720 B → 4,376 B), and it exposed that
+WorldTiles were never the expensive part of a streamed scene: the atlas pool is a flat
+12,496 B of the field's 18 KB, so the remaining footprint question is about tilesets, not
+tiling.
+
+**A batching bug this exposed:** `PNX_MAP_STREAM_BUDGET` counted WorldTiles, but a run of
+consecutive ones is a single read -- so a batched fetch was charged four or five times over
+and the streamer ran at a quarter of the I/O it was actually paying for. Invisible while
+WorldTiles were large and few; on device at eight tiles/tick the backlog went from 3 to
+**12** the moment the pipeline started choosing smaller ones, for no extra reads. The budget
+now counts reads, not WorldTiles; `tests/test_stream.c` sprints 40 and asserts the backlog
+stays at zero.
+
+### Is it worth the space?
+
+The engine cost is **3,076 bytes** (`pnx/assets` +2,596, `pnx/gfx` +480). Against the RAM it
+buys, on a 16px grid and a 200x228 screen:
+
+| Map | Streamed | Held whole | |
+|---|---|---|---|
+| 16x16 | 537 | 537 | fits its pool: held whole, streaming never runs |
+| 32x24 | 1,836 | 1,836 | same |
+| 48x48 | 2,888 | 4,833 | 1,945 B cheaper |
+| 96x96 | 3,320 | 18,657 | 15,337 B cheaper |
+| 192x192 | 4,376 | 74,628 | **70,252 B cheaper** |
+| 255x255 | 4,824 | 132,672 | 127,848 B cheaper |
+
+Streaming never costs more RAM than holding whole, at any size: below the pool it's the same
+number (a map that fits its pool IS held whole, streaming never executes), above it,
+streaming is strictly cheaper by a margin that grows quadratically. Streamed residency is
+O(screen); held-whole is O(map area). So the 3,076 bytes is the only cost, paid once by the
+framework rather than per map -- and it passes back almost immediately on any map above
+roughly 48x48 cells, running away with it at 192x192 (23x over).
+
+Two functional bugs `tests/test_stream.c` found along the way (a warp deadlocking the
+atlas pool, and a "resident" map still reading flash lazily) are recorded with
+`docs/ROADMAP.md`'s M4d rather than here, since they are bugs in behaviour rather than
+measurements.
+
+### The resource ceilings this made newly reachable
+
+Three limits, two of them spelled 256, and the pipeline was only reporting one:
+
+| | | |
+|---|---|---|
+| `MAX_RESOURCES_SIZE_APPSTORE` | 256 KB | bytes in the whole `.pbpack` -- a warning |
+| `MAX_RESOURCES_SIZE` | **1 MB** | bytes -- the hard error |
+| pbpack `table_size` | **256 entries** | resources, whatever they weigh |
+
+The byte limits apply to the pack as a whole (`os.stat(resources_path).st_size` in the
+SDK's `report_memory_usage.py`), not to any single resource. The entry count is the one
+banking made newly reachable: a map is now one resource plus a bank per few WorldTiles, so
+a project of large maps runs out of *entries* long before it runs out of bytes -- and
+exceeding it was a bare traceback out of the SDK's packer. The budget report now prints
+both ceilings and the entry count, and refuses a build that would overflow the table.
 
 ## Palette variants: one atlas, many zones
 

@@ -226,6 +226,8 @@ void test_audio(void);
 void test_input(void);
 void test_stream(void);
 void test_synth(void);
+void test_save(void);
+void test_app(void);
 
 int main(void) {
   printf("pebblnyx core tests\n");
@@ -240,6 +242,8 @@ int main(void) {
   test_input();
   test_stream();
   test_synth();
+  test_save();
+  test_app();
 
   printf("\n%d checks, %d failures\n", s_checks, s_failures);
   return s_failures == 0 ? 0 : 1;

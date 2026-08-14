@@ -12,9 +12,11 @@ see [`docs/GAME.md`](docs/GAME.md), which is also why a few framework features e
 
 **Status: playable slice running on hardware.** Platform, core, assets, graphics and an
 audio mixer are built and verified on a real Pebble Time 2; there is a visual editor for
-maps and asset import. The pipeline deduplicates mirrored tiles, composes 16x16 tiles from
-shared 8x8 quadrants when that pays, and collapses palette-swapped sprite recolours to one
-bitmap plus a palette each. Every number in this repo was measured on the device, and the ones
+maps and asset import. Save and the app-state/lifecycle framework are built and host-tested
+end to end but not yet confirmed on device — see [`docs/ROADMAP.md`](docs/ROADMAP.md)'s M5
+and M6. The pipeline deduplicates mirrored tiles, composes 16x16 tiles from shared 8x8
+quadrants when that pays, and collapses palette-swapped sprite recolours to one bitmap plus
+a palette each. Every number in this repo was measured on the device, and the ones
 that overturned a design decision are recorded as such in
 [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md) — including several where the estimate was
 wrong by more than 2x.
@@ -25,7 +27,8 @@ wrong by more than 2x.
 | Playable slice | 15,157 of 65,535 static bytes (23.1%), 19,239 of 262,144 resource bytes (7.3%) |
 | Runtime memory | 15,157 static + 115,915 bytes of heap, of one 128KB slot |
 | Frame cost | ~5,100 µs of ~35,000 available, holding the 26.8fps ceiling |
-| Tests | 435 host checks + 84 pipeline-validation tests |
+| Render cadence | locked to 40ms (25fps), ~2.67ms of slack under the 37.33ms display floor |
+| Tests | 724 host checks + 361 pipeline-validation checks |
 
 ---
 
@@ -71,10 +74,11 @@ in [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md).
 ```
 docs/PLATFORM.md      how these games are actually played: off the wrist, in two hands
 docs/GAME.md          the game this is built for, and what it demands
-docs/EDITOR.md        the visual editor: levels, assets, embedded emulator, packaging
+docs/EDITOR.md        the visual editor: levels, assets, packaging -- no embedded emulator, see inside
 docs/DESIGN.md        architecture, rationale, API sketches
 docs/MEASUREMENTS.md  the measured platform facts everything rests on
 docs/ROADMAP.md       milestones and current state
+docs/PORTING.md       reference for M9: per-platform packaging, before that work starts
 docs/blog/            notes toward a writeup on old techniques, re-priced
 
 src/pnx/platform/     THE ONLY layer that touches Pebble APIs
@@ -83,10 +87,10 @@ src/pnx/assets/       handle-based asset registry
 src/pnx/gfx/          blitter with X/Y flip, camera, tilemap, sprites with depth sort
 src/pnx/audio/        software mixer over a streamed PCM buffer
 src/pnx/input/        button edges, hold times, orientation-aware cluster mapping
-src/pnx/save/         chunk-packed persistence (planned)
-src/pnx/app/          fixed-timestep loop, scene stack, lifecycle (planned)
+src/pnx/save/         chunk-packed persistence, versioned, spread across frames
+src/pnx/app/          state stack, fixed-timestep loop, focus-aware lifecycle
 
-tests/                435 host checks, run with a normal compiler
+tests/                724 host checks, run with a normal compiler
 tools/pnx_assets.py   the asset pipeline: manifest -> blobs + generated header
 tools/pnx_editor.py   visual editor: maps, transitions, asset import, build
 tools/pnx_preview.py  renders the shipped blobs as an HTML report

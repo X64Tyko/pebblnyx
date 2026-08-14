@@ -4,12 +4,12 @@ Dependencies run strictly downward. A module may include from its own directory 
 from any directory below it in this list, and never upward or sideways.
 
 ```
-app        loop, scene stack, lifecycle
+app        loop, state stack, lifecycle
 audio      mixer, sequencer, sfx
 gfx        tilemap, sprites, text, camera
-input      backends -> PnxInputState
+input      button edges/holds, orientation-aware cluster mapping
 assets     handle-based registry, residency
-save       chunk packing, incremental writer
+save       chunk packing, incremental writer, versioning
 core       fixed point, arenas, containers, diagnostics
 platform   the only layer that touches Pebble APIs
 ```

@@ -145,10 +145,17 @@ Pebblemon has no equivalent of, and theirs includes a complete game.
 Against `basalt`'s 64 KB that is 29% for a finished game. Against `emery`'s 128 KB it would be
 15%. **Static RAM is not what will run out.**
 
-**Fonts are 9,060 bytes -- 36% of their resource payload**, the single largest line item, and
-bigger than every tile in the game combined. We have no font strategy written down anywhere,
-and Resonant's `Budget.md` guesses 4,000 bytes for "UI and font glyphs". That guess is probably
-low by a factor of two, and it is the number most worth replacing with a measurement.
+**Fonts were 9,060 bytes -- 36% of their resource payload**, the single largest line item, and
+bigger than every tile in the game combined, when this was written. E7 has since landed
+pebblnyx's own font pipeline and it undercuts that badly: resonant ships two faces, a HUD
+font and a dialogue font, `charset = "auto"` deriving the glyph set from the actual dialogue
+rather than shipping a full alphabet, at **1,234 + 1,691 = 2,925 bytes** for both (built
+resource sizes, `resonant/resources/font_hud.bin` and `font_dialogue.bin`) -- less than a
+third of Pebblemon's 9,060 for two TTFs. The gap is the format, not the content: theirs ships
+a general-purpose TTF outline per face; ours ships pre-rasterised, per-glyph-trimmed bitmaps
+of exactly the codepoints a project's own dialogue uses, at whatever pixel size and bit depth
+it chose. The example in `MEASUREMENTS.md`'s Font costs (E7) section is smaller still (757 +
+902 B) because it carries fewer glyphs.
 
 **Our tiles cost 8x theirs, each.** 4bpp at 16x16 is 128 bytes per tile; 2bpp at 8x8 is 16.
 Per unit of screen area we pay 2x for the extra colour depth, and we lose again on reuse

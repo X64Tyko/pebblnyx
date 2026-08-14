@@ -109,7 +109,7 @@ Target budget, to be held honest as code lands:
 ```
 game code                       <- author writes this
 ─────────────────────────────
-app        loop, scene stack, lifecycle, save-on-blur
+app        loop, state stack, lifecycle, save-on-blur
 audio      mixer, voices, envelopes, sequencer, sfx priority
 gfx        tilemap, sprites, text, camera
 input      backends -> InputState
@@ -124,26 +124,48 @@ The dependency rule is strict and one-directional. `platform` isolation exists s
 simulation and rendering logic can be compiled and tested on a host — proven viable in
 the probe, where a single module touched Pebble graphics.
 
-## 4. The loop
+## 4. The loop — **built (M6), host-tested, not yet on device**
 
 Driven by the render callback, not an independent timer, because the hardware already
-paces at 37.33 ms and a second clock only fights it.
+paces at 37.33 ms and a second clock only fights it. The render REQUEST is now locked to
+a fixed 40 ms grid rather than asked for as soon as the display will take it — see
+`MEASUREMENTS.md`'s Frame pacing section for why that trades a ceiling that was never
+reachable anyway for slack that protects against a frame running long.
 
 ```c
-void pnx_app_frame(uint32_t elapsed_ms);   /* called from the update proc */
+/* PnxFrameFn-shaped -- hand it straight to pnx_platform_run */
+void pnx_app_frame(void *ctx, uint32_t elapsed_ms, PnxTarget *target);
 ```
 
+This took an extra `ctx`/`target` over the original sketch above, once it had to match
+`pnx_platform_run`'s actual callback shape rather than stand in for it.
+
 - **Fixed 25 Hz sim tick (40 ms)** with an accumulator over *measured* elapsed time, so
-  speed is independent of frame jitter (37–41 ms observed).
+  speed is independent of frame jitter. Now that the render request is ALSO locked to
+  40 ms, a rendered frame carries almost exactly one tick instead of the
+  roughly-one-frame-in-fourteen that used to carry none.
 - **The accumulator clamp is load-bearing, not defensive.** While covered by a modal
   the app is throttled to ~0.4 fps, so a frame can arrive with a multi-second
   `elapsed`. Unclamped, the sim fast-forwards seconds every time a notification clears.
+- **Went further than a clamp: throttle-aware pausing.** Between `FOCUS_LOST` and
+  `FOCUS_GAINED` the accumulator is not fed at all, so a covered app does not accrue
+  ticks to spend in a burst on `FOCUS_GAINED` -- it just stops, and resumes from zero.
+- **A state stack, not a bare callback.** `pnx_app_push`/`pop`/`replace` own enter/exit/
+  suspend/resume around whatever `input`/`tick`/`draw` a state defines; only the TOP
+  state ticks, which is what makes "nothing simulates behind the menu" a property of the
+  stack rather than a rule every mode's tick function has to remember to follow. Called a
+  STATE and not a SCENE specifically to keep clear of `assets`' own scene (a loaded
+  content chunk, an unrelated idea).
 - **Full-screen redraw every frame.** No clear pass needed when an opaque tilemap
   covers the viewport.
 - Edge-triggered input (an action press) is consumed by the **first tick only**;
   direction is continuous and may repeat. Otherwise one press fires up to four times.
 
-## 5. Assets
+Measured `.text + .bss`: **1,052 bytes**, against a 2KB budget. See `docs/ROADMAP.md`'s
+M6 for the full account, including where resonant's own use of the stack stops short of
+the whole idea (depth 2, not one state per mode) and why.
+
+## 5. Assets, palettes and colour
 
 A declarative manifest is the single source of truth; an offline tool emits packed
 binaries plus a generated header. **No C file ever names a source PNG, a pixel offset,
@@ -512,48 +534,78 @@ pnx_audio_feed();   /* once per frame */
   ADSR envelopes and loop points are all affordable — everything the 4-voice batch API
   denied.
 
-## 8. Save
+## 8. Save — **built (M5), host-tested, not yet on device**
+
+Landed close to this sketch, with the API split into two shapes for two different call
+sites rather than one `begin`/`write`/`commit` triple — the actual usage turned out to
+split cleanly along "is there a frame to protect":
 
 ```c
-pnx_save_begin(SAVE_SLOT_0);
-pnx_save_write(&state, sizeof(state));   /* packed into 256-byte chunks */
-pnx_save_commit();                       /* incremental, spread across frames */
+/* interactive: a player chose SAVE, and a stall would be visible */
+pnx_save_begin(SLOT, &state, sizeof(state), VERSION);
+while (pnx_save_pending(SLOT)) pnx_save_step(SLOT);   /* one call per rendered frame */
+
+/* save-on-blur: ~297 ms of warning and no frame left to protect, so just finish it */
+pnx_save_write(SLOT, &state, sizeof(state), VERSION);   /* begin + a blocking flush */
+
+/* either way */
+pnx_save_load(SLOT, &out, sizeof(out), VERSION, &out_bytes);
 ```
 
 Driven entirely by the measurement that **writes cost ~7.3 ms per call regardless of
 size**, and a 4KB save is 106 ms — about three frames:
 
 - **Pack into full 256-byte chunks.** A 4-byte `persist_write_int` costs half of a full
-  chunk, so scattering small values is ~31x worse per byte.
+  chunk, so scattering small values is ~31x worse per byte. The 8-byte header rides
+  inside chunk 0 rather than spending a key of its own, for the same reason.
 - **Use as few keys as possible** — rewriting one key beat spreading across keys.
-- **Commit incrementally, one chunk per frame.** At 7.3 ms against ~35 ms that is ~20%
-  of a frame and never stutters; 4KB becomes 16 invisible frames.
-- **Also save on blur.** `will_focus(OUT)` gives ~297 ms of warning against a 106 ms
-  save, so state can be persisted when the app is covered rather than autosaved during
-  play.
-- Saves carry a version and the framework refuses to load a newer one, because a game
-  that ships will need migrations.
+  `PNX_SAVE_CHUNKS_PER_SLOT` (16) is sized directly off the "realistic 4KB save, 16
+  keys" measurement.
+- **Spread incrementally, one chunk per frame** — for the interactive path only. At
+  7.3 ms against ~35 ms that is ~20% of a frame and never stutters; 4KB becomes 16
+  invisible frames. Save-on-blur does NOT spread: it blocks, because the ~297 ms
+  `will_focus` warning against a ~106 ms 4KB save means there is time to just finish,
+  and no rendered frame left to protect anyway.
+- Saves carry a version; the framework refuses to load one newer than the caller
+  understands. Migration for an older save is left to the game — not built, because
+  nothing has shipped yet for there to be an older save FROM.
 
-## 9. Input
+Measured `.text + .bss`: **808 bytes**, against a 2KB budget. What was not anticipated
+here: **two slots**, not one — `PNX_SAVE_SLOT_RESUME` (automatic, save-on-blur) and
+`PNX_SAVE_SLOT_CHECKPOINT` (an explicit save, at an author-placed point), because
+resonant's own design (`docs/Menu.md`) treats those as different data, not two paths to
+the same record. See [`ROADMAP.md`](ROADMAP.md)'s M5 for what actually landed and what
+a real game does with it.
 
-A backend table, so the control scheme is swappable without game code knowing.
+## 9. Input — **built**
+
+Landed simpler than a backend table over one abstract `PnxInputState`, because the actual
+problem turned out not to be "touch vs buttons" but **orientation**: the three-button
+cluster is bolted to the case and does not rotate with the content, so `pnx_input.h`'s real
+job is addressing it by the POSITION the player reads (0 nearest the screen's origin) rather
+than by which physical button that is -- `buttons_bottom` reverses which physical button is
+"first" because the watch turned the other way, and a game that reads positions needs no
+branch for that at all.
 
 ```c
-typedef struct {
-  fx dx, dy;       /* direction, magnitude conveys deflection */
-  bool engaged;
-  bool action;     /* edge, auto-clears */
-} PnxInputState;
+bool pnx_input_pressed(PnxButton button);        // edge, this frame
+bool pnx_input_held(PnxButton button);
+int8_t pnx_input_axis(void);                     // -1/0/+1 along the cluster, level
+int8_t pnx_input_axis_pressed(void);             // same axis, edge-triggered
+PnxButton pnx_input_cluster(uint8_t pos);        // position -> physical button
 ```
 
-Shipping backends: a **relative touch stick** (touch anywhere, drag from that point —
-works wherever the thumb lands and costs no screen area) and **buttons** (only three
-are usable, so this is a fallback rather than a design).
+A game still resolves touch itself (a relative drag for movement, a tap to confirm --
+`resonant/src/c/field.c` is the reference), rather than the framework owning a stick
+abstraction: touch semantics turned out to be per-game (a drag threshold that must not
+double as a tap, in resonant's case) rather than something one abstraction could serve
+generically. What the framework does own is the bookkeeping every game would otherwise
+rewrite -- edges, hold times measured from the event's own timestamp rather than from the
+frame that noticed it, since a frame can arrive carrying seconds while the app is covered.
 
-**Known unsolved problem:** a finger on a 200px screen occludes much of the play area.
-That is a design issue, not a tuning one. Candidate backends to compare: a bottom-third
-drag zone, or tap-to-move so the finger is transient. The backend table exists partly
-so this can be settled empirically.
+**The occlusion problem named below is still real and still unsolved.** A finger on a
+200px screen covers much of the play area during a drag; resonant's answer (drag from
+touchdown, not from a fixed zone) is one candidate, not a settled one.
 
 ## 10. Scripting (deferred, designed for)
 
@@ -576,19 +628,25 @@ call must do to be worth crossing for.
 
 ## 11. Open questions
 
-Honest list of what is not settled:
+Honest list of what is not settled. Three items this list carried for a long time are
+gone because they got answered rather than because the list was tidied: **input latency**
+(M0 measured it directly rather than estimating -- see `MEASUREMENTS.md`, ±74ms hits
+100%), **fonts** (E7 shipped them, costs measured on real content), and **the host test
+harness** (it is how every milestone since M1 has been verified before touching a watch,
+724 checks and counting).
 
-1. **Per-call FFI overhead** — needed before committing to the scripting layer.
+1. **Per-call FFI overhead** — needed before committing to the scripting layer (M8).
 2. **Battery.** Instrumented but barely measurable: apps get only a coarse `uint8`
    percent, and the firmware itself warns the model is inaccurate. One data point takes
    hours. Also probably the wrong question — `light_enable(true)` "will rapidly deplete
    the battery" per the docs, and a reflective screen needs it indoors, which likely
    dwarfs any rendering difference.
-3. **Combined-load frame cost.** Each piece is measured; the sum never was.
-4. **Custom font resources** — untested, and they compete for the 256KB budget.
-5. **End-to-end input latency** — ≥37 ms by construction, likely ~74 ms touch-to-pixel.
-   Fine turn-based, fatal for anything twitchy.
-6. **Host test harness.** The architecture was designed for it but that is unproven.
+3. **Combined-load frame cost.** Each subsystem's cost is measured; the sum, everything
+   running at once against a single frame budget, never has been.
+4. **Device confirmation for M4-M6.** Audio, landscape/screen-lock, map streaming, save
+   and the app-state lifecycle are all built and pass their host tests; none has been
+   watched running on a Pebble Time 2 yet. See `ROADMAP.md`'s "pending device
+   confirmation" tags.
 
 ## 12. Decisions rejected, with evidence
 

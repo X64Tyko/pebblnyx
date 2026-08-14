@@ -1,9 +1,17 @@
 # The editor
 
-A visual tool for building levels, managing assets, testing in an embedded emulator,
-and packaging a build.
+A visual tool for building levels, managing assets, and packaging a build.
 
 ---
+
+**There is no embedded emulator, and there will not be one.** The sections below on the
+QEMU/noVNC stack and the E3 "emulator panel" stage describe the plan as it stood before
+that was checked against the actual SDK -- see "The embedded emulator is not currently
+possible" near the end. They are kept because the mechanism is still correct for a
+platform that DOES have a QEMU target, and because option 1 there (rendering the host
+platform seam's framebuffer into the editor, which is what actually exists today) is a
+direct descendant of the same architecture. A reader wanting the current picture should
+read that section first and treat E3 as superseded rather than pending.
 
 ## Why it belongs in the plan
 
@@ -17,7 +25,11 @@ It also pays for itself immediately on this project. Several things already done
 are exactly what the editor automates: rendering tile previews to a PNG to pick ids,
 tracing why a warp did not fire, checking the resource budget after each change.
 
-## The stack question is already answered
+## The stack question, for a platform that has an emulator
+
+`emery` does not -- see "The embedded emulator is not currently possible" below. This
+section is the mechanism recorded for whichever platform eventually does, or for anyone
+building an editor against `aplite`/`basalt`/`chalk`/`diorite`, which QEMU does cover.
 
 The Pebble emulator is **QEMU with a VNC display**, and `pebble-tool` ships
 **websockify** — a WebSocket-to-TCP bridge whose entire purpose is putting VNC in a
@@ -56,6 +68,11 @@ browser UI
   └─ emulator lifecycle + log stream
 ```
 
+The emulator panel in that diagram is the E3 plan and was never built -- see the status
+note at the top of this document. Everything else in it shipped: manifest editor, map
+canvas and build panel are E1/E2/E4/E5's inspector, painting and packaging tabs; add
+sprite and code tabs from E12.
+
 **The editor is a GUI over the manifest.** That framing keeps it small: the manifest is
 already the single source of truth, the pipeline already validates and packs, and the
 generated header is already the contract with the C. The editor reads and writes one
@@ -75,9 +92,12 @@ currently done by hand, and it is worth building even if nothing after it happen
 source and destination. Validation runs live — the reachability flood fill highlights
 unreachable doors *as you draw*, rather than at build time.
 
-**E3 — Emulator panel.** noVNC embedded, plus build → install → run → logs, with the log
-stream in a pane beside the screen. Removes the push-to-device cycle for everything that
-does not need real hardware.
+**E3 — Emulator panel. SUPERSEDED, not built.** The plan was noVNC embedded plus build →
+install → run → logs. It assumed a QEMU target for the platform this framework builds
+for, which does not exist -- see "The embedded emulator is not currently possible" below.
+What replaces it, partially: `tools/host_harness.c` plus `tools/preview.py` dump the host
+platform seam's framebuffer as a PNG contact sheet, which is real game logic and real
+pixels but not real hardware timing. No in-editor panel does this yet.
 
 **E4 — Asset import.** Drop a sheet in; slice it, pick a colour key, preview
 quantisation to the 64-colour palette, preview dedup savings, choose frames. Currently
@@ -386,16 +406,15 @@ behaviour in measured ways.
 
 ## Open questions
 
-- **Does the editor own the manifest file, or edit it in place?** In place keeps git
-  diffs meaningful and lets hand-editing continue to work, but constrains the UI to what
-  the format can express. Leaning in place.
-- **One emulator instance shared with the CLI, or its own?** The state file suggests
-  sharing is intended and would avoid surprising port conflicts.
-- **How much does the emulator actually tell us?** It will not reproduce the 26.8fps
-  ceiling, real flash timing, touch behaviour, or audio. Useful for content and layout
-  iteration; misleading for anything measured. The UI should say so rather than let
-  someone tune a timing window against QEMU.
+The other two questions this section used to carry -- sharing one emulator instance with
+the CLI, and how much a QEMU run could actually be trusted for anything measured -- are
+moot now that there is no embedded emulator to ask them about; see below.
 
+- **Does the editor own the manifest file, or edit it in place?** RESOLVED: in place.
+  `assets.toml` stays the file an author reads and diffs; the editor writes into it
+  rather than owning a parallel representation, which is also what made E16's audit able
+  to find manifests the editor itself had made unbuildable -- there was only one file to
+  be wrong.
 
 ## The embedded emulator is not currently possible
 

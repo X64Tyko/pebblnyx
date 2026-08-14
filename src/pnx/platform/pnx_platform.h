@@ -130,6 +130,37 @@ static inline uint32_t pnx_audio_byte_rate(PnxAudioFormat f) {
   return rate * width;
 }
 
+// ------------------------------------------------------------------------ persist
+//
+// Key-value flash storage, keyed by a small integer. Costed in docs/MEASUREMENTS.md and
+// the two numbers there ARE the save module's design:
+//
+//   - a write costs ~7ms PER CALL, almost flat regardless of how many bytes are in it
+//     (a 4-byte int is 3.5ms; 256 bytes is 5-7ms) -- so the thing to minimise is CALLS,
+//     not bytes, and packing several small fields into one key is worth far more than
+//     shrinking any one of them.
+//   - each key caps at PNX_PERSIST_KEY_BYTES. A save larger than one key has no choice
+//     but to spend more calls, which is where pnx_save's chunking and its one-call-per-
+//     frame writer both come from -- see pnx_save.h.
+//
+// Reads are ~100x cheaper (~70us) and are not spread across frames.
+
+#define PNX_PERSIST_KEY_BYTES 256
+
+// Reads up to `bytes` into `dst`. `*out_bytes` is what was actually stored under the key
+// (which may be less than `bytes`, or the call fails and leaves it at 0). False if the key
+// has never been written.
+bool pnx_platform_persist_read(uint32_t key, void *dst, size_t bytes, size_t *out_bytes);
+
+// Overwrites the key wholesale -- there is no partial or appending write. `bytes` must not
+// exceed PNX_PERSIST_KEY_BYTES; the platform truncates rather than failing, because a save
+// format that stays inside the limit should never learn from a runtime error that it did
+// not.
+bool pnx_platform_persist_write(uint32_t key, const void *data, size_t bytes);
+
+bool pnx_platform_persist_delete(uint32_t key);
+bool pnx_platform_persist_exists(uint32_t key);
+
 // -------------------------------------------------------------------------- text
 //
 // Text is the one thing worth borrowing from the SDK rather than reimplementing: it has

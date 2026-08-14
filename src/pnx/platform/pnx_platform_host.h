@@ -33,3 +33,10 @@ const char *pnx_host_last_text(void);
 
 // Points a resource id at a file on disk, so tests load the same blobs the device does.
 void pnx_host_register_resource(uint32_t resource_id, const char *path);
+
+// Calls to each persist operation since the last pnx_host_reset. On device a WRITE costs
+// ~7ms per call regardless of size -- see docs/MEASUREMENTS.md -- so this is the number a
+// save format's chunking has to be judged on, the same way resource reads judge streaming.
+uint32_t pnx_host_persist_writes(void);
+uint32_t pnx_host_persist_reads(void);
+uint32_t pnx_host_persist_deletes(void);

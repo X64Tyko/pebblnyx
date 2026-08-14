@@ -140,6 +140,79 @@ size_t pnx_platform_resource_read(uint32_t resource_id, size_t offset,
   return got;
 }
 
+// ------------------------------------------------------------------------ persist
+//
+// An in-memory table, not a file -- a save's correctness has to survive a process that
+// never restarts (the host harness and the test binary both are), so "does it round-trip
+// within one run" is the whole of what this needs to prove. Call counts are tracked for
+// the same reason resource reads are: on device a persist WRITE costs ~7ms per call
+// regardless of size (docs/MEASUREMENTS.md), so "how many calls" is what a save's design
+// has to be judged on, and it is not observable any other way on a host.
+
+#define MAX_PERSIST_KEYS 64
+
+typedef struct {
+  uint32_t key;
+  uint8_t bytes[PNX_PERSIST_KEY_BYTES];
+  uint16_t len;
+  bool used;
+} HostPersistSlot;
+
+static HostPersistSlot s_persist[MAX_PERSIST_KEYS];
+static uint32_t s_persist_writes, s_persist_reads, s_persist_deletes;
+
+static HostPersistSlot *persist_find(uint32_t key, bool create) {
+  int free_slot = -1;
+  for (int i = 0; i < MAX_PERSIST_KEYS; i++) {
+    if (s_persist[i].used && s_persist[i].key == key) return &s_persist[i];
+    if (free_slot < 0 && !s_persist[i].used) free_slot = i;
+  }
+  if (!create || free_slot < 0) return NULL;
+  s_persist[free_slot].used = true;
+  s_persist[free_slot].key = key;
+  s_persist[free_slot].len = 0;
+  return &s_persist[free_slot];
+}
+
+bool pnx_platform_persist_read(uint32_t key, void *dst, size_t bytes, size_t *out_bytes) {
+  if (!dst) return false;
+  HostPersistSlot *s = persist_find(key, false);
+  if (!s) return false;
+  s_persist_reads++;
+  const size_t got = s->len < bytes ? s->len : bytes;
+  memcpy(dst, s->bytes, got);
+  if (out_bytes) *out_bytes = got;
+  return true;
+}
+
+bool pnx_platform_persist_write(uint32_t key, const void *data, size_t bytes) {
+  if (!data) return false;
+  if (bytes > PNX_PERSIST_KEY_BYTES) bytes = PNX_PERSIST_KEY_BYTES;
+  HostPersistSlot *s = persist_find(key, true);
+  if (!s) return false;
+  s_persist_writes++;
+  memcpy(s->bytes, data, bytes);
+  s->len = (uint16_t)bytes;
+  return true;
+}
+
+bool pnx_platform_persist_delete(uint32_t key) {
+  HostPersistSlot *s = persist_find(key, false);
+  if (!s) return false;
+  s_persist_deletes++;
+  s->used = false;
+  s->len = 0;
+  return true;
+}
+
+bool pnx_platform_persist_exists(uint32_t key) {
+  return persist_find(key, false) != NULL;
+}
+
+uint32_t pnx_host_persist_writes(void) { return s_persist_writes; }
+uint32_t pnx_host_persist_reads(void) { return s_persist_reads; }
+uint32_t pnx_host_persist_deletes(void) { return s_persist_deletes; }
+
 // ------------------------------------------------------------------------- input
 
 bool pnx_platform_poll_event(PnxEvent *out) {
@@ -264,6 +337,8 @@ void pnx_host_reset(void) {
   s_queued_read = 0;
   s_quit = false;
   memset(s_pixels, 0, sizeof(s_pixels));
+  memset(s_persist, 0, sizeof(s_persist));
+  s_persist_writes = s_persist_reads = s_persist_deletes = 0;
 }
 
 PnxTarget *pnx_host_target(void) { return &s_target; }

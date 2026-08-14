@@ -13,18 +13,24 @@
 #include <pebble.h>
 #include <string.h>
 
-// The frame loop is a self-rearming timer that marks the canvas dirty. It cannot beat the
-// display: PebbleOS gates rendering on framebuffer_render_pending, so the real pace is
-// ~37.33ms no matter what is requested.
+// The frame loop is a self-rearming timer that marks the canvas dirty, on a FIXED grid --
+// PNX_FRAME_MS apart, measured from the start of the previous frame, not from when it
+// finished. It used to just ask again as soon as possible, which sounds free and is not:
+// PebbleOS gates rendering on framebuffer_render_pending at a real pace of ~37.33ms no
+// matter what is requested, so "ask immediately" converges on exactly that ceiling with
+// nothing held back -- and a frame that runs a millisecond long then arrives a millisecond
+// late, one for one, because there was no slack to absorb it into.
 //
-// It used to ask for 1ms, on the reasoning that "as soon as allowed" costs nothing. It is
-// not free: at 1ms this timer floods the app's event loop and starves every other timer in
-// it. A 10ms audio timer measured at 54-59ms on device for exactly that reason, which held
-// the stream lead high and made effects late.
+// PNX_FRAME_MS (40, 25fps) is deliberately looser than the ~37.33ms ceiling. The ~2.67ms
+// between them is banked as slack on every frame, so the frame that runs long can still
+// land on schedule. See PNX_FRAME_MS in pnx_config.h and docs/MEASUREMENTS.md.
 //
-// 16ms still arrives well before the display will accept a frame, so the frame rate is
-// unchanged, and it leaves the loop free for anything else that needs it.
-#define FRAME_TIMER_MS 16
+// It used to also flood the loop at 1ms between marks, on the reasoning that "as soon as
+// allowed" costs nothing. It is not free: at 1ms this timer starves every other timer in
+// the app's event loop. A 10ms audio timer measured at 54-59ms on device for exactly that
+// reason, which held the stream lead high and made effects late -- part of why the audio
+// timer runs on its own app_timer now rather than off this one.
+#define FRAME_PERIOD_MS PNX_FRAME_MS
 
 #define EVENT_QUEUE_LEN 16
 
@@ -43,6 +49,7 @@ static PnxFrameFn s_frame_fn;
 static PnxPostFrameFn s_post_fn;
 static void *s_frame_ctx;
 static uint32_t s_last_frame_ms;
+static uint32_t s_frame_due_ms;   // wall clock the NEXT frame is scheduled for; the grid
 static bool s_quit;
 static bool s_screen_locked;
 
@@ -94,6 +101,31 @@ size_t pnx_platform_resource_read(uint32_t resource_id, size_t offset,
   ResHandle handle = resource_get_handle(resource_id);
   if (!handle || !dst) return 0;
   return resource_load_byte_range(handle, (uint32_t)offset, (uint8_t *)dst, bytes);
+}
+
+// ------------------------------------------------------------------------ persist
+
+bool pnx_platform_persist_read(uint32_t key, void *dst, size_t bytes, size_t *out_bytes) {
+  if (!dst) return false;
+  if (!persist_exists(key)) return false;
+  const int got = persist_read_data(key, dst, bytes);
+  if (got < 0) return false;
+  if (out_bytes) *out_bytes = (size_t)got;
+  return true;
+}
+
+bool pnx_platform_persist_write(uint32_t key, const void *data, size_t bytes) {
+  if (!data) return false;
+  if (bytes > PNX_PERSIST_KEY_BYTES) bytes = PNX_PERSIST_KEY_BYTES;
+  return persist_write_data(key, data, bytes) >= 0;
+}
+
+bool pnx_platform_persist_delete(uint32_t key) {
+  return persist_delete(key) == S_SUCCESS;
+}
+
+bool pnx_platform_persist_exists(uint32_t key) {
+  return persist_exists(key);
 }
 
 // ------------------------------------------------------------------------- audio
@@ -308,8 +340,23 @@ static void update_proc(Layer *layer, GContext *ctx) {
   }
 
   // Re-armed after drawing, not before: the next frame should only be scheduled once
-  // this one has actually been rendered.
-  s_timer = app_timer_register(FRAME_TIMER_MS, frame_timer, NULL);
+  // this one has actually been rendered. The DELAY targets a fixed grid -- s_frame_due_ms
+  // -- rather than a flat offset from "now", so a frame that ran a little long is followed
+  // by a slightly shorter wait rather than the schedule permanently drifting by however
+  // much that one frame overran.
+  s_frame_due_ms += FRAME_PERIOD_MS;
+  const uint32_t after = pnx_platform_now_ms();
+  uint32_t delay;
+  if (s_frame_due_ms > after) {
+    delay = s_frame_due_ms - after;
+  } else {
+    // Behind the grid -- covered by a notification, or a frame ran long enough to eat its
+    // own slack. Snap the grid to now rather than firing a burst of make-up frames the
+    // display would refuse anyway; the next frame just starts a fresh 40ms count from here.
+    s_frame_due_ms = after;
+    delay = 1;
+  }
+  s_timer = app_timer_register(delay, frame_timer, NULL);
 }
 
 static void frame_timer(void *ctx) {
@@ -324,7 +371,8 @@ static void window_load(Window *window) {
   layer_add_child(root, s_canvas);
 
   s_last_frame_ms = 0;
-  s_timer = app_timer_register(FRAME_TIMER_MS, frame_timer, NULL);
+  s_frame_due_ms = pnx_platform_now_ms();
+  s_timer = app_timer_register(FRAME_PERIOD_MS, frame_timer, NULL);
 }
 
 static void window_unload(Window *window) {

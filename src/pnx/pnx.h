@@ -47,6 +47,14 @@
 #include "audio/pnx_synth.h"
 #endif
 
+#if PNX_USE_SAVE
+#include "save/pnx_save.h"
+#endif
+
+#if PNX_USE_APP
+#include "app/pnx_app.h"
+#endif
+
 // Later milestones add their headers here behind their own #if guards:
 //   #if PNX_USE_TILEMAP
 //   #include "gfx/pnx_tilemap.h"
