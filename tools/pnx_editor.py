@@ -3389,7 +3389,8 @@ rows = """
             instruments = []
             synth = spec.get("synth", [])
             for i, ins in enumerate(spec.get("instrument", [])):
-                entry = {"wave": ins.get("wave", "square"),
+                entry = {"name": ins.get("name", ""),
+                         "wave": ins.get("wave", "square"),
                          "attack": ins.get("attack", 5),
                          "decay": ins.get("decay", 50),
                          "sustain": ins.get("sustain", 180),
@@ -3414,6 +3415,173 @@ rows = """
                           + (2 + len(synth) * 48 if synth else 0)),
             })
         return out
+
+    def add_song(self, name, tempo=120, rows=16, synth=True):
+        """Create a [music.*] with one instrument and one empty pattern.
+
+        Seeded rather than left blank: the pipeline refuses a song with no instruments and
+        no patterns, so an empty one could not be saved at all -- the same reason a new map
+        arrives with a room already in it.
+        """
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise ValueError("a song name must be lowercase letters, digits and "
+                             "underscores -- it becomes a C identifier")
+        if name in self.man.get("music", {}):
+            raise ValueError(f"a song named {name!r} already exists")
+        rows = int(rows)
+        if not 1 <= rows <= 64:
+            raise ValueError("a pattern holds between 1 and 64 rows")
+
+        blank = "     ".join(["."] * 4)
+        body = [f"[music.{name}]", f"tempo = {int(tempo)}", "channels = 4", "",
+                f"[[music.{name}.instrument]]",
+                'wave = "square"', "attack = 5", "decay = 80", "sustain = 180",
+                "release = 120", ""]
+        if synth:
+            body += [f"[[music.{name}.synth]]",
+                     'filter = "lowpass"', "cutoff_base = 128", "resonance = 0",
+                     "cutoff_env = 0", 'lfo_target = "off"', "lfo_rate = 0",
+                     "lfo_depth = 0", "pitch_env = 0", "pitch_env_decay = 0",
+                     "reverb = 0", "chorus = 0",
+                     "amp = { attack = 5, decay = 80, sustain = 180, release = 120 }",
+                     "cutoff = { attack = 5, decay = 80, sustain = 128, release = 120 }",
+                     "osc = [",
+                     '  { wave = "square", volume = 200, detune = 0, octave = 0, '
+                     'duty = 128 },',
+                     "]", ""]
+        body += [f"[[music.{name}.pattern]]", "rows = ["]
+        body += [f'  "{blank}",' for _ in range(rows)]
+        body += ["]"]
+
+        with open(self.path, "a") as f:
+            f.write("\n\n" + "\n".join(body) + "\n")
+        self.reload()
+
+    def remove_song(self, name):
+        """Delete a song and every table under it."""
+        if name not in self.man.get("music", {}):
+            raise ValueError(f"no song named {name!r}")
+        lines = open(self.path).read().split("\n")
+        keep, drop = [], False
+        for line in lines:
+            s = line.lstrip()
+            if s.startswith("["):
+                inner = s.lstrip("[")
+                drop = (inner.startswith(f"music.{name}]")
+                        or inner.startswith(f"music.{name}."))
+            if not drop:
+                keep.append(line)
+        with open(self.path, "w") as f:
+            f.write("\n".join(keep))
+        self.reload()
+
+    def add_instrument(self, name):
+        """Append an instrument, and its synth record when the song has a synth table.
+
+        Both or neither. The pipeline refuses tables of different lengths because a pattern
+        row names one index, so adding to one alone would break the build in a way that
+        points at the song rather than at this button.
+        """
+        spec = self.man.get("music", {}).get(name)
+        if spec is None:
+            raise ValueError(f"no song named {name!r}")
+        count = len(spec.get("instrument", []))
+        if count >= 255:
+            raise ValueError("a song holds at most 255 instruments")
+
+        body = [f"[[music.{name}.instrument]]", 'wave = "square"', "attack = 5",
+                "decay = 80", "sustain = 180", "release = 120"]
+        found = self._nth_table(f"[[music.{name}.instrument]]", count - 1)
+        if not found:
+            raise ValueError(f"song {name!r} has no instruments to append after")
+        lines, head, end = found
+        while end > head and lines[end - 1].strip() == "":
+            end -= 1
+        lines[end:end] = [""] + body
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+        if spec.get("synth"):
+            self.add_synth_record(name)
+
+    def add_synth_record(self, name):
+        body = [f"[[music.{name}.synth]]", 'filter = "off"', "cutoff_base = 128",
+                "resonance = 0", "cutoff_env = 0", 'lfo_target = "off"', "lfo_rate = 0",
+                "lfo_depth = 0", "pitch_env = 0", "pitch_env_decay = 0", "reverb = 0",
+                "chorus = 0",
+                "amp = { attack = 5, decay = 80, sustain = 180, release = 120 }",
+                "cutoff = { attack = 5, decay = 80, sustain = 128, release = 120 }",
+                "osc = [",
+                '  { wave = "square", volume = 200, detune = 0, octave = 0, duty = 128 },',
+                "]"]
+        count = len(self.man.get("music", {}).get(name, {}).get("synth", []))
+        found = self._nth_table(f"[[music.{name}.synth]]", count - 1)
+        if not found:
+            with open(self.path, "a") as f:
+                f.write("\n\n" + "\n".join(body) + "\n")
+            self.reload()
+            return
+        lines, head, end = found
+        while end > head and lines[end - 1].strip() == "":
+            end -= 1
+        lines[end:end] = [""] + body
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def instrument_users(self, name, index):
+        """Which patterns play this instrument, so removing it can refuse and say where."""
+        spec = self.man.get("music", {}).get(name, {})
+        hits = []
+        for pi, pat in enumerate(spec.get("pattern", [])):
+            for ri, row in enumerate(pat.get("rows", [])):
+                for cell in row.split():
+                    if ":" in cell and cell.split(":", 1)[1] == str(index):
+                        hits.append(f"pattern {pi} row {ri}")
+                        break
+        return hits
+
+    def remove_instrument(self, name, index):
+        """Delete an instrument, once no row plays it.
+
+        Refused while in use rather than renumbering, because a row names an instrument by
+        INDEX -- removing one silently repoints every note above it at a different sound.
+        """
+        spec = self.man.get("music", {}).get(name)
+        if spec is None:
+            raise ValueError(f"no song named {name!r}")
+        count = len(spec.get("instrument", []))
+        if count <= 1:
+            raise ValueError("a song needs at least one instrument")
+        if not 0 <= index < count:
+            raise ValueError(f"song {name!r} has {count} instruments, not {index + 1}")
+        users = self.instrument_users(name, index)
+        if users:
+            raise ValueError(
+                f"instrument {index} is played in {', '.join(users[:3])}"
+                + (f" and {len(users) - 3} more" if len(users) > 3 else "")
+                + ". Repoint those notes first -- removing it would renumber every "
+                  "instrument above it and silently change what they play.")
+        if index != count - 1:
+            raise ValueError(
+                f"only the last instrument can be removed ({count - 1}), because a row "
+                f"names an instrument by index and removing one from the middle repoints "
+                f"every note above it.")
+
+        for header in (f"[[music.{name}.instrument]]", f"[[music.{name}.synth]]"):
+            found = self._nth_table(header, index)
+            if not found:
+                continue
+            lines, head, end = found
+            while end < len(lines) and lines[end].strip() == "":
+                end += 1
+            while head > 0 and lines[head - 1].strip() == "":
+                head -= 1
+            lines[head:end] = [""]
+            with open(self.path, "w") as f:
+                f.write("\n".join(lines))
+            self.reload()
 
     def _music_block(self, name):
         """(lines, start, end) for a [music.x] table and every subtable under it.
@@ -3456,7 +3624,7 @@ rows = """
             entry = {"name": name, "file": rel, "source_bytes": None, "bytes": None}
             if os.path.exists(full):
                 entry["source_bytes"] = os.path.getsize(full)
-            blob = os.path.join(self.res, f"sample_{name}.bin")
+            blob = os.path.join(self.res, f"sfx_{name}.bin")
             if os.path.exists(blob):
                 entry["bytes"] = os.path.getsize(blob)
             out.append(entry)
@@ -3597,17 +3765,26 @@ rows = """
             f.write("\n".join(lines))
         self.reload()
 
-    def save_pattern(self, name, index, rows):
-        """Rewrite one pattern's rows. The unit a tracker edits."""
+    def save_pattern(self, name, index, rows, append=False):
+        """Rewrite one pattern's rows, or append a new one. The unit a tracker edits.
+
+        Appending only. Removing a pattern is deliberately not offered: the order list
+        names patterns by INDEX, so deleting one silently renumbers every entry after it
+        and the song plays something different with nothing to show why.
+        """
         spec = self.man.get("music", {}).get(name)
         if spec is None:
             raise ValueError(f"no song named {name!r}")
         patterns = spec.get("pattern", [])
-        if not 0 <= index < len(patterns):
+        if append:
+            if len(patterns) >= 255:
+                raise ValueError("a song holds at most 255 patterns")
+            index = len(patterns)
+        elif not 0 <= index < len(patterns):
             raise ValueError(f"song {name!r} has {len(patterns)} patterns, not {index + 1}")
 
         channels = int(spec.get("channels", 4))
-        expect = len(patterns[0].get("rows", []))
+        expect = len(patterns[0].get("rows", [])) if patterns else len(rows)
         if len(rows) != expect:
             raise ValueError(f"pattern 0 has {expect} rows, so this one must too -- the "
                              f"pipeline requires every pattern in a song to match")
@@ -3619,6 +3796,23 @@ rows = """
         body = [f"[[music.{name}.pattern]]", "rows = ["]
         body += [f'  {json.dumps(r)},' for r in rows]
         body += ["]"]
+
+        if append:
+            # After the LAST existing pattern, so the file order matches the index order --
+            # a pattern appended at the end of the file but numbered from the middle would
+            # make the manifest unreadable next to the tracker.
+            found = self._nth_table(f"[[music.{name}.pattern]]", len(patterns) - 1)
+            if not found:
+                raise ValueError(f"song {name!r} has no patterns to append after")
+            lines, head, end = found
+            while end > head and lines[end - 1].strip() == "":
+                end -= 1
+            lines[end:end] = [""] + body
+            with open(self.path, "w") as f:
+                f.write("\n".join(lines))
+            self.reload()
+            return
+
         self._replace_table(f"[[music.{name}.pattern]]", index, body)
 
     def save_instrument(self, name, index, plain, synth=None):
@@ -3653,8 +3847,18 @@ rows = """
                     f"for every instrument, because a row names one index and the two "
                     f"tables have to line up.")
 
-        body = [f"[[music.{name}.instrument]]",
-                f'wave = "{plain["wave"]}"',
+        label = str(plain.get("name", "")).strip()
+        if label and not re.fullmatch(r"[a-z][a-z0-9_]*", label):
+            raise ValueError("an instrument name must be lowercase letters, digits and "
+                             "underscores -- it becomes a C identifier")
+
+        body = [f"[[music.{name}.instrument]]"]
+        # Optional, and written first when present so the block reads as a named thing.
+        # A song's instruments are referred to by INDEX in a pattern row, which is fine for
+        # the four bytes it costs and useless for reading -- `3` says nothing, `bass` does.
+        if label:
+            body.append(f'name = "{label}"')
+        body += [f'wave = "{plain["wave"]}"',
                 f'attack = {int(plain.get("attack", 5))}',
                 f'decay = {int(plain.get("decay", 50))}',
                 f'sustain = {int(plain.get("sustain", 180))}',
@@ -4692,19 +4896,109 @@ kbd{font:11px ui-monospace,monospace;background:var(--soft);color:var(--accent);
    checkboxes gives no sign where one ends and the next begins. */
 .scenecard{border:1px solid var(--line);border-radius:6px;padding:.6rem .8rem;
   margin:.6rem 0;max-width:60ch}
+/* ------------------------------------------------------------------ the synth panel
+   Modelled on a hardware synth, because that is what it is: a signal path you read left
+   to right -- oscillators, filter, amplifier, modulation, effects -- with each stage a
+   module you can find without reading. A wall of numbered boxes hides the one thing the
+   instrument is actually about, which is what feeds what.
+
+   Silkscreen typography does the labelling: 10px, uppercase, widely tracked, dim. That is
+   the panel vernacular and it costs nothing but discipline.
+
+   ONE accent, not five. Each module carries a thin coloured rule to mark its stage the way
+   a Roland front panel does, but every interactive element uses the shell's own accent --
+   a different hue per control would be a rainbow, and the colour would stop meaning
+   "you can turn this". */
+.synth{display:flex;gap:.55rem;flex-wrap:wrap;align-items:stretch;margin:.5rem 0}
+#music>section{margin-bottom:1.4rem}
+#music .musicgrid{margin-bottom:.6rem}
+/* flex:0 0 auto, NOT the flex default. A module sizes to the controls it holds and wraps
+   to the next line when the rack runs out of room; letting it shrink instead squeezed
+   whichever module happened to be last until its text ran out through the border. A knob
+   is a fixed-size object, so the module around it is too. */
+.mod{background:var(--surface);border:1px solid var(--line);border-radius:7px;
+  padding:.5rem .6rem .6rem;flex:0 0 auto;position:relative;overflow:hidden}
+.mod::before{content:"";position:absolute;inset:0 0 auto 0;height:2px;
+  background:var(--mod-hue,var(--dim));opacity:.75}
+.mod>h4{margin:.15rem 0 .5rem;font-size:10px;font-weight:600;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--dim)}
+.mod .row{display:flex;gap:.5rem;align-items:flex-start}
+
+/* The knob. Drag vertically, wheel, or focus and use the arrow keys; double-click to type
+   an exact value. A knob alone would be imprecise and a number box alone would not feel
+   like an instrument, so it is both -- the arc for the gesture, the readout for the value.
+   This is the one place the design spends its boldness. */
+.knob{width:52px;text-align:center;user-select:none}
+.knob .dial{width:38px;height:38px;margin:0 auto;border-radius:50%;position:relative;
+  cursor:ns-resize;background:
+    conic-gradient(from 215deg,var(--accent) calc(var(--p,0) * 290deg),#00000000 0),
+    radial-gradient(circle at 50% 38%,#39424f,#20262f 70%);
+  box-shadow:inset 0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.4)}
+.knob .dial::after{content:"";position:absolute;left:50%;top:5px;width:2px;height:11px;
+  margin-left:-1px;background:var(--fg);border-radius:1px;transform-origin:50% 14px;
+  transform:rotate(calc(-145deg + var(--p,0) * 290deg))}
+.knob .dial:focus{outline:none;box-shadow:inset 0 0 0 1px var(--accent),0 0 0 2px var(--soft)}
+.knob b{display:block;font-size:10px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--dim);font-weight:600;margin-top:.2rem}
+.knob i{display:block;font-style:normal;font-size:11px;
+  font-family:ui-monospace,Menlo,Consolas,monospace}
+.knob input{width:46px;font-size:11px;text-align:center;
+  font-family:ui-monospace,Menlo,Consolas,monospace}
+
+/* A switch that reads as a switch: the options are all visible and the chosen one is lit,
+   the way a waveform selector is on a panel. A dropdown hides the alternatives, which is
+   the wrong shape for four choices you pick between constantly. */
+.pick{display:flex;gap:2px;background:#00000033;border:1px solid var(--line);
+  border-radius:5px;padding:2px}
+.pick button{border:0;background:transparent;color:var(--dim);border-radius:3px;
+  padding:.2rem .35rem;font-size:11px;line-height:1;cursor:pointer}
+.pick button.on{background:var(--accent);color:#0b1016}
+.pick.wide button{padding:.25rem .5rem}
+.wglyph{display:block;width:22px;height:12px}
+
+/* The envelope, drawn from the values themselves. Not decoration: attack, decay, sustain
+   and release are a SHAPE, and four numbers do not read as one. */
+.envbox{background:#00000033;border:1px solid var(--line);border-radius:5px;padding:2px}
+
 /* The tracker and the instrument panel side by side: a pattern is read while an
    instrument is tweaked, and putting them on separate screens would mean editing a sound
    you cannot hear in context. */
 .musicgrid{display:flex;gap:1.2rem;flex-wrap:wrap;align-items:flex-start}
+
+/* The tracker. Conventions borrowed from the form because they are load-bearing, not
+   nostalgic: a fixed-width grid so columns line up at a glance, every fourth row marked
+   because music is read in beats, and NOTE and INSTRUMENT as separate fields because they
+   are separate decisions. `---` is an empty step and `===` is a release, which is what a
+   tracker has always drawn and what the manifest's '.' and '-' mean. */
 .tracker{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
-  border:1px solid var(--line);border-radius:6px;padding:.4rem;display:inline-block}
-.trow{display:flex;gap:.25rem;align-items:center}
-.trow.beat{background:rgba(255,255,255,.04)}
-.trow>b{width:2.2rem;text-align:right;color:var(--dim);font-weight:400}
-.tcell{width:4.4rem;font-family:inherit;font-size:inherit;padding:1px 3px;
-  background:transparent;border:1px solid transparent;color:inherit}
-.tcell:focus{border-color:var(--accent);background:rgba(255,255,255,.06);outline:none}
-.tcell.on{color:var(--accent)}
+  border:1px solid var(--line);border-radius:6px;background:var(--surface);
+  padding:.35rem;display:inline-block}
+.thead,.trow{display:flex;gap:.3rem;align-items:center}
+.thead{border-bottom:1px solid var(--line);padding-bottom:.25rem;margin-bottom:.2rem}
+.thead>span{width:5.4rem;font-size:10px;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--dim);text-align:center}
+.thead>b,.trow>b{width:1.9rem;text-align:right;color:var(--dim);font-weight:400;
+  font-size:11px}
+.trow.beat{background:rgba(255,255,255,.045)}
+.trow.here{background:var(--soft)}
+.tstep{width:5.4rem;display:flex;gap:2px;justify-content:center}
+.tnote,.tinst{font-family:inherit;font-size:inherit;padding:1px 2px;background:transparent;
+  border:1px solid transparent;color:var(--dim);text-align:center}
+.tnote{width:3.1rem;letter-spacing:.04em}
+.tinst{width:1.7rem}
+.tnote.on,.tinst.on{color:var(--fg)}
+.tnote.off{color:var(--bad)}
+.tnote:focus,.tinst:focus{border-color:var(--accent);background:rgba(255,255,255,.08);
+  outline:none;color:var(--fg)}
+
+/* The sample list, with each one measured against the 1.5 s cap the pipeline enforces.
+   The bar is the point: the limit is the reason samples are short, and a number alone does
+   not say how close you are to it. */
+.smprow{display:flex;gap:.6rem;align-items:center;margin:.3rem 0;max-width:44rem}
+.smprow>b{width:7rem;flex:0 0 auto}
+.smpbar{flex:0 0 120px;height:6px;background:#00000044;border-radius:3px;overflow:hidden}
+.smpbar>i{display:block;height:100%;background:var(--accent)}
+.smpbar>i.over{background:var(--bad)}
 .mini input{font:inherit;width:4rem;padding:.25rem .4rem;background:var(--surface);
   color:var(--fg);border:1px solid var(--line);border-radius:4px}
 .mini input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
@@ -5162,27 +5456,48 @@ button:disabled{opacity:.45;cursor:not-allowed}
       <div class="mini">
         <b>Song</b><select id="msong"></select>
         <label class="mini">tempo <input id="mtempo" type="number" min="20" max="400"
-          size="4" style="width:5rem"></label>
+          style="width:5rem"></label>
+        <button id="msongnew">New song…</button>
+        <button id="msongdel">Remove song</button>
         <span id="mcost" class="dim"></span>
       </div>
       <div class="mini">
         <b>Order</b><input id="morder" size="40" placeholder="0, 1, 2, 1">
-        <button id="mordergo">Set</button>
         <span class="dim">which patterns play, in sequence</span>
       </div>
+      <!-- No save button anywhere in this tab. Everything else in the editor writes the
+           manifest as you change it -- the legend, scenes, dialog, map properties -- and
+           one tab with its own save model is a thing to remember rather than a thing to
+           learn. -->
     </section>
 
     <div class="musicgrid">
       <section>
         <h2>Pattern <select id="mpat"></select></h2>
+        <div class="mini">
+          <label class="mini">octave <select id="moct">
+            <option>1</option><option>2</option><option>3</option>
+            <option selected>4</option><option>5</option><option>6</option>
+          </select></label>
+          <button id="mpatadd" title="append an empty pattern">+ Pattern</button>
+          <button id="mpatclone" title="copy this pattern to a new one">Clone</button>
+        </div>
         <div id="mrows" class="tracker"></div>
-        <div class="mini"><button id="mpatsave" class="primary">Save pattern</button>
-          <span id="mpatlog" class="dim"></span></div>
+        <div class="mini"><span id="mpatlog" class="dim"></span></div>
+        <small class="dim" style="display:block;max-width:34ch;margin:.5rem 0 1.2rem">
+          Type on the piano row to enter notes — <kbd>z</kbd>…<kbd>m</kbd> naturals,
+          <kbd>s</kbd><kbd>d</kbd><kbd>g</kbd> sharps, <kbd>q</kbd> up an octave.
+          <kbd>-</kbd> releases, <kbd>del</kbd> clears.
+        </small>
       </section>
 
-      <section>
-        <h2>Instrument <select id="minst"></select></h2>
+      <section style="flex:1;min-width:24rem">
+        <h2>Instrument <select id="minst"></select>
+          <button id="minstadd" title="append an instrument">+</button>
+          <button id="minstdel" title="remove the last instrument">−</button>
+        </h2>
         <div id="minstbody"></div>
+        <div class="mini"><span id="minstlog" class="dim"></span></div>
       </section>
     </div>
 
@@ -7127,7 +7442,7 @@ $('#prsave').onclick=async()=>{
 // `NOTE:INSTRUMENT`, '.' to hold, '-' to release -- rather than a prettier one invented
 // here, because a song half-edited by hand and half in this tool has to stay one song.
 
-const MU = { song: 0, pattern: 0, inst: 0, rows: null };
+const MU = { song: 0, pattern: 0, inst: 0, rows: null, octave: 4, row: 0 };
 
 function muSong(){ return ((S.data && S.data.songs) || [])[MU.song] || null; }
 
@@ -7176,7 +7491,7 @@ function drawMusic(){
 
   const inst = $('#minst');
   inst.innerHTML = s.instruments.map((x, i) =>
-    `<option value="${i}">${i} - ${x.wave}</option>`).join('');
+    `<option value="${i}">${i} - ${x.name || x.wave}</option>`).join('');
   if(MU.inst >= s.instruments.length) MU.inst = 0;
   inst.value = String(MU.inst);
 
@@ -7185,40 +7500,300 @@ function drawMusic(){
   drawSamples();
 }
 
+// Note names both ways. A tracker shows `C-4`; the manifest writes `C4`. The dash is the
+// tracker's own device for keeping a sharp and a natural the same width so columns line up,
+// and it is worth keeping on screen and dropping on save.
+const NOTE_NAMES = ['C-','C#','D-','D#','E-','F-','F#','G-','G#','A-','A#','B-'];
+
+// The inverse of parse_note in pnx_assets.py, which maps C4 to MIDI 60 -- so the octave
+// is floor(n/12) MINUS ONE. Getting that wrong wrote every keyboard-entered note an octave
+// high, which builds cleanly and plays wrong, and is invisible unless you can hear it.
+function midiToTracker(n){
+  return NOTE_NAMES[n % 12] + (Math.floor(n / 12) - 1);
+}
+
+// `C-4` on screen becomes `C4` in the manifest. The dash exists so a natural and a sharp
+// occupy the same width and the columns line up; the manifest has no columns and does not
+// want it.
+function toManifestNote(s){
+  return s.trim().replace(/^([A-G])-(-?\d)$/, '$1$2');
+}
+
+// A cell is `NOTE:INSTRUMENT`, '.' to hold, '-' to release. Split for display so note and
+// instrument are separate fields -- they are separate decisions, and one text box for both
+// means retyping the instrument to change a note.
+function splitCell(cell){
+  const c = (cell || '.').trim();
+  if(c === '.') return { note: '', inst: '' };
+  if(c === '-') return { note: 'off', inst: '' };
+  const i = c.indexOf(':');
+  const note = i < 0 ? c : c.slice(0, i);
+  // Shown in tracker form so the grid stays aligned; stored without the dash.
+  const shown = note.replace(/^([A-G])(-?\d)$/, '$1-$2');
+  return { note: shown, inst: i < 0 ? '' : c.slice(i + 1) };
+}
+function joinCell(note, inst){
+  const n = toManifestNote(note || '');
+  if(!n) return '.';
+  if(n === 'off' || n === '-' || n === '===') return '-';
+  const i = (inst || '').trim();
+  return i ? `${n}:${i}` : n;
+}
+
+// The piano row, as every tracker has mapped it since Fasttracker: the home row is the
+// naturals and the row above is the sharps, so a keyboard is a keyboard.
+const PIANO = { z:0, s:1, x:2, d:3, c:4, v:5, g:6, b:7, h:8, n:9, j:10, m:11,
+                q:12, '2':13, w:14, '3':15, e:16, r:17, '5':18, t:19, '6':20,
+                y:21, '7':22, u:23 };
+
 function drawTracker(){
   const s = muSong();
   const box = $('#mrows');
   box.innerHTML = '';
   if(!s) return;
-  // Held in MU.rows while editing, so switching instrument or tweaking a knob does not
-  // discard unsaved cells.
   MU.rows = s.patterns[MU.pattern].map(r => muCells(r, s.channels));
+
+  const head = document.createElement('div');
+  head.className = 'thead';
+  const hn = document.createElement('b');
+  hn.textContent = '';
+  head.appendChild(hn);
+  for(let c = 0; c < s.channels; c++){
+    const sp = document.createElement('span');
+    sp.textContent = `ch ${c + 1}`;
+    head.appendChild(sp);
+  }
+  box.appendChild(head);
 
   MU.rows.forEach((cells, ri) => {
     const row = document.createElement('div');
-    // Every fourth row marked: a tracker is read in beats, and 16 undifferentiated lines
-    // is where you lose your place.
     row.className = 'trow' + (ri % 4 === 0 ? ' beat' : '');
     const n = document.createElement('b');
     n.textContent = String(ri).padStart(2, '0');
     row.appendChild(n);
 
     cells.forEach((cell, ci) => {
-      const i = document.createElement('input');
-      i.className = 'tcell' + (cell !== '.' ? ' on' : '');
-      i.value = cell;
-      i.spellcheck = false;
-      i.title = `row ${ri}, channel ${ci}`;
-      i.onchange = () => {
-        MU.rows[ri][ci] = i.value.trim() || '.';
-        i.value = MU.rows[ri][ci];
-        i.className = 'tcell' + (MU.rows[ri][ci] !== '.' ? ' on' : '');
-        muSay('#mpatlog', 'unsaved', true);
+      const step = document.createElement('div');
+      step.className = 'tstep';
+      const parts = splitCell(cell);
+
+      const note = document.createElement('input');
+      note.className = 'tnote' + (parts.note ? (parts.note === 'off' ? ' off' : ' on') : '');
+      note.value = parts.note === 'off' ? '===' : (parts.note || '---');
+      note.spellcheck = false;
+      note.title = `row ${ri}, channel ${ci + 1} - type a note, or . to clear`;
+
+      const inst = document.createElement('input');
+      inst.className = 'tinst' + (parts.inst ? ' on' : '');
+      inst.value = parts.inst || '--';
+      inst.spellcheck = false;
+      inst.title = 'instrument';
+
+      const commit = () => {
+        let nv = note.value.trim();
+        if(nv === '---' || nv === '.' || nv === '') nv = '';
+        if(nv === '===' || nv === '-') nv = 'off';
+        let iv = inst.value.trim();
+        if(iv === '--' || iv === '.') iv = '';
+        MU.rows[ri][ci] = joinCell(nv, iv);
+        // Write through to the cached song BEFORE redrawing. drawTracker rebuilds MU.rows
+        // from `s.patterns`, and muSavePattern is async, so without this the redraw reads
+        // the pre-edit pattern back and the note vanishes from the grid a frame after it
+        // was typed -- while the correct value is sitting on disk. That desync is worse
+        // than an outright failure, because reloading the page "fixes" it.
+        s.patterns[MU.pattern] = MU.rows.map(muRow);
+        muSavePattern();
+        drawTracker();
+        // Keeping the caret where it was: a grid that jumps to the top on every keystroke
+        // cannot be played into.
+        const sel = box.querySelectorAll('.tnote')[ri * s.channels + ci];
+        if(sel) sel.focus();
       };
-      row.appendChild(i);
+
+      // Typing a letter plays the note it sits under, the way a tracker keyboard does.
+      // Anything else falls through to ordinary text editing, so `C#4` can still be typed
+      // out in full.
+      note.onkeydown = e => {
+        if(e.ctrlKey || e.metaKey || e.altKey) return;
+        const k = e.key.toLowerCase();
+        if(k === 'delete' || k === 'backspace'){
+          e.preventDefault(); note.value = '---'; commit(); return;
+        }
+        if(k === '-' || k === '='){
+          e.preventDefault(); note.value = '==='; commit(); return;
+        }
+        if(k in PIANO){
+          e.preventDefault();
+          const midi = (MU.octave + 1) * 12 + PIANO[k];
+          note.value = midiToTracker(Math.max(0, Math.min(119, midi)));
+          if(inst.value === '--') inst.value = String(MU.inst);
+          commit();
+          return;
+        }
+        if(k === 'arrowdown' || k === 'enter'){
+          e.preventDefault();
+          const all = box.querySelectorAll('.tnote');
+          const nx = all[(ri + 1) * s.channels + ci];
+          if(nx){ nx.focus(); nx.select() }
+        }
+        if(k === 'arrowup'){
+          e.preventDefault();
+          const all = box.querySelectorAll('.tnote');
+          const pv = all[(ri - 1) * s.channels + ci];
+          if(pv){ pv.focus(); pv.select() }
+        }
+      };
+      note.onchange = commit;
+      inst.onchange = commit;
+      note.onfocus = () => { note.select(); MU.row = ri };
+
+      step.append(note, inst);
+      row.appendChild(step);
     });
     box.appendChild(row);
   });
+}
+
+
+// ---------------------------------------------------------------- panel controls
+//
+// Three primitives, because a synth panel is three kinds of control and nothing else: a
+// continuous value, a choice between a few options, and a shape you read rather than
+// count.
+
+// A knob. Drag vertically, wheel, or focus and arrow; double-click to type an exact value.
+// Both halves are needed -- the arc gives the gesture, the readout gives the precision a
+// developer tool owes you -- and a knob that could only be dragged would be a worse number
+// box wearing a costume.
+function knob(label, value, lo, hi, on){
+  const wrap = document.createElement('div');
+  wrap.className = 'knob';
+  const dial = document.createElement('div');
+  dial.className = 'dial';
+  dial.tabIndex = 0;
+  dial.setAttribute('role', 'slider');
+  dial.setAttribute('aria-label', label);
+  dial.setAttribute('aria-valuemin', lo);
+  dial.setAttribute('aria-valuemax', hi);
+  const name = document.createElement('b');
+  name.textContent = label;
+  const read = document.createElement('i');
+
+  let v = value;
+  const span = (hi - lo) || 1;
+  const paint = () => {
+    dial.style.setProperty('--p', String((v - lo) / span));
+    dial.setAttribute('aria-valuenow', v);
+    read.textContent = v;
+  };
+  const set = nv => {
+    nv = Math.max(lo, Math.min(hi, Math.round(nv)));
+    if(nv === v) return;
+    v = nv; paint(); on(v);
+  };
+  paint();
+
+  // Coarse by default, fine with shift -- a 5000 ms envelope and a 0..3 octave want very
+  // different sensitivities from the same gesture.
+  let dragging = false, lastY = 0;
+  dial.addEventListener('pointerdown', e => {
+    dragging = true; lastY = e.clientY; dial.setPointerCapture(e.pointerId); dial.focus();
+  });
+  dial.addEventListener('pointermove', e => {
+    if(!dragging) return;
+    const step = (e.shiftKey ? 1 : Math.max(1, Math.round(span / 60)));
+    set(v + (lastY - e.clientY) * step);
+    lastY = e.clientY;
+  });
+  const stop = () => { dragging = false };
+  dial.addEventListener('pointerup', stop);
+  dial.addEventListener('pointercancel', stop);
+  dial.addEventListener('wheel', e => {
+    e.preventDefault();
+    set(v + (e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 1 : Math.max(1, Math.round(span / 60))));
+  }, { passive: false });
+  dial.addEventListener('keydown', e => {
+    const step = e.shiftKey ? 1 : Math.max(1, Math.round(span / 60));
+    if(e.key === 'ArrowUp' || e.key === 'ArrowRight'){ set(v + step); e.preventDefault() }
+    if(e.key === 'ArrowDown' || e.key === 'ArrowLeft'){ set(v - step); e.preventDefault() }
+  });
+  // The exact value, for when a knob is the wrong tool -- which it is whenever you already
+  // know the number you want.
+  read.ondblclick = () => {
+    const box = document.createElement('input');
+    box.value = v;
+    box.onblur = box.onchange = () => {
+      set(parseInt(box.value, 10) || lo);
+      box.replaceWith(read);
+    };
+    read.replaceWith(box);
+    box.focus(); box.select();
+  };
+
+  wrap.append(dial, name, read);
+  return wrap;
+}
+
+// A switch with every option visible and the chosen one lit. A dropdown would hide the
+// alternatives, which is wrong for a choice you make constantly between four things.
+function switcher(options, value, on, glyphs){
+  const box = document.createElement('div');
+  box.className = 'pick' + (glyphs ? '' : ' wide');
+  const btns = [];
+  options.forEach(o => {
+    const b = document.createElement('button');
+    b.className = o === value ? 'on' : '';
+    b.title = o;
+    b.innerHTML = glyphs ? waveGlyph(o) : o;
+    // The switch moves its own light. It used to depend on the panel being rebuilt after
+    // every save, so once saving stopped redrawing, a click would change the sound without
+    // changing anything on screen.
+    b.onclick = () => { btns.forEach(x => x.classList.toggle('on', x === b)); on(o) };
+    btns.push(b);
+    box.appendChild(b);
+  });
+  return box;
+}
+
+// Waveform marks. Iconic, not previews -- the real thing is band-limited per octave and
+// drawing an idealised curve as if it were the output would be a preview that lies. The
+// harmonic count beside the oscillator is the honest version of that information.
+function waveGlyph(w){
+  const p = { square:   'M1 9 L1 3 L7 3 L7 9 L13 9 L13 3 L19 3 L19 9',
+              saw:      'M1 9 L7 3 L7 9 L13 3 L13 9 L19 3',
+              triangle: 'M1 9 L5 3 L9 9 L13 3 L17 9 L19 6',
+              noise:    'M1 6 L3 3 L4 8 L6 4 L8 9 L10 3 L12 7 L14 4 L16 8 L18 5 L19 7' }[w]
+          || 'M1 6 L19 6';
+  return `<svg class="wglyph" viewBox="0 0 20 12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linejoin="round"><path d="${p}"/></svg>`;
+}
+
+// The envelope as a shape. Four numbers do not read as one thing; a curve does, and the
+// difference between a pluck and a pad is visible in it before you play a note.
+function envCurve(e){
+  const A = Math.max(0, e.attack || 0), D = Math.max(0, e.decay || 0),
+        S = Math.max(0, Math.min(255, e.sustain ?? 0)), R = Math.max(0, e.release || 0);
+  const W = 150, H = 44, pad = 3, top = pad, bot = H - pad;
+  // Time is scaled to the longest stage so the shape stays legible whether the envelope is
+  // 5 ms or 5 s -- an absolute axis would flatten every fast envelope into a vertical line.
+  const total = Math.max(1, A + D + R) * 1.25;
+  const x = ms => pad + (ms / total) * (W - pad * 2);
+  const sy = bot - (S / 255) * (bot - top);
+  const hold = total * 0.18;
+  const d = `M${x(0)} ${bot} L${x(A)} ${top} L${x(A + D)} ${sy} `
+          + `L${x(A + D + hold)} ${sy} L${x(A + D + hold + R)} ${bot}`;
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" fill="none">
+    <path d="${d}" stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round"/>
+    <path d="${d} L${x(0)} ${bot} Z" fill="var(--accent)" opacity=".12"/>
+  </svg>`;
+}
+
+// How many harmonics survive band-limiting at this pitch. Mirrors MIP_HARMONICS in
+// pnx_synth.c -- shown because it is the constraint that decides whether a bright waveform
+// stays bright up the keyboard, and it is invisible everywhere else.
+function harmonicsAt(midi){
+  const H = [31, 31, 31, 31, 31, 16, 8, 4];
+  return H[Math.max(0, Math.min(7, Math.floor(midi / 12)))];
 }
 
 function drawInstrument(){
@@ -7229,129 +7804,265 @@ function drawInstrument(){
   const ins = s.instruments[MU.inst];
   const waves = (S.data.waveforms) || ['square','saw','triangle','noise'];
 
-  const num = (label, val, lo, hi, on) => {
-    const l = document.createElement('label');
-    l.className = 'mini';
-    l.innerHTML = `${label} `;
-    const i = document.createElement('input');
-    i.type = 'number'; i.min = lo; i.max = hi; i.value = val;
-    i.style.width = '5rem';
-    i.onchange = () => on(parseInt(i.value, 10) || 0);
-    l.appendChild(i);
-    return l;
-  };
-  const pick = (label, val, opts, on) => {
-    const l = document.createElement('label');
-    l.className = 'mini';
-    l.innerHTML = `${label} `;
-    const sl = document.createElement('select');
-    sl.innerHTML = opts.map(o => `<option${o === val ? ' selected' : ''}>${o}</option>`).join('');
-    sl.onchange = () => on(sl.value);
-    l.appendChild(sl);
-    return l;
-  };
-
-  // The PLAIN envelope. Always present, and what plays when a build has PNX_USE_SYNTH=0 --
-  // so it is shown first and never hidden, even when a synth record exists.
   const plain = JSON.parse(JSON.stringify(ins));
   delete plain.synth;
-  const ph = document.createElement('div');
-  ph.className = 'mini';
-  ph.innerHTML = '<b>Envelope</b> <span class="dim">plays when the synth is compiled out</span>';
-  box.appendChild(ph);
-  const prow = document.createElement('div');
-  prow.className = 'mini';
-  prow.appendChild(pick('wave', plain.wave, waves, v => { plain.wave = v; muWrite(plain, null); }));
-  for(const [k, lo, hi] of [['attack',0,5000],['decay',0,5000],['sustain',0,255],['release',0,5000]])
-    prow.appendChild(num(k, plain[k], lo, hi, v => { plain[k] = v; muWrite(plain, null); }));
-  box.appendChild(prow);
+  const sy = ins.synth ? JSON.parse(JSON.stringify(ins.synth)) : null;
 
-  if(!ins.synth){
+  // Readouts derived from the model -- envelope curves, the harmonic count, the header
+  // name -- repaint themselves after every change. The panel used to get this for free
+  // from a full rebuild on save, which is exactly what made a knob undraggable.
+  const live = [];
+  const push = () => { for(const f of live) f(); muWrite(plain, sy) };
+
+  const mod = (title, hue) => {
+    const m = document.createElement('div');
+    m.className = 'mod';
+    if(hue) m.style.setProperty('--mod-hue', hue);
+    const h = document.createElement('h4');
+    h.textContent = title;
+    m.appendChild(h);
+    return m;
+  };
+  // The name, first. An instrument is referred to by index everywhere it is USED -- a
+  // pattern row, the generated header -- so the one place it can be called something is
+  // here, and naming it is what makes the index legible everywhere else.
+  const idrow = document.createElement('div');
+  idrow.className = 'mini';
+  idrow.innerHTML = '<span class="dim" style="font-size:10px;letter-spacing:.09em;'
+    + 'text-transform:uppercase">name</span> ';
+  const nameBox = document.createElement('input');
+  nameBox.value = plain.name || '';
+  nameBox.placeholder = `instrument ${MU.inst}`;
+  nameBox.size = 14;
+  nameBox.title = 'lowercase letters, digits and underscores - becomes '
+    + `MUSIC_${(s.name || '').toUpperCase()}_INST_<NAME> in the generated header`;
+  nameBox.onchange = () => { plain.name = nameBox.value.trim(); push() };
+  idrow.appendChild(nameBox);
+  const hint = document.createElement('small');
+  hint.className = 'dim';
+  hint.style.fontSize = '10px';
+  const paintHint = () => {
+    hint.textContent = plain.name
+      ? `MUSIC_${(s.name || '').toUpperCase()}_INST_${plain.name.toUpperCase()}`
+      : 'unnamed - patterns still reach it by index';
+  };
+  paintHint();
+  live.push(paintHint);
+  idrow.appendChild(hint);
+  box.appendChild(idrow);
+
+  const chain = document.createElement('div');
+  chain.className = 'synth';
+  box.appendChild(chain);
+
+  if(!sy){
+    // No synth table. The plain envelope is the whole instrument, so it gets the panel
+    // rather than being demoted to a footnote under one that does not exist.
+    const m = mod('Envelope', 'var(--accent)');
+    const r = document.createElement('div');
+    r.className = 'row';
+    r.appendChild(switcher(waves, plain.wave, v => { plain.wave = v; push() }, true));
+    for(const [k, hi] of [['attack',5000],['decay',5000],['sustain',255],['release',5000]])
+      r.appendChild(knob(k, plain[k], 0, hi, v => { plain[k] = v; push() }));
+    m.appendChild(r);
+    chain.appendChild(m);
     const note = document.createElement('small');
     note.className = 'dim';
     note.textContent = 'This song has no synth table. Adding one means a record for every '
-      + 'instrument, because a row names one index and the tables have to line up.';
+      + 'instrument, because a pattern row names one index and the tables have to line up.';
     box.appendChild(note);
     return;
   }
 
-  // The SYNTH record. Edited together with the envelope above, and saved together, because
-  // a pattern row names ONE instrument index.
-  const sy = JSON.parse(JSON.stringify(ins.synth));
-  const push = () => muWrite(plain, sy);
-
-  const head = document.createElement('div');
-  head.className = 'mini';
-  head.innerHTML = '<b>Synth</b>';
-  box.appendChild(head);
-
-  const f = document.createElement('div');
-  f.className = 'mini';
-  f.appendChild(pick('filter', sy.filter || 'off',
-    S.data.filter_modes || ['off','lowpass','highpass','bandpass'],
-    v => { sy.filter = v; push(); }));
-  f.appendChild(num('cutoff', sy.cutoff_base ?? 128, 0, 255, v => { sy.cutoff_base = v; push(); }));
-  f.appendChild(num('reson', sy.resonance ?? 0, 0, 255, v => { sy.resonance = v; push(); }));
-  f.appendChild(num('cut env', sy.cutoff_env ?? 0, 0, 255, v => { sy.cutoff_env = v; push(); }));
-  box.appendChild(f);
-
-  const l = document.createElement('div');
-  l.className = 'mini';
-  l.appendChild(pick('lfo', sy.lfo_target || 'off',
-    S.data.lfo_targets || ['off','pitch','volume','duty','cutoff'],
-    v => { sy.lfo_target = v; push(); }));
-  l.appendChild(num('rate', sy.lfo_rate ?? 0, 0, 255, v => { sy.lfo_rate = v; push(); }));
-  l.appendChild(num('depth', sy.lfo_depth ?? 0, 0, 255, v => { sy.lfo_depth = v; push(); }));
-  box.appendChild(l);
-
-  const pe = document.createElement('div');
-  pe.className = 'mini';
-  pe.appendChild(num('pitch env', sy.pitch_env ?? 0, -1200, 1200, v => { sy.pitch_env = v; push(); }));
-  pe.appendChild(num('decay', sy.pitch_env_decay ?? 0, 0, 255, v => { sy.pitch_env_decay = v; push(); }));
-  pe.appendChild(num('reverb', sy.reverb ?? 0, 0, 255, v => { sy.reverb = v; push(); }));
-  pe.appendChild(num('chorus', sy.chorus ?? 0, 0, 255, v => { sy.chorus = v; push(); }));
-  box.appendChild(pe);
-
-  for(const [key, label] of [['amp','amp env'],['cutoff','filter env']]){
-    const e = sy[key] || {};
-    const row = document.createElement('div');
-    row.className = 'mini';
-    row.innerHTML = `<span class="dim">${label}</span> `;
-    for(const [k, lo, hi] of [['attack',0,5000],['decay',0,5000],['sustain',0,255],['release',0,5000]])
-      row.appendChild(num(k, e[k] ?? 0, lo, hi, v => { sy[key] = sy[key] || {}; sy[key][k] = v; push(); }));
-    box.appendChild(row);
-  }
-
-  const oh = document.createElement('div');
-  oh.className = 'mini';
-  oh.innerHTML = '<span class="dim">oscillators — detune is in CENTS relative to the '
-    + 'played note, so an instrument works at every pitch</span>';
-  box.appendChild(oh);
+  // --- oscillators. The signal starts here, so they are leftmost.
   (sy.osc || []).forEach((o, oi) => {
-    const row = document.createElement('div');
-    row.className = 'mini';
-    row.innerHTML = `<span class="dim">${oi}</span> `;
-    row.appendChild(pick('wave', o.wave || 'square', waves, v => { o.wave = v; push(); }));
-    row.appendChild(num('vol', o.volume ?? 200, 0, 255, v => { o.volume = v; push(); }));
-    row.appendChild(num('detune', o.detune ?? 0, -1200, 1200, v => { o.detune = v; push(); }));
-    row.appendChild(num('oct', o.octave ?? 0, -4, 4, v => { o.octave = v; push(); }));
-    row.appendChild(num('duty', o.duty ?? 128, 0, 255, v => { o.duty = v; push(); }));
-    box.appendChild(row);
+    const m = mod(`Osc ${oi + 1}`, 'var(--accent)');
+    const r = document.createElement('div');
+    r.className = 'row';
+    const col = document.createElement('div');
+    col.appendChild(switcher(waves, o.wave || 'square', v => { o.wave = v; push() }, true));
+    const harm = document.createElement('small');
+    harm.className = 'dim';
+    harm.style.cssText = 'display:block;font-size:10px;margin-top:.35rem;letter-spacing:.06em';
+    // Real information, not decoration: a saw an octave up carries a quarter the harmonics,
+    // and that is why it sounds duller. Nothing else in the tool says so.
+    const paintHarm = () => {
+      harm.textContent = `${harmonicsAt(60 + (o.octave || 0) * 12)} harm at C4`;
+    };
+    paintHarm();
+    live.push(paintHarm);
+    col.appendChild(harm);
+    r.appendChild(col);
+    r.appendChild(knob('level', o.volume ?? 200, 0, 255, v => { o.volume = v; push() }));
+    r.appendChild(knob('detune', o.detune ?? 0, -100, 100, v => { o.detune = v; push() }));
+    r.appendChild(knob('oct', o.octave ?? 0, -4, 4, v => { o.octave = v; push() }));
+    // Pulse width is square-only, so it is built once and shown conditionally rather than
+    // appended conditionally: switching waveform no longer redraws the module, and a knob
+    // that can only appear on a redraw would never appear.
+    const width = knob('width', o.duty ?? 128, 16, 240, v => { o.duty = v; push() });
+    const paintWidth = () => {
+      width.style.display = (o.wave || 'square') === 'square' ? '' : 'none';
+    };
+    paintWidth();
+    live.push(paintWidth);
+    r.appendChild(width);
+    m.appendChild(r);
+    chain.appendChild(m);
   });
+
+  // --- filter, with its own envelope drawn beside it.
+  const fm = mod('Filter', '#e0a33c');
+  const fr = document.createElement('div');
+  fr.className = 'row';
+  fr.appendChild(switcher(S.data.filter_modes || ['off','lowpass','highpass','bandpass'],
+    sy.filter || 'off', v => { sy.filter = v; push() }));
+  fr.appendChild(knob('cutoff', sy.cutoff_base ?? 128, 0, 255, v => { sy.cutoff_base = v; push() }));
+  fr.appendChild(knob('reson', sy.resonance ?? 0, 0, 255, v => { sy.resonance = v; push() }));
+  fr.appendChild(knob('env amt', sy.cutoff_env ?? 0, 0, 255, v => { sy.cutoff_env = v; push() }));
+  fm.appendChild(fr);
+  const fe = sy.cutoff || {};
+  const fenv = document.createElement('div');
+  fenv.className = 'row';
+  fenv.style.marginTop = '.45rem';
+  const fbox = document.createElement('div');
+  fbox.className = 'envbox';
+  fbox.innerHTML = envCurve(fe);
+  live.push(() => { fbox.innerHTML = envCurve(sy.cutoff || {}) });
+  fenv.appendChild(fbox);
+  for(const [k, hi] of [['a',5000],['d',5000],['s',255],['r',5000]]){
+    const key = { a:'attack', d:'decay', s:'sustain', r:'release' }[k];
+    fenv.appendChild(knob(k, fe[key] ?? 0, 0, hi,
+      v => { sy.cutoff = sy.cutoff || {}; sy.cutoff[key] = v; push() }));
+  }
+  fm.appendChild(fenv);
+  chain.appendChild(fm);
+
+  // --- amplifier.
+  const am = mod('Amp', '#5fd28d');
+  const ae = sy.amp || {};
+  const ar = document.createElement('div');
+  ar.className = 'row';
+  const abox = document.createElement('div');
+  abox.className = 'envbox';
+  abox.innerHTML = envCurve(ae);
+  live.push(() => { abox.innerHTML = envCurve(sy.amp || {}) });
+  ar.appendChild(abox);
+  for(const [k, hi] of [['a',5000],['d',5000],['s',255],['r',5000]]){
+    const key = { a:'attack', d:'decay', s:'sustain', r:'release' }[k];
+    ar.appendChild(knob(k, ae[key] ?? 0, 0, hi,
+      v => { sy.amp = sy.amp || {}; sy.amp[key] = v; push() }));
+  }
+  am.appendChild(ar);
+  chain.appendChild(am);
+
+  // --- modulation. The LFO routes to one destination, which is why it is a switch and not
+  // four separate depth controls.
+  const lm = mod('Mod', '#a98cf0');
+  // The destination switch spans the module and the four knobs sit under it in one row.
+  // Putting the switch inline with the knobs left a wrapped row and a module two thirds
+  // empty -- the LFO destination is a routing choice, not a fifth knob, and reads better
+  // as the heading of the controls it governs.
+  const lr = document.createElement('div');
+  lr.className = 'row';
+  lr.style.marginBottom = '.45rem';
+  lr.appendChild(switcher(S.data.lfo_targets || ['off','pitch','volume','duty','cutoff'],
+    sy.lfo_target || 'off', v => { sy.lfo_target = v; push() }));
+  lm.appendChild(lr);
+  const pr = document.createElement('div');
+  pr.className = 'row';
+  pr.appendChild(knob('rate', sy.lfo_rate ?? 0, 0, 255, v => { sy.lfo_rate = v; push() }));
+  pr.appendChild(knob('depth', sy.lfo_depth ?? 0, 0, 255, v => { sy.lfo_depth = v; push() }));
+  pr.appendChild(knob('pitch env', sy.pitch_env ?? 0, -1200, 1200,
+    v => { sy.pitch_env = v; push() }));
+  pr.appendChild(knob('fall', sy.pitch_env_decay ?? 0, 0, 255,
+    v => { sy.pitch_env_decay = v; push() }));
+  lm.appendChild(pr);
+  chain.appendChild(lm);
+
+  // --- sends. Global instances, so these are levels into a shared effect rather than
+  // effects of their own -- worth saying, because it is why they are cheap.
+  const xm = mod('Sends', '#7b8798');
+  const xr = document.createElement('div');
+  xr.className = 'row';
+  xr.appendChild(knob('reverb', sy.reverb ?? 0, 0, 255, v => { sy.reverb = v; push() }));
+  xr.appendChild(knob('chorus', sy.chorus ?? 0, 0, 255, v => { sy.chorus = v; push() }));
+  xm.appendChild(xr);
+  const xn = document.createElement('small');
+  xn.className = 'dim';
+  xn.style.cssText = 'display:block;font-size:10px;margin-top:.3rem;max-width:9rem';
+  xn.textContent = 'one shared reverb and chorus for all four voices';
+  xm.appendChild(xn);
+  chain.appendChild(xm);
+
+  // --- the fallback envelope, last because it is what plays only when the synth is
+  // compiled out. Still shown: a build with PNX_USE_SYNTH=0 makes this the whole sound.
+  const pm = mod('If synth is off', '#3a4451');
+  pm.style.opacity = '.72';
+  const prow = document.createElement('div');
+  prow.className = 'row';
+  prow.appendChild(switcher(waves, plain.wave, v => { plain.wave = v; push() }, true));
+  for(const [k, hi] of [['attack',5000],['decay',5000],['sustain',255],['release',5000]])
+    prow.appendChild(knob(k, plain[k], 0, hi, v => { plain[k] = v; push() }));
+  pm.appendChild(prow);
+  const pn = document.createElement('small');
+  pn.className = 'dim';
+  pn.style.cssText = 'display:block;font-size:10px;margin-top:.3rem;max-width:11rem';
+  pn.textContent = 'the plain envelope, used only in a PNX_USE_SYNTH=0 build';
+  pm.appendChild(pn);
+  chain.appendChild(pm);
 }
+
 
 // Both halves in one request. The pipeline refuses tables of different lengths precisely
 // so a note cannot play a different sound depending on which one it resolved through, and
 // saving them separately would be the same mistake one step earlier.
-async function muWrite(plain, synth){
+//
+// Write-BEHIND, and deliberately so. A knob calls this on every pointermove, so writing
+// synchronously would be a request per pixel; and the obvious "reload and redraw" ending
+// would replace the very dial the pointer has captured, killing the drag after its first
+// step. So: coalesce, and never rebuild the panel from a write. The panel owns the live
+// model and repaints its own readouts.
+let muWriteTimer = null, muWritePend = null;
+function muWrite(plain, synth){
   const s = muSong();
   if(!s) return;
+  // The index is captured NOW, not at flush time: switching instruments inside the
+  // coalescing window would otherwise land these values on the wrong one.
+  muWritePend = { song: s, index: MU.inst, plain, synth };
+  muSay('#minstlog', 'editing…');
+  if(muWriteTimer) return;
+  muWriteTimer = setTimeout(muFlushInstrument, 260);
+}
+
+async function muFlushInstrument(){
+  muWriteTimer = null;
+  const p = muWritePend;
+  muWritePend = null;
+  if(!p) return;
   const r = await post('/api/song/instrument',
-    { name: s.name, index: MU.inst, plain, synth });
-  if(!r.ok){ muSay('#mpatlog', r.error, true); return }
-  await reload();
-  drawMusic();
+    { name: p.song.name, index: p.index, plain: p.plain, synth: p.synth });
+  if(!r.ok){ muSay('#minstlog', r.error, true); return }
+  // Write through to the cached song. Without this, switching instruments and back would
+  // redraw the panel from the pre-edit model -- the same desync the tracker grid had.
+  const merged = JSON.parse(JSON.stringify(p.plain));
+  if(p.synth) merged.synth = JSON.parse(JSON.stringify(p.synth));
+  p.song.instruments[p.index] = merged;
+  muRelabelInstruments();
+  muSay('#minstlog', 'saved', false);
   budget(true);
+}
+
+// A rename has to reach the picker, which is the only place an instrument is named once
+// the panel is drawn. Relabelling in place rather than redrawing keeps the caret in the
+// name field the user is still typing in.
+function muRelabelInstruments(){
+  const s = muSong();
+  const sel = $('#minst');
+  if(!s || !sel) return;
+  [...sel.options].forEach((o, i) => {
+    const x = s.instruments[i];
+    if(x) o.textContent = `${i} - ${x.name || x.wave}`;
+  });
 }
 
 function drawSamples(){
@@ -7362,9 +8073,18 @@ function drawSamples(){
   if(!list.length) box.innerHTML = '<small class="dim">No samples.</small>';
   for(const sm of list){
     const row = document.createElement('div');
-    row.className = 'mini';
-    row.innerHTML = `<b>${sm.name}</b> <span class="dim">${sm.file}`
-      + (sm.bytes ? ` - ${sm.bytes} B packed` : ' - not built') + '</span> ';
+    row.className = 'smprow';
+    // Seconds, from the packed size: 16 kHz 8-bit is one byte a sample, so the blob IS the
+    // duration. Measured against the 1.5 s the pipeline enforces, because that limit is
+    // the reason samples are short and a byte count does not say how close you are.
+    const secs = sm.bytes ? (sm.bytes - 8) / 16000 : null;
+    const pct = secs === null ? 0 : Math.min(100, (secs / 1.5) * 100);
+    row.innerHTML = `<b>${sm.name}</b>`
+      + `<span class="dim" style="flex:1">${sm.file}</span>`
+      + `<span class="smpbar"><i style="width:${pct}%" class="${pct >= 100 ? 'over' : ''}">`
+      + `</i></span>`
+      + `<span class="dim" style="width:6.5rem;text-align:right">`
+      + (secs === null ? 'not built' : `${secs.toFixed(2)} s of 1.5`) + '</span> ';
     const del = document.createElement('button');
     del.textContent = 'Remove';
     del.onclick = async () => {
@@ -7381,9 +8101,41 @@ function drawSamples(){
     .map(w => `<option>${w.path}</option>`).join('');
 }
 
-$('#msong').onchange = () => { MU.song = +$('#msong').value; MU.pattern = 0; MU.inst = 0; drawMusic() };
+// Leaving an instrument settles its pending write first. The write already carries the
+// index it was made against, so it would land correctly either way -- but a save that
+// completes after you have moved on reports "saved" under a different instrument, and the
+// 260 ms is only there to coalesce a drag, not to survive one.
+function muSettle(){
+  if(!muWriteTimer) return;
+  clearTimeout(muWriteTimer);
+  muWriteTimer = null;
+  muFlushInstrument();
+}
+
+$('#msong').onchange = () => { muSettle(); MU.song = +$('#msong').value; MU.pattern = 0; MU.inst = 0; drawMusic() };
 $('#mpat').onchange  = () => { MU.pattern = +$('#mpat').value; drawTracker(); muSay('#mpatlog','') };
-$('#minst').onchange = () => { MU.inst = +$('#minst').value; drawInstrument() };
+$('#minst').onchange = () => { muSettle(); MU.inst = +$('#minst').value; drawInstrument() };
+$('#moct').onchange  = () => { MU.octave = +$('#moct').value };
+
+// A new pattern is empty; a clone is this one. Both are additive -- nothing here removes a
+// pattern, because the order list names patterns by index and deleting one silently
+// renumbers every entry after it. That is a change worth making deliberately in the
+// manifest rather than accidentally with a button.
+async function muAddPattern(copy){
+  const s = muSong(); if(!s) return;
+  const blank = Array.from({ length: s.rows_per },
+    () => Array.from({ length: s.channels }, () => '.').join('     '));
+  const rows = copy ? s.patterns[MU.pattern].slice() : blank;
+  const r = await post('/api/song/pattern',
+    { name: s.name, index: s.patterns.length, rows, append: true });
+  if(!r.ok){ muSay('#mpatlog', r.error, true); return }
+  await reload();
+  MU.pattern = (S.data.songs[MU.song].patterns.length - 1);
+  drawMusic(); budget(true);
+  muSay('#mpatlog', copy ? 'cloned' : 'added', false);
+}
+$('#mpatadd').onclick   = () => muAddPattern(false);
+$('#mpatclone').onclick = () => muAddPattern(true);
 
 $('#mtempo').onchange = async () => {
   const s = muSong(); if(!s) return;
@@ -7392,7 +8144,17 @@ $('#mtempo').onchange = async () => {
   await reload(); drawMusic();
 };
 
-$('#mordergo').onclick = async () => {
+// Written as it changes, like everything else in the editor. The row is redrawn from the
+// local copy immediately so typing stays responsive, and the manifest catches up.
+async function muSavePattern(){
+  const s = muSong(); if(!s || !MU.rows) return;
+  const r = await post('/api/song/pattern',
+    { name: s.name, index: MU.pattern, rows: MU.rows.map(muRow) });
+  muSay('#mpatlog', r.ok ? 'saved' : r.error, r.ok ? false : true);
+  if(r.ok) budget(true);
+}
+
+$('#morder').onchange = async () => {
   const s = muSong(); if(!s) return;
   const order = $('#morder').value.split(/[,\s]+/).filter(Boolean).map(Number);
   const r = await post('/api/song/meta', { name: s.name, order });
@@ -7401,14 +8163,45 @@ $('#mordergo').onclick = async () => {
   muSay('#mpatlog', 'order saved', false);
 };
 
-$('#mpatsave').onclick = async () => {
-  const s = muSong(); if(!s || !MU.rows) return;
-  const rows = MU.rows.map(muRow);
-  const r = await post('/api/song/pattern',
-    { name: s.name, index: MU.pattern, rows });
+$('#msongnew').onclick = async () => {
+  const name = prompt('Name the song.\n\n'
+    + 'Game code loads it as PNX_ASSET_MUSIC_<NAME>. Lowercase letters, digits and '
+    + 'underscores.');
+  if(!name) return;
+  const r = await post('/api/song', { name: name.trim() });
   if(!r.ok){ muSay('#mpatlog', r.error, true); return }
+  await reload();
+  MU.song = (S.data.songs || []).findIndex(x => x.name === name.trim());
+  MU.pattern = 0; MU.inst = 0;
+  drawMusic(); budget(true);
+};
+
+$('#msongdel').onclick = async () => {
+  const s = muSong(); if(!s) return;
+  if(!confirm(`Remove song "${s.name}"?\n\n`
+    + `Game code loading it by name will stop compiling.`)) return;
+  const r = await post('/api/song/remove', { name: s.name });
+  if(!r.ok){ muSay('#mpatlog', r.error, true); return }
+  MU.song = 0; MU.pattern = 0; MU.inst = 0;
   await reload(); drawMusic(); budget(true);
-  muSay('#mpatlog', 'saved', false);
+};
+
+$('#minstadd').onclick = async () => {
+  const s = muSong(); if(!s) return;
+  const r = await post('/api/song/instrument/add', { name: s.name });
+  if(!r.ok){ muSay('#mpatlog', r.error, true); return }
+  await reload();
+  MU.inst = S.data.songs[MU.song].instruments.length - 1;
+  drawMusic(); budget(true);
+};
+
+$('#minstdel').onclick = async () => {
+  const s = muSong(); if(!s) return;
+  const r = await post('/api/song/instrument/remove',
+    { name: s.name, index: s.instruments.length - 1 });
+  if(!r.ok){ muSay('#mpatlog', r.error, true); return }
+  MU.inst = 0;
+  await reload(); drawMusic(); budget(true);
 };
 
 $('#msadd').onclick = async () => {
@@ -9406,6 +10199,24 @@ def make_handler(session):
                     d = json.loads(raw)
                     session.proj.remove_sample(d["name"])
                     self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/song":
+                    d = json.loads(raw)
+                    session.proj.add_song(d["name"], int(d.get("tempo", 120)),
+                                          int(d.get("rows", 16)),
+                                          bool(d.get("synth", True)))
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/song/remove":
+                    d = json.loads(raw)
+                    session.proj.remove_song(d["name"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/song/instrument/add":
+                    d = json.loads(raw)
+                    session.proj.add_instrument(d["name"])
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/song/instrument/remove":
+                    d = json.loads(raw)
+                    session.proj.remove_instrument(d["name"], int(d["index"]))
+                    self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/song/meta":
                     d = json.loads(raw)
                     session.proj.save_song_meta(d["name"], d.get("tempo"),
@@ -9413,7 +10224,8 @@ def make_handler(session):
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/song/pattern":
                     d = json.loads(raw)
-                    session.proj.save_pattern(d["name"], int(d["index"]), d["rows"])
+                    session.proj.save_pattern(d["name"], int(d["index"]), d["rows"],
+                                              bool(d.get("append")))
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/song/instrument":
                     d = json.loads(raw)

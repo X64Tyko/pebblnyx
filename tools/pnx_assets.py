@@ -2439,7 +2439,13 @@ def pack_music(specs, orient=ORIENT_BUTTONS_RIGHT):
               + (f" (+{len(synth)} synth)" if synth else "")
               + f", {tempo}bpm, {len(blob)} bytes")
         songs.append({"name": name, "blob": blob, "out": f"music_{name}.bin",
-                      "synth": len(synth)})
+                      "synth": len(synth),
+                      # Named instruments reach the header the way tile roles do, so C can
+                      # say MUSIC_THEME_INST_BASS instead of 1. Unnamed ones emit nothing;
+                      # the index still works and nothing is invented.
+                      "instrument_names": [(i, ins["name"])
+                                           for i, ins in enumerate(instruments)
+                                           if ins.get("name")]})
     return songs
 
 
@@ -2974,6 +2980,17 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
               "//   if (pnx_map_flags(map, x, y) & TILE_FLAG_WATER) { ... }"]
         for name, bit in sorted(custom.items(), key=lambda kv: kv[1]):
             L.append(f"#define TILE_FLAG_{c_ident(name)} 0x{bit:02X}")
+        L.append("")
+
+    named = [(sg["name"], sg.get("instrument_names") or []) for sg in (songs or [])]
+    if any(n for _, n in named):
+        L += ["// Named instruments. A pattern row names an instrument by INDEX, which is",
+              "// right for the two bytes a row costs and useless for reading -- so a song",
+              "// may name them, and game code says MUSIC_THEME_INST_BASS rather than 1."]
+        for song_name, names in named:
+            for index, label in names:
+                L.append(f"#define MUSIC_{c_ident(song_name)}_INST_{c_ident(label)} "
+                         f"{index}")
         L.append("")
 
     if roles:
