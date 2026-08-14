@@ -70,8 +70,8 @@ void pnx_input_event(const PnxEvent* ev);
 // ------------------------------------------------------------------ physical buttons
 
 bool pnx_input_held(PnxButton button);
-bool pnx_input_pressed(PnxButton button);	// went down during this frame
-bool pnx_input_released(PnxButton button);	// came up during this frame
+bool pnx_input_pressed(PnxButton button);  // went down during this frame
+bool pnx_input_released(PnxButton button); // came up during this frame
 
 // How long `button` has been down, in ms, or 0 when it is not. Measured from the event's
 // own delivery stamp rather than from the frame it was noticed in: a frame can arrive
@@ -94,4 +94,4 @@ int8_t pnx_input_axis(void);
 // frame at either end wins over a button merely still held at the other.
 int8_t pnx_input_axis_pressed(void);
 
-#endif	// PNX_USE_INPUT
+#endif // PNX_USE_INPUT

@@ -112,15 +112,19 @@ MAP_TILE_IDS = 1024
 # WorldTile payloads are split across BANK resources of about this size rather than living
 # in one contiguous run inside the map's own resource.
 #
-# This is not a tidiness decision. `resource_load_byte_range` on this platform is O(offset)
-# -- it streams from the start of the resource on every call -- so a WorldTile two thirds of
-# the way through a 75KB map cost 13 ms to read, and holding a 192x192 world whole took two
-# seconds. Measured on device; see docs/MEASUREMENTS.md. Banking caps the seek at the bank's
-# own size instead of the map's, which is the only lever that touches the term that dominates.
+# This is not a tidiness decision. A `resource_load_byte_range` call costs by the size of
+# the RESOURCE IT IS AGAINST, not by the offset within it or the bytes actually asked for
+# -- so a WorldTile two thirds of the way through a 75KB map cost as much as one at the
+# start (13 ms either way), and holding a 192x192 world whole, one big read per WorldTile
+# against that same 75KB resource, took two seconds. Measured on device, including the
+# controlled sweep that pinned the cause down to resource size rather than offset; see
+# docs/MEASUREMENTS.md's "Flash / resource reads". Banking caps that per-call cost at the
+# bank's own size instead of the map's, which is the only lever that touches the term that
+# dominates.
 #
-# 8KB is the trade: smaller banks are faster to seek within and cost more resources, and a
-# .pbpack has a bounded number of those. At 8KB a 516-byte WorldTile averages a 2KB seek
-# rather than a 37KB one.
+# 8KB is the trade: smaller banks cost less per read and cost more resources, and a
+# .pbpack has a bounded number of those (256 entries). At 8KB a 516-byte WorldTile pays
+# roughly the size-driven cost of an 8KB resource per call rather than a 75KB one.
 WORLDTILE_BANK_BYTES = 8192
 
 # Hardcoded because emery is the only platform the engine builds for today; M9's

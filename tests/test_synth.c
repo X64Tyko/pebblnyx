@@ -60,33 +60,33 @@ static PnxInstrument lead_instrument(void)
 	// in and out of phase and their sum peaks well above any one of them.
 	for (int i = 0; i < 3; i++)
 	{
-		in.osc[i].wave = PNX_WAVE_SAW;
+		in.osc[i].wave	 = PNX_WAVE_SAW;
 		in.osc[i].volume = 200;
-		in.osc[i].duty = 128;
+		in.osc[i].duty	 = 128;
 		in.osc[i].octave = 0;
 	}
 	in.osc[0].detune = 0;
 	in.osc[1].detune = 7;
 	in.osc[2].detune = -9;
 
-	in.amp.attack_ms = 5;
-	in.amp.decay_ms = 80;
-	in.amp.sustain = 180;
+	in.amp.attack_ms  = 5;
+	in.amp.decay_ms	  = 80;
+	in.amp.sustain	  = 180;
 	in.amp.release_ms = 120;
 
-	in.cutoff.attack_ms = 2;
-	in.cutoff.decay_ms = 200;
-	in.cutoff.sustain = 60;
+	in.cutoff.attack_ms	 = 2;
+	in.cutoff.decay_ms	 = 200;
+	in.cutoff.sustain	 = 60;
 	in.cutoff.release_ms = 150;
 
-	in.filter_mode = PNX_FILTER_LOWPASS;
-	in.cutoff_base = 40;
-	in.resonance = 200;
+	in.filter_mode		 = PNX_FILTER_LOWPASS;
+	in.cutoff_base		 = 40;
+	in.resonance		 = 200;
 	in.cutoff_env_amount = 200;
 
 	in.lfo_target = PNX_LFO_PITCH;
-	in.lfo_rate = 40;
-	in.lfo_depth = 30;
+	in.lfo_rate	  = 40;
+	in.lfo_depth  = 30;
 
 	in.reverb_send = 90;
 	in.chorus_send = 70;
@@ -100,15 +100,15 @@ static PnxInstrument kick_instrument(void)
 {
 	PnxInstrument in;
 	memset(&in, 0, sizeof(in));
-	in.osc_count = 1;
-	in.osc[0].wave = PNX_WAVE_TRIANGLE;
-	in.osc[0].volume = 255;
-	in.amp.attack_ms = 1;
-	in.amp.decay_ms = 90;
-	in.amp.sustain = 0;
-	in.amp.release_ms = 40;
-	in.pitch_env_amount = 900;	// starts ~9 semitones up
-	in.pitch_env_decay = 200;
+	in.osc_count		= 1;
+	in.osc[0].wave		= PNX_WAVE_TRIANGLE;
+	in.osc[0].volume	= 255;
+	in.amp.attack_ms	= 1;
+	in.amp.decay_ms		= 90;
+	in.amp.sustain		= 0;
+	in.amp.release_ms	= 40;
+	in.pitch_env_amount = 900; // starts ~9 semitones up
+	in.pitch_env_decay	= 200;
 	return in;
 }
 
@@ -165,16 +165,16 @@ static void test_record_roundtrip(void)
 	uint8_t rec[PNX_SYNTH_RECORD_BYTES];
 	memset(rec, 0, sizeof(rec));
 
-	rec[0] = 3;	 // osc_count
-	rec[1] = PNX_FILTER_BANDPASS;
-	rec[2] = 60;
-	rec[3] = 190;
-	rec[4] = 180;
-	rec[5] = PNX_LFO_DUTY;
-	rec[6] = 40;
-	rec[7] = 25;
-	rec[8] = 0x84;
-	rec[9] = 0x03;	// pitch_env_amount = 900
+	rec[0]	= 3; // osc_count
+	rec[1]	= PNX_FILTER_BANDPASS;
+	rec[2]	= 60;
+	rec[3]	= 190;
+	rec[4]	= 180;
+	rec[5]	= PNX_LFO_DUTY;
+	rec[6]	= 40;
+	rec[7]	= 25;
+	rec[8]	= 0x84;
+	rec[9]	= 0x03; // pitch_env_amount = 900
 	rec[10] = 200;
 	rec[11] = 90;
 	rec[12] = 70;
@@ -185,30 +185,30 @@ static void test_record_roundtrip(void)
 	rec[20] = 150;
 	rec[22] = 2;
 	rec[24] = 44;
-	rec[25] = 1;  // cutoff.decay_ms = 300
+	rec[25] = 1; // cutoff.decay_ms = 300
 	rec[26] = 80;
 	rec[28] = 200;
 
 	// The third oscillator carries a NEGATIVE detune and octave, because a sign error in a
 	// hand-written little-endian decode is exactly what this exists to catch.
-	const uint8_t waves[3] = { PNX_WAVE_SAW, PNX_WAVE_SQUARE, PNX_WAVE_TRIANGLE };
+	const uint8_t waves[3]	 = { PNX_WAVE_SAW, PNX_WAVE_SQUARE, PNX_WAVE_TRIANGLE };
 	const int16_t detunes[3] = { 0, 7, -9 };
-	const int8_t octaves[3] = { 0, 1, -2 };
+	const int8_t octaves[3]	 = { 0, 1, -2 };
 	for (int i = 0; i < 3; i++)
 	{
 		uint8_t* o = rec + 30 + i * 6;
-		o[0] = waves[i];
-		o[1] = (uint8_t)(200 - i * 10);
-		o[2] = (uint8_t)(detunes[i] & 0xFF);
-		o[3] = (uint8_t)((detunes[i] >> 8) & 0xFF);
-		o[4] = (uint8_t)octaves[i];
-		o[5] = (uint8_t)(128 - i * 32);
+		o[0]	   = waves[i];
+		o[1]	   = (uint8_t)(200 - i * 10);
+		o[2]	   = (uint8_t)(detunes[i] & 0xFF);
+		o[3]	   = (uint8_t)((detunes[i] >> 8) & 0xFF);
+		o[4]	   = (uint8_t)octaves[i];
+		o[5]	   = (uint8_t)(128 - i * 32);
 	}
 
 	PnxSong song;
 	memset(&song, 0, sizeof(song));
-	song.synth = rec;
-	song.synth_count = 1;
+	song.synth		  = rec;
+	song.synth_count  = 1;
 	song.synth_stride = PNX_SYNTH_RECORD_BYTES;
 
 	PnxInstrument in;
@@ -222,11 +222,8 @@ static void test_record_roundtrip(void)
 			 in.lfo_target == PNX_LFO_DUTY && in.lfo_rate == 40 && in.lfo_depth == 25);
 	SY_CHECK("record: pitch envelope", in.pitch_env_amount == 900 && in.pitch_env_decay == 200);
 	SY_CHECK("record: sends", in.reverb_send == 90 && in.chorus_send == 70);
-	SY_CHECK("record: amp envelope", in.amp.attack_ms == 5 && in.amp.decay_ms == 200 &&
-										 in.amp.sustain == 190 && in.amp.release_ms == 150);
-	SY_CHECK("record: cutoff envelope", in.cutoff.attack_ms == 2 && in.cutoff.decay_ms == 300 &&
-											in.cutoff.sustain == 80 &&
-											in.cutoff.release_ms == 200);
+	SY_CHECK("record: amp envelope", in.amp.attack_ms == 5 && in.amp.decay_ms == 200 && in.amp.sustain == 190 && in.amp.release_ms == 150);
+	SY_CHECK("record: cutoff envelope", in.cutoff.attack_ms == 2 && in.cutoff.decay_ms == 300 && in.cutoff.sustain == 80 && in.cutoff.release_ms == 200);
 
 	bool oscs_ok = true;
 	for (int i = 0; i < 3; i++)
@@ -276,30 +273,30 @@ static void test_record_roundtrip(void)
 static void test_bandlimited_tables(void)
 {
 	PnxSynthConfig c = pnx_synth_worst_case();
-	c.oscillators = 1;
-	c.filter = false;
-	c.lfo = false;
-	c.pitch_env = false;
-	c.reverb = false;
-	c.chorus = false;
+	c.oscillators	 = 1;
+	c.filter		 = false;
+	c.lfo			 = false;
+	c.pitch_env		 = false;
+	c.reverb		 = false;
+	c.chorus		 = false;
 	pnx_synth_set_config(&c);
 
 	PnxInstrument in;
 	memset(&in, 0, sizeof(in));
-	in.osc_count = 1;
-	in.osc[0].wave = PNX_WAVE_SAW;
-	in.osc[0].volume = 255;
-	in.osc[0].duty = 128;
-	in.amp.attack_ms = 1;
-	in.amp.decay_ms = 2000;
-	in.amp.sustain = 255;
+	in.osc_count	  = 1;
+	in.osc[0].wave	  = PNX_WAVE_SAW;
+	in.osc[0].volume  = 255;
+	in.osc[0].duty	  = 128;
+	in.amp.attack_ms  = 1;
+	in.amp.decay_ms	  = 2000;
+	in.amp.sustain	  = 255;
 	in.amp.release_ms = 100;
 
 	// Slew per sample, normalised by amplitude. A band-limited high note is a smooth curve;
 	// an aliased one jumps around, because the folded harmonics are high-frequency by
 	// construction. The HIGH note must not be rougher than the low one.
-	int32_t rough[2] = { 0, 0 };
-	const uint8_t notes[2] = { 48, 84 };  // C3 and C6
+	int32_t rough[2]	   = { 0, 0 };
+	const uint8_t notes[2] = { 48, 84 }; // C3 and C6
 	for (int w = 0; w < 2; w++)
 	{
 		pnx_synth_all_off();
@@ -317,7 +314,7 @@ static void test_bandlimited_tables(void)
 			if (m > peak)
 				peak = m;
 		}
-		rough[w] = slew / peak;	 // slew per unit amplitude
+		rough[w] = slew / peak; // slew per unit amplitude
 	}
 
 	// Slew per sample scales with PITCH -- a C6 saw legitimately moves eight times as far
@@ -380,7 +377,7 @@ void test_synth(void)
 	pnx_synth_all_off();
 	pnx_synth_note_on(0, 60, 255);
 	for (int i = 0; i < 40; i++)
-		render_into(buf, CHUNK);  // ~1.9 s
+		render_into(buf, CHUNK); // ~1.9 s
 	SY_CHECK("a held note is still sounding at sustain", pnx_synth_active_voices() == 1);
 	pnx_synth_note_off(0);
 	for (int i = 0; i < 20; i++)
@@ -392,9 +389,9 @@ void test_synth(void)
 	// A resonant SVF driven hard genuinely can self-oscillate, and on integers that is a
 	// wrap to full scale rather than a graceful overload -- it would be heard as a burst of
 	// noise, not as a loud filter.
-	PnxInstrument screaming = lead;
-	screaming.resonance = 255;
-	screaming.cutoff_base = 250;
+	PnxInstrument screaming		= lead;
+	screaming.resonance			= 255;
+	screaming.cutoff_base		= 250;
 	screaming.cutoff_env_amount = 255;
 	pnx_synth_set_instrument(0, &screaming);
 	pnx_synth_all_off();
@@ -424,7 +421,7 @@ void test_synth(void)
 	// and proves only that the note ended. It would have passed with no pitch envelope at
 	// all.
 	kick.amp.decay_ms = 400;
-	kick.amp.sustain = 200;
+	kick.amp.sustain  = 200;
 	pnx_synth_set_instrument(1, &kick);
 	pnx_synth_note_on(1, 36, 255);
 	render_into(buf, CHUNK);
@@ -452,7 +449,7 @@ void test_synth(void)
 	pnx_synth_set_instrument(0, &lead);
 	pnx_synth_note_on(0, 60, 200);
 	render_into(buf, CHUNK);
-	int32_t before = peak_of(buf, CHUNK);
+	int32_t before		= peak_of(buf, CHUNK);
 	PnxInstrument other = kick_instrument();
 	pnx_synth_set_instrument(0, &other);
 	render_into(buf, CHUNK);
@@ -478,34 +475,34 @@ void test_synth(void)
 	// millisecond clock. At 200 chunks the cheap features all reported exactly 0, which is
 	// the resolution failing, not the feature being free -- and "free" is precisely the
 	// wrong conclusion to hand someone deciding what to cut.
-	const uint32_t chunks = 2000;  // ~96 s of audio per configuration
-	uint32_t full = cost_of(&worst, chunks);
+	const uint32_t chunks = 2000; // ~96 s of audio per configuration
+	uint32_t full		  = cost_of(&worst, chunks);
 
 	PnxSynthConfig c;
-	c = worst;
-	c.reverb = false;
+	c				   = worst;
+	c.reverb		   = false;
 	uint32_t no_reverb = cost_of(&c, chunks);
-	c = worst;
-	c.chorus = false;
+	c				   = worst;
+	c.chorus		   = false;
 	uint32_t no_chorus = cost_of(&c, chunks);
-	c = worst;
-	c.filter = false;
+	c				   = worst;
+	c.filter		   = false;
 	uint32_t no_filter = cost_of(&c, chunks);
-	c = worst;
-	c.resonance = false;
-	uint32_t no_res = cost_of(&c, chunks);
-	c = worst;
-	c.lfo = false;
-	uint32_t no_lfo = cost_of(&c, chunks);
-	c = worst;
-	c.pitch_env = false;
-	uint32_t no_pitch = cost_of(&c, chunks);
-	c = worst;
-	c.oscillators = 2;
-	uint32_t two_osc = cost_of(&c, chunks);
-	c = worst;
-	c.oscillators = 1;
-	uint32_t one_osc = cost_of(&c, chunks);
+	c				   = worst;
+	c.resonance		   = false;
+	uint32_t no_res	   = cost_of(&c, chunks);
+	c				   = worst;
+	c.lfo			   = false;
+	uint32_t no_lfo	   = cost_of(&c, chunks);
+	c				   = worst;
+	c.pitch_env		   = false;
+	uint32_t no_pitch  = cost_of(&c, chunks);
+	c				   = worst;
+	c.oscillators	   = 2;
+	uint32_t two_osc   = cost_of(&c, chunks);
+	c				   = worst;
+	c.oscillators	   = 1;
+	uint32_t one_osc   = cost_of(&c, chunks);
 
 	note("  host ns/sample, 4 voices (ORDERING only -- the device is the authority):");
 	note("    everything on        %5u", (unsigned)full);
@@ -543,4 +540,4 @@ void test_synth(void)
 	free(buf);
 }
 
-#endif	// PNX_USE_SYNTH
+#endif // PNX_USE_SYNTH

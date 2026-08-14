@@ -23,25 +23,25 @@ static void draw_worldtile(const PnxMap* map, const PnxWorldTile* wt, PnxTarget*
 						   const PnxCamera* camera, int32_t x0, int32_t y0, int32_t x1,
 						   int32_t y1)
 {
-	const int32_t T = map->tile_px;
+	const int32_t T	 = map->tile_px;
 	const int32_t ox = (int32_t)wt->wx * map->worldtile;
 	const int32_t oy = (int32_t)wt->wy * map->worldtile;
 
 	for (int32_t ty = y0; ty <= y1; ty++)
 	{
 		const uint8_t* row = wt->cells + (size_t)(ty - oy) * wt->cell_w * 2;
-		const int32_t sy = ty * T - camera->y;
+		const int32_t sy   = ty * T - camera->y;
 
 		for (int32_t tx = x0; tx <= x1; tx++)
 		{
-			const uint8_t* cell = row + (size_t)(tx - ox) * 2;
+			const uint8_t* cell	 = row + (size_t)(tx - ox) * 2;
 			const uint16_t entry = (uint16_t)(cell[0] | ((uint16_t)cell[1] << 8));
-			const uint16_t id = entry & PNX_MAP_INDEX_MASK;
+			const uint16_t id	 = entry & PNX_MAP_INDEX_MASK;
 
-			uint16_t local = 0;
+			uint16_t local		  = 0;
 			const PnxAtlas* atlas = pnx_map_atlas(map, id, &local);
 			if (!atlas)
-				continue;  // its slot was evicted; the WorldTile pin makes this unreachable
+				continue; // its slot was evicted; the WorldTile pin makes this unreachable
 
 			const int32_t sx = tx * T - camera->x;
 
@@ -50,8 +50,8 @@ static void draw_worldtile(const PnxMap* map, const PnxWorldTile* wt, PnxTarget*
 			// It is indexed by the MAP's tile id, not the atlas's, so one table covers a map
 			// whose tiles come from several tilesets.
 			const PnxPalette* pal = map->tile_palette
-										? pnx_palette(map->tile_palette[id])
-										: pnx_atlas_tile_palette(atlas, (uint8_t)local);
+				? pnx_palette(map->tile_palette[id])
+				: pnx_atlas_tile_palette(atlas, (uint8_t)local);
 
 			// An atlas is one layout or the other for its whole life, so this branch is free to
 			// the predictor even though it now sits inside the per-cell body: a map's atlases do
@@ -130,4 +130,4 @@ void pnx_tilemap_draw(const PnxMap* map, PnxTarget* target, const PnxCamera* cam
 	}
 }
 
-#endif	// PNX_USE_TILEMAP
+#endif // PNX_USE_TILEMAP

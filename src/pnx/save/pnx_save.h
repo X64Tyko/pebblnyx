@@ -108,4 +108,4 @@ bool pnx_save_peek_version(PnxSaveSlot slot, uint8_t* out_version);
 bool pnx_save_exists(PnxSaveSlot slot);
 bool pnx_save_delete(PnxSaveSlot slot);
 
-#endif	// PNX_USE_SAVE
+#endif // PNX_USE_SAVE

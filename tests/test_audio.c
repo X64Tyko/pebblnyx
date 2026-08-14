@@ -54,18 +54,18 @@ static void test_synth_shares_the_mixer_lifecycle(void)
 	pnx_audio_shutdown();
 	AU_CHECK(pnx_synth_bytes() == 0);
 	AU_CHECK(pnx_audio_init(PNX_AUDIO_16KHZ_8BIT, 200));
-	AU_CHECK(pnx_synth_bytes() > 0);  // opening the mixer opened the synth
+	AU_CHECK(pnx_synth_bytes() > 0); // opening the mixer opened the synth
 
 	// And a note routed through it actually reaches the output, which is the property the
 	// shipped bug broke -- the allocation alone would not have caught it.
 	PnxInstrument in;
 	memset(&in, 0, sizeof(in));
-	in.osc_count = 1;
-	in.osc[0].wave = PNX_WAVE_SAW;
-	in.osc[0].volume = 255;
-	in.amp.attack_ms = 1;
-	in.amp.decay_ms = 500;
-	in.amp.sustain = 255;
+	in.osc_count	  = 1;
+	in.osc[0].wave	  = PNX_WAVE_SAW;
+	in.osc[0].volume  = 255;
+	in.amp.attack_ms  = 1;
+	in.amp.decay_ms	  = 500;
+	in.amp.sustain	  = 255;
 	in.amp.release_ms = 100;
 	pnx_synth_all_off();
 	pnx_synth_set_instrument(0, &in);
@@ -76,17 +76,17 @@ static void test_synth_shares_the_mixer_lifecycle(void)
 		pnx_audio_update(100u + (uint32_t)i * 40u);
 	AU_CHECK(pnx_host_audio_total() > before);
 
-	size_t bytes = 0;
+	size_t bytes	   = 0;
 	const int8_t* last = (const int8_t*)pnx_host_audio_last(&bytes);
-	bool sounded = false;
+	bool sounded	   = false;
 	for (size_t i = 0; i < bytes; i++)
 		if (last[i])
 			sounded = true;
-	AU_CHECK(sounded);	// the synth is IN the stream, not just alive
+	AU_CHECK(sounded); // the synth is IN the stream, not just alive
 
 	pnx_synth_all_off();
 	pnx_audio_shutdown();
-	AU_CHECK(pnx_synth_bytes() == 0);  // and closing it closes the synth
+	AU_CHECK(pnx_synth_bytes() == 0); // and closing it closes the synth
 }
 
 // Four synth voices plus effects must not overdrive the mixer's output clamp.
@@ -104,26 +104,26 @@ static void test_synth_does_not_overdrive_the_mixer(void)
 	in.osc_count = 3;
 	for (int i = 0; i < 3; i++)
 	{
-		in.osc[i].wave = PNX_WAVE_SAW;
+		in.osc[i].wave	 = PNX_WAVE_SAW;
 		in.osc[i].volume = 200;
-		in.osc[i].duty = 128;
+		in.osc[i].duty	 = 128;
 	}
-	in.osc[1].detune = 7;
-	in.osc[2].detune = -9;
-	in.amp.attack_ms = 5;
-	in.amp.decay_ms = 200;
-	in.amp.sustain = 200;
-	in.amp.release_ms = 150;
-	in.filter_mode = PNX_FILTER_LOWPASS;
-	in.cutoff_base = 60;
-	in.resonance = 190;
+	in.osc[1].detune	 = 7;
+	in.osc[2].detune	 = -9;
+	in.amp.attack_ms	 = 5;
+	in.amp.decay_ms		 = 200;
+	in.amp.sustain		 = 200;
+	in.amp.release_ms	 = 150;
+	in.filter_mode		 = PNX_FILTER_LOWPASS;
+	in.cutoff_base		 = 60;
+	in.resonance		 = 190;
 	in.cutoff_env_amount = 180;
-	in.cutoff.attack_ms = 2;
-	in.cutoff.decay_ms = 300;
-	in.cutoff.sustain = 80;
+	in.cutoff.attack_ms	 = 2;
+	in.cutoff.decay_ms	 = 300;
+	in.cutoff.sustain	 = 80;
 	in.cutoff.release_ms = 200;
-	in.reverb_send = 90;
-	in.chorus_send = 70;
+	in.reverb_send		 = 90;
+	in.chorus_send		 = 70;
 
 	// Four voices at the velocity a real song uses. Detuned oscillators drift in and out of
 	// phase and their sum peaks well above any one of them, so this is already the awkward
@@ -166,8 +166,8 @@ static void test_synth_does_not_overdrive_the_mixer(void)
 	for (uint32_t ms = 0; ms < 4000; ms += 10)
 		pnx_audio_update(ms);
 	const PnxAudioStats* hot = pnx_audio_stats();
-	AU_CHECK(hot->clipped > 0);	 // the ceiling is real
-	AU_CHECK(hot->peak > 127);	 // and the counter sees it
+	AU_CHECK(hot->clipped > 0); // the ceiling is real
+	AU_CHECK(hot->peak > 127);	// and the counter sees it
 	printf("  ... at full velocity: peak %u/127, %u clipped -- the 8-bit ceiling\n",
 		   (unsigned)hot->peak, (unsigned)hot->clipped);
 
@@ -182,7 +182,7 @@ static void test_synth_does_not_overdrive_the_mixer(void)
 	const uint32_t at16 = pnx_synth_bytes();
 	AU_CHECK(at16 > 0);
 	AU_CHECK(pnx_audio_reopen(PNX_AUDIO_8KHZ_8BIT, 200));
-	AU_CHECK(pnx_synth_bytes() > 0);  // still up after the reopen
+	AU_CHECK(pnx_synth_bytes() > 0); // still up after the reopen
 	AU_CHECK(pnx_audio_reopen(PNX_AUDIO_16KHZ_8BIT, 200));
 	AU_CHECK(pnx_synth_bytes() == at16);
 	pnx_audio_shutdown();
@@ -223,7 +223,7 @@ void test_audio(void)
 	pnx_audio_update(40);
 	AU_CHECK(pnx_audio_voice_active(sustained));
 	pnx_audio_update(80);
-	AU_CHECK(pnx_audio_voice_active(sustained));  // looping: never retires on its own
+	AU_CHECK(pnx_audio_voice_active(sustained)); // looping: never retires on its own
 	pnx_audio_stop(sustained);
 	AU_CHECK(!pnx_audio_voice_active(sustained));
 
@@ -266,7 +266,7 @@ void test_audio(void)
 	// over-feeding would mean unbounded latency on every sound effect.
 	const uint32_t consumed = 2000u * 32000u / 1000u;
 	AU_CHECK(st->written > consumed);
-	AU_CHECK(st->written < consumed + 32000u / 2u);	 // under half a second ahead
+	AU_CHECK(st->written < consumed + 32000u / 2u); // under half a second ahead
 
 	// A cadence slower than the lead starves the stream, which is the whole reason audio
 	// moved off the render loop. Asserted so the reason cannot be quietly lost: feeding every
@@ -276,7 +276,7 @@ void test_audio(void)
 	pnx_audio_play(tone, 64, 0, 16000, 255);
 	for (uint32_t t = 0; t <= 2000; t += 200)
 		pnx_audio_update(t);
-	AU_CHECK(pnx_audio_stats()->worst_deficit > 0);	 // 200ms cadence cannot hold an 80ms lead
+	AU_CHECK(pnx_audio_stats()->worst_deficit > 0); // 200ms cadence cannot hold an 80ms lead
 	AU_CHECK(pnx_audio_stats()->worst_gap_ms >= 200);
 
 	// --- a late frame must be survivable: the app is throttled to ~0.4fps when covered
@@ -290,7 +290,7 @@ void test_audio(void)
 	// not, which is why this is asserted rather than left to be rediscovered.
 	for (uint32_t t = 0; t <= 30; t++)
 		pnx_audio_update(t);
-	pnx_audio_update(70);  // 40ms of silence, inside the real queue
+	pnx_audio_update(70); // 40ms of silence, inside the real queue
 	AU_CHECK_EQ(pnx_audio_stats()->worst_deficit, 0);
 
 	// A 2-second stall is beyond any lead; the deficit must be REPORTED rather than hidden,
@@ -312,26 +312,26 @@ void test_audio(void)
 	pnx_audio_shutdown();
 	AU_CHECK(pnx_audio_init(PNX_AUDIO_16KHZ_8BIT, 60));
 	const PnxEnvelope flat = { .attack_ms = 1, .decay_ms = 1, .sustain = 255, .release_ms = 1 };
-	pnx_audio_note(PNX_WAVE_TRIANGLE, 69, 255, &flat, 0);  // A4
+	pnx_audio_note(PNX_WAVE_TRIANGLE, 69, 255, &flat, 0); // A4
 
 	// The host keeps only the most recent block, so the running total is what says whether
 	// there is new data and whether any was missed. Without that, an update which skips its
 	// write leaves the same block in place and gets compared against itself -- a fake seam.
 	int32_t worst_delta = 0, prev = 0;
 	uint32_t sampled = 0, boundaries = 0;
-	bool have_prev = false;
+	bool have_prev		= false;
 	uint32_t seen_total = pnx_host_audio_total();
 	for (uint32_t t = 0; t <= 3000; t += 10)
 	{
 		pnx_audio_update(t);
 		const uint32_t total = pnx_host_audio_total();
 		if (total == seen_total)
-			continue;  // nothing written this update
+			continue; // nothing written this update
 
-		size_t bytes = 0;
-		const int8_t* block = (const int8_t*)pnx_host_audio_last(&bytes);
-		const bool contiguous = (total - seen_total) == bytes;	// no earlier write was missed
-		seen_total = total;
+		size_t bytes		  = 0;
+		const int8_t* block	  = (const int8_t*)pnx_host_audio_last(&bytes);
+		const bool contiguous = (total - seen_total) == bytes; // no earlier write was missed
+		seen_total			  = total;
 		if (!block || bytes == 0)
 			continue;
 		if (contiguous)
@@ -347,12 +347,12 @@ void test_audio(void)
 				if (d > worst_delta)
 					worst_delta = d;
 			}
-			prev = block[i];
+			prev	  = block[i];
 			have_prev = true;
 			sampled++;
 		}
 	}
-	AU_CHECK(boundaries > 50);	// the seams were actually exercised
+	AU_CHECK(boundaries > 50); // the seams were actually exercised
 	AU_CHECK(sampled > 20000);
 	AU_CHECK(worst_delta <= 12);
 	if (worst_delta > 12)
@@ -365,7 +365,7 @@ void test_audio(void)
 	AU_CHECK(pnx_audio_init(PNX_AUDIO_16KHZ_16BIT, 60));
 	pnx_audio_note(PNX_WAVE_TRIANGLE, 69, 255, &flat, 0);
 	pnx_audio_update(0);
-	size_t wide_bytes = 0;
+	size_t wide_bytes	= 0;
 	const int16_t* wide = (const int16_t*)pnx_host_audio_last(&wide_bytes);
 	AU_CHECK(wide != NULL && wide_bytes >= 64);
 	if (wide && wide_bytes >= 64)
@@ -374,7 +374,7 @@ void test_audio(void)
 		for (size_t i = 0; i < wide_bytes / 2; i++)
 		{
 			if ((wide[i] & 0xFF) != 0)
-				clean = false;	// low byte must be zero: c << 8
+				clean = false; // low byte must be zero: c << 8
 		}
 		AU_CHECK(clean);
 	}

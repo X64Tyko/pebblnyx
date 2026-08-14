@@ -89,7 +89,7 @@ static bool register_worldtiles(void)
 // map there was a hole" is not a report anybody can act on.
 static int32_t first_hole(const PnxMap* m, const PnxCamera* cam)
 {
-	const int32_t T = m->tile_px;
+	const int32_t T	 = m->tile_px;
 	const int32_t x0 = pnx_floor_div(cam->x, T), y0 = pnx_floor_div(cam->y, T);
 	const int32_t x1 = x0 + cam->view_w / T + 1, y1 = y0 + cam->view_h / T + 1;
 
@@ -113,8 +113,8 @@ static int32_t first_hole(const PnxMap* m, const PnxCamera* cam)
 static void walk_everything(PnxMap* m, PnxCamera* cam, int32_t step, int32_t* out_holes,
 							uint32_t* out_worst_missing)
 {
-	int32_t holes = 0;
-	uint32_t worst = 0;
+	int32_t holes	= 0;
+	uint32_t worst	= 0;
 	const int32_t w = pnx_tilemap_width(m), h = pnx_tilemap_height(m);
 
 	for (int32_t ty = 0; ty < m->h; ty += step)
@@ -138,7 +138,7 @@ static void walk_everything(PnxMap* m, PnxCamera* cam, int32_t step, int32_t* ou
 			}
 		}
 	}
-	*out_holes = holes;
+	*out_holes		   = holes;
 	*out_worst_missing = worst;
 }
 
@@ -225,11 +225,11 @@ void test_stream(void)
 		   MAP_FIELD_W * MAP_FIELD_H * 2);
 
 	S_CHECK_EQ(pnx_map_stream_now(&field, 0, 0, 200, 228), 0);
-	const size_t field_bytes = scene.used;
+	const size_t field_bytes	   = scene.used;
 	const uint32_t read_after_load = pnx_assets_bytes_loaded();
 
 	// --- walk all of it, checking for holes at every step
-	int32_t holes = 0;
+	int32_t holes		   = 0;
 	uint32_t worst_missing = 0;
 	walk_everything(&field, &cam, 1, &holes, &worst_missing);
 	S_CHECK_EQ(holes, 0);
@@ -263,7 +263,7 @@ void test_stream(void)
 	//     at the same speed the moment WorldTiles got smaller. Pinned here because nothing
 	//     about it is visible in a frame time or a byte count.
 	{
-		const int32_t step = 8 * field.tile_px;
+		const int32_t step	  = 8 * field.tile_px;
 		uint32_t worst_sprint = 0, reads = 0;
 		for (int32_t i = 0; i < 40; i++)
 		{
@@ -306,8 +306,8 @@ void test_stream(void)
 		PnxMap m;
 		S_CHECK(pnx_map_load(&m, small[i]));
 		S_CHECK_EQ(m.slot_count, m.wt_cols * m.wt_rows);
-		S_CHECK_EQ(pnx_map_resident(&m), m.wt_cols * m.wt_rows);  // whole, before any stream
-		S_CHECK_EQ(pnx_map_stream_now(&m, 0, 0, 200, 228), 0);	  // and the stream is a no-op
+		S_CHECK_EQ(pnx_map_resident(&m), m.wt_cols * m.wt_rows); // whole, before any stream
+		S_CHECK_EQ(pnx_map_stream_now(&m, 0, 0, 200, 228), 0);	 // and the stream is a no-op
 
 		// Its warp must land on a walkable tile of the field, which is what makes the round
 		// trip real rather than a door into a wall.

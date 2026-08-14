@@ -48,13 +48,13 @@
 // states leave `frame` NULL.
 typedef struct
 {
-	void (*enter)(void* ctx);	 // just pushed
-	void (*exit)(void* ctx);	 // just popped, permanently
-	void (*suspend)(void* ctx);	 // covered -- by a push, or by the OS
-	void (*resume)(void* ctx);	 // uncovered -- by a pop, or by the OS
-	void (*input)(void* ctx);	 // once per rendered frame, before tick
-	void (*tick)(void* ctx);	 // fixed PNX_TICK_MS steps; skipped while covered
-	void (*frame)(void* ctx);	 // once per rendered frame, even while covered
+	void (*enter)(void* ctx);	// just pushed
+	void (*exit)(void* ctx);	// just popped, permanently
+	void (*suspend)(void* ctx); // covered -- by a push, or by the OS
+	void (*resume)(void* ctx);	// uncovered -- by a pop, or by the OS
+	void (*input)(void* ctx);	// once per rendered frame, before tick
+	void (*tick)(void* ctx);	// fixed PNX_TICK_MS steps; skipped while covered
+	void (*frame)(void* ctx);	// once per rendered frame, even while covered
 	void (*draw)(void* ctx, PnxTarget* target);
 } PnxAppOps;
 
@@ -99,4 +99,4 @@ void pnx_app_frame(void* unused_ctx, uint32_t elapsed_ms, PnxTarget* target);
 // state's own input() calls this instead of pnx_platform_poll_event directly.
 bool pnx_app_poll_event(PnxEvent* out);
 
-#endif	// PNX_USE_APP
+#endif // PNX_USE_APP

@@ -41,7 +41,7 @@ typedef struct
 	uint8_t fmt_index;
 	uint8_t cut_index;
 	bool
-		seq_on;	 // sequencer; off at startup so a bare tone can be judged alone      // auto-firing effects; off by default so the tone is clean
+		seq_on; // sequencer; off at startup so a bare tone can be judged alone      // auto-firing effects; off by default so the tone is clean
 	uint32_t ticks, accumulator_ms;
 	uint32_t next_auto_ms;
 	char hud[48];
@@ -60,11 +60,11 @@ static const uint32_t RESOURCES[] = PNX_ASSET_RESOURCE_TABLE;
 // helper, because this is the only place that needs it and the shape is three fields.
 static const int8_t* load_sample(uint16_t asset, uint32_t* len, uint32_t* hz)
 {
-	size_t payload = 0;
+	size_t payload	 = 0;
 	const uint8_t* d = pnx_blob_load(asset, "PW", NULL, NULL, NULL, NULL, &payload);
 	if (!d || payload < 8)
 		return NULL;
-	*hz = (uint32_t)(d[0] | (d[1] << 8) | (d[2] << 16) | ((uint32_t)d[3] << 24));
+	*hz	 = (uint32_t)(d[0] | (d[1] << 8) | (d[2] << 16) | ((uint32_t)d[3] << 24));
 	*len = (uint32_t)(payload - 8);
 	return (const int8_t*)(d + 8);
 }
@@ -73,8 +73,8 @@ static void draw_hud(App* a, PnxTarget* target);
 
 static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 {
-	App* a = (App*)ctx;
-	const uint32_t now = pnx_platform_now_ms();
+	App* a					  = (App*)ctx;
+	const uint32_t now		  = pnx_platform_now_ms();
 	const uint32_t work_start = now;
 
 	PnxEvent ev;
@@ -86,8 +86,8 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 		// a near-zero gap that never happened. This bit a real run once already.
 		if (ev.type == PNX_EVENT_FOCUS_LOST)
 		{
-			a->covered = true;
-			a->t_lost = ev.time_ms;
+			a->covered		 = true;
+			a->t_lost		 = ev.time_ms;
 			a->stats_at_lost = *pnx_audio_stats();
 			pnx_log("audio: FOCUS_LOST -- snapshot g%u wg%u short%u",
 					(unsigned)a->stats_at_lost.left_playing,
@@ -116,7 +116,7 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 		{
 			// Sweeps the low-pass cutoff. 0 is off, which is what every earlier build did.
 			static const uint16_t cuts[] = { 3200, 2400, 1800, 5000, 0 };
-			a->cut_index = (uint8_t)((a->cut_index + 1) % 5);
+			a->cut_index				 = (uint8_t)((a->cut_index + 1) % 5);
 			pnx_audio_set_lowpass(cuts[a->cut_index]);
 		}
 		else if (ev.button == PNX_BUTTON_SELECT)
@@ -129,10 +129,10 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 			//
 			// `fmt_index` and `lead_index` sat here unused for a long time, which is how the
 			// format A/B ended up being something claimed rather than something available.
-			a->fmt_index = (uint8_t)((a->fmt_index + 1) % 4);
+			a->fmt_index	  = (uint8_t)((a->fmt_index + 1) % 4);
 			const bool want16 = (a->fmt_index >= 2);
-			a->sfx_on = (a->fmt_index & 1) == 0;
-			a->next_auto_ms = now + 400;
+			a->sfx_on		  = (a->fmt_index & 1) == 0;
+			a->next_auto_ms	  = now + 400;
 
 			const PnxAudioFormat want = want16 ? PNX_AUDIO_16KHZ_16BIT : PNX_AUDIO_16KHZ_8BIT;
 			if (want != pnx_audio_format())
@@ -188,15 +188,15 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 
 	pnx_gfx_clear(target, 0xC0);
 
-	const PnxAudioStats* au = pnx_audio_stats();
-	const PnxFrameStats* fs = pnx_diag_stats();
+	const PnxAudioStats* au	   = pnx_audio_stats();
+	const PnxFrameStats* fs	   = pnx_diag_stats();
 	static const char* STATE[] = { "idle", "play", "drain", "?" };
 	// Keyed by the enum, not by position, for the same reason the platform map is.
 	static const char* FMT[] = {
 		[PNX_AUDIO_16KHZ_16BIT] = "16k/16",
-		[PNX_AUDIO_16KHZ_8BIT] = "16k/8",
-		[PNX_AUDIO_8KHZ_16BIT] = "8k/16",
-		[PNX_AUDIO_8KHZ_8BIT] = "8k/8",
+		[PNX_AUDIO_16KHZ_8BIT]	= "16k/8",
+		[PNX_AUDIO_8KHZ_16BIT]	= "8k/16",
+		[PNX_AUDIO_8KHZ_8BIT]	= "8k/8",
 	};
 	// peak/clip/dry together, because "it sounds bad" has three causes that are identical
 	// by ear: too hot (peak > 127, clip rising), the stream running dry (dry rising), and
@@ -238,7 +238,7 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 // the glyph blitter has no such constraint and draws in the frame.
 static void audio_tick(void* ctx)
 {
-	App* a = (App*)ctx;
+	App* a			   = (App*)ctx;
 	const uint32_t now = pnx_platform_now_ms();
 	if (a->seq_on)
 		pnx_music_update(now);
@@ -303,9 +303,9 @@ int main(void)
 	pnx_audio_set_lead(180);
 #endif
 
-	a.laser = load_sample(PNX_ASSET_SAMPLE_LASER, &a.laser_len, &a.laser_hz);
-	a.boom = load_sample(PNX_ASSET_SAMPLE_EXPLOSION, &a.boom_len, &a.boom_hz);
-	a.ready = pnx_music_load(&a.song, PNX_ASSET_MUSIC_THEME);
+	a.laser	   = load_sample(PNX_ASSET_SAMPLE_LASER, &a.laser_len, &a.laser_hz);
+	a.boom	   = load_sample(PNX_ASSET_SAMPLE_EXPLOSION, &a.boom_len, &a.boom_hz);
+	a.ready	   = pnx_music_load(&a.song, PNX_ASSET_MUSIC_THEME);
 	a.has_font = pnx_font_load(&a.hud_font, PNX_ASSET_FONT_HUD);
 	if (!a.has_font)
 		pnx_log("hud font would not load");

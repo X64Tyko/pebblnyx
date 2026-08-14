@@ -64,7 +64,7 @@
 
 typedef struct
 {
-	uint8_t entries[PNX_PALETTE_ENTRIES];  // GColor8 values; [0] is transparent
+	uint8_t entries[PNX_PALETTE_ENTRIES]; // GColor8 values; [0] is transparent
 } PnxPalette;
 
 // Fills the table. Must be called before any atlas or sprite loads, since those carry
@@ -88,15 +88,15 @@ uint16_t pnx_palette_count(void);
 // dedup key guarantees, so palette lookup is unchanged between the two.
 typedef struct
 {
-	const uint8_t* pixels;		  // whole tiles, or the quadrant bank
-	const uint8_t* tile_palette;  // tile_count, palette slot per tile
-	const uint8_t* tile_flags;	  // tile_count, PNX_TILE_*
-	const uint16_t* metatiles;	  // NULL when flat; else tile_count * 4 indices
+	const uint8_t* pixels;		 // whole tiles, or the quadrant bank
+	const uint8_t* tile_palette; // tile_count, palette slot per tile
+	const uint8_t* tile_flags;	 // tile_count, PNX_TILE_*
+	const uint16_t* metatiles;	 // NULL when flat; else tile_count * 4 indices
 	uint16_t tile_count;
 	uint16_t subtile_count;
 	uint8_t tile_px;
-	uint8_t tile_bytes;	 // bytes per whole tile at 4bpp
-	uint8_t sub_bytes;	 // bytes per quadrant; 0 when flat
+	uint8_t tile_bytes; // bytes per whole tile at 4bpp
+	uint8_t sub_bytes;	// bytes per quadrant; 0 when flat
 } PnxAtlas;
 
 static inline bool pnx_atlas_is_metatiled(const PnxAtlas* a)
@@ -106,17 +106,17 @@ static inline bool pnx_atlas_is_metatiled(const PnxAtlas* a)
 
 typedef struct
 {
-	const uint8_t* pixels;		   // frame_count * frame_bytes, 4bpp
-	const uint8_t* frame_palette;  // frame_count, palette slot per frame
+	const uint8_t* pixels;		  // frame_count * frame_bytes, 4bpp
+	const uint8_t* frame_palette; // frame_count, palette slot per frame
 	uint8_t w, h;
 	uint8_t frame_count;
-	uint16_t frame_bytes;  // w * h / 2
+	uint16_t frame_bytes; // w * h / 2
 } PnxSprite;
 
 typedef struct
 {
-	uint8_t x, y;	   // tile the warp triggers on
-	uint8_t dest_map;  // index into the manifest's map order
+	uint8_t x, y;	  // tile the warp triggers on
+	uint8_t dest_map; // index into the manifest's map order
 	uint8_t dest_x, dest_y;
 } PnxWarp;
 
@@ -162,21 +162,21 @@ typedef struct
 
 typedef struct
 {
-	uint16_t asset;		  // the atlas's asset id
-	uint16_t first_tile;  // where its slice of the map's tile id space begins
+	uint16_t asset;		 // the atlas's asset id
+	uint16_t first_tile; // where its slice of the map's tile id space begins
 	uint16_t tile_count;
-	uint8_t slot;  // atlas pool slot holding it, or PNX_MAP_NO_SLOT
+	uint8_t slot; // atlas pool slot holding it, or PNX_MAP_NO_SLOT
 } PnxMapAtlas;
 
 // One resident WorldTile. `cells` points into the pool slot, not into the blob: the blob
 // is never held whole.
 typedef struct
 {
-	const uint8_t* cells;	   // cell_w * cell_h u16 entries
-	const uint8_t* overrides;  // override_count * 3 bytes: x, y local to this WorldTile
+	const uint8_t* cells;	  // cell_w * cell_h u16 entries
+	const uint8_t* overrides; // override_count * 3 bytes: x, y local to this WorldTile
 	uint16_t override_count;
-	uint8_t wx, wy;			 // which WorldTile of the grid this slot holds
-	uint8_t cell_w, cell_h;	 // clipped at the map's edge, so no padding is stored
+	uint8_t wx, wy;			// which WorldTile of the grid this slot holds
+	uint8_t cell_w, cell_h; // clipped at the map's edge, so no padding is stored
 	bool live;
 } PnxWorldTile;
 
@@ -192,30 +192,30 @@ typedef struct
 // the renderer happens to have loaded.
 typedef struct
 {
-	const uint8_t* tile_flags;	// tile_total bytes, indexed by map-global tile id
+	const uint8_t* tile_flags; // tile_total bytes, indexed by map-global tile id
 
 	// Optional palette variant: tile_total bytes naming the palette slot to use instead of
 	// the atlas's own, so one atlas serves several recoloured zones. NULL means use the
 	// atlas's. 44 bytes for the cave tileset against ~5,600 for a second copy of it.
 	const uint8_t* tile_palette;
 	const PnxWarp* warps;
-	const uint8_t* wt_mask;	 // wt_cols * wt_rows: which atlases each WorldTile needs
+	const uint8_t* wt_mask; // wt_cols * wt_rows: which atlases each WorldTile needs
 
 	// The atlas pool's slots are NOT a uniform stride. When there is a slot per atlas
 	// nothing is ever evicted, so each slot is exactly its atlas's size -- which for one
 	// large tileset beside one small one is the difference between fitting in RAM and not.
 	// Only a map that really streams its atlases pays for slots that all hold the largest.
-	const uint8_t* pool_offset;	 // (atlas_slots + 1) u32 offsets into pool_mem
+	const uint8_t* pool_offset; // (atlas_slots + 1) u32 offsets into pool_mem
 
 	PnxMapAtlas atlas[PNX_MAP_MAX_ATLASES];
-	PnxAtlas* pool;		  // atlas_slots views onto pool_mem
-	uint8_t* pool_mem;	  // pool_bytes
-	uint8_t* pool_owner;  // atlas_slots: which atlas index sits there, or NO_SLOT
-	uint8_t* pool_pins;	  // atlas_slots: live WorldTiles depending on that slot
+	PnxAtlas* pool;		 // atlas_slots views onto pool_mem
+	uint8_t* pool_mem;	 // pool_bytes
+	uint8_t* pool_owner; // atlas_slots: which atlas index sits there, or NO_SLOT
+	uint8_t* pool_pins;	 // atlas_slots: live WorldTiles depending on that slot
 
-	PnxWorldTile* slots;  // slot_count of them
-	uint8_t* slot_mem;	  // slot_count * slot_bytes
-	uint8_t* wt_slot;	  // wt_cols * wt_rows: slot holding it, or NO_SLOT
+	PnxWorldTile* slots; // slot_count of them
+	uint8_t* slot_mem;	 // slot_count * slot_bytes
+	uint8_t* wt_slot;	 // wt_cols * wt_rows: slot holding it, or NO_SLOT
 
 	// WorldTile payloads are not in the map's resource. They live in BANK resources whose
 	// asset ids run consecutively from `first_bank_asset`, because a ranged read costs by
@@ -225,8 +225,8 @@ typedef struct
 	uint16_t first_bank_asset;
 	uint8_t bank_shift;
 
-	uint32_t resource;	  // the map's own resource: the resident preamble
-	uint16_t tile_count;  // bound for tile_flags: the map's whole id space
+	uint32_t resource;	 // the map's own resource: the resident preamble
+	uint16_t tile_count; // bound for tile_flags: the map's whole id space
 	uint16_t slot_bytes;
 	uint8_t w, h;
 	uint8_t warp_count;
@@ -234,8 +234,8 @@ typedef struct
 	uint8_t atlas_slots;
 	uint8_t slot_count;
 	uint8_t wt_cols, wt_rows;
-	uint8_t worldtile;	// cells per side
-	uint8_t wt_shift;	// log2(worldtile): a cell finds its WorldTile by shifting
+	uint8_t worldtile; // cells per side
+	uint8_t wt_shift;  // log2(worldtile): a cell finds its WorldTile by shifting
 	uint8_t tile_px;
 
 	// Every WorldTile and every atlas has a slot, so the map was loaded whole and can never
@@ -246,9 +246,9 @@ typedef struct
 
 typedef struct
 {
-	const uint8_t* text;	  // NUL-terminated pages, back to back
-	const uint16_t* offsets;  // one per page, into text
-	const uint8_t* index;	  // entry_count * 4 bytes: u16 first_page, u16 page_count
+	const uint8_t* text;	 // NUL-terminated pages, back to back
+	const uint16_t* offsets; // one per page, into text
+	const uint8_t* index;	 // entry_count * 4 bytes: u16 first_page, u16 page_count
 	uint16_t entry_count;
 } PnxDialog;
 
@@ -266,7 +266,7 @@ typedef struct
 // Drawing lives in gfx/pnx_text.h; this is only the storage and the lookup.
 
 #define PNX_FONT_GLYPH_BYTES 8
-#define PNX_FONT_NO_GLYPH	 0xFF  // codepoint map entry for a character the font lacks
+#define PNX_FONT_NO_GLYPH	 0xFF // codepoint map entry for a character the font lacks
 
 // Which way the pen walks between glyphs.
 //
@@ -282,27 +282,27 @@ typedef struct
 // than a bool called `landscape`.
 typedef enum
 {
-	PNX_ADVANCE_X_POS,	// left to right: portrait, and every Latin face
-	PNX_ADVANCE_Y_POS,	// top to bottom
-	PNX_ADVANCE_Y_NEG,	// bottom to top
-	PNX_ADVANCE_X_NEG,	// right to left; carried by the format, not yet emitted
+	PNX_ADVANCE_X_POS, // left to right: portrait, and every Latin face
+	PNX_ADVANCE_Y_POS, // top to bottom
+	PNX_ADVANCE_Y_NEG, // bottom to top
+	PNX_ADVANCE_X_NEG, // right to left; carried by the format, not yet emitted
 	PNX_ADVANCE_COUNT
 } PnxAdvanceAxis;
 
 typedef struct
 {
 	const uint8_t* bitmaps;
-	const uint8_t* glyphs;	// glyph_count * PNX_FONT_GLYPH_BYTES
-	const uint8_t* map;		// one byte per codepoint in [first_cp, last_cp]
+	const uint8_t* glyphs; // glyph_count * PNX_FONT_GLYPH_BYTES
+	const uint8_t* map;	   // one byte per codepoint in [first_cp, last_cp]
 	uint16_t glyph_count;
 	uint16_t bitmap_bytes;
-	uint8_t depth;		  // 1 or 2
-	uint8_t line_height;  // ascent + descent: what to advance between lines
-	uint8_t baseline;	  // ascent: top of the line box to the baseline
+	uint8_t depth;		 // 1 or 2
+	uint8_t line_height; // ascent + descent: what to advance between lines
+	uint8_t baseline;	 // ascent: top of the line box to the baseline
 	uint8_t space_advance;
 	uint8_t first_cp, last_cp;
-	uint8_t fallback;  // glyph drawn for a character the font does not carry
-	uint8_t advance;   // PnxAdvanceAxis: which way the pen walks
+	uint8_t fallback; // glyph drawn for a character the font does not carry
+	uint8_t advance;  // PnxAdvanceAxis: which way the pen walks
 } PnxFont;
 
 // One glyph's metrics, unpacked from the index. `bits` is NULL when the glyph has no ink
@@ -315,9 +315,9 @@ typedef struct
 {
 	const uint8_t* bits;
 	uint8_t w, h;
-	uint8_t advance;   // along the baseline, whichever way that runs
-	int8_t bearing_x;  // pen to the START edge of the bitmap, along the baseline
-	int8_t bearing_y;  // baseline to the TOP of the bitmap, positive upwards
+	uint8_t advance;  // along the baseline, whichever way that runs
+	int8_t bearing_x; // pen to the START edge of the bitmap, along the baseline
+	int8_t bearing_y; // baseline to the TOP of the bitmap, positive upwards
 } PnxGlyph;
 
 bool pnx_font_load(PnxFont* out, uint16_t asset_id);
@@ -339,12 +339,12 @@ static inline uint8_t pnx_font_glyph_index(const PnxFont* f, char c)
 static inline void pnx_font_glyph(const PnxFont* f, uint8_t index, PnxGlyph* out)
 {
 	const uint8_t* e = f->glyphs + (uint32_t)index * PNX_FONT_GLYPH_BYTES;
-	out->w = e[2];
-	out->h = e[3];
-	out->advance = e[4];
-	out->bearing_x = (int8_t)e[5];
-	out->bearing_y = (int8_t)e[6];
-	out->bits = out->w ? f->bitmaps + (uint16_t)(e[0] | (e[1] << 8)) : NULL;
+	out->w			 = e[2];
+	out->h			 = e[3];
+	out->advance	 = e[4];
+	out->bearing_x	 = (int8_t)e[5];
+	out->bearing_y	 = (int8_t)e[6];
+	out->bits		 = out->w ? f->bitmaps + (uint16_t)(e[0] | (e[1] << 8)) : NULL;
 }
 
 // Bytes per bitmap row. Rows are byte-aligned rather than a continuous bit stream, so a
@@ -521,7 +521,7 @@ void pnx_decode_4bpp(const uint8_t* src, const PnxPalette* palette, uint8_t* dst
 // of two so this is a shift, which is the whole reason the pipeline insists on one.
 static inline const PnxWorldTile* pnx_map_worldtile(const PnxMap* m, int32_t x, int32_t y)
 {
-	const uint32_t i = (uint32_t)(y >> m->wt_shift) * m->wt_cols + (uint32_t)(x >> m->wt_shift);
+	const uint32_t i   = (uint32_t)(y >> m->wt_shift) * m->wt_cols + (uint32_t)(x >> m->wt_shift);
 	const uint8_t slot = m->wt_slot[i];
 	return slot == PNX_MAP_NO_SLOT ? NULL : &m->slots[slot];
 }
@@ -587,7 +587,7 @@ static inline uint8_t pnx_map_flags(const PnxMap* m, int32_t x, int32_t y)
 {
 	const PnxWorldTile* wt = pnx_map_worldtile(m, x, y);
 	if (!wt)
-		return PNX_TILE_SOLID;	// see pnx_map_solid
+		return PNX_TILE_SOLID; // see pnx_map_solid
 
 	const uint8_t lx = (uint8_t)(x & (m->worldtile - 1));
 	const uint8_t ly = (uint8_t)(y & (m->worldtile - 1));
@@ -630,4 +630,4 @@ const PnxWarp* pnx_map_warp_at(const PnxMap* m, int32_t x, int32_t y);
 const char* pnx_dialog_page(const PnxDialog* d, uint16_t entry, uint16_t page);
 uint16_t pnx_dialog_page_count(const PnxDialog* d, uint16_t entry);
 
-#endif	// PNX_USE_ASSETS
+#endif // PNX_USE_ASSETS

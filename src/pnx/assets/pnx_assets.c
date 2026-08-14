@@ -52,14 +52,14 @@ bool pnx_assets_init(PnxArena* persistent, PnxArena* scene, const uint32_t* reso
 {
 	if (!persistent || !scene || !resources || count == 0)
 		return false;
-	s_persistent = persistent;
-	s_scene = scene;
-	s_arena = scene;
-	s_resources = resources;
+	s_persistent	 = persistent;
+	s_scene			 = scene;
+	s_arena			 = scene;
+	s_resources		 = resources;
 	s_resource_count = count;
-	s_bytes_loaded = 0;
-	s_palettes = NULL;
-	s_palette_count = 0;
+	s_bytes_loaded	 = 0;
+	s_palettes		 = NULL;
+	s_palette_count	 = 0;
 	// Cleared here rather than left standing, so a second init starts from no expectation
 	// instead of inheriting one. Which is why the expectation is set AFTER init.
 	s_orientation = PNX_ORIENT_UNSET;
@@ -82,7 +82,7 @@ uint8_t pnx_assets_orientation(void)
 bool pnx_assets_persistent(bool on)
 {
 	const bool was = (s_arena == s_persistent);
-	s_arena = on ? s_persistent : s_scene;
+	s_arena		   = on ? s_persistent : s_scene;
 	return was;
 }
 
@@ -93,8 +93,8 @@ static const uint8_t* load_blob(uint16_t asset_id, const char* magic, uint8_t* o
 
 bool pnx_palettes_load(uint16_t asset_id)
 {
-	uint8_t count = 0;
-	size_t payload = 0;
+	uint8_t count		= 0;
+	size_t payload		= 0;
 	const uint8_t* data = load_blob(asset_id, "PP", &count, NULL, NULL, &payload);
 	if (!data)
 		return false;
@@ -114,7 +114,7 @@ bool pnx_palettes_load(uint16_t asset_id)
 		return false;
 	}
 
-	s_palettes = (PnxPalette*)(const void*)data;
+	s_palettes		= (PnxPalette*)(const void*)data;
 	s_palette_count = count;
 	return true;
 }
@@ -171,7 +171,7 @@ static const uint8_t* load_blob_into(uint16_t asset_id, const char* magic, uint8
 	}
 
 	const uint32_t resource = s_resources[asset_id];
-	size_t size = 0;
+	size_t size				= 0;
 	if (!pnx_platform_resource_size(resource, &size) || size < PNX_BLOB_HEADER_BYTES)
 	{
 		pnx_log("asset %u: missing or too small (%u bytes)", asset_id, (unsigned)size);
@@ -196,7 +196,12 @@ static const uint8_t* load_blob_into(uint16_t asset_id, const char* magic, uint8
 		return NULL;
 	}
 
-	// One call, whole blob. Splitting this up would cost 29 us per extra call for nothing.
+	// One call, whole blob. A resource_read's cost tracks the resource's own size, not the
+	// bytes requested -- splitting this into a header read plus a payload read would cost
+	// the whole size-driven touch twice, not an extra ~29us; see docs/MEASUREMENTS.md's
+	// "Flash / resource reads". A map pays that price on purpose (pnx_map_load) because
+	// sizing its resident block needs the preamble before the payload can be allocated;
+	// nothing else here has that excuse.
 	const size_t got = pnx_platform_resource_read(resource, 0, buf, size);
 	if (got != size)
 	{
@@ -297,12 +302,12 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 		return false;
 
 	const uint16_t tile_count = count_lo;
-	const size_t tile_bytes = (size_t)tile_px * tile_px / 2;
-	const size_t tables = pad4(tile_count) * 2;
+	const size_t tile_bytes	  = (size_t)tile_px * tile_px / 2;
+	const size_t tables		  = pad4(tile_count) * 2;
 
-	out->metatiles = NULL;
+	out->metatiles	   = NULL;
 	out->subtile_count = 0;
-	out->sub_bytes = 0;
+	out->sub_bytes	   = 0;
 
 	if (layout == 0)
 	{
@@ -314,18 +319,18 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 			return false;
 		}
 		out->tile_palette = data;
-		out->tile_flags = data + pad4(tile_count);
-		out->pixels = data + tables;
+		out->tile_flags	  = data + pad4(tile_count);
+		out->pixels		  = data + tables;
 	}
 	else
 	{
 		// u16 subtile_count, u16 pad, palettes, flags, metatile table, quadrant bank.
 		if (payload < 4)
 			return false;
-		const uint16_t subs = (uint16_t)(data[0] | (data[1] << 8));
-		const size_t sub_bytes = tile_bytes / 4;
+		const uint16_t subs		 = (uint16_t)(data[0] | (data[1] << 8));
+		const size_t sub_bytes	 = tile_bytes / 4;
 		const size_t table_bytes = (size_t)tile_count * 4 * 2;
-		const size_t expected = 4 + tables + table_bytes + (size_t)subs * sub_bytes;
+		const size_t expected	 = 4 + tables + table_bytes + (size_t)subs * sub_bytes;
 
 		if (tile_px == 0 || tile_count == 0 || subs == 0 || payload != expected)
 		{
@@ -334,12 +339,12 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 			return false;
 		}
 
-		out->tile_palette = data + 4;
-		out->tile_flags = data + 4 + pad4(tile_count);
-		out->metatiles = (const uint16_t*)(const void*)(data + 4 + tables);
-		out->pixels = data + 4 + tables + table_bytes;
+		out->tile_palette  = data + 4;
+		out->tile_flags	   = data + 4 + pad4(tile_count);
+		out->metatiles	   = (const uint16_t*)(const void*)(data + 4 + tables);
+		out->pixels		   = data + 4 + tables + table_bytes;
 		out->subtile_count = subs;
-		out->sub_bytes = (uint8_t)sub_bytes;
+		out->sub_bytes	   = (uint8_t)sub_bytes;
 
 		for (uint32_t i = 0; i < (uint32_t)tile_count * 4; i++)
 		{
@@ -352,7 +357,7 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 		}
 	}
 
-	out->tile_px = tile_px;
+	out->tile_px	= tile_px;
 	out->tile_bytes = (uint8_t)tile_bytes;
 	out->tile_count = tile_count;
 
@@ -382,13 +387,13 @@ bool pnx_sprite_load(PnxSprite* out, uint16_t asset_id)
 	}
 
 	uint8_t w = 0, h = 0, frames = 0;
-	size_t payload = 0;
+	size_t payload		= 0;
 	const uint8_t* data = load_blob(asset_id, "PS", &w, &h, &frames, &payload);
 	if (!data)
 		return false;
 
 	const size_t frame_bytes = (size_t)w * h / 2;
-	const size_t expected = pad4(frames) + frames * frame_bytes;
+	const size_t expected	 = pad4(frames) + frames * frame_bytes;
 	if (w == 0 || h == 0 || frames == 0 || payload != expected)
 	{
 		pnx_log("sprite %u: %u frames of %ux%u needs %u bytes, blob has %u", asset_id, frames,
@@ -397,11 +402,11 @@ bool pnx_sprite_load(PnxSprite* out, uint16_t asset_id)
 	}
 
 	out->frame_palette = data;
-	out->pixels = data + pad4(frames);
-	out->w = w;
-	out->h = h;
-	out->frame_count = frames;
-	out->frame_bytes = (uint16_t)frame_bytes;
+	out->pixels		   = data + pad4(frames);
+	out->w			   = w;
+	out->h			   = h;
+	out->frame_count   = frames;
+	out->frame_bytes   = (uint16_t)frame_bytes;
 	return true;
 }
 
@@ -422,7 +427,7 @@ bool pnx_sprite_load(PnxSprite* out, uint16_t asset_id)
 static uint32_t read_u32(const uint8_t* p)
 {
 	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
-		   ((uint32_t)p[3] << 24);
+		((uint32_t)p[3] << 24);
 }
 
 static uint16_t read_u16(const uint8_t* p)
@@ -481,10 +486,10 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	}
 
 	const uint8_t w = head[3], h = head[4], warps = head[5], worldtile = head[6];
-	const uint8_t* pre = head + PNX_BLOB_HEADER_BYTES;
+	const uint8_t* pre		  = head + PNX_BLOB_HEADER_BYTES;
 	const uint8_t atlas_count = pre[0], cols = pre[1], rows = pre[2], flags = pre[3];
 	const uint16_t tile_total = read_u16(pre + 4);
-	const uint8_t tile_px = pre[6];
+	const uint8_t tile_px	  = pre[6];
 	const uint16_t slot_bytes = read_u16(pre + 8);
 	const uint8_t want_slots = pre[10], atlas_slots = pre[11];
 	const uint32_t pool_bytes = read_u32(pre + 12);
@@ -499,11 +504,11 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 		return false;
 	}
 
-	const uint16_t n = (uint16_t)cols * rows;
+	const uint16_t n	  = (uint16_t)cols * rows;
 	const size_t resident = 16 + (size_t)atlas_count * 4 + ((size_t)atlas_slots + 1) * 4 +
-							4  // first_bank_asset, pad
-							+ pad4(tile_total) + ((flags & 1) ? pad4(tile_total) : 0) +
-							pad4((size_t)warps * sizeof(PnxWarp)) + pad4(n);
+		4 // first_bank_asset, pad
+		+ pad4(tile_total) + ((flags & 1) ? pad4(tile_total) : 0) +
+		pad4((size_t)warps * sizeof(PnxWarp)) + pad4(n);
 
 	uint8_t* pre_mem = (uint8_t*)pnx_arena_alloc(s_arena, resident, 4);
 	if (!pre_mem)
@@ -521,12 +526,12 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	s_bytes_loaded += (uint32_t)(sizeof(head) + resident);
 
 	const uint8_t* at = pre_mem + 16;
-	uint16_t base = 0;
+	uint16_t base	  = 0;
 	for (uint8_t i = 0; i < atlas_count; i++)
 	{
-		out->atlas[i].asset = read_u16(at);
+		out->atlas[i].asset		 = read_u16(at);
 		out->atlas[i].first_tile = read_u16(at + 2);
-		out->atlas[i].slot = PNX_MAP_NO_SLOT;
+		out->atlas[i].slot		 = PNX_MAP_NO_SLOT;
 		if (out->atlas[i].first_tile != base)
 		{
 			pnx_log(
@@ -607,13 +612,13 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	// actually has -- a map of four WorldTiles never needs nine slots, and paying for them
 	// would make small maps cost more resident than they did before any of this.
 	const uint8_t slots = want_slots < n ? want_slots : (uint8_t)n;
-	out->slots = PNX_ARENA_CALLOC_ARRAY(s_arena, PnxWorldTile, slots);
-	out->slot_mem = (uint8_t*)pnx_arena_alloc(s_arena, (size_t)slots * slot_bytes, 4);
-	out->wt_slot = (uint8_t*)pnx_arena_alloc(s_arena, n, 4);
-	out->pool = PNX_ARENA_CALLOC_ARRAY(s_arena, PnxAtlas, atlas_slots);
-	out->pool_mem = (uint8_t*)pnx_arena_alloc(s_arena, pool_bytes, 4);
-	out->pool_owner = (uint8_t*)pnx_arena_alloc(s_arena, atlas_slots, 4);
-	out->pool_pins = (uint8_t*)pnx_arena_alloc(s_arena, atlas_slots, 4);
+	out->slots			= PNX_ARENA_CALLOC_ARRAY(s_arena, PnxWorldTile, slots);
+	out->slot_mem		= (uint8_t*)pnx_arena_alloc(s_arena, (size_t)slots * slot_bytes, 4);
+	out->wt_slot		= (uint8_t*)pnx_arena_alloc(s_arena, n, 4);
+	out->pool			= PNX_ARENA_CALLOC_ARRAY(s_arena, PnxAtlas, atlas_slots);
+	out->pool_mem		= (uint8_t*)pnx_arena_alloc(s_arena, pool_bytes, 4);
+	out->pool_owner		= (uint8_t*)pnx_arena_alloc(s_arena, atlas_slots, 4);
+	out->pool_pins		= (uint8_t*)pnx_arena_alloc(s_arena, atlas_slots, 4);
 	if (!out->slots || !out->slot_mem || !out->wt_slot || !out->pool || !out->pool_mem ||
 		!out->pool_owner || !out->pool_pins)
 	{
@@ -629,20 +634,20 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	memset(out->pool_owner, PNX_MAP_NO_SLOT, atlas_slots);
 	memset(out->pool_pins, 0, atlas_slots);
 
-	out->resource = resource;
-	out->tile_count = tile_total;
-	out->slot_bytes = slot_bytes;
-	out->w = w;
-	out->h = h;
-	out->warp_count = warps;
+	out->resource	 = resource;
+	out->tile_count	 = tile_total;
+	out->slot_bytes	 = slot_bytes;
+	out->w			 = w;
+	out->h			 = h;
+	out->warp_count	 = warps;
 	out->atlas_count = atlas_count;
 	out->atlas_slots = atlas_slots;
-	out->slot_count = slots;
-	out->wt_cols = cols;
-	out->wt_rows = rows;
-	out->worldtile = worldtile;
-	out->wt_shift = shift_of(worldtile);
-	out->bank_shift = pre[7];
+	out->slot_count	 = slots;
+	out->wt_cols	 = cols;
+	out->wt_rows	 = rows;
+	out->worldtile	 = worldtile;
+	out->wt_shift	 = shift_of(worldtile);
+	out->bank_shift	 = pre[7];
 	// Carried by the map rather than read off a loaded atlas: the streamer works in world
 	// pixels and has to size its window BEFORE any atlas is resident. The atlas load checks
 	// the two agree.
@@ -739,7 +744,7 @@ static bool atlas_pin(PnxMap* m, uint8_t which)
 	m->pool_owner[slot] = PNX_MAP_NO_SLOT;
 
 	const uint32_t from = read_u32(m->pool_offset + (size_t)slot * 4);
-	const uint32_t to = read_u32(m->pool_offset + ((size_t)slot + 1) * 4);
+	const uint32_t to	= read_u32(m->pool_offset + ((size_t)slot + 1) * 4);
 	if (!atlas_load_into(&m->pool[slot], a->asset, m->pool_mem + from, to - from))
 	{
 		return false;
@@ -754,7 +759,7 @@ static bool atlas_pin(PnxMap* m, uint8_t which)
 		return false;
 	}
 	m->pool_owner[slot] = which;
-	a->slot = slot;
+	a->slot				= slot;
 	return true;
 }
 
@@ -781,7 +786,7 @@ static void worldtile_release(PnxMap* m, uint8_t slot)
 	const uint32_t i = (uint32_t)wt->wy * m->wt_cols + wt->wx;
 	atlas_unpin_mask(m, m->wt_mask[i]);
 	m->wt_slot[i] = PNX_MAP_NO_SLOT;
-	wt->live = false;
+	wt->live	  = false;
 }
 
 // Pins the atlases one WorldTile needs, and reports which ones it pinned so a later
@@ -797,7 +802,7 @@ static void worldtile_release(PnxMap* m, uint8_t slot)
 static bool worldtile_pin(PnxMap* m, uint32_t i, uint8_t* out_pinned)
 {
 	const uint8_t mask = m->wt_mask[i];
-	uint8_t pinned = 0;
+	uint8_t pinned	   = 0;
 	for (uint8_t k = 0; k < m->atlas_count; k++)
 	{
 		if (!(mask >> k & 1))
@@ -820,13 +825,13 @@ static bool worldtile_pin(PnxMap* m, uint32_t i, uint8_t* out_pinned)
 static bool worldtile_accept(PnxMap* m, uint32_t i, uint8_t slot)
 {
 	const uint8_t* dst = m->slot_mem + (size_t)slot * m->slot_bytes;
-	PnxWorldTile* wt = &m->slots[slot];
+	PnxWorldTile* wt   = &m->slots[slot];
 
-	wt->cell_w = dst[0];
-	wt->cell_h = dst[1];
+	wt->cell_w		   = dst[0];
+	wt->cell_h		   = dst[1];
 	wt->override_count = read_u16(dst + 2);
-	wt->cells = dst + 4;
-	wt->overrides = dst + 4 + (size_t)wt->cell_w * wt->cell_h * 2;
+	wt->cells		   = dst + 4;
+	wt->overrides	   = dst + 4 + (size_t)wt->cell_w * wt->cell_h * 2;
 
 	const size_t need =
 		4 + (size_t)wt->cell_w * wt->cell_h * 2 + (size_t)wt->override_count * 3;
@@ -839,9 +844,9 @@ static bool worldtile_accept(PnxMap* m, uint32_t i, uint8_t slot)
 		return false;
 	}
 
-	wt->wx = (uint8_t)(i % m->wt_cols);
-	wt->wy = (uint8_t)(i / m->wt_cols);
-	wt->live = true;
+	wt->wx		  = (uint8_t)(i % m->wt_cols);
+	wt->wy		  = (uint8_t)(i / m->wt_cols);
+	wt->live	  = true;
 	m->wt_slot[i] = slot;
 	return true;
 }
@@ -877,11 +882,11 @@ static bool worldtile_load_run(PnxMap* m, uint32_t first, uint8_t slot, uint8_t 
 	}
 
 	const uint16_t per_bank = (uint16_t)(1u << m->bank_shift);
-	const uint16_t bank = (uint16_t)(first >> m->bank_shift);
+	const uint16_t bank		= (uint16_t)(first >> m->bank_shift);
 	const size_t offset =
 		PNX_BLOB_HEADER_BYTES + (size_t)(first & (per_bank - 1)) * m->slot_bytes;
 	const size_t len = (size_t)count * m->slot_bytes;
-	uint8_t* dst = m->slot_mem + (size_t)slot * m->slot_bytes;
+	uint8_t* dst	 = m->slot_mem + (size_t)slot * m->slot_bytes;
 
 	const uint32_t resource = s_resources[m->first_bank_asset + bank];
 	if (pnx_platform_resource_read(resource, offset, dst, len) != len)
@@ -999,7 +1004,7 @@ static uint8_t stream_window(PnxMap* m, int32_t x, int32_t y, int32_t w, int32_t
 			// makes them consecutive in the bank, and stopping at the bank boundary because one
 			// read cannot cross two resources.
 			const uint32_t per_bank = 1u << m->bank_shift;
-			int32_t run = 1;
+			int32_t run				= 1;
 			while (wx + run <= x1 && m->wt_slot[first + run] == PNX_MAP_NO_SLOT &&
 				   ((first + run) >> m->bank_shift) == (first >> m->bank_shift) &&
 				   (uint32_t)run < per_bank && run < PNX_MAP_MAX_RUN)
@@ -1040,14 +1045,14 @@ static uint8_t stream_window(PnxMap* m, int32_t x, int32_t y, int32_t w, int32_t
 				// Nothing free at all. Evict the resident WorldTile furthest from the middle of
 				// what is wanted -- the one the player is walking away from, by construction --
 				// and take it alone.
-				run = 1;
+				run			   = 1;
 				uint32_t worst = 0;
 				for (uint8_t i = 0; i < m->slot_count; i++)
 				{
 					const uint32_t d = wt_distance(&m->slots[i], cx, cy);
 					if (slot == PNX_MAP_NO_SLOT || d > worst)
 					{
-						slot = i;
+						slot  = i;
 						worst = d;
 					}
 				}
@@ -1060,7 +1065,7 @@ static uint8_t stream_window(PnxMap* m, int32_t x, int32_t y, int32_t w, int32_t
 				wx++;
 				continue;
 			}
-			budget--;  // one READ, however many WorldTiles it carried
+			budget--; // one READ, however many WorldTiles it carried
 			wx += run;
 		}
 	}
@@ -1095,8 +1100,8 @@ uint8_t pnx_map_resident(const PnxMap* m)
 
 bool pnx_dialog_load(PnxDialog* out, uint16_t asset_id)
 {
-	uint8_t entries = 0;
-	size_t payload = 0;
+	uint8_t entries		= 0;
+	size_t payload		= 0;
 	const uint8_t* data = load_blob(asset_id, "PD", &entries, NULL, NULL, &payload);
 	if (!data)
 		return false;
@@ -1114,7 +1119,7 @@ bool pnx_dialog_load(PnxDialog* out, uint16_t asset_id)
 	uint16_t total_pages = 0;
 	for (uint16_t i = 0; i < entries; i++)
 	{
-		const uint8_t* e = data + (size_t)i * 4;
+		const uint8_t* e	 = data + (size_t)i * 4;
 		const uint16_t first = (uint16_t)(e[0] | (e[1] << 8));
 		const uint16_t count = (uint16_t)(e[2] | (e[3] << 8));
 		if (first + count > total_pages)
@@ -1128,9 +1133,9 @@ bool pnx_dialog_load(PnxDialog* out, uint16_t asset_id)
 		return false;
 	}
 
-	out->index = data;
-	out->offsets = (const uint16_t*)(const void*)(data + index_bytes);
-	out->text = data + index_bytes + (size_t)total_pages * 2;
+	out->index		 = data;
+	out->offsets	 = (const uint16_t*)(const void*)(data + index_bytes);
+	out->text		 = data + index_bytes + (size_t)total_pages * 2;
 	out->entry_count = entries;
 	return true;
 }
@@ -1159,7 +1164,7 @@ bool pnx_font_load(PnxFont* out, uint16_t asset_id)
 		return false;
 	}
 
-	const uint16_t glyphs = (uint16_t)(data[0] | (data[1] << 8));
+	const uint16_t glyphs		= (uint16_t)(data[0] | (data[1] << 8));
 	const uint16_t bitmap_bytes = (uint16_t)(data[2] | (data[3] << 8));
 	const uint8_t first_cp = data[4], last_cp = data[5];
 	const uint8_t fallback = data[6], space_advance = data[7];
@@ -1182,8 +1187,8 @@ bool pnx_font_load(PnxFont* out, uint16_t asset_id)
 	}
 
 	const size_t index_bytes = (size_t)glyphs * PNX_FONT_GLYPH_BYTES;
-	const size_t map_bytes = (size_t)(last_cp - first_cp) + 1u;
-	const size_t expected = 8 + index_bytes + map_bytes + bitmap_bytes;
+	const size_t map_bytes	 = (size_t)(last_cp - first_cp) + 1u;
+	const size_t expected	 = 8 + index_bytes + map_bytes + bitmap_bytes;
 	if (payload != expected)
 	{
 		pnx_log("font %u: %u glyphs, %u cp, %u bitmap bytes needs %u, blob has %u", asset_id,
@@ -1192,26 +1197,26 @@ bool pnx_font_load(PnxFont* out, uint16_t asset_id)
 		return false;
 	}
 
-	out->glyphs = data + 8;
-	out->map = data + 8 + index_bytes;
-	out->bitmaps = data + 8 + index_bytes + map_bytes;
-	out->glyph_count = glyphs;
-	out->bitmap_bytes = bitmap_bytes;
-	out->depth = depth;
-	out->line_height = line_height;
-	out->baseline = baseline;
+	out->glyphs		   = data + 8;
+	out->map		   = data + 8 + index_bytes;
+	out->bitmaps	   = data + 8 + index_bytes + map_bytes;
+	out->glyph_count   = glyphs;
+	out->bitmap_bytes  = bitmap_bytes;
+	out->depth		   = depth;
+	out->line_height   = line_height;
+	out->baseline	   = baseline;
 	out->space_advance = space_advance;
-	out->first_cp = first_cp;
-	out->last_cp = last_cp;
-	out->fallback = fallback;
-	out->advance = advance;
+	out->first_cp	   = first_cp;
+	out->last_cp	   = last_cp;
+	out->fallback	   = fallback;
+	out->advance	   = advance;
 
 	// Both tables are validated once, here, so the blitter can index them per pixel with
 	// no checks at all -- the same bargain pnx_atlas_load makes with palette slots. An
 	// out-of-range offset would otherwise read arbitrary arena memory as glyph pixels.
 	for (uint16_t i = 0; i < glyphs; i++)
 	{
-		const uint8_t* e = out->glyphs + (size_t)i * PNX_FONT_GLYPH_BYTES;
+		const uint8_t* e   = out->glyphs + (size_t)i * PNX_FONT_GLYPH_BYTES;
 		const uint16_t off = (uint16_t)(e[0] | (e[1] << 8));
 		const uint8_t w = e[2], h = e[3];
 		if (w == 0)
@@ -1264,7 +1269,7 @@ const char* pnx_dialog_page(const PnxDialog* d, uint16_t entry, uint16_t page)
 {
 	if (entry >= d->entry_count)
 		return NULL;
-	const uint8_t* e = d->index + (size_t)entry * 4;
+	const uint8_t* e	 = d->index + (size_t)entry * 4;
 	const uint16_t first = (uint16_t)(e[0] | (e[1] << 8));
 	const uint16_t count = (uint16_t)(e[2] | (e[3] << 8));
 	if (page >= count)
@@ -1282,10 +1287,10 @@ bool pnx_scenes_load(uint16_t asset_id)
 	// Read into the PERSISTENT arena: the table has to survive the scene resets it
 	// drives, which is the whole reason the two arenas are separate.
 	PnxArena* saved = s_arena;
-	s_arena = s_persistent;
+	s_arena			= s_persistent;
 
-	uint8_t count = 0;
-	size_t payload = 0;
+	uint8_t count		= 0;
+	size_t payload		= 0;
 	const uint8_t* data = load_blob(asset_id, "PC", &count, NULL, NULL, &payload);
 
 	s_arena = saved;
@@ -1314,7 +1319,7 @@ bool pnx_scene_load(uint16_t scene_id)
 
 	const uint8_t* entry = s_scene_table + (size_t)scene_id * 4;
 	const uint16_t first = (uint16_t)(entry[0] | (entry[1] << 8));
-	const uint8_t count = entry[2];
+	const uint8_t count	 = entry[2];
 	const uint16_t* ids =
 		(const uint16_t*)(const void*)(s_scene_table + (size_t)s_scene_count * 4);
 
@@ -1323,8 +1328,8 @@ bool pnx_scene_load(uint16_t scene_id)
 	pnx_arena_reset(s_arena);
 	s_atlas_count = s_sprite_count = s_font_count = 0;
 	s_have_map = s_have_dialog = false;
-	s_palettes = NULL;
-	s_palette_count = 0;
+	s_palettes				   = NULL;
+	s_palette_count			   = 0;
 
 	// Palettes first: atlases and sprites carry indices into them, and refuse to load
 	// before the table exists.
@@ -1334,7 +1339,7 @@ bool pnx_scene_load(uint16_t scene_id)
 	for (uint8_t i = 0; i < count; i++)
 	{
 		const uint16_t asset = ids[first + i];
-		size_t size = 0;
+		size_t size			 = 0;
 		if (!pnx_platform_resource_size(s_resources[asset], &size) || size < 3)
 		{
 			pnx_log("scene %u: asset %u unreadable", scene_id, asset);
@@ -1353,14 +1358,14 @@ bool pnx_scene_load(uint16_t scene_id)
 			// tilesets it draws with -- so the asset id it came from is not kept. It is here for
 			// whatever else a scene wants a resident tileset for.
 			ok = s_atlas_count < PNX_SCENE_MAX_ATLASES &&
-				 pnx_atlas_load(&s_atlases[s_atlas_count], asset);
+				pnx_atlas_load(&s_atlases[s_atlas_count], asset);
 			if (ok)
 				s_atlas_count++;
 		}
 		else if (magic[0] == 'P' && magic[1] == 'S')
 		{
 			ok = s_sprite_count < PNX_SCENE_MAX_SPRITES &&
-				 pnx_sprite_load(&s_sprites[s_sprite_count], asset);
+				pnx_sprite_load(&s_sprites[s_sprite_count], asset);
 			if (ok)
 				s_sprite_count++;
 		}
@@ -1368,18 +1373,18 @@ bool pnx_scene_load(uint16_t scene_id)
 		{
 			// A map names and owns its own tilesets, so there is nothing to pair here any more.
 			// The scene's job ends at loading it; the map's pools do the rest.
-			ok = pnx_map_load(&s_map, asset);
+			ok		   = pnx_map_load(&s_map, asset);
 			s_have_map = ok;
 		}
 		else if (magic[0] == 'P' && magic[1] == 'D')
 		{
-			ok = pnx_dialog_load(&s_dialog, asset);
+			ok			  = pnx_dialog_load(&s_dialog, asset);
 			s_have_dialog = ok;
 		}
 		else if (magic[0] == 'P' && magic[1] == 'F')
 		{
 			ok = s_font_count < PNX_SCENE_MAX_FONTS &&
-				 pnx_font_load(&s_fonts[s_font_count], asset);
+				pnx_font_load(&s_fonts[s_font_count], asset);
 			if (ok)
 				s_font_count++;
 		}
@@ -1431,4 +1436,4 @@ uint8_t pnx_scene_font_count(void)
 	return s_font_count;
 }
 
-#endif	// PNX_USE_ASSETS
+#endif // PNX_USE_ASSETS

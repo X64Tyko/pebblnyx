@@ -16,7 +16,7 @@
 
 // clock_gettime is POSIX, not ISO C, and -std=c11 hides it without this. The name and
 // leading underscore are POSIX's, not a choice available here -- NOLINT
-#define _POSIX_C_SOURCE 200809L	 // NOLINT
+#define _POSIX_C_SOURCE 200809L // NOLINT
 
 #include "pnx_platform.h"
 #include "pnx_platform_host.h"
@@ -73,7 +73,7 @@ PnxRow pnx_target_row(PnxTarget* t, int16_t y)
 	PnxRow row = { 0 };
 	if (!t || y < 0 || y >= t->h)
 		return row;
-	row.data = t->pixels + (size_t)y * t->w;
+	row.data  = t->pixels + (size_t)y * t->w;
 	row.min_x = 0;
 	row.max_x = (int16_t)(t->w - 1);
 	return row;
@@ -104,7 +104,7 @@ void pnx_host_register_resource(uint32_t resource_id, const char* path)
 	if (s_resource_count >= MAX_RESOURCES || !path)
 		return;
 	HostResource* r = &s_resources[s_resource_count++];
-	r->id = resource_id;
+	r->id			= resource_id;
 	strncpy(r->path, path, sizeof(r->path) - 1);
 	r->path[sizeof(r->path) - 1] = '\0';
 }
@@ -211,8 +211,8 @@ static HostPersistSlot* persist_find(uint32_t key, bool create)
 	if (!create || free_slot < 0)
 		return NULL;
 	s_persist[free_slot].used = true;
-	s_persist[free_slot].key = key;
-	s_persist[free_slot].len = 0;
+	s_persist[free_slot].key  = key;
+	s_persist[free_slot].len  = 0;
 	return &s_persist[free_slot];
 }
 
@@ -253,7 +253,7 @@ bool pnx_platform_persist_delete(uint32_t key)
 		return false;
 	s_persist_deletes++;
 	s->used = false;
-	s->len = 0;
+	s->len	= 0;
 	return true;
 }
 
@@ -304,14 +304,14 @@ void pnx_platform_run(PnxFrameFn frame, void* ctx)
 {
 	// Runs a bounded number of frames rather than forever, so a test that forgets to
 	// quit fails fast instead of hanging a CI job.
-	s_quit = false;
+	s_quit		  = false;
 	uint32_t last = pnx_platform_now_ms();
 
 	for (int i = 0; i < 1000 && !s_quit; i++)
 	{
-		const uint32_t now = pnx_platform_now_ms();
+		const uint32_t now	   = pnx_platform_now_ms();
 		const uint32_t elapsed = now - last;
-		last = now;
+		last				   = now;
 		if (frame)
 			frame(ctx, elapsed ? elapsed : 1, &s_target);
 	}
@@ -356,7 +356,7 @@ const char* pnx_host_last_text(void)
 	return s_last_text;
 }
 
-#endif	// PNX_USE_SDK_TEXT
+#endif // PNX_USE_SDK_TEXT
 
 void pnx_platform_set_post_frame_fn(PnxPostFrameFn fn)
 {
@@ -378,7 +378,7 @@ bool pnx_platform_audio_open(PnxAudioFormat format, uint8_t volume)
 {
 	(void)format;
 	(void)volume;
-	s_audio_open = true;
+	s_audio_open  = true;
 	s_audio_total = 0;
 	return true;
 }
@@ -442,9 +442,9 @@ void pnx_host_reset(void)
 {
 	s_resource_count = 0;
 	s_resource_reads = 0;
-	s_queued_count = 0;
-	s_queued_read = 0;
-	s_quit = false;
+	s_queued_count	 = 0;
+	s_queued_read	 = 0;
+	s_quit			 = false;
 	memset(s_pixels, 0, sizeof(s_pixels));
 	memset(s_persist, 0, sizeof(s_persist));
 	s_persist_writes = s_persist_reads = s_persist_deletes = 0;
@@ -455,4 +455,4 @@ PnxTarget* pnx_host_target(void)
 	return &s_target;
 }
 
-#endif	// PNX_PLATFORM_HOST
+#endif // PNX_PLATFORM_HOST

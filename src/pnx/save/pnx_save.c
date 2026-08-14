@@ -28,7 +28,7 @@ static uint32_t key_for(PnxSaveSlot slot, uint8_t chunk)
 // nothing worth measuring next to a persist write.
 static uint16_t checksum16(const uint8_t* data, size_t len)
 {
-	uint16_t sum = 0x5A5A;	// non-zero seed so an all-zero payload does not checksum to 0
+	uint16_t sum = 0x5A5A; // non-zero seed so an all-zero payload does not checksum to 0
 	for (size_t i = 0; i < len; i++)
 	{
 		sum = (uint16_t)((sum << 1) | (sum >> 15));
@@ -85,7 +85,7 @@ static bool write_chunk(void)
 		const size_t offset =
 			PNX_SAVE_CHUNK0_PAYLOAD + (size_t)(chunk - 1) * PNX_PERSIST_KEY_BYTES;
 		const size_t remaining = s_writer.bytes - offset;
-		const size_t n = remaining < PNX_PERSIST_KEY_BYTES ? remaining : PNX_PERSIST_KEY_BYTES;
+		const size_t n		   = remaining < PNX_PERSIST_KEY_BYTES ? remaining : PNX_PERSIST_KEY_BYTES;
 		memcpy(buf, s_writer.data + offset, n);
 		buf_len = n;
 	}
@@ -119,17 +119,17 @@ bool pnx_save_begin(PnxSaveSlot slot, const void* data, size_t bytes, uint8_t ve
 	if (bytes > PNX_SAVE_CHUNK0_PAYLOAD)
 	{
 		const size_t rest = bytes - PNX_SAVE_CHUNK0_PAYLOAD;
-		chunk_count = (uint8_t)(1 + (rest + PNX_PERSIST_KEY_BYTES - 1) / PNX_PERSIST_KEY_BYTES);
+		chunk_count		  = (uint8_t)(1 + (rest + PNX_PERSIST_KEY_BYTES - 1) / PNX_PERSIST_KEY_BYTES);
 	}
 
-	s_writer.active = true;
-	s_writer.slot = slot;
-	s_writer.data = (const uint8_t*)data;
-	s_writer.bytes = (uint16_t)bytes;
+	s_writer.active		 = true;
+	s_writer.slot		 = slot;
+	s_writer.data		 = (const uint8_t*)data;
+	s_writer.bytes		 = (uint16_t)bytes;
 	s_writer.chunk_count = chunk_count;
-	s_writer.next_chunk = 0;
-	s_writer.version = version;
-	s_writer.checksum = checksum16(s_writer.data, bytes);
+	s_writer.next_chunk	 = 0;
+	s_writer.version	 = version;
+	s_writer.checksum	 = checksum16(s_writer.data, bytes);
 
 	return write_chunk();
 }
@@ -202,9 +202,9 @@ bool pnx_save_load(PnxSaveSlot slot, void* out, size_t max_bytes, uint8_t versio
 	if (got0 < PNX_SAVE_HEADER_BYTES || buf0[0] != 'P' || buf0[1] != 'S')
 		return false;
 
-	const uint8_t file_version = buf0[2];
-	const uint8_t chunk_count = buf0[3];
-	const uint16_t payload_bytes = (uint16_t)(buf0[4] | (buf0[5] << 8));
+	const uint8_t file_version	   = buf0[2];
+	const uint8_t chunk_count	   = buf0[3];
+	const uint16_t payload_bytes   = (uint16_t)(buf0[4] | (buf0[5] << 8));
 	const uint16_t stored_checksum = (uint16_t)(buf0[6] | (buf0[7] << 8));
 
 	if (file_version > version)
@@ -230,7 +230,7 @@ bool pnx_save_load(PnxSaveSlot slot, void* out, size_t max_bytes, uint8_t versio
 		if (!pnx_platform_persist_read(key_for(slot, c), buf, sizeof(buf), &got))
 			return false;
 		const size_t remaining = payload_bytes - have;
-		const size_t n = remaining < got ? remaining : got;
+		const size_t n		   = remaining < got ? remaining : got;
 		memcpy((uint8_t*)out + have, buf, n);
 		have += n;
 	}
@@ -259,4 +259,4 @@ bool pnx_save_delete(PnxSaveSlot slot)
 	return any;
 }
 
-#endif	// PNX_USE_SAVE
+#endif // PNX_USE_SAVE

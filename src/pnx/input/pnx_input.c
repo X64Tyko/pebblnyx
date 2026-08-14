@@ -8,16 +8,16 @@
 // because there are three cases and they are not a formula -- the middle button is always
 // SELECT, and only the ends swap. See the header for why buttons_bottom reverses.
 static const uint8_t s_cluster[PNX_ORIENT_COUNT][PNX_CLUSTER_SIZE] = {
-	{ PNX_BUTTON_UP, PNX_BUTTON_SELECT, PNX_BUTTON_DOWN },	// buttons_right
-	{ PNX_BUTTON_UP, PNX_BUTTON_SELECT, PNX_BUTTON_DOWN },	// buttons_top
-	{ PNX_BUTTON_DOWN, PNX_BUTTON_SELECT, PNX_BUTTON_UP },	// buttons_bottom
+	{ PNX_BUTTON_UP, PNX_BUTTON_SELECT, PNX_BUTTON_DOWN }, // buttons_right
+	{ PNX_BUTTON_UP, PNX_BUTTON_SELECT, PNX_BUTTON_DOWN }, // buttons_top
+	{ PNX_BUTTON_DOWN, PNX_BUTTON_SELECT, PNX_BUTTON_UP }, // buttons_bottom
 };
 
 static uint8_t s_orientation;
 static bool s_held[PNX_BUTTON_COUNT];
 static bool s_pressed[PNX_BUTTON_COUNT];
 static bool s_released[PNX_BUTTON_COUNT];
-static uint32_t s_since[PNX_BUTTON_COUNT];	// delivery stamp of the press
+static uint32_t s_since[PNX_BUTTON_COUNT]; // delivery stamp of the press
 
 void pnx_input_init(uint8_t orientation)
 {
@@ -47,14 +47,14 @@ void pnx_input_event(const PnxEvent* ev)
 		// simply never reach its threshold.
 		if (!s_held[ev->button])
 			s_since[ev->button] = ev->time_ms;
-		s_held[ev->button] = true;
+		s_held[ev->button]	  = true;
 		s_pressed[ev->button] = true;
 	}
 	else if (ev->type == PNX_EVENT_BUTTON_UP)
 	{
-		s_held[ev->button] = false;
+		s_held[ev->button]	   = false;
 		s_released[ev->button] = true;
-		s_since[ev->button] = 0;
+		s_since[ev->button]	   = 0;
 	}
 }
 
@@ -91,16 +91,16 @@ PnxButton pnx_input_cluster(uint8_t pos)
 
 int8_t pnx_input_axis(void)
 {
-	const bool low = pnx_input_held(pnx_input_cluster(0));
+	const bool low	= pnx_input_held(pnx_input_cluster(0));
 	const bool high = pnx_input_held(pnx_input_cluster(2));
 	return (int8_t)((high ? 1 : 0) - (low ? 1 : 0));
 }
 
 int8_t pnx_input_axis_pressed(void)
 {
-	const bool low = pnx_input_pressed(pnx_input_cluster(0));
+	const bool low	= pnx_input_pressed(pnx_input_cluster(0));
 	const bool high = pnx_input_pressed(pnx_input_cluster(2));
 	return (int8_t)((high ? 1 : 0) - (low ? 1 : 0));
 }
 
-#endif	// PNX_USE_INPUT
+#endif // PNX_USE_INPUT

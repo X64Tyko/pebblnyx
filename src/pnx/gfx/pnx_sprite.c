@@ -39,7 +39,7 @@ void pnx_sprites_draw_sorted(const PnxSpriteInstance* instances, uint8_t count, 
 	for (uint8_t i = 1; i < n; i++)
 	{
 		const uint8_t key = order[i];
-		int16_t j = (int16_t)i - 1;
+		int16_t j		  = (int16_t)i - 1;
 		while (j >= 0 && instances[order[j]].y > instances[key].y)
 		{
 			order[j + 1] = order[j];
@@ -51,7 +51,7 @@ void pnx_sprites_draw_sorted(const PnxSpriteInstance* instances, uint8_t count, 
 	for (uint8_t k = 0; k < n; k++)
 	{
 		const PnxSpriteInstance* s = &instances[order[k]];
-		const PnxSprite* asset = pnx_scene_sprite(s->sprite);
+		const PnxSprite* asset	   = pnx_scene_sprite(s->sprite);
 		if (!asset)
 			continue;
 
@@ -63,4 +63,4 @@ void pnx_sprites_draw_sorted(const PnxSpriteInstance* instances, uint8_t count, 
 	}
 }
 
-#endif	// PNX_USE_SPRITES
+#endif // PNX_USE_SPRITES

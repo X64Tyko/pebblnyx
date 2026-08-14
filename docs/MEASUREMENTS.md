@@ -229,10 +229,90 @@ reason. The O(offset) finding above says why a small streaming unit beats one bi
 resource for a *given offset*; this says a large single resource is expensive even at
 offset 0.
 
-**Still wanted:** a sweep across resource SIZE at a fixed offset (say four resources at
-8KB/32KB/128KB/220KB, all read at offset 0) would confirm or kill the CRC hypothesis
-directly -- if flat-per-resource cost scales with that resource's own size, the hypothesis
-holds; if the four come back similar, it does not and the real mechanism is still open.
+**Resolved: it is O(resource size), not O(offset).** `flashbench` v2 reads five resources
+of different total sizes (8/32/75/150/220 KB), each at a near-origin offset and a
+two-thirds-deep one, fixed 256B length throughout -- the same design that would kill or
+confirm the CRC hypothesis. Measured on `emery`, 2026-08-14, 30 calls per point:
+
+| Size | Near | Deep | Deep/near |
+|---|---|---|---|
+| 8 KB | 2,266 µs | 2,433 µs | 1.0x |
+| 32 KB | 7,100 µs | 7,033 µs | 0.9x |
+| 75 KB | 14,666 µs | 15,066 µs | 1.0x |
+| 150 KB | 28,300 µs | 29,000 µs | 1.0x |
+| 220 KB | 40,600 µs | 40,000 µs | 0.9x |
+
+Offset genuinely does not matter, at any size tested -- near and deep agree within noise
+at every point, matching v1's flat sweep exactly. Size does: a linear fit across the five
+(least-squares, averaging near/deep per size) gives
+
+```
+cost ≈ 1,257 µs + 179 µs/KB          (R² good: 4 of 5 points within 2%, 8KB within 13%)
+```
+
+implying an effective **~5.7 MB/s** whole-resource touch rate -- close to the ~5.6 MB/s
+guessed from the single-resource magnitude above, now backed by five independent sizes
+instead of one. This is consistent with the CRC-of-entire-content hypothesis (a per-call
+validation pass over the whole resource, not the requested range) though the mechanism
+itself is still not verified against PebbleOS firmware source -- what changed is the
+*shape*: O(size), not O(offset), is no longer the best guess, it is what the controlled
+sweep shows.
+
+**This also reopens the original WorldTile numbers, and mostly resolves them.** Two of
+the three original rows are a 75KB-resource read, so the new model predicts
+1,257 + 179×75 ≈ **14.7 ms/call** for every one of them, regardless of where in the
+resource each individual tile lived:
+
+| Row | Actual | Actual /call | Predicted (75KB) | Ratio |
+|---|---|---|---|---|
+| 9 WorldTiles at the map's origin | 46 ms / 16 calls | 2.9 ms | 14.7 ms | **0.20x** |
+| 16 WorldTiles at tile 142,52 (2/3 in) | 305 ms / 19 calls | 16.1 ms | 14.7 ms | 1.09x |
+| all 144 WorldTiles | 1,984 ms / 148 calls | 13.4 ms | 14.7 ms | 0.91x |
+
+The "depth" and "all 144" rows land within 10% of the O(size) prediction -- a good match
+for a coarse, session-log-inferred number being checked against a cleanly bracketed one.
+The "origin" row is the actual outlier, and it is **cheaper** than the model by 5x, not
+more expensive -- the opposite of what the original O(offset) story needed to be true.
+
+**Ruled out: it is not pack position either.** v2 declared its five sizes in ascending
+order, and `pbpack.py`'s own `finalize()` assigns offsets by walking resources in
+declaration order, each placed right after the last -- so the biggest resource was also
+always the one with the most other content in front of it. Size and position were never
+actually separated. `flashbench` v3 does: five **identical** 8KB probes (the real
+WorldTile bank size), each declared behind a different amount of padding -- 0, 50, 100,
+150, 200 KB. Verified directly against the built `.pbpack` (deserialized with the SDK's
+own `pbpack.py`) that the probes land at exactly those offsets before trusting the run --
+a first attempt filled every probe and padding file with the same content and the packer
+silently deduplicated all of them onto two physical copies, which would have made the
+result meaningless. Measured on `emery`, 2026-08-14, 30 calls per point:
+
+| Preceding | Cost |
+|---|---|
+| 0 KB | 2,566 µs |
+| 50 KB | 2,066 µs |
+| 100 KB | 2,366 µs |
+| 150 KB | 2,466 µs |
+| 200 KB | 2,800 µs |
+
+Flat -- 200KB/0KB ratio 1.0x, fitted slope ~1 µs/KB of preceding content, noise. Position
+in the pack does not matter. This closes the question rather than reopening it: size is
+confirmed as the driver against both alternatives that could have explained it away
+(offset within a resource, and now position within the pack), and the "origin" row's
+5x-cheaper anomaly goes back to being explained by call mix rather than position -- that
+first batch of WorldTiles necessarily also paid for loading whichever atlas(es) the
+initial view touched (each its own, much smaller resource, not yet resident), while
+"depth" and "all 144" reused already-resident atlases and paid the full map-resource cost
+on every call. Not confirmed at the individual-call level -- only the row totals survived
+from that original session-log measurement -- but no longer competing against a live
+alternative mechanism.
+
+**Bottom line:** the O(offset) framing that motivated M4d's banking fix was very likely
+the wrong mechanism, arrived at from one coarse measurement with an atlas-loading
+confound -- but the fix it produced (split large payloads into small resources) is still
+exactly correct, for the mechanism this sweep actually found: cost scales with a
+resource's own size on *every* call to it, independent of both where in the resource you
+read and where in the pack the resource itself sits, so the way to make reads cheap is to
+keep the resources themselves small.
 
 ## Persist: writes are ~116x slower than reads **(replicated, 3 runs)**
 

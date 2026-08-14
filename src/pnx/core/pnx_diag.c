@@ -74,8 +74,8 @@ void pnx_diag_flush(void)
 	}
 	pnx_platform_log("--- end buffered log ---");
 
-	s_count = 0;
-	s_head = 0;
+	s_count	  = 0;
+	s_head	  = 0;
 	s_flushed = true;
 }
 
@@ -107,15 +107,15 @@ void pnx_diag_frame(uint32_t frame_ms, uint32_t work_ms)
 
 	// Averaged over a window rather than per frame: the clock has 1ms resolution, so a
 	// single frame's work is mostly quantisation noise.
-	s_stats.fps_x10 = (s_window_frames * 10000u) / s_window_ms;
+	s_stats.fps_x10	 = (s_window_frames * 10000u) / s_window_ms;
 	s_stats.frame_us = (s_window_ms * 1000u) / s_window_frames;
-	s_stats.work_us = (s_window_work_ms * 1000u) / s_window_frames;
+	s_stats.work_us	 = (s_window_work_ms * 1000u) / s_window_frames;
 	s_stats.worst_us = s_window_worst_ms * 1000u;
-	s_stats.frames = s_window_frames;
+	s_stats.frames	 = s_window_frames;
 
-	s_window_ms = 0;
-	s_window_frames = 0;
-	s_window_work_ms = 0;
+	s_window_ms		  = 0;
+	s_window_frames	  = 0;
+	s_window_work_ms  = 0;
 	s_window_worst_ms = 0;
 }
 
@@ -124,4 +124,4 @@ const PnxFrameStats* pnx_diag_stats(void)
 	return &s_stats;
 }
 
-#endif	// PNX_USE_DIAGNOSTICS
+#endif // PNX_USE_DIAGNOSTICS

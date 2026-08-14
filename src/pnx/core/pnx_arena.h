@@ -16,12 +16,12 @@
 
 typedef struct
 {
-	uint8_t* base;	// aligned start of usable space
-	uint8_t* raw;	// the malloc'd pointer, for free()
+	uint8_t* base; // aligned start of usable space
+	uint8_t* raw;  // the malloc'd pointer, for free()
 	size_t capacity;
 	size_t used;
-	size_t peak;	   // high-water mark, for budgeting
-	const char* name;  // for diagnostics
+	size_t peak;	  // high-water mark, for budgeting
+	const char* name; // for diagnostics
 } PnxArena;
 
 // `align` must be a power of two. 4 is right for almost everything here: cache-line

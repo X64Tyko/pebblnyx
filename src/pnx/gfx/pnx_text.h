@@ -78,4 +78,4 @@ int16_t pnx_text_draw_wrapped(PnxTarget* t, const PnxFont* f, const char* s, int
 							  int32_t y, int16_t w, int16_t h, uint8_t colour,
 							  PnxTextAlign align);
 
-#endif	// PNX_USE_TEXT
+#endif // PNX_USE_TEXT

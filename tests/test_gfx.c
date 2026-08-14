@@ -55,7 +55,14 @@ void test_gfx(void);
 
 // A 4x4 image: left half palette index 1, right half transparent.
 static const uint8_t HALF[8] = {
-	0x11, 0x00, 0x11, 0x00, 0x11, 0x00, 0x11, 0x00,
+	0x11,
+	0x00,
+	0x11,
+	0x00,
+	0x11,
+	0x00,
+	0x11,
+	0x00,
 };
 
 static uint8_t pixel_at(PnxTarget* t, int16_t x, int16_t y)
@@ -70,8 +77,8 @@ void test_gfx(void)
 
 	PnxPalette pal;
 	memset(&pal, 0, sizeof(pal));
-	pal.entries[0] = 0x00;	// transparent, never written
-	pal.entries[1] = 0xFF;	// opaque white
+	pal.entries[0] = 0x00; // transparent, never written
+	pal.entries[1] = 0xFF; // opaque white
 
 	pnx_host_reset();
 	PnxTarget* t = pnx_host_target();
@@ -79,9 +86,9 @@ void test_gfx(void)
 	// --- transparency: index 0 must leave the destination untouched
 	pnx_gfx_clear(t, 0x40);
 	pnx_blit_4bpp(t, HALF, &pal, 10, 10, 4, 4, false);
-	G_CHECK_EQ(pixel_at(t, 10, 10), 0xFF);	// opaque half drawn
+	G_CHECK_EQ(pixel_at(t, 10, 10), 0xFF); // opaque half drawn
 	G_CHECK_EQ(pixel_at(t, 11, 10), 0xFF);
-	G_CHECK_EQ(pixel_at(t, 12, 10), 0x40);	// transparent half preserved
+	G_CHECK_EQ(pixel_at(t, 12, 10), 0x40); // transparent half preserved
 	G_CHECK_EQ(pixel_at(t, 13, 10), 0x40);
 
 	// --- mirroring swaps which half is opaque
@@ -95,12 +102,12 @@ void test_gfx(void)
 	static const uint8_t topbar[8] = { 0x11, 0x11, 0x11, 0x11, 0x00, 0x00, 0x00, 0x00 };
 	pnx_gfx_clear(t, 0x40);
 	pnx_blit_4bpp(t, topbar, &pal, 10, 10, 4, 4, PNX_FLIP_NONE);
-	G_CHECK_EQ(pixel_at(t, 10, 10), 0xFF);	// row 0 opaque
-	G_CHECK_EQ(pixel_at(t, 10, 13), 0x40);	// row 3 transparent
+	G_CHECK_EQ(pixel_at(t, 10, 10), 0xFF); // row 0 opaque
+	G_CHECK_EQ(pixel_at(t, 10, 13), 0x40); // row 3 transparent
 
 	pnx_gfx_clear(t, 0x40);
 	pnx_blit_4bpp(t, topbar, &pal, 10, 10, 4, 4, PNX_FLIP_Y);
-	G_CHECK_EQ(pixel_at(t, 10, 10), 0x40);	// now row 3's content
+	G_CHECK_EQ(pixel_at(t, 10, 10), 0x40); // now row 3's content
 	G_CHECK_EQ(pixel_at(t, 10, 13), 0xFF);
 
 	// Clipped at the top edge, which is where flip Y is easy to get wrong: the vertical clip
@@ -121,9 +128,9 @@ void test_gfx(void)
 	// --- clipping off every edge must draw nothing outside the target and not crash
 	pnx_gfx_clear(t, 0x40);
 	pnx_blit_4bpp(t, HALF, &pal, -2, -2, 4, 4, false);
-	G_CHECK_EQ(pixel_at(t, 0, 0), 0x40);  // the opaque half is off-screen left
+	G_CHECK_EQ(pixel_at(t, 0, 0), 0x40); // the opaque half is off-screen left
 	pnx_blit_4bpp(t, HALF, &pal, 198, 226, 4, 4, false);
-	G_CHECK_EQ(pixel_at(t, 198, 226), 0xFF);  // partially on, bottom-right
+	G_CHECK_EQ(pixel_at(t, 198, 226), 0xFF); // partially on, bottom-right
 
 	// Fully off-screen in each direction: the target must be untouched.
 	pnx_gfx_clear(t, 0x40);
@@ -164,29 +171,29 @@ void test_gfx(void)
 
 		PnxAtlas meta;
 		memset(&meta, 0, sizeof(meta));
-		meta.pixels = bank;
-		meta.metatiles = defs;
-		meta.tile_count = 1;
+		meta.pixels		   = bank;
+		meta.metatiles	   = defs;
+		meta.tile_count	   = 1;
 		meta.subtile_count = 4;
-		meta.tile_px = 16;
-		meta.tile_bytes = 128;
-		meta.sub_bytes = 32;
+		meta.tile_px	   = 16;
+		meta.tile_bytes	   = 128;
+		meta.sub_bytes	   = 32;
 
 		// pnx_atlas_tile_palette goes through the loaded palette table, so point the atlas
 		// at slot 0 and load a table containing our palette.
 		static uint8_t slot = 0;
-		meta.tile_palette = &slot;
+		meta.tile_palette	= &slot;
 
 		G_CHECK(pnx_atlas_is_metatiled(&meta));
-		G_CHECK(pnx_atlas_tile(&meta, 0) == NULL);	// no contiguous whole tile exists
+		G_CHECK(pnx_atlas_tile(&meta, 0) == NULL); // no contiguous whole tile exists
 
 		pnx_gfx_clear(t, 0x00);
 		pnx_blit_metatile_with(t, &meta, 0, &mp, 40, 40);
 
-		G_CHECK_EQ(pixel_at(t, 40, 40), 0xC1);	// top-left  -> quadrant 0
-		G_CHECK_EQ(pixel_at(t, 52, 40), 0xC2);	// top-right -> quadrant 1
-		G_CHECK_EQ(pixel_at(t, 40, 52), 0xC3);	// bottom-left
-		G_CHECK_EQ(pixel_at(t, 52, 52), 0xC4);	// bottom-right
+		G_CHECK_EQ(pixel_at(t, 40, 40), 0xC1); // top-left  -> quadrant 0
+		G_CHECK_EQ(pixel_at(t, 52, 40), 0xC2); // top-right -> quadrant 1
+		G_CHECK_EQ(pixel_at(t, 40, 52), 0xC3); // bottom-left
+		G_CHECK_EQ(pixel_at(t, 52, 52), 0xC4); // bottom-right
 
 		// Clipped off the left edge: the right quadrants must still land correctly.
 		pnx_gfx_clear(t, 0x00);
@@ -206,15 +213,15 @@ void test_gfx(void)
 	pnx_camera_init(&cam, 200, 228);
 
 	pnx_camera_center(&cam, 0, 0, 1000, 1000);
-	G_CHECK_EQ(cam.x, 0);  // clamped at the near edge
+	G_CHECK_EQ(cam.x, 0); // clamped at the near edge
 	G_CHECK_EQ(cam.y, 0);
 
 	pnx_camera_center(&cam, 1000, 1000, 1000, 1000);
-	G_CHECK_EQ(cam.x, 1000 - 200);	// clamped at the far edge
+	G_CHECK_EQ(cam.x, 1000 - 200); // clamped at the far edge
 	G_CHECK_EQ(cam.y, 1000 - 228);
 
 	pnx_camera_center(&cam, 500, 500, 1000, 1000);
-	G_CHECK_EQ(cam.x, 400);	 // centred when it can be
+	G_CHECK_EQ(cam.x, 400); // centred when it can be
 	G_CHECK_EQ(cam.y, 386);
 
 	// A world smaller than the view must pin at 0, not clamp to a negative maximum and
@@ -292,7 +299,7 @@ static void test_tilemap(void)
 	// --- the ship: two atlases, and a WorldTile boundary down the middle of the screen
 	PnxMap ship;
 	G_CHECK(pnx_map_load(&ship, PNX_ASSET_MAP_DECK));
-	G_CHECK(ship.wt_cols > 1);	// there has to BE a boundary to draw across
+	G_CHECK(ship.wt_cols > 1); // there has to BE a boundary to draw across
 	G_CHECK_EQ(pnx_map_stream_now(&ship, 0, 0, 200, 228), 0);
 
 	// Note there is no "load it and draw before streaming" case to test here: `deck` fits

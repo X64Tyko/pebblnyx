@@ -36,11 +36,11 @@ void pnx_diag_frame(uint32_t frame_ms, uint32_t work_ms);
 
 typedef struct
 {
-	uint32_t fps_x10;	// frames per second, times ten
-	uint32_t frame_us;	// mean whole-frame period
-	uint32_t work_us;	// mean time inside our callback
-	uint32_t worst_us;	// worst callback in the current window
-	uint32_t frames;	// frames in the completed window
+	uint32_t fps_x10;  // frames per second, times ten
+	uint32_t frame_us; // mean whole-frame period
+	uint32_t work_us;  // mean time inside our callback
+	uint32_t worst_us; // worst callback in the current window
+	uint32_t frames;   // frames in the completed window
 } PnxFrameStats;
 
 const PnxFrameStats* pnx_diag_stats(void);
@@ -54,4 +54,4 @@ const PnxFrameStats* pnx_diag_stats(void);
 #define pnx_diag_frame(a, b) ((void)0)
 #define pnx_diag_stats()	 (NULL)
 
-#endif	// PNX_USE_DIAGNOSTICS
+#endif // PNX_USE_DIAGNOSTICS

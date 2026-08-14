@@ -27,11 +27,11 @@ bool pnx_arena_init(PnxArena* a, const char* name, size_t capacity, size_t align
 		return false;
 
 	const uintptr_t aligned = align_up((uintptr_t)a->raw, align);
-	a->base = (uint8_t*)aligned;
-	a->capacity = capacity;
-	a->used = 0;
-	a->peak = 0;
-	a->name = name;
+	a->base					= (uint8_t*)aligned;
+	a->capacity				= capacity;
+	a->used					= 0;
+	a->peak					= 0;
+	a->name					= name;
 	return true;
 }
 
@@ -50,7 +50,7 @@ void* pnx_arena_alloc(PnxArena* a, size_t bytes, size_t align)
 
 	const size_t start = align_up(a->used, align);
 	if (start + bytes > a->capacity)
-		return NULL;  // caller decides how to fail
+		return NULL; // caller decides how to fail
 
 	void* p = a->base + start;
 	a->used = start + bytes;

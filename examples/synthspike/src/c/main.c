@@ -70,8 +70,14 @@
 // The synth's own slot bounds check swallowed the extra calls, so it was inaudible, and it
 // stayed that way until -Werror=aggressive-loop-optimizations named it.
 static const uint8_t PHRASE[8][PNX_SYNTH_SLOTS] = {
-	{ 45, 57, 64, 69 }, { 45, 57, 64, 72 }, { 43, 55, 62, 67 }, { 43, 55, 62, 70 },
-	{ 41, 53, 60, 65 }, { 41, 53, 60, 69 }, { 40, 52, 59, 64 }, { 40, 52, 59, 67 },
+	{ 45, 57, 64, 69 },
+	{ 45, 57, 64, 72 },
+	{ 43, 55, 62, 67 },
+	{ 43, 55, 62, 70 },
+	{ 41, 53, 60, 65 },
+	{ 41, 53, 60, 69 },
+	{ 40, 52, 59, 64 },
+	{ 40, 52, 59, 67 },
 };
 #define STEP_MS 500u
 
@@ -84,7 +90,7 @@ _Static_assert(sizeof(PHRASE[0]) / sizeof(PHRASE[0][0]) == PNX_SYNTH_SLOTS,
 typedef struct
 {
 	const char* name;
-	bool silent;  // measured with no voices sounding: the loop's own floor
+	bool silent; // measured with no voices sounding: the loop's own floor
 	PnxSynthConfig cfg;
 	uint32_t ns;
 	uint32_t pct;
@@ -126,39 +132,39 @@ static void add_case(App* a, const char* name, PnxSynthConfig cfg)
 	if (a->case_count >= 12)
 		return;
 	a->cases[a->case_count].name = name;
-	a->cases[a->case_count].cfg = cfg;
+	a->cases[a->case_count].cfg	 = cfg;
 	a->case_count++;
 }
 
 static void build_cases(App* a)
 {
-	a->case_count = 0;
+	a->case_count	 = 0;
 	PnxSynthConfig w = pnx_synth_worst_case();
 	add_case(a, "all on", w);
 
 	PnxSynthConfig c;
-	c = w;
+	c			  = w;
 	c.oscillators = 2;
 	add_case(a, "2 osc", c);
-	c = w;
+	c			  = w;
 	c.oscillators = 1;
 	add_case(a, "1 osc", c);
-	c = w;
+	c		 = w;
 	c.filter = false;
 	add_case(a, "no filter", c);
-	c = w;
+	c			= w;
 	c.resonance = false;
 	add_case(a, "no reson", c);
-	c = w;
+	c		 = w;
 	c.reverb = false;
 	add_case(a, "no reverb", c);
-	c = w;
+	c		 = w;
 	c.chorus = false;
 	add_case(a, "no chorus", c);
-	c = w;
+	c	  = w;
 	c.lfo = false;
 	add_case(a, "no lfo", c);
-	c = w;
+	c			= w;
 	c.pitch_env = false;
 	add_case(a, "no pitchenv", c);
 
@@ -166,16 +172,16 @@ static void build_cases(App* a)
 	// each, envelope and output -- is now the largest single item, and no case isolates it.
 	// These two do: `bare` is the cheapest possible sounding voice, and `silence` is the
 	// loop with nothing active, which is the floor everything else is measured against.
-	c = w;
+	c			  = w;
 	c.oscillators = 1;
-	c.filter = false;
-	c.resonance = false;
-	c.lfo = false;
-	c.pitch_env = false;
-	c.reverb = false;
-	c.chorus = false;
+	c.filter	  = false;
+	c.resonance	  = false;
+	c.lfo		  = false;
+	c.pitch_env	  = false;
+	c.reverb	  = false;
+	c.chorus	  = false;
 	add_case(a, "bare voice", c);
-	add_case(a, "silence", c);	// same config; run_case leaves the voices off
+	add_case(a, "silence", c); // same config; run_case leaves the voices off
 	a->cases[a->case_count - 1u].silent = true;
 }
 
@@ -189,31 +195,31 @@ static PnxInstrument worst_instrument(void)
 	in.osc_count = 3;
 	for (int i = 0; i < 3; i++)
 	{
-		in.osc[i].wave = PNX_WAVE_SAW;
+		in.osc[i].wave	 = PNX_WAVE_SAW;
 		in.osc[i].volume = 200;
-		in.osc[i].duty = 128;
+		in.osc[i].duty	 = 128;
 	}
 	in.osc[1].detune = 7;
 	in.osc[2].detune = -9;
 
-	in.amp.attack_ms = 5;
-	in.amp.decay_ms = 200;
-	in.amp.sustain = 200;
-	in.amp.release_ms = 150;
-	in.cutoff.attack_ms = 2;
-	in.cutoff.decay_ms = 300;
-	in.cutoff.sustain = 80;
+	in.amp.attack_ms	 = 5;
+	in.amp.decay_ms		 = 200;
+	in.amp.sustain		 = 200;
+	in.amp.release_ms	 = 150;
+	in.cutoff.attack_ms	 = 2;
+	in.cutoff.decay_ms	 = 300;
+	in.cutoff.sustain	 = 80;
 	in.cutoff.release_ms = 200;
 
-	in.filter_mode = PNX_FILTER_LOWPASS;
-	in.cutoff_base = 40;
-	in.resonance = 200;
+	in.filter_mode		 = PNX_FILTER_LOWPASS;
+	in.cutoff_base		 = 40;
+	in.resonance		 = 200;
 	in.cutoff_env_amount = 200;
-	in.lfo_target = PNX_LFO_PITCH;
-	in.lfo_rate = 40;
-	in.lfo_depth = 30;
-	in.reverb_send = 90;
-	in.chorus_send = 70;
+	in.lfo_target		 = PNX_LFO_PITCH;
+	in.lfo_rate			 = 40;
+	in.lfo_depth		 = 30;
+	in.reverb_send		 = 90;
+	in.chorus_send		 = 70;
 	return in;
 }
 
@@ -246,13 +252,13 @@ static void feed_audio(App* a)
 	// would leave a hole the voices cannot fill: their phase has already advanced past it.
 	if (a->carry_bytes > a->carry_head)
 	{
-		const uint8_t* p = (const uint8_t*)a->feed + a->carry_head;
-		const size_t left = a->carry_bytes - a->carry_head;
+		const uint8_t* p   = (const uint8_t*)a->feed + a->carry_head;
+		const size_t left  = a->carry_bytes - a->carry_head;
 		const size_t wrote = pnx_platform_audio_write(p, left);
 		a->written += (uint32_t)wrote;
 		a->carry_head += (uint32_t)wrote;
 		if (a->carry_head < a->carry_bytes)
-			return;	 // still full; try again next tick
+			return; // still full; try again next tick
 		a->carry_bytes = a->carry_head = 0;
 	}
 
@@ -294,8 +300,8 @@ static void feed_audio(App* a)
 		{
 			a->short_writes++;
 			a->carry_bytes = (uint32_t)bytes;
-			a->carry_head = (uint32_t)wrote;
-			break;	// buffer is full; the lead is met by definition
+			a->carry_head  = (uint32_t)wrote;
+			break; // buffer is full; the lead is met by definition
 		}
 	}
 }
@@ -307,7 +313,7 @@ static void advance_phrase(App* a, uint32_t now)
 	if (!a->audio_on || now < a->next_step_ms)
 		return;
 	a->next_step_ms = now + STEP_MS;
-	a->step = (uint8_t)((a->step + 1u) % 8u);
+	a->step			= (uint8_t)((a->step + 1u) % 8u);
 	for (int v = 0; v < PNX_SYNTH_SLOTS; v++)
 		pnx_synth_note_on((uint8_t)v, PHRASE[a->step][v], 200);
 }
@@ -339,8 +345,8 @@ static void run_case(App* a, uint8_t i)
 
 	PnxSynthBench b;
 	pnx_synth_bench(BENCH_CHUNKS, CHUNK, &b);
-	a->cases[i].ns = b.ns_per_sample;
-	a->cases[i].pct = b.pct_of_realtime;
+	a->cases[i].ns	 = b.ns_per_sample;
+	a->cases[i].pct	 = b.pct_of_realtime;
 	a->cases[i].done = true;
 	// The checksum has to be consumed or the render is dead code. A benchmark kernel with
 	// no observable side effect gets deleted -- this project has already lost a 16 KB
@@ -437,7 +443,7 @@ static void compose(App* a)
 // path runs after the framebuffer is released.
 static void post_frame(void* ctx)
 {
-	App* a = (App*)ctx;
+	App* a	  = (App*)ctx;
 	int16_t y = 8;
 	for (int i = 0; i < 10; i++)
 	{
@@ -472,7 +478,7 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 		// why the first run reported nothing. A button press is exactly the moment the header
 		// recommends calling it.
 		pnx_diag_flush();
-		a->running = true;
+		a->running	 = true;
 		a->next_case = 0;
 	}
 	if (pnx_input_pressed(PNX_BUTTON_UP) && a->case_count)
@@ -493,12 +499,12 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 		// The bench blocks for seconds. Without this the feed would wake up owing seconds of
 		// audio and try to render all of it, which is a stall on top of a stall.
 		a->audio_start_ms = 0;
-		a->written = 0;
+		a->written		  = 0;
 		a->next_case++;
 		if (a->next_case >= a->case_count)
 		{
 			a->running = false;
-			a->ran = true;
+			a->ran	   = true;
 			measure_peak(a);
 			// Restored to everything-on. The sweep ends on whichever case turned a feature
 			// off, and leaving it there would mean the thing you listen to afterwards is
@@ -540,7 +546,7 @@ int main(void)
 		// This spike writes to the stream directly rather than through the mixer, so it owns
 		// the headroom the mixer would otherwise supply.
 		pnx_synth_set_headroom(1);
-		app.heap_total = pnx_synth_bytes();
+		app.heap_total	 = pnx_synth_bytes();
 		app.heap_effects = pnx_synth_effect_bytes();
 		build_cases(&app);
 		measure_peak(&app);

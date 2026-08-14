@@ -44,4 +44,4 @@ static inline int32_t pnx_tilemap_height(const PnxMap* m)
 	return (int32_t)m->h * m->tile_px;
 }
 
-#endif	// PNX_USE_TILEMAP
+#endif // PNX_USE_TILEMAP

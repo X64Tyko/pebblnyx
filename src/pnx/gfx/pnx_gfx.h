@@ -26,7 +26,7 @@
 
 typedef struct
 {
-	int32_t x, y;  // top-left of the view, in world pixels
+	int32_t x, y; // top-left of the view, in world pixels
 	int16_t view_w, view_h;
 } PnxCamera;
 

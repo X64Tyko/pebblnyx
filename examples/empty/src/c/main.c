@@ -15,8 +15,8 @@ typedef struct
 {
 	PnxArena arena;
 
-	uint32_t accumulator_ms;  // leftover real time not yet consumed by a tick
-	uint32_t ticks;			  // total sim ticks, the sim's own clock
+	uint32_t accumulator_ms; // leftover real time not yet consumed by a tick
+	uint32_t ticks;			 // total sim ticks, the sim's own clock
 	int32_t bar_x;
 	int32_t bar_dir;
 
@@ -35,12 +35,12 @@ static void sim_tick(Game* g)
 	g->bar_x += g->bar_dir * 3;
 	if (g->bar_x < 0)
 	{
-		g->bar_x = 0;
+		g->bar_x   = 0;
 		g->bar_dir = 1;
 	}
 	if (g->bar_x > 180)
 	{
-		g->bar_x = 180;
+		g->bar_x   = 180;
 		g->bar_dir = -1;
 	}
 }
@@ -67,7 +67,7 @@ static void render(Game* g, PnxTarget* target)
 				const int16_t px = (int16_t)(g->bar_x + x);
 				if (px >= row.min_x && px <= row.max_x)
 				{
-					row.data[px] = 0xFF;  // opaque white in ARGB2222
+					row.data[px] = 0xFF; // opaque white in ARGB2222
 				}
 			}
 		}
@@ -78,7 +78,7 @@ static void render(Game* g, PnxTarget* target)
 
 static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 {
-	Game* g = (Game*)ctx;
+	Game* g					  = (Game*)ctx;
 	const uint32_t work_start = pnx_platform_now_ms();
 
 	PnxEvent ev;
@@ -127,7 +127,7 @@ int main(void)
 {
 	static Game g;
 	memset(&g, 0, sizeof(g));
-	g.bar_dir = 1;
+	g.bar_dir	 = 1;
 	g.started_ms = pnx_platform_now_ms();
 
 	// Heap, not static: static allocation shares the same 64KB uint16 ceiling as code,

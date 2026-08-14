@@ -37,10 +37,10 @@
 
 typedef struct
 {
-	const uint8_t* rows;   // pattern data, 2 bytes per channel per row
-	const uint8_t* order;  // pattern indices to play in sequence
+	const uint8_t* rows;  // pattern data, 2 bytes per channel per row
+	const uint8_t* order; // pattern indices to play in sequence
 	const PnxEnvelope* instruments;
-	const uint8_t* waveforms;  // one PnxWaveform per instrument
+	const uint8_t* waveforms; // one PnxWaveform per instrument
 
 	// Optional synth instrument table, appended after the patterns. NULL for a song built
 	// before synth instruments existed, which still plays through the plain mixer -- the
@@ -81,4 +81,4 @@ void pnx_music_set_volume(uint8_t volume);
 uint8_t pnx_music_pattern(void);
 uint8_t pnx_music_row(void);
 
-#endif	// PNX_USE_SEQUENCER
+#endif // PNX_USE_SEQUENCER

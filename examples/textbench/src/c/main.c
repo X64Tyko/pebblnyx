@@ -47,9 +47,9 @@
 // kept for continuity with earlier runs.
 #define TIER_COUNT 3
 static const char* TIER_STRING[TIER_COUNT] = {
-	"HP 42",				// SHORT
-	"LV5  HP 42/60",		// MEDIUM -- the original benchmark string
-	"LV5  HP 42/60  MP 8",	// LONG
+	"HP 42",			   // SHORT
+	"LV5  HP 42/60",	   // MEDIUM -- the original benchmark string
+	"LV5  HP 42/60  MP 8", // LONG
 };
 // Counted characters, not measured advance width -- kerning and variable glyph width are
 // exactly what is NOT being isolated here; each character is one blit (glyph path) or one
@@ -64,20 +64,20 @@ typedef enum
 	PATH_GLYPH2,
 	PATH_COUNT
 } Path;
-static const char* PATH_NAME[PATH_COUNT] = { "sdk", "g1", "g2" };  // short: log line budget
+static const char* PATH_NAME[PATH_COUNT] = { "sdk", "g1", "g2" }; // short: log line budget
 
-#define FRAMES_PER_SUBPHASE 40	// ~1.6s at the locked 25fps render cadence
-#define WARMUP_FRAMES		20	// settle the frame rate after SELECT, before timing starts
+#define FRAMES_PER_SUBPHASE 40 // ~1.6s at the locked 25fps render cadence
+#define WARMUP_FRAMES		20 // settle the frame rate after SELECT, before timing starts
 
-#define N_GLYPH_PER_FRAME 30  // cheap; many reps/frame keeps the run short
-#define N_SDK_PER_FRAME	  3	  // ~1.4ms each -- 3 is ~4ms, well inside the frame budget
+#define N_GLYPH_PER_FRAME 30 // cheap; many reps/frame keeps the run short
+#define N_SDK_PER_FRAME	  3	 // ~1.4ms each -- 3 is ~4ms, well inside the frame budget
 
 // One step per (tier, path) triple: 0=T0 sdk, 1=T0 g1, 2=T0 g2, 3=T1 sdk, ...
 #define STEP_COUNT (TIER_COUNT * PATH_COUNT)
 
 typedef enum
 {
-	PHASE_IDLE,	 // waiting for SELECT; nothing timed runs here
+	PHASE_IDLE, // waiting for SELECT; nothing timed runs here
 	PHASE_WARMUP,
 	PHASE_RUN,
 	PHASE_DONE,
@@ -86,12 +86,12 @@ typedef enum
 typedef struct
 {
 	PnxArena persistent, scene;
-	PnxFont font1, font2;  // depth 1 (bench) and depth 2 (bench2)
+	PnxFont font1, font2; // depth 1 (bench) and depth 2 (bench2)
 	bool has_font1, has_font2;
 
 	Phase phase;
 	uint32_t phase_frame;
-	uint8_t step;  // 0..STEP_COUNT-1 during PHASE_RUN
+	uint8_t step; // 0..STEP_COUNT-1 during PHASE_RUN
 
 	uint32_t ms[PATH_COUNT][TIER_COUNT], calls[PATH_COUNT][TIER_COUNT];
 
@@ -116,9 +116,9 @@ static Path step_path(uint8_t step)
 
 static void start_bench(App* a)
 {
-	a->phase = PHASE_WARMUP;
+	a->phase	   = PHASE_WARMUP;
 	a->phase_frame = 0;
-	a->step = 0;
+	a->step		   = 0;
 	memset(a->ms, 0, sizeof(a->ms));
 	memset(a->calls, 0, sizeof(a->calls));
 	for (int i = 0; i < TIER_COUNT; i++)
@@ -145,8 +145,8 @@ static void fit_two_point(uint32_t us_short, uint32_t us_long, int32_t* out_fixe
 {
 	const int32_t dg = (int32_t)TIER_GLYPHS[TIER_COUNT - 1] - (int32_t)TIER_GLYPHS[0];
 	const int32_t dc = (int32_t)us_long - (int32_t)us_short;
-	*out_marginal = dg ? dc / dg : 0;
-	*out_fixed = (int32_t)us_short - (*out_marginal) * (int32_t)TIER_GLYPHS[0];
+	*out_marginal	 = dg ? dc / dg : 0;
+	*out_fixed		 = (int32_t)us_short - (*out_marginal) * (int32_t)TIER_GLYPHS[0];
 }
 
 static void report_results(App* a)
@@ -199,10 +199,10 @@ static void advance(App* a)
 		return;
 	}
 	if (a->phase != PHASE_RUN)
-		return;	 // IDLE/DONE: only SELECT moves out; see frame()
+		return; // IDLE/DONE: only SELECT moves out; see frame()
 
 	const uint8_t tier = step_tier(a->step);
-	const Path path = step_path(a->step);
+	const Path path	   = step_path(a->step);
 	pnx_log("textbench: %ug %s done -- %uus/call, %u calls", (unsigned)TIER_GLYPHS[tier],
 			PATH_NAME[path], (unsigned)per_call_us(a->ms[path][tier], a->calls[path][tier]),
 			(unsigned)a->calls[path][tier]);
@@ -217,7 +217,7 @@ static void advance(App* a)
 
 static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 {
-	App* a = (App*)ctx;
+	App* a					  = (App*)ctx;
 	const uint32_t work_start = pnx_platform_now_ms();
 
 	PnxEvent ev;
@@ -230,16 +230,16 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 		}
 	}
 
-	pnx_gfx_clear(target, 0xC0);  // opaque black -- see resonant's IN_BLACK for the same value
+	pnx_gfx_clear(target, 0xC0); // opaque black -- see resonant's IN_BLACK for the same value
 
 	// The glyph side's timed work happens HERE, during the frame, like any other blit --
 	// for BOTH bit depths, which font differs by which one is being timed this step.
 	if (a->phase == PHASE_RUN && step_path(a->step) != PATH_SDK)
 	{
 		const uint8_t tier = step_tier(a->step);
-		const Path path = step_path(a->step);
-		const PnxFont* f = (path == PATH_GLYPH1) ? &a->font1 : &a->font2;
-		const bool ready = (path == PATH_GLYPH1) ? a->has_font1 : a->has_font2;
+		const Path path	   = step_path(a->step);
+		const PnxFont* f   = (path == PATH_GLYPH1) ? &a->font1 : &a->font2;
+		const bool ready   = (path == PATH_GLYPH1) ? a->has_font1 : a->has_font2;
 		if (ready)
 		{
 			const uint32_t t0 = pnx_platform_now_ms();
@@ -284,7 +284,7 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 				pnx_text_draw(target, &a->font1, a->result[t], 10, y, 0xFF);
 				y = (int16_t)(y + 18);
 			}
-			y = (int16_t)(y + 8);
+			y										 = (int16_t)(y + 8);
 			static const uint8_t FIT_INK[PATH_COUNT] = { 0xF0, 0xCC, 0xC7 };
 			for (int p = 0; p < PATH_COUNT; p++)
 			{
@@ -310,7 +310,7 @@ static void post_frame(void* ctx)
 		return;
 
 	const uint8_t tier = step_tier(a->step);
-	const uint32_t t0 = pnx_platform_now_ms();
+	const uint32_t t0  = pnx_platform_now_ms();
 	for (int i = 0; i < N_SDK_PER_FRAME; i++)
 	{
 		pnx_platform_text_draw(TIER_STRING[tier], PNX_TEXT_SMALL, 0xFF, 10, 80, 185, 20);

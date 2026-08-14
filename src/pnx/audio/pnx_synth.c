@@ -39,11 +39,70 @@ static const uint8_t MIP_HARMONICS[MIPS] = { 31, 31, 31, 31, 31, 16, 8, 4 };
 // harmonics of a 64-point fundamental land exactly on this grid, so it is not even an
 // approximation.
 static const int16_t SINE_Q12[CYCLE] = {
-	0,	   401,	  799,	 1189,	1567,  1931,  2276,	 2598,	2896,  3166,  3406,	 3612,	3784,
-	3920,  4017,  4076,	 4096,	4076,  4017,  3920,	 3784,	3612,  3406,  3166,	 2896,	2598,
-	2276,  1931,  1567,	 1189,	799,   401,	  0,	 -401,	-799,  -1189, -1567, -1931, -2276,
-	-2598, -2896, -3166, -3406, -3612, -3784, -3920, -4017, -4076, -4096, -4076, -4017, -3920,
-	-3784, -3612, -3406, -3166, -2896, -2598, -2276, -1931, -1567, -1189, -799,	 -401,
+	0,
+	401,
+	799,
+	1189,
+	1567,
+	1931,
+	2276,
+	2598,
+	2896,
+	3166,
+	3406,
+	3612,
+	3784,
+	3920,
+	4017,
+	4076,
+	4096,
+	4076,
+	4017,
+	3920,
+	3784,
+	3612,
+	3406,
+	3166,
+	2896,
+	2598,
+	2276,
+	1931,
+	1567,
+	1189,
+	799,
+	401,
+	0,
+	-401,
+	-799,
+	-1189,
+	-1567,
+	-1931,
+	-2276,
+	-2598,
+	-2896,
+	-3166,
+	-3406,
+	-3612,
+	-3784,
+	-3920,
+	-4017,
+	-4076,
+	-4096,
+	-4076,
+	-4017,
+	-3920,
+	-3784,
+	-3612,
+	-3406,
+	-3166,
+	-2896,
+	-2598,
+	-2276,
+	-1931,
+	-1567,
+	-1189,
+	-799,
+	-401,
 };
 
 // [waveform][octave][phase].
@@ -64,9 +123,9 @@ static bool s_ready;
 // reverb would be 20 KB and would not fit.
 #define COMBS	4
 #define ALLPASS 2
-static const uint16_t COMB_LEN[COMBS] = { 405, 431, 463, 492 };
+static const uint16_t COMB_LEN[COMBS]	   = { 405, 431, 463, 492 };
 static const uint16_t ALLPASS_LEN[ALLPASS] = { 202, 160 };
-#define CHORUS_LEN 480	// 30 ms at 16 kHz
+#define CHORUS_LEN 480 // 30 ms at 16 kHz
 
 typedef struct
 {
@@ -88,11 +147,11 @@ static int32_t* s_cho_send;
 static Line s_comb[COMBS];
 static Line s_allpass[ALLPASS];
 static Line s_chorus;
-static int16_t s_comb_store[COMBS];	 // one-pole damping inside each comb
+static int16_t s_comb_store[COMBS]; // one-pole damping inside each comb
 static uint32_t s_chorus_phase;
 static uint32_t s_effect_bytes;
 static uint32_t s_total_bytes;
-static uint8_t* s_block_base;  // start of the single allocation, for free()
+static uint8_t* s_block_base; // start of the single allocation, for free()
 
 // ------------------------------------------------------------------------ voices
 
@@ -108,7 +167,7 @@ typedef enum
 typedef struct
 {
 	uint32_t phase, step;
-	uint8_t mip;  // which band-limited table this oscillator reads
+	uint8_t mip; // which band-limited table this oscillator reads
 } Osc;
 
 // Field order groups by what the comments explain (identity, oscillators, amp envelope,
@@ -121,9 +180,9 @@ typedef struct
 {
 	bool active;
 	uint8_t note, velocity;
-	PnxInstrument inst;	 // a COPY: the slot's instrument may be replaced while this
-						 // note is still sounding, and a note must finish with the
-						 // instrument it started on.
+	PnxInstrument inst; // a COPY: the slot's instrument may be replaced while this
+						// note is still sounding, and a note must finish with the
+						// instrument it started on.
 	Osc osc[PNX_SYNTH_OSCILLATORS];
 
 	int32_t amp_level, amp_rate;
@@ -132,9 +191,9 @@ typedef struct
 	uint8_t cut_stage;
 
 	uint32_t lfo_phase;
-	int32_t pitch_env;	// cents, decaying to zero
-	uint8_t mod_count;	// samples until the next pitch recompute; see PITCH_EVERY
-	bool pitch_moves;	// does anything modulate this voice's pitch at all
+	int32_t pitch_env; // cents, decaying to zero
+	uint8_t mod_count; // samples until the next pitch recompute; see PITCH_EVERY
+	bool pitch_moves;  // does anything modulate this voice's pitch at all
 
 	// State-variable filter state. Chamberlin's form: two integrators, one multiply each,
 	// and it gives lowpass, highpass and bandpass from the same three lines -- which is why
@@ -149,7 +208,7 @@ static PnxInstrument s_slot[PNX_SYNTH_SLOTS];
 // the note replacing it -- the same few milliseconds the plain mixer uses for the same job.
 #define STEAL_MS 4
 static PnxSynthConfig s_cfg;
-static int32_t s_osc_recip = 65536;	 // 65536 / oscillator count
+static int32_t s_osc_recip = 65536; // 65536 / oscillator count
 // One bit, and this default has been wrong in both directions already, so the reasoning
 // is recorded rather than the conclusion.
 //
@@ -183,15 +242,15 @@ static uint32_t note_hz_q16(int32_t midi_note, int32_t cents)
 	int32_t total = midi_note * 100 + cents;
 	if (total < 0)
 		total = 0;
-	int32_t semis = total / 100;
+	int32_t semis	   = total / 100;
 	int32_t frac_cents = total - semis * 100;
 
-	int32_t octave = semis / 12 - 5;  // relative to MIDI 60 = C4
+	int32_t octave = semis / 12 - 5; // relative to MIDI 60 = C4
 	int32_t within = semis % 12;
 
 	// 261.63 Hz (C4) in Q16.
 	uint32_t hz = (uint32_t)((261630u * 65536u) / 1000u);
-	hz = (uint32_t)(((uint64_t)hz * SEMITONE_Q16[within]) >> 16);
+	hz			= (uint32_t)(((uint64_t)hz * SEMITONE_Q16[within]) >> 16);
 	if (octave > 0)
 		hz <<= octave;
 	else if (octave < 0)
@@ -246,7 +305,7 @@ static void voice_steps(Voice* v, int32_t lfo)
 	for (int oi = 0; oi < PNX_SYNTH_OSCILLATORS; oi++)
 	{
 		const PnxOscillator* o = &v->inst.osc[oi];
-		int32_t cents = o->detune + (int32_t)o->octave * 1200 + v->pitch_env;
+		int32_t cents		   = o->detune + (int32_t)o->octave * 1200 + v->pitch_env;
 		if (v->inst.lfo_target == PNX_LFO_PITCH)
 			cents += lfo >> 1;
 		v->osc[oi].step = step_for(note_hz_q16(v->note, cents));
@@ -257,7 +316,7 @@ static void voice_steps(Voice* v, int32_t lfo)
 		//
 		// Chosen here, on the pitch update, so the inner loop just indexes a pointer.
 		int32_t sounding = (int32_t)v->note + (int32_t)o->octave * 12 + (cents / 100);
-		int32_t mip = sounding / 12;
+		int32_t mip		 = sounding / 12;
 		if (mip < 0)
 			mip = 0;
 		if (mip >= MIPS)
@@ -274,47 +333,47 @@ static void voice_steps(Voice* v, int32_t lfo)
 // whose state is never addressed, dropped 647 ns; the per-voice cost, whose envelope was,
 // moved 58. A macro touches the variables directly and cannot take their address.
 //
-#define ENV_STEP(level, rate, stage, e, sr)                                 \
-	do                                                                      \
-	{                                                                       \
-		if ((stage) != ENV_OFF)                                             \
-		{                                                                   \
-			(level) += (rate);                                              \
-			const int32_t _t = (int32_t)(e).sustain << 8;                   \
-			if ((stage) == ENV_ATTACK)                                      \
-			{                                                               \
-				if ((level) >= (1 << 16))                                   \
-				{                                                           \
-					(level) = 1 << 16;                                      \
-					(stage) = ENV_DECAY;                                    \
-					(rate) = -env_ramp((e).decay_ms, (1 << 16) - _t, (sr)); \
-					if (!(e).decay_ms)                                      \
-					{                                                       \
-						(level) = _t;                                       \
-						(rate) = 0;                                         \
-						(stage) = ENV_SUSTAIN;                              \
-					}                                                       \
-				}                                                           \
-			}                                                               \
-			else if ((stage) == ENV_DECAY)                                  \
-			{                                                               \
-				if ((level) <= _t)                                          \
-				{                                                           \
-					(level) = _t;                                           \
-					(rate) = 0;                                             \
-					(stage) = ENV_SUSTAIN;                                  \
-				}                                                           \
-			}                                                               \
-			else if ((stage) == ENV_RELEASE)                                \
-			{                                                               \
-				if ((level) <= 0)                                           \
-				{                                                           \
-					(level) = 0;                                            \
-					(rate) = 0;                                             \
-					(stage) = ENV_OFF;                                      \
-				}                                                           \
-			}                                                               \
-		}                                                                   \
+#define ENV_STEP(level, rate, stage, e, sr)                                  \
+	do                                                                       \
+	{                                                                        \
+		if ((stage) != ENV_OFF)                                              \
+		{                                                                    \
+			(level) += (rate);                                               \
+			const int32_t _t = (int32_t)(e).sustain << 8;                    \
+			if ((stage) == ENV_ATTACK)                                       \
+			{                                                                \
+				if ((level) >= (1 << 16))                                    \
+				{                                                            \
+					(level) = 1 << 16;                                       \
+					(stage) = ENV_DECAY;                                     \
+					(rate)	= -env_ramp((e).decay_ms, (1 << 16) - _t, (sr)); \
+					if (!(e).decay_ms)                                       \
+					{                                                        \
+						(level) = _t;                                        \
+						(rate)	= 0;                                         \
+						(stage) = ENV_SUSTAIN;                               \
+					}                                                        \
+				}                                                            \
+			}                                                                \
+			else if ((stage) == ENV_DECAY)                                   \
+			{                                                                \
+				if ((level) <= _t)                                           \
+				{                                                            \
+					(level) = _t;                                            \
+					(rate)	= 0;                                             \
+					(stage) = ENV_SUSTAIN;                                   \
+				}                                                            \
+			}                                                                \
+			else if ((stage) == ENV_RELEASE)                                 \
+			{                                                                \
+				if ((level) <= 0)                                            \
+				{                                                            \
+					(level) = 0;                                             \
+					(rate)	= 0;                                             \
+					(stage) = ENV_OFF;                                       \
+				}                                                            \
+			}                                                                \
+		}                                                                    \
 	} while (0)
 
 // How often a modulated pitch is recomputed, in samples.
@@ -336,12 +395,12 @@ PnxSynthConfig pnx_synth_worst_case(void)
 {
 	PnxSynthConfig c;
 	c.oscillators = PNX_SYNTH_OSCILLATORS;
-	c.filter = true;
-	c.resonance = true;
-	c.lfo = true;
-	c.pitch_env = true;
-	c.reverb = true;
-	c.chorus = true;
+	c.filter	  = true;
+	c.resonance	  = true;
+	c.lfo		  = true;
+	c.pitch_env	  = true;
+	c.reverb	  = true;
+	c.chorus	  = true;
 	return c;
 }
 
@@ -349,7 +408,7 @@ static bool alloc_line(Line* l, uint16_t len, uint8_t** p)
 {
 	l->buf = (int16_t*)*p;
 	l->len = len;
-	l->at = 0;
+	l->at  = 0;
 	memset(l->buf, 0, (size_t)len * sizeof(int16_t));
 	*p += (size_t)len * sizeof(int16_t);
 	return true;
@@ -369,17 +428,17 @@ bool pnx_synth_init(uint32_t sample_rate)
 		// playing at the wrong pitch with tables band-limited for a Nyquist it no longer has.
 		pnx_synth_shutdown();
 	}
-	s_rate = want;
+	s_rate		  = want;
 	s_phase_recip = (uint32_t)(((uint64_t)CYCLE << 32) / s_rate);
 
-	size_t wave_bytes = (size_t)PNX_WAVE_COUNT * MIPS * CYCLE;
+	size_t wave_bytes	= (size_t)PNX_WAVE_COUNT * MIPS * CYCLE;
 	size_t line_samples = 0;
 	for (int i = 0; i < COMBS; i++)
 		line_samples += COMB_LEN[i];
 	for (int i = 0; i < ALLPASS; i++)
 		line_samples += ALLPASS_LEN[i];
 	line_samples += CHORUS_LEN;
-	size_t line_bytes = line_samples * sizeof(int16_t);
+	size_t line_bytes		 = line_samples * sizeof(int16_t);
 	const size_t block_bytes = sizeof(int32_t) * BLOCK * 3u;
 
 	// One allocation, carved by decreasing alignment -- int32 accumulators, then int16
@@ -391,7 +450,7 @@ bool pnx_synth_init(uint32_t sample_rate)
 		return false;
 	}
 	s_effect_bytes = (uint32_t)line_bytes;
-	s_total_bytes = (uint32_t)(block_bytes + line_bytes + wave_bytes);
+	s_total_bytes  = (uint32_t)(block_bytes + line_bytes + wave_bytes);
 
 	s_dry = (int32_t*)p;
 	p += sizeof(int32_t) * BLOCK;
@@ -426,17 +485,17 @@ bool pnx_synth_init(uint32_t sample_rate)
 			for (int k = 1; k <= h; k++)
 			{
 				const int32_t s = SINE_Q12[(k * i) & (CYCLE - 1)];
-				saw += ((k & 1) ? s : -s) / k;	// every harmonic, 1/k
+				saw += ((k & 1) ? s : -s) / k; // every harmonic, 1/k
 				if (k & 1)
 				{
-					sq += s / k;									  // odd harmonics, 1/k
-					tri += ((((k - 1) / 2) & 1) ? -s : s) / (k * k);  // odd, 1/k^2, alternating
+					sq += s / k;									 // odd harmonics, 1/k
+					tri += ((((k - 1) / 2) & 1) ? -s : s) / (k * k); // odd, 1/k^2, alternating
 				}
 			}
 			// Normalised so a saw, a square and a triangle come out at comparable loudness in
 			// the +-100 the rest of the synth works in.
-			s_wave[PNX_WAVE_SAW][m][i] = (int8_t)((saw * 100) / 6400);
-			s_wave[PNX_WAVE_SQUARE][m][i] = (int8_t)((sq * 100) / 5200);
+			s_wave[PNX_WAVE_SAW][m][i]		= (int8_t)((saw * 100) / 6400);
+			s_wave[PNX_WAVE_SQUARE][m][i]	= (int8_t)((sq * 100) / 5200);
 			s_wave[PNX_WAVE_TRIANGLE][m][i] = (int8_t)((tri * 100) / 4200);
 		}
 
@@ -446,16 +505,16 @@ bool pnx_synth_init(uint32_t sample_rate)
 		uint32_t lfsr = 0xACE1u;
 		for (int i = 0; i < CYCLE; i++)
 		{
-			lfsr = (lfsr >> 1) ^ (uint32_t)((-(int32_t)(lfsr & 1u)) & 0xB400u);
+			lfsr						 = (lfsr >> 1) ^ (uint32_t)((-(int32_t)(lfsr & 1u)) & 0xB400u);
 			s_wave[PNX_WAVE_NOISE][m][i] = (int8_t)((int8_t)((lfsr >> 4) & 0xFF) / 2);
 		}
 	}
 
 	s_tail = 0;
-	memset(s_voice, 0, sizeof(s_voice));  // clears filter state for a genuinely fresh voice
+	memset(s_voice, 0, sizeof(s_voice)); // clears filter state for a genuinely fresh voice
 	memset(s_slot, 0, sizeof(s_slot));
 	memset(s_comb_store, 0, sizeof(s_comb_store));
-	s_cfg = pnx_synth_worst_case();
+	s_cfg	= pnx_synth_worst_case();
 	s_ready = true;
 	return true;
 }
@@ -465,9 +524,9 @@ void pnx_synth_shutdown(void)
 	if (!s_ready)
 		return;
 	free(s_block_base);
-	s_block_base = NULL;
-	s_wave = NULL;
-	s_ready = false;
+	s_block_base  = NULL;
+	s_wave		  = NULL;
+	s_ready		  = false;
 	s_total_bytes = s_effect_bytes = 0;
 }
 
@@ -534,7 +593,7 @@ void pnx_synth_note_on(uint8_t slot, uint8_t midi_note, uint8_t velocity)
 	if (old->active && old->amp_stage != ENV_OFF)
 	{
 		old->amp_stage = ENV_RELEASE;
-		old->amp_rate = -env_ramp(STEAL_MS, old->amp_level, s_rate);
+		old->amp_rate  = -env_ramp(STEAL_MS, old->amp_level, s_rate);
 		if (!old->amp_rate)
 			old->amp_rate = -(1 << 16);
 	}
@@ -543,7 +602,7 @@ void pnx_synth_note_on(uint8_t slot, uint8_t midi_note, uint8_t velocity)
 		// Both were sounding, so this one is being taken over. Fade it in the same way rather
 		// than stepping: the join matters more than which voice makes the sound.
 		v->amp_stage = ENV_RELEASE;
-		v->amp_rate = -env_ramp(STEAL_MS, v->amp_level, s_rate);
+		v->amp_rate	 = -env_ramp(STEAL_MS, v->amp_level, s_rate);
 	}
 
 	// The instrument is copied at note-on. That is what makes "push an instrument into a
@@ -567,16 +626,16 @@ void pnx_synth_note_on(uint8_t slot, uint8_t midi_note, uint8_t velocity)
 	v->inst = s_slot[slot];
 	if (v->inst.osc_count < 1)
 		v->inst.osc_count = 1;
-	v->note = midi_note;
+	v->note		= midi_note;
 	v->velocity = velocity;
-	v->active = true;
+	v->active	= true;
 
 	for (int i = 0; i < PNX_SYNTH_OSCILLATORS; i++)
 	{
 		// Staggered rather than zeroed together. Three oscillators starting in phase sum to
 		// one loud transient and then drift apart, which is its own click.
 		v->osc[i].phase = (uint32_t)i * (CYCLE << 16) / PNX_SYNTH_OSCILLATORS;
-		v->osc[i].step = 0;
+		v->osc[i].step	= 0;
 	}
 	v->amp_level = 0;
 	v->amp_stage = ENV_ATTACK;
@@ -584,15 +643,15 @@ void pnx_synth_note_on(uint8_t slot, uint8_t midi_note, uint8_t velocity)
 		v->inst.amp.attack_ms ? env_ramp(v->inst.amp.attack_ms, 1 << 16, s_rate) : (1 << 16);
 	v->cut_level = 0;
 	v->cut_stage = ENV_ATTACK;
-	v->cut_rate = v->inst.cutoff.attack_ms ? env_ramp(v->inst.cutoff.attack_ms, 1 << 16, s_rate)
-										   : (1 << 16);
+	v->cut_rate	 = v->inst.cutoff.attack_ms ? env_ramp(v->inst.cutoff.attack_ms, 1 << 16, s_rate)
+											: (1 << 16);
 	v->lfo_phase = 0;
 	v->pitch_env = v->inst.pitch_env_amount;
 	// Filter state is deliberately NOT cleared. A filter is a continuous system and zeroing
 	// its integrators mid-sound is a step discontinuity -- a click on every retrigger. Real
 	// synths leave it running; only a fresh voice starts from silence.
 	v->pitch_moves = (v->inst.lfo_target == PNX_LFO_PITCH && v->inst.lfo_depth) ||
-					 (v->inst.pitch_env_amount != 0);
+		(v->inst.pitch_env_amount != 0);
 	v->mod_count = 0;
 	voice_steps(v, 0);
 }
@@ -608,11 +667,11 @@ void pnx_synth_note_off(uint8_t slot)
 		if (!v->active || v->amp_stage == ENV_RELEASE || v->amp_stage == ENV_OFF)
 			continue;
 		v->amp_stage = ENV_RELEASE;
-		v->amp_rate = -env_ramp(v->inst.amp.release_ms, v->amp_level, s_rate);
+		v->amp_rate	 = -env_ramp(v->inst.amp.release_ms, v->amp_level, s_rate);
 		if (!v->amp_rate)
 			v->amp_rate = -(1 << 16);
 		v->cut_stage = ENV_RELEASE;
-		v->cut_rate = -env_ramp(v->inst.cutoff.release_ms, v->cut_level, s_rate);
+		v->cut_rate	 = -env_ramp(v->inst.cutoff.release_ms, v->cut_level, s_rate);
 	}
 }
 
@@ -646,7 +705,7 @@ static inline void line_write(Line* l, int32_t v)
 	if (v < -32768)
 		v = -32768;
 	l->buf[l->at] = (int16_t)v;
-	l->at = (uint16_t)((l->at + 1u) % l->len);
+	l->at		  = (uint16_t)((l->at + 1u) % l->len);
 }
 
 // One sample of the global reverb. A Schroeder/Freeverb arrangement: four damped combs in
@@ -656,7 +715,7 @@ static int32_t reverb_sample(int32_t in)
 	int32_t acc = 0;
 	for (int i = 0; i < COMBS; i++)
 	{
-		Line* l = &s_comb[i];
+		Line* l	  = &s_comb[i];
 		int32_t y = l->buf[l->at];
 		// One-pole damping in the feedback path is what stops the tail sounding metallic.
 		s_comb_store[i] += ((y - s_comb_store[i]) * 80) >> 8;
@@ -666,8 +725,8 @@ static int32_t reverb_sample(int32_t in)
 	acc >>= 2;
 	for (int i = 0; i < ALLPASS; i++)
 	{
-		Line* l = &s_allpass[i];
-		int32_t y = l->buf[l->at];
+		Line* l		= &s_allpass[i];
+		int32_t y	= l->buf[l->at];
 		int32_t out = y - acc;
 		line_write(l, acc + ((y * 128) >> 8));
 		acc = out;
@@ -680,8 +739,8 @@ static int32_t reverb_sample(int32_t in)
 // like several without paying for a second oscillator.
 static int32_t chorus_sample(int32_t in)
 {
-	s_chorus_phase += 137u;	 // ~0.5 Hz at 16 kHz
-	int32_t lfo = s_wave[PNX_WAVE_TRIANGLE][0][(s_chorus_phase >> 16) & (CYCLE - 1)];
+	s_chorus_phase += 137u; // ~0.5 Hz at 16 kHz
+	int32_t lfo	   = s_wave[PNX_WAVE_TRIANGLE][0][(s_chorus_phase >> 16) & (CYCLE - 1)];
 	uint16_t depth = (uint16_t)(CHORUS_LEN / 2 + ((lfo * (CHORUS_LEN / 3)) >> 7));
 	if (depth >= s_chorus.len)
 		depth = (uint16_t)(s_chorus.len - 1u);
@@ -757,9 +816,9 @@ void pnx_synth_render(int16_t* out, uint32_t count)
 			int32_t amp_level = v->amp_level, amp_rate = v->amp_rate;
 			uint8_t amp_stage = v->amp_stage;
 			int32_t cut_level = v->cut_level, cut_rate = v->cut_rate;
-			uint8_t cut_stage = v->cut_stage;
+			uint8_t cut_stage  = v->cut_stage;
 			uint32_t lfo_phase = v->lfo_phase;
-			int32_t pitch_env = v->pitch_env;
+			int32_t pitch_env  = v->pitch_env;
 			int32_t flt_low = v->flt_low, flt_band = v->flt_band;
 			uint8_t mod_count = v->mod_count;
 			uint32_t ph[PNX_SYNTH_OSCILLATORS], st[PNX_SYNTH_OSCILLATORS];
@@ -770,11 +829,11 @@ void pnx_synth_render(int16_t* out, uint32_t count)
 				st[oi] = v->osc[oi].step;
 				mp[oi] = v->osc[oi].mip;
 			}
-			const int32_t velocity = v->velocity;
+			const int32_t velocity	 = v->velocity;
 			const uint8_t lfo_target = in->lfo_target;
-			const bool do_filter = s_cfg.filter && in->filter_mode != PNX_FILTER_OFF;
-			const int32_t rev_send = s_cfg.reverb ? in->reverb_send : 0;
-			const int32_t cho_send = s_cfg.chorus ? in->chorus_send : 0;
+			const bool do_filter	 = s_cfg.filter && in->filter_mode != PNX_FILTER_OFF;
+			const int32_t rev_send	 = s_cfg.reverb ? in->reverb_send : 0;
+			const int32_t cho_send	 = s_cfg.chorus ? in->chorus_send : 0;
 
 			uint32_t n = 0;
 			for (; n < n_block; n++)
@@ -804,7 +863,7 @@ void pnx_synth_render(int16_t* out, uint32_t count)
 				// --- pitch, on a slow clock. See PITCH_EVERY.
 				if (v->pitch_moves && mod_count-- == 0)
 				{
-					mod_count = PITCH_EVERY - 1;
+					mod_count	 = PITCH_EVERY - 1;
 					v->pitch_env = pitch_env;
 					voice_steps(v, s_cfg.lfo ? lfo : 0);
 					for (int oi = 0; oi < PNX_SYNTH_OSCILLATORS; oi++)
@@ -819,13 +878,13 @@ void pnx_synth_render(int16_t* out, uint32_t count)
 				for (int oi = 0; oi < osc_n; oi++)
 				{
 					const PnxOscillator* o = &in->osc[oi];
-					uint32_t idx = (ph[oi] >> 16) & (CYCLE - 1);
+					uint32_t idx		   = (ph[oi] >> 16) & (CYCLE - 1);
 					int32_t s;
 					uint8_t duty = o->duty;
 					if (o->wave == PNX_WAVE_SQUARE && s_cfg.lfo && lfo_target == PNX_LFO_DUTY)
 					{
 						int32_t d = (int32_t)duty + (lfo >> 1);
-						duty = (uint8_t)(d < 16 ? 16 : (d > 240 ? 240 : d));
+						duty	  = (uint8_t)(d < 16 ? 16 : (d > 240 ? 240 : d));
 					}
 					// A 50% square reads the band-limited table like everything else. Only a MOVED
 					// duty falls back to the threshold comparison, because pulse width cannot be
@@ -838,9 +897,9 @@ void pnx_synth_render(int16_t* out, uint32_t count)
 					else
 					{
 						const int8_t* tbl = s_wave[o->wave][mp[oi]];
-						int32_t a0 = tbl[idx];
-						int32_t a1 = tbl[(idx + 1u) & (CYCLE - 1)];
-						s = a0 + (((a1 - a0) * (int32_t)(ph[oi] & 0xFFFF)) >> 16);
+						int32_t a0		  = tbl[idx];
+						int32_t a1		  = tbl[(idx + 1u) & (CYCLE - 1)];
+						s				  = a0 + (((a1 - a0) * (int32_t)(ph[oi] & 0xFFFF)) >> 16);
 					}
 					mixed += (s * o->volume) >> 8;
 					ph[oi] += st[oi];
@@ -851,7 +910,7 @@ void pnx_synth_render(int16_t* out, uint32_t count)
 				if (do_filter)
 				{
 					int32_t cut = (int32_t)in->cutoff_base +
-								  (((cut_level >> 8) * in->cutoff_env_amount) >> 8);
+						(((cut_level >> 8) * in->cutoff_env_amount) >> 8);
 					if (s_cfg.lfo && lfo_target == PNX_LFO_CUTOFF)
 						cut += lfo;
 					if (cut < 4)
@@ -861,8 +920,8 @@ void pnx_synth_render(int16_t* out, uint32_t count)
 
 					int32_t f = (cut * 220) >> 4;
 					int32_t q = s_cfg.resonance
-									? ((65536 - ((int32_t)in->resonance * 240)) >> 4)
-									: 4096;
+						? ((65536 - ((int32_t)in->resonance * 240)) >> 4)
+						: 4096;
 					if (q < 256)
 						q = 256;
 
@@ -881,9 +940,9 @@ void pnx_synth_render(int16_t* out, uint32_t count)
 					if (flt_low < -262144)
 						flt_low = -262144;
 
-					int32_t fout = (in->filter_mode == PNX_FILTER_LOWPASS)	  ? flt_low
-								   : (in->filter_mode == PNX_FILTER_HIGHPASS) ? high
-																			  : flt_band;
+					int32_t fout = (in->filter_mode == PNX_FILTER_LOWPASS) ? flt_low
+						: (in->filter_mode == PNX_FILTER_HIGHPASS)		   ? high
+																		   : flt_band;
 					if (fout > (127 << 8))
 						fout = 127 << 8;
 					if (fout < -(127 << 8))
@@ -895,7 +954,7 @@ void pnx_synth_render(int16_t* out, uint32_t count)
 				if (s_cfg.lfo && lfo_target == PNX_LFO_VOLUME)
 					amp = (amp * (128 + (lfo >> 1))) >> 7;
 				int32_t sample = (mixed * amp) >> 8;
-				sample = (sample * velocity) >> 8;
+				sample		   = (sample * velocity) >> 8;
 
 				if (first)
 				{
@@ -932,20 +991,20 @@ void pnx_synth_render(int16_t* out, uint32_t count)
 
 			// --- written back once per block, not once per sample
 			v->amp_level = amp_level;
-			v->amp_rate = amp_rate;
+			v->amp_rate	 = amp_rate;
 			v->amp_stage = amp_stage;
 			v->cut_level = cut_level;
-			v->cut_rate = cut_rate;
+			v->cut_rate	 = cut_rate;
 			v->cut_stage = cut_stage;
 			v->lfo_phase = lfo_phase;
 			v->pitch_env = pitch_env;
-			v->flt_low = flt_low;
-			v->flt_band = flt_band;
+			v->flt_low	 = flt_low;
+			v->flt_band	 = flt_band;
 			v->mod_count = mod_count;
 			for (int oi = 0; oi < PNX_SYNTH_OSCILLATORS; oi++)
 			{
 				v->osc[oi].phase = ph[oi];
-				v->osc[oi].step = st[oi];
+				v->osc[oi].step	 = st[oi];
 			}
 			if (amp_stage == ENV_OFF)
 				v->active = false;
@@ -1009,7 +1068,7 @@ void pnx_synth_bench(uint32_t chunks, uint32_t count, PnxSynthBench* out)
 		return;
 
 	const uint32_t t0 = pnx_platform_now_ms();
-	int32_t sum = 0;
+	int32_t sum		  = 0;
 	for (uint32_t c = 0; c < chunks; c++)
 	{
 		memset(buf, 0, sizeof(int16_t) * count);
@@ -1023,8 +1082,8 @@ void pnx_synth_bench(uint32_t chunks, uint32_t count, PnxSynthBench* out)
 	free(buf);
 
 	out->elapsed_ms = elapsed;
-	out->samples = chunks * count;
-	out->checksum = sum;
+	out->samples	= chunks * count;
+	out->checksum	= sum;
 	if (out->samples)
 	{
 		// Nanoseconds, because microseconds per sample rounds to zero here and the whole
@@ -1037,4 +1096,4 @@ void pnx_synth_bench(uint32_t chunks, uint32_t count, PnxSynthBench* out)
 	}
 }
 
-#endif	// PNX_USE_SYNTH
+#endif // PNX_USE_SYNTH

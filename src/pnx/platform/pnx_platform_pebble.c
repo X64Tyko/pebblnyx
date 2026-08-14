@@ -41,7 +41,7 @@ struct PnxTarget
 };
 
 static Window* s_window;
-static GContext* s_ctx;	 // valid only during update_proc
+static GContext* s_ctx; // valid only during update_proc
 
 static Layer* s_canvas;
 static AppTimer* s_timer;
@@ -50,7 +50,7 @@ static PnxFrameFn s_frame_fn;
 static PnxPostFrameFn s_post_fn;
 static void* s_frame_ctx;
 static uint32_t s_last_frame_ms;
-static uint32_t s_frame_due_ms;	 // wall clock the NEXT frame is scheduled for; the grid
+static uint32_t s_frame_due_ms; // wall clock the NEXT frame is scheduled for; the grid
 static bool s_quit;
 static bool s_screen_locked;
 
@@ -62,7 +62,7 @@ static uint8_t s_ev_head, s_ev_count;
 uint32_t pnx_platform_now_ms(void)
 {
 	time_t seconds = 0;
-	uint16_t ms = time_ms(&seconds, NULL);
+	uint16_t ms	   = time_ms(&seconds, NULL);
 	return (uint32_t)seconds * 1000u + (uint32_t)ms;
 }
 
@@ -91,9 +91,9 @@ PnxRow pnx_target_row(PnxTarget* t, int16_t y)
 		return row;
 
 	const GBitmapDataRowInfo info = gbitmap_get_data_row_info(t->fb, (uint16_t)y);
-	row.data = info.data;
-	row.min_x = info.min_x;
-	row.max_x = info.max_x;
+	row.data					  = info.data;
+	row.min_x					  = info.min_x;
+	row.max_x					  = info.max_x;
 	return row;
 }
 
@@ -166,9 +166,9 @@ bool pnx_platform_audio_open(PnxAudioFormat format, uint8_t volume)
 	// and the thrum, and no amount of mixer work could have touched it.
 	static const SpeakerPcmFormat map[] = {
 		[PNX_AUDIO_16KHZ_16BIT] = SpeakerPcmFormat_16kHz_16bit,
-		[PNX_AUDIO_16KHZ_8BIT] = SpeakerPcmFormat_16kHz_8bit,
-		[PNX_AUDIO_8KHZ_16BIT] = SpeakerPcmFormat_8kHz_16bit,
-		[PNX_AUDIO_8KHZ_8BIT] = SpeakerPcmFormat_8kHz_8bit,
+		[PNX_AUDIO_16KHZ_8BIT]	= SpeakerPcmFormat_16kHz_8bit,
+		[PNX_AUDIO_8KHZ_16BIT]	= SpeakerPcmFormat_8kHz_16bit,
+		[PNX_AUDIO_8KHZ_8BIT]	= SpeakerPcmFormat_8kHz_8bit,
 	};
 	_Static_assert(sizeof(map) / sizeof(map[0]) == PNX_AUDIO_8KHZ_8BIT + 1,
 				   "format map must cover every PnxAudioFormat");
@@ -214,8 +214,8 @@ static void audio_tick(void* unused)
 
 void pnx_platform_set_audio_timer(PnxTickFn fn, void* ctx, uint16_t interval_ms)
 {
-	s_audio_fn = fn;
-	s_audio_ctx = ctx;
+	s_audio_fn		 = fn;
+	s_audio_ctx		 = ctx;
 	s_audio_interval = interval_ms ? interval_ms : 1;
 	if (!s_audio_timer && fn)
 	{
@@ -265,7 +265,7 @@ void pnx_platform_text_draw(const char* text, PnxTextSize size, uint8_t colour, 
 					   GTextAlignmentLeft, NULL);
 }
 
-#endif	// PNX_USE_SDK_TEXT
+#endif // PNX_USE_SDK_TEXT
 
 // ------------------------------------------------------------------------- input
 
@@ -278,12 +278,12 @@ static void push_event(PnxEventType type, int16_t x, int16_t y, uint8_t button)
 		return;
 
 	const uint8_t slot = (uint8_t)((s_ev_head + s_ev_count) % EVENT_QUEUE_LEN);
-	s_events[slot] = (PnxEvent){
-		.type = type,
+	s_events[slot]	   = (PnxEvent){
+		.type	 = type,
 		.time_ms = pnx_platform_now_ms(),
-		.x = x,
-		.y = y,
-		.button = button,
+		.x		 = x,
+		.y		 = y,
+		.button	 = button,
 	};
 	s_ev_count++;
 }
@@ -292,7 +292,7 @@ bool pnx_platform_poll_event(PnxEvent* out)
 {
 	if (s_ev_count == 0)
 		return false;
-	*out = s_events[s_ev_head];
+	*out	  = s_events[s_ev_head];
 	s_ev_head = (uint8_t)((s_ev_head + 1) % EVENT_QUEUE_LEN);
 	s_ev_count--;
 	return true;
@@ -384,16 +384,16 @@ static void frame_timer(void* ctx);
 
 static void update_proc(Layer* layer, GContext* ctx)
 {
-	s_ctx = ctx;
-	const uint32_t now = pnx_platform_now_ms();
+	s_ctx				   = ctx;
+	const uint32_t now	   = pnx_platform_now_ms();
 	const uint32_t elapsed = s_last_frame_ms ? (now - s_last_frame_ms) : PNX_TICK_MS;
-	s_last_frame_ms = now;
+	s_last_frame_ms		   = now;
 
 	GBitmap* fb = graphics_capture_frame_buffer(ctx);
 	if (fb)
 	{
 		const GRect bounds = layer_get_bounds(layer);
-		PnxTarget target = { .fb = fb, .w = bounds.size.w, .h = bounds.size.h };
+		PnxTarget target   = { .fb = fb, .w = bounds.size.w, .h = bounds.size.h };
 
 		if (s_frame_fn)
 			s_frame_fn(s_frame_ctx, elapsed, &target);
@@ -431,7 +431,7 @@ static void update_proc(Layer* layer, GContext* ctx)
 		// own slack. Snap the grid to now rather than firing a burst of make-up frames the
 		// display would refuse anyway; the next frame just starts a fresh 40ms count from here.
 		s_frame_due_ms = after;
-		delay = 1;
+		delay		   = 1;
 	}
 	s_timer = app_timer_register(delay, frame_timer, NULL);
 }
@@ -446,13 +446,13 @@ static void frame_timer(void* ctx)
 static void window_load(Window* window)
 {
 	Layer* root = window_get_root_layer(window);
-	s_canvas = layer_create(layer_get_bounds(root));
+	s_canvas	= layer_create(layer_get_bounds(root));
 	layer_set_update_proc(s_canvas, update_proc);
 	layer_add_child(root, s_canvas);
 
 	s_last_frame_ms = 0;
-	s_frame_due_ms = pnx_platform_now_ms();
-	s_timer = app_timer_register(FRAME_PERIOD_MS, frame_timer, NULL);
+	s_frame_due_ms	= pnx_platform_now_ms();
+	s_timer			= app_timer_register(FRAME_PERIOD_MS, frame_timer, NULL);
 }
 
 static void window_unload(Window* window)
@@ -473,15 +473,15 @@ void pnx_platform_set_post_frame_fn(PnxPostFrameFn fn)
 
 void pnx_platform_run(PnxFrameFn frame, void* ctx)
 {
-	s_frame_fn = frame;
+	s_frame_fn	= frame;
 	s_frame_ctx = ctx;
-	s_quit = false;
+	s_quit		= false;
 
 	s_window = window_create();
 	window_set_background_color(s_window, GColorBlack);
 	window_set_click_config_provider(s_window, click_config);
 	window_set_window_handlers(s_window, (WindowHandlers){
-											 .load = window_load,
+											 .load	 = window_load,
 											 .unload = window_unload,
 										 });
 
@@ -526,4 +526,4 @@ bool pnx_platform_screen_locked(void)
 	return s_screen_locked;
 }
 
-#endif	// !PNX_PLATFORM_HOST
+#endif // !PNX_PLATFORM_HOST

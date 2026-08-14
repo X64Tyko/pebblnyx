@@ -34,8 +34,8 @@
 
 #define TEST_SLOT		   ((PnxSaveSlot)0)
 #define SAVE_VERSION	   1
-#define SAVE_PAYLOAD_BYTES 2000	 // ~8 chunks at PNX_SAVE_CHUNK0_PAYLOAD=248 / 256 each
-#define SAVE_INTERVAL_MS   3000	 // a new save cycle starts this often once idle
+#define SAVE_PAYLOAD_BYTES 2000 // ~8 chunks at PNX_SAVE_CHUNK0_PAYLOAD=248 / 256 each
+#define SAVE_INTERVAL_MS   3000 // a new save cycle starts this often once idle
 
 static uint8_t s_payload[SAVE_PAYLOAD_BYTES];
 
@@ -63,9 +63,9 @@ typedef struct
 
 static void log_cycle_start(App* a)
 {
-	a->saving = true;
+	a->saving				  = true;
 	a->save_frames_this_cycle = 0;
-	a->stats_before_save = *pnx_audio_stats();
+	a->stats_before_save	  = *pnx_audio_stats();
 	for (size_t i = 0; i < SAVE_PAYLOAD_BYTES; i++)
 		s_payload[i] = (uint8_t)(i ^ 0xA5);
 	pnx_save_begin(TEST_SLOT, s_payload, SAVE_PAYLOAD_BYTES, SAVE_VERSION);
@@ -79,13 +79,13 @@ static void log_cycle_end(App* a)
 			(unsigned)a->save_frames_this_cycle,
 			(unsigned)(now_stats->left_playing - a->stats_before_save.left_playing),
 			(unsigned)a->stats_before_save.worst_gap_ms, (unsigned)now_stats->worst_gap_ms);
-	a->saving = false;
+	a->saving		   = false;
 	a->next_save_at_ms = pnx_platform_now_ms() + SAVE_INTERVAL_MS;
 }
 
 static void draw_synthetic_graphics(PnxTarget* target)
 {
-	static const uint8_t COLORS[2] = { 0xD5, 0xC7 };  // resonant's IN_DIM / IN_STEEL values
+	static const uint8_t COLORS[2] = { 0xD5, 0xC7 }; // resonant's IN_DIM / IN_STEEL values
 	const int16_t w = pnx_target_width(target), h = pnx_target_height(target);
 	int idx = 0;
 	for (int16_t y = 0; y < h; y = (int16_t)(y + 16))
@@ -108,7 +108,7 @@ static void audio_tick(void* ctx)
 
 static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 {
-	App* a = (App*)ctx;
+	App* a			  = (App*)ctx;
 	const uint32_t t0 = pnx_platform_now_ms();
 
 	PnxEvent ev;
@@ -116,13 +116,13 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 	{
 		if (ev.type == PNX_EVENT_BUTTON_DOWN && ev.button == PNX_BUTTON_SELECT && !a->running)
 		{
-			a->running = true;
-			a->frames = 0;
-			a->saving = false;
+			a->running			  = true;
+			a->frames			  = 0;
+			a->saving			  = false;
 			a->worst_ms_with_save = a->worst_ms_no_save = 0;
 			a->frames_with_save = a->frames_no_save = 0;
 			a->sum_ms_with_save = a->sum_ms_no_save = 0;
-			a->next_save_at_ms = pnx_platform_now_ms() + SAVE_INTERVAL_MS;
+			a->next_save_at_ms						= pnx_platform_now_ms() + SAVE_INTERVAL_MS;
 			pnx_diag_flush();
 			pnx_log("stress: run started -- %u byte saves every %ums",
 					(unsigned)SAVE_PAYLOAD_BYTES, (unsigned)SAVE_INTERVAL_MS);

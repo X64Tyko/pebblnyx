@@ -72,7 +72,7 @@ enum
 {
 	SCENE_CAVE,
 	SCENE_OUTDOOR
-};	// pipeline sorts scene names alphabetically
+}; // pipeline sorts scene names alphabetically
 
 // The host platform keys resources by number, so any distinct ids will do.
 static uint32_t s_resources[A_COUNT];
@@ -125,7 +125,7 @@ void test_assets(void)
 
 	// --- palettes must load before anything that indexes them
 	PnxAtlas atlas;
-	A_CHECK(!pnx_atlas_load(&atlas, A_TILES));	// refused: no palettes yet
+	A_CHECK(!pnx_atlas_load(&atlas, A_TILES)); // refused: no palettes yet
 	A_CHECK(pnx_palettes_load(A_PALETTES));
 	A_CHECK(pnx_palette_count() > 0);
 	A_CHECK(pnx_palette_count() <= PNX_PALETTE_SLOTS);
@@ -142,7 +142,7 @@ void test_assets(void)
 	A_CHECK(pnx_atlas_load(&atlas, A_TILES));
 	A_CHECK_EQ(atlas.tile_px, 16);
 	A_CHECK_EQ(atlas.tile_count, TILES_TILE_COUNT);
-	A_CHECK_EQ(atlas.tile_bytes, 16 * 16 / 2);	// 4bpp: two pixels per byte
+	A_CHECK_EQ(atlas.tile_bytes, 16 * 16 / 2); // 4bpp: two pixels per byte
 
 	A_CHECK(pnx_atlas_tile_palette(&atlas, 0) != NULL);
 
@@ -152,7 +152,7 @@ void test_assets(void)
 		// rather than hand back the wrong bytes.
 		A_CHECK(pnx_atlas_tile(&atlas, 0) == NULL);
 		A_CHECK(atlas.subtile_count > 0);
-		A_CHECK(atlas.subtile_count <= atlas.tile_count * 4);  // dedup can only shrink
+		A_CHECK(atlas.subtile_count <= atlas.tile_count * 4); // dedup can only shrink
 		A_CHECK_EQ(atlas.sub_bytes, atlas.tile_bytes / 4);
 
 		// Every quadrant index must be in range, or the blitter reads past the bank. The
@@ -239,8 +239,8 @@ void test_assets(void)
 		else if (!a_clear && npc_px[i] != ice_px[i])
 			colour_diffs++;
 	}
-	A_CHECK(shape_same);		// identical silhouette, so the bitmap really is shared
-	A_CHECK(colour_diffs > 0);	// and it is genuinely recoloured, not a duplicate
+	A_CHECK(shape_same);	   // identical silhouette, so the bitmap really is shared
+	A_CHECK(colour_diffs > 0); // and it is genuinely recoloured, not a duplicate
 
 	// Index 0 must stay transparent in every palette, or shared pixels show holes.
 	A_CHECK_EQ(pnx_palette(SPRITE_NPC_PALETTE_NPC_ICE)->entries[0],
@@ -365,10 +365,10 @@ void test_assets(void)
 
 	// --- type and range safety
 	PnxAtlas wrong;
-	A_CHECK(!pnx_atlas_load(&wrong, A_OUTDOOR));  // a map is not an atlas
+	A_CHECK(!pnx_atlas_load(&wrong, A_OUTDOOR)); // a map is not an atlas
 	PnxMap wrong_map;
-	A_CHECK(!pnx_map_load(&wrong_map, A_TILES));  // nor the reverse
-	A_CHECK(!pnx_atlas_load(&wrong, A_COUNT));	  // out of range handle
+	A_CHECK(!pnx_map_load(&wrong_map, A_TILES)); // nor the reverse
+	A_CHECK(!pnx_atlas_load(&wrong, A_COUNT));	 // out of range handle
 	A_CHECK(!pnx_map_load(&wrong_map, A_COUNT));
 
 	// --- multiple atlases in one map
@@ -470,12 +470,12 @@ void test_assets(void)
 	// Loading another scene must release the first entirely rather than accumulating.
 	const size_t after_outdoor = arena.used;
 	A_CHECK(pnx_scene_load(SCENE_CAVE));
-	A_CHECK_EQ(pnx_scene_sprite_count(), 1);  // cave declares no npc
-	A_CHECK(pnx_scene_dialog() == NULL);	  // nor dialog
-	A_CHECK_EQ(pnx_scene_font_count(), 1);	  // HUD only: no conversations here
+	A_CHECK_EQ(pnx_scene_sprite_count(), 1); // cave declares no npc
+	A_CHECK(pnx_scene_dialog() == NULL);	 // nor dialog
+	A_CHECK_EQ(pnx_scene_font_count(), 1);	 // HUD only: no conversations here
 	if (pnx_scene_map())
 		A_CHECK_EQ(pnx_scene_map()->w, MAP_CAVE_W);
-	A_CHECK(arena.used < after_outdoor);  // smaller scene, less arena
+	A_CHECK(arena.used < after_outdoor); // smaller scene, less arena
 
 	// Reloading the bigger scene must fit again, which it cannot if resets leak.
 	A_CHECK(pnx_scene_load(SCENE_OUTDOOR));

@@ -63,7 +63,7 @@ void test_save(void)
 		SV_CHECK(!pnx_save_pending(SLOT_A));
 
 		SmallPayload out = { 0 };
-		size_t got = 0;
+		size_t got		 = 0;
 		SV_CHECK(pnx_save_exists(SLOT_A));
 		SV_CHECK(pnx_save_load(SLOT_A, &out, sizeof(out), 1, &got));
 		SV_CHECK_EQ(got, sizeof(out));
@@ -72,7 +72,7 @@ void test_save(void)
 		// way to test that. Relies on gcc/clang zero-filling padding for a `= {...}`
 		// aggregate initializer, which both `in` and `out` use -- not guaranteed by the C
 		// standard, but reliable in practice on the one host toolchain this runs on.
-		SV_CHECK(memcmp(&in, &out, sizeof(in)) == 0);  // NOLINT
+		SV_CHECK(memcmp(&in, &out, sizeof(in)) == 0); // NOLINT
 	}
 
 	// --- two slots never collide
@@ -102,20 +102,20 @@ void test_save(void)
 		const size_t rest = sizeof(big) - PNX_SAVE_CHUNK0_PAYLOAD;
 		const size_t expect_chunks =
 			1 + (rest + PNX_PERSIST_KEY_BYTES - 1) / PNX_PERSIST_KEY_BYTES;
-		SV_CHECK(expect_chunks > 1);  // the scenario is only meaningful if it actually spans
+		SV_CHECK(expect_chunks > 1); // the scenario is only meaningful if it actually spans
 
-		uint32_t frames = 1;  // begin() already wrote chunk 0
+		uint32_t frames = 1; // begin() already wrote chunk 0
 		while (pnx_save_pending(SLOT_A))
 		{
 			SV_CHECK(pnx_save_step(SLOT_A));
 			frames++;
-			SV_CHECK(frames < 100);	 // runaway guard, not a real limit
+			SV_CHECK(frames < 100); // runaway guard, not a real limit
 		}
 		SV_CHECK_EQ(frames, expect_chunks);
 		SV_CHECK_EQ(pnx_host_persist_writes(), expect_chunks);
 
 		uint8_t out[600] = { 0 };
-		size_t got = 0;
+		size_t got		 = 0;
 		SV_CHECK(pnx_save_load(SLOT_A, out, sizeof(out), 1, &got));
 		SV_CHECK_EQ(got, sizeof(big));
 		SV_CHECK(memcmp(big, out, sizeof(big)) == 0);
@@ -145,8 +145,8 @@ void test_save(void)
 		SV_CHECK_EQ(seen, 5);
 
 		uint32_t out = 0;
-		SV_CHECK(!pnx_save_load(SLOT_A, &out, sizeof(out), 4, NULL));  // 4 < 5, refused
-		SV_CHECK(pnx_save_load(SLOT_A, &out, sizeof(out), 5, NULL));   // exact version, fine
+		SV_CHECK(!pnx_save_load(SLOT_A, &out, sizeof(out), 4, NULL)); // 4 < 5, refused
+		SV_CHECK(pnx_save_load(SLOT_A, &out, sizeof(out), 5, NULL));  // exact version, fine
 		SV_CHECK(pnx_save_load(SLOT_A, &out, sizeof(out), 9, NULL));  // caller understands more
 	}
 
@@ -175,7 +175,7 @@ void test_save(void)
 		SV_CHECK(!pnx_save_exists(SLOT_A));
 		uint32_t out = 0;
 		SV_CHECK(!pnx_save_load(SLOT_A, &out, sizeof(out), 255, NULL));
-		pnx_save_delete(SLOT_A);  // must not crash on a slot that was never written
+		pnx_save_delete(SLOT_A); // must not crash on a slot that was never written
 	}
 
 	// --- delete actually clears it
@@ -200,7 +200,7 @@ void test_save(void)
 		uint32_t second = 555;
 		SV_CHECK(pnx_save_begin(SLOT_A, &second, sizeof(second), 1));
 		SV_CHECK(
-			!pnx_save_pending(SLOT_A));	 // the second was small enough to finish in begin()
+			!pnx_save_pending(SLOT_A)); // the second was small enough to finish in begin()
 
 		uint32_t out = 0;
 		SV_CHECK(pnx_save_load(SLOT_A, &out, sizeof(out), 1, NULL));

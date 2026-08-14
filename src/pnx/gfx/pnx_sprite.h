@@ -17,10 +17,10 @@
 // deciding factor is footprint.
 typedef struct
 {
-	int32_t x, y;	 // world pixels, at the FEET
-	uint8_t sprite;	 // index into the scene's sprites
+	int32_t x, y;	// world pixels, at the FEET
+	uint8_t sprite; // index into the scene's sprites
 	uint8_t frame;
-	uint8_t palette;  // slot; PNX_SPRITE_PALETTE_DEFAULT for the asset's own
+	uint8_t palette; // slot; PNX_SPRITE_PALETTE_DEFAULT for the asset's own
 	uint8_t flags;
 } PnxSpriteInstance;
 
@@ -40,4 +40,4 @@ void pnx_sprite_draw(const PnxSprite* sprite, PnxTarget* target, const PnxCamera
 void pnx_sprites_draw_sorted(const PnxSpriteInstance* instances, uint8_t count, uint8_t* order,
 							 PnxTarget* target, const PnxCamera* camera);
 
-#endif	// PNX_USE_SPRITES
+#endif // PNX_USE_SPRITES

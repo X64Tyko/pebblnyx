@@ -28,10 +28,10 @@ static const PnxAppOps* top(void)
 
 void pnx_app_init(void* ctx)
 {
-	s_ctx = ctx;
-	s_depth = 0;
+	s_ctx			 = ctx;
+	s_depth			 = 0;
 	s_accumulator_ms = 0;
-	s_covered = false;
+	s_covered		 = false;
 	s_fwd_head = s_fwd_count = 0;
 }
 
@@ -55,7 +55,7 @@ void pnx_app_push(const PnxAppOps* ops)
 	}
 
 	s_stack[s_depth++] = ops;
-	s_accumulator_ms = 0;
+	s_accumulator_ms   = 0;
 	if (ops->enter)
 		ops->enter(s_ctx);
 }
@@ -69,7 +69,7 @@ void pnx_app_pop(void)
 	if (was->exit)
 		was->exit(s_ctx);
 
-	s_accumulator_ms = 0;
+	s_accumulator_ms	 = 0;
 	const PnxAppOps* now = top();
 	if (now && now->resume)
 		now->resume(s_ctx);
@@ -94,7 +94,7 @@ void pnx_app_replace(const PnxAppOps* ops)
 	}
 
 	s_stack[s_depth++] = ops;
-	s_accumulator_ms = 0;
+	s_accumulator_ms   = 0;
 	if (ops->enter)
 		ops->enter(s_ctx);
 }
@@ -117,7 +117,7 @@ static void forward_push(PnxEvent ev)
 	if (s_fwd_count >= FWD_QUEUE_LEN)
 		return;
 	const uint8_t slot = (uint8_t)((s_fwd_head + s_fwd_count) % FWD_QUEUE_LEN);
-	s_fwd[slot] = ev;
+	s_fwd[slot]		   = ev;
 	s_fwd_count++;
 }
 
@@ -125,7 +125,7 @@ bool pnx_app_poll_event(PnxEvent* out)
 {
 	if (s_fwd_count == 0)
 		return false;
-	*out = s_fwd[s_fwd_head];
+	*out	   = s_fwd[s_fwd_head];
 	s_fwd_head = (uint8_t)((s_fwd_head + 1) % FWD_QUEUE_LEN);
 	s_fwd_count--;
 	return true;
@@ -138,15 +138,15 @@ static void pump_events(void)
 	{
 		if (ev.type == PNX_EVENT_FOCUS_LOST)
 		{
-			s_covered = true;
-			s_accumulator_ms = 0;
+			s_covered		   = true;
+			s_accumulator_ms   = 0;
 			const PnxAppOps* t = top();
 			if (t && t->suspend)
 				t->suspend(s_ctx);
 		}
 		else if (ev.type == PNX_EVENT_FOCUS_GAINED)
 		{
-			s_covered = false;
+			s_covered		   = false;
 			const PnxAppOps* t = top();
 			if (t && t->resume)
 				t->resume(s_ctx);
@@ -224,4 +224,4 @@ void pnx_app_frame(void* unused_ctx, uint32_t elapsed_ms, PnxTarget* target)
 	pnx_diag_frame(elapsed_ms, pnx_platform_now_ms() - work_start);
 }
 
-#endif	// PNX_USE_APP
+#endif // PNX_USE_APP

@@ -23,6 +23,51 @@
       "media": [
         {
           "type": "raw",
+          "name": "PROBE_0",
+          "file": "probe_0.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PADDING_0",
+          "file": "padding_0.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PROBE_1",
+          "file": "probe_1.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PADDING_1",
+          "file": "padding_1.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PROBE_2",
+          "file": "probe_2.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PADDING_2",
+          "file": "padding_2.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PROBE_3",
+          "file": "probe_3.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PADDING_3",
+          "file": "padding_3.bin"
+        },
+        {
+          "type": "raw",
+          "name": "PROBE_4",
+          "file": "probe_4.bin"
+        },
+        {
+          "type": "raw",
           "name": "PALETTES",
           "file": "palettes.bin"
         },
@@ -30,31 +75,6 @@
           "type": "raw",
           "name": "BENCH",
           "file": "font_bench.bin"
-        },
-        {
-          "type": "raw",
-          "name": "FLASHDATA_8K",
-          "file": "flashdata_8k.bin"
-        },
-        {
-          "type": "raw",
-          "name": "FLASHDATA_32K",
-          "file": "flashdata_32k.bin"
-        },
-        {
-          "type": "raw",
-          "name": "FLASHDATA_75K",
-          "file": "flashdata_75k.bin"
-        },
-        {
-          "type": "raw",
-          "name": "FLASHDATA_150K",
-          "file": "flashdata_150k.bin"
-        },
-        {
-          "type": "raw",
-          "name": "FLASHDATA_220K",
-          "file": "flashdata_220k.bin"
         }
       ]
     }

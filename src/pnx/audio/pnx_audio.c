@@ -82,10 +82,10 @@ typedef struct
 {
 	const int8_t* pcm;
 	uint32_t samples;
-	uint32_t loop_start;  // PNX_AUDIO_NO_LOOP to stop at the end
-	uint32_t phase;		  // 16.16 index into pcm
-	uint32_t step;		  // 16.16 advance per output sample
-	uint8_t volume;		  // 0..255
+	uint32_t loop_start; // PNX_AUDIO_NO_LOOP to stop at the end
+	uint32_t phase;		 // 16.16 index into pcm
+	uint32_t step;		 // 16.16 advance per output sample
+	uint8_t volume;		 // 0..255
 	uint8_t priority;
 	bool active;
 
@@ -102,7 +102,18 @@ static int8_t (*s_wavetable)[CYCLE];
 // Equal temperament, one octave tabulated and shifted. Values are Hz x 100 for C4..B4 so
 // the arithmetic stays integral.
 static const uint16_t NOTE_CENTIHZ[12] = {
-	26163, 27718, 29366, 31113, 32963, 34923, 36999, 39200, 41530, 44000, 46616, 49388,
+	26163,
+	27718,
+	29366,
+	31113,
+	32963,
+	34923,
+	36999,
+	39200,
+	41530,
+	44000,
+	46616,
+	49388,
 };
 
 // Centihz for a note, shifted by octave. Kept in hundredths so nothing rounds early.
@@ -110,7 +121,7 @@ static uint32_t output_rate(void);
 
 static uint32_t note_centihz(uint8_t midi_note)
 {
-	const int octave = (int)(midi_note / 12) - 5;  // 60 -> octave 0 (C4)
+	const int octave = (int)(midi_note / 12) - 5; // 60 -> octave 0 (C4)
 	const uint32_t c = NOTE_CENTIHZ[midi_note % 12];
 	return octave > 0 ? (c << octave) : (c >> -octave);
 }
@@ -132,7 +143,7 @@ static uint32_t note_step(uint8_t midi_note, uint32_t cycle_len)
 
 uint32_t pnx_note_hz(uint8_t midi_note)
 {
-	const int octave = (int)(midi_note / 12) - 5;  // 60 -> octave 0 (C4)
+	const int octave = (int)(midi_note / 12) - 5; // 60 -> octave 0 (C4)
 
 	// Shift in CENTIHZ and round at the end. Truncating to whole Hz first and then shifting
 	// multiplies the rounding error by the octave -- measured at 10 cents flat on D3, where
@@ -161,7 +172,7 @@ uint32_t pnx_note_hz(uint8_t midi_note)
 // triangle one.
 static void build_wavetable(void)
 {
-	const int q = CYCLE / 4;
+	const int q	 = CYCLE / 4;
 	uint32_t rng = 0x2545F491u;
 
 	for (int i = 0; i < CYCLE; i++)
@@ -241,7 +252,7 @@ static bool reserve(void)
 				(uint32_t)(VOICES_BYTES + MIX_BYTES + WAVE_BYTES));
 		return false;
 	}
-	s_block = p;
+	s_block	 = p;
 	s_voices = (Voice*)p;
 	p += VOICES_BYTES;
 	s_mix = (int16_t*)p;
@@ -250,8 +261,8 @@ static bool reserve(void)
 	return true;
 }
 
-static uint32_t s_carry_bytes;	// bytes in s_mix awaiting the device
-static uint32_t s_carry_head;	// how many it has taken; equal means drained
+static uint32_t s_carry_bytes; // bytes in s_mix awaiting the device
+static uint32_t s_carry_head;  // how many it has taken; equal means drained
 
 static PnxAudioStats s_stats;
 
@@ -264,7 +275,7 @@ static PnxAudioStats s_stats;
 // the thorough fix. A one-pole filter costs one multiply and one shift per sample and
 // removes the harshness that is genuinely too high to belong there.
 static int32_t s_lp;
-static int32_t s_lp_a = 0;	// 0 disables the filter entirely
+static int32_t s_lp_a		= 0; // 0 disables the filter entirely
 static uint16_t s_cutoff_hz = PNX_AUDIO_CUTOFF_HZ;
 
 static PnxAudioFormat s_format;
@@ -280,7 +291,7 @@ bool pnx_audio_init(PnxAudioFormat format, uint8_t volume)
 	if (s_on)
 		return true;
 	if (!reserve())
-		return false;  // before opening, so a failure leaves no stream
+		return false; // before opening, so a failure leaves no stream
 	if (!pnx_platform_audio_open(format, volume))
 	{
 		pnx_log("audio: stream would not open");
@@ -291,17 +302,17 @@ bool pnx_audio_init(PnxAudioFormat format, uint8_t volume)
 	memset(s_voices, 0, VOICES_BYTES);
 	memset(&s_stats, 0, sizeof(s_stats));
 	build_wavetable();
-	s_format = format;
+	s_format	= format;
 	s_byte_rate = pnx_audio_byte_rate(format);
-	s_16bit = (format == PNX_AUDIO_16KHZ_16BIT || format == PNX_AUDIO_8KHZ_16BIT);
-	s_start_ms = 0;
+	s_16bit		= (format == PNX_AUDIO_16KHZ_16BIT || format == PNX_AUDIO_8KHZ_16BIT);
+	s_start_ms	= 0;
 	// Cleared so the first gap after an open is not measured from before it. Not doing this
 	// reported a 2,398ms gap after a format change, which was the measurement and not the
 	// device.
-	s_last_update_ms = 0;
+	s_last_update_ms	 = 0;
 	s_stats.worst_gap_ms = 0;
 	s_carry_bytes = s_carry_head = 0;
-	s_lp = 0;
+	s_lp						 = 0;
 	pnx_audio_set_lowpass(s_cutoff_hz);
 	s_on = true;
 #if PNX_USE_SYNTH
@@ -369,17 +380,17 @@ static void env_begin(Voice* v, const PnxEnvelope* env)
 {
 	if (!env || (env->attack_ms == 0 && env->decay_ms == 0 && env->release_ms == 0))
 	{
-		v->stage = ENV_OFF;	 // no envelope: full level, hard stop
+		v->stage = ENV_OFF; // no envelope: full level, hard stop
 		v->level = 1 << 16;
-		v->rate = 0;
+		v->rate	 = 0;
 		return;
 	}
-	v->env = *env;
-	v->stage = ENV_ATTACK;
-	v->level = 0;
+	v->env				= *env;
+	v->stage			= ENV_ATTACK;
+	v->level			= 0;
 	const uint32_t rate = output_rate();
-	v->rate = env->attack_ms ? (int32_t)((1 << 16) / ((env->attack_ms * rate) / 1000 + 1))
-							 : (1 << 16);
+	v->rate				= env->attack_ms ? (int32_t)((1 << 16) / ((env->attack_ms * rate) / 1000 + 1))
+										 : (1 << 16);
 }
 
 uint8_t pnx_audio_play_pri(const int8_t* pcm, uint32_t samples, uint32_t loop_start,
@@ -391,12 +402,12 @@ uint8_t pnx_audio_play_pri(const int8_t* pcm, uint32_t samples, uint32_t loop_st
 
 	const int slot = claim_voice(priority);
 	if (slot < 0)
-		return PNX_AUDIO_NO_VOICE;	// everything playing is more important
+		return PNX_AUDIO_NO_VOICE; // everything playing is more important
 
 	Voice* v = &s_voices[slot];
 	memset(v, 0, sizeof(*v));
-	v->pcm = pcm;
-	v->samples = samples;
+	v->pcm		  = pcm;
+	v->samples	  = samples;
 	v->loop_start = loop_start < samples ? loop_start : PNX_AUDIO_NO_LOOP;
 	// 16.16 ratio of source to output rate, without a 64-bit divide -- that pulled in
 	// __udivmoddi4 at 754 bytes, which the size report shows as "(unattributed)".
@@ -405,9 +416,9 @@ uint8_t pnx_audio_play_pri(const int8_t* pcm, uint32_t samples, uint32_t loop_st
 	v->step = ((sample_hz << 8) / output_rate()) << 8;
 	if (v->step == 0)
 		v->step = 1;
-	v->volume = volume;
+	v->volume	= volume;
 	v->priority = priority;
-	v->active = true;
+	v->active	= true;
 	env_begin(v, env);
 	return (uint8_t)slot;
 }
@@ -424,15 +435,15 @@ uint8_t pnx_audio_note(PnxWaveform wave, uint8_t midi_note, uint8_t volume,
 
 	Voice* v = &s_voices[slot];
 	memset(v, 0, sizeof(*v));
-	v->pcm = s_wavetable[wave];
-	v->samples = CYCLE;
+	v->pcm		  = s_wavetable[wave];
+	v->samples	  = CYCLE;
 	v->loop_start = 0;
 	// Set directly rather than derived from an integer frequency, which is where the
 	// tuning error came from.
-	v->step = note_step(midi_note, CYCLE);
-	v->volume = volume;
+	v->step		= note_step(midi_note, CYCLE);
+	v->volume	= volume;
 	v->priority = priority;
-	v->active = true;
+	v->active	= true;
 	env_begin(v, env);
 	return (uint8_t)slot;
 }
@@ -441,7 +452,7 @@ void pnx_audio_release_in(uint8_t voice, uint16_t ms)
 {
 	if (voice >= PNX_AUDIO_VOICES || !s_voices[voice].active)
 		return;
-	Voice* v = &s_voices[voice];
+	Voice* v			   = &s_voices[voice];
 	const uint32_t samples = ((uint32_t)ms * output_rate()) / 1000u + 1u;
 
 	// Even a voice with no envelope gets a fade, because the alternative is a step in the
@@ -449,7 +460,7 @@ void pnx_audio_release_in(uint8_t voice, uint16_t ms)
 	if (v->stage == ENV_OFF)
 		v->level = 1 << 16;
 	v->stage = ENV_RELEASE;
-	v->rate = -(int32_t)(v->level / samples);
+	v->rate	 = -(int32_t)(v->level / samples);
 	if (v->rate == 0)
 		v->rate = -1;
 }
@@ -522,7 +533,7 @@ static uint32_t mix(uint32_t count)
 				{
 					o->active = false;
 					break;
-				}  // pathological step
+				} // pathological step
 			}
 
 			// Envelope advance. One add and a stage test per sample, which at 600 samples x
@@ -536,19 +547,19 @@ static uint32_t mix(uint32_t count)
 					case ENV_ATTACK:
 						if (o->level >= (1 << 16))
 						{
-							o->level = 1 << 16;
-							o->stage = ENV_DECAY;
+							o->level			 = 1 << 16;
+							o->stage			 = ENV_DECAY;
 							const int32_t target = (int32_t)o->env.sustain << 8;
-							o->rate = o->env.decay_ms
-										  ? -(int32_t)(((1 << 16) - target) /
-													   ((o->env.decay_ms * sr) / 1000 + 1))
-										  : 0;
+							o->rate				 = o->env.decay_ms
+								? -(int32_t)(((1 << 16) - target) /
+											 ((o->env.decay_ms * sr) / 1000 + 1))
+								: 0;
 							// rate must be cleared too, or sustain keeps applying the attack ramp and
 							// the note swells indefinitely.
 							if (!o->env.decay_ms)
 							{
 								o->level = target;
-								o->rate = 0;
+								o->rate	 = 0;
 								o->stage = ENV_SUSTAIN;
 							}
 						}
@@ -557,14 +568,14 @@ static uint32_t mix(uint32_t count)
 						if (o->level <= ((int32_t)o->env.sustain << 8))
 						{
 							o->level = (int32_t)o->env.sustain << 8;
-							o->rate = 0;
+							o->rate	 = 0;
 							o->stage = ENV_SUSTAIN;
 						}
 						break;
 					case ENV_RELEASE:
 						if (o->level <= 0)
 						{
-							o->level = 0;
+							o->level  = 0;
 							o->active = false;
 						}
 						break;
@@ -586,15 +597,15 @@ static uint32_t mix(uint32_t count)
 			// of idle CPU per frame that is free, and it is the difference between a tone and a
 			// buzz.
 			const uint32_t frac = o->phase & 0xFFFF;
-			const int32_t a0 = o->pcm[index];
-			uint32_t next = index + 1u;
+			const int32_t a0	= o->pcm[index];
+			uint32_t next		= index + 1u;
 			if (next >= o->samples)
 			{
 				// Wrap to the loop point so the seam interpolates too; a one-cycle wavetable is
 				// continuous across it, and treating the end as a cliff would tick once per cycle.
 				next = (o->loop_start == PNX_AUDIO_NO_LOOP) ? index : o->loop_start;
 			}
-			const int32_t a1 = o->pcm[next];
+			const int32_t a1	 = o->pcm[next];
 			const int32_t sample = a0 + (((a1 - a0) * (int32_t)frac) >> 16);
 
 			const int32_t enveloped =
@@ -655,9 +666,9 @@ static uint32_t mix(uint32_t count)
 		}
 		const int8_t c = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
 		if (s_16bit)
-			s_mix[n] = (int16_t)(c << 8);  // same entry, read above
+			s_mix[n] = (int16_t)(c << 8); // same entry, read above
 		else
-			out8[n] = c;  // byte n lives in entry n/2, already read
+			out8[n] = c; // byte n lives in entry n/2, already read
 	}
 
 	s_stats.active_voices = active;
@@ -680,7 +691,7 @@ static void offer(uint32_t bytes)
 			s_stats.capacity = s_stats.written;
 		s_stats.short_writes++;
 		s_carry_bytes = bytes;
-		s_carry_head = (uint32_t)wrote;
+		s_carry_head  = (uint32_t)wrote;
 	}
 	else
 	{
@@ -746,7 +757,7 @@ void pnx_audio_update(uint32_t now_ms)
 		if (s_carry_head < s_carry_bytes)
 		{
 			s_stats.short_writes++;
-			return;	 // still backed up; do not mix ahead of it
+			return; // still backed up; do not mix ahead of it
 		}
 		s_carry_bytes = s_carry_head = 0;
 	}
@@ -755,7 +766,7 @@ void pnx_audio_update(uint32_t now_ms)
 	if (target <= s_stats.written)
 		return;
 
-	uint32_t want_bytes = target - s_stats.written;
+	uint32_t want_bytes		 = target - s_stats.written;
 	const uint32_t max_bytes = s_16bit ? PNX_AUDIO_CHUNK * 2u : PNX_AUDIO_CHUNK;
 	if (want_bytes > max_bytes)
 		want_bytes = max_bytes;
@@ -796,9 +807,9 @@ void pnx_audio_set_lowpass(uint16_t cutoff_hz)
 	{
 		s_lp_a = 0;
 		return;
-	}  // above Nyquist: no filtering
+	} // above Nyquist: no filtering
 
-	const uint32_t wc = (cutoff_hz * 6283u) / 1000u;  // 2*pi*fc
+	const uint32_t wc = (cutoff_hz * 6283u) / 1000u; // 2*pi*fc
 	// 32-bit throughout: one 64-bit division costs 754 bytes of __udivmoddi4, and the Nyquist
 	// check above bounds wc at 50,264, so wc << 16 stays under 3.3e9 and inside a uint32.
 	s_lp_a = (int32_t)((wc << 16) / (rate + wc));
@@ -828,11 +839,11 @@ void pnx_audio_set_lead(uint16_t ms)
 	// Reset the deficit so a sweep is judged on the new setting rather than on the worst
 	// value any earlier setting produced.
 	s_stats.worst_deficit = 0;
-	s_stats.short_writes = 0;
-	s_stats.feeds = 0;
+	s_stats.short_writes  = 0;
+	s_stats.feeds		  = 0;
 	s_stats.feed_min = s_stats.feed_max = 0;
-	s_stats.worst_gap_ms = 0;
-	s_last_update_ms = 0;
+	s_stats.worst_gap_ms				= 0;
+	s_last_update_ms					= 0;
 }
 
 uint16_t pnx_audio_lead(void)
@@ -845,4 +856,4 @@ const PnxAudioStats* pnx_audio_stats(void)
 	return &s_stats;
 }
 
-#endif	// PNX_USE_AUDIO
+#endif // PNX_USE_AUDIO

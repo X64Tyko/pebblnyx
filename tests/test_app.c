@@ -112,13 +112,13 @@ static void a_frame(void* ctx)
 }
 
 static const PnxAppOps A_OPS = {
-	.enter = a_enter,
-	.exit = a_exit,
+	.enter	 = a_enter,
+	.exit	 = a_exit,
 	.suspend = a_suspend,
-	.resume = a_resume,
-	.tick = a_tick,
-	.draw = a_draw,
-	.frame = a_frame,
+	.resume	 = a_resume,
+	.tick	 = a_tick,
+	.draw	 = a_draw,
+	.frame	 = a_frame,
 };
 
 // State "B": a second, distinct state for push/pop/replace ordering. No tick/draw of its
@@ -145,10 +145,10 @@ static void b_resume(void* ctx)
 }
 
 static const PnxAppOps B_OPS = {
-	.enter = b_enter,
-	.exit = b_exit,
+	.enter	 = b_enter,
+	.exit	 = b_exit,
 	.suspend = b_suspend,
-	.resume = b_resume,
+	.resume	 = b_resume,
 };
 
 void test_app(void)
@@ -195,7 +195,7 @@ void test_app(void)
 	AP_CHECK_EQ(pnx_app_depth(), 1);
 	AP_CHECK(log_eq(0, "a.exit"));
 	AP_CHECK(log_eq(1, "b.enter"));
-	AP_CHECK_EQ(s_log_n, 2);  // specifically NOT a.suspend or b.resume
+	AP_CHECK_EQ(s_log_n, 2); // specifically NOT a.suspend or b.resume
 
 	// --- push past PNX_APP_MAX_DEPTH is refused, and the state that got suspended for the
 	// attempt is resumed rather than left paused for a push that never happened
@@ -206,10 +206,10 @@ void test_app(void)
 	AP_CHECK_EQ(pnx_app_depth(), PNX_APP_MAX_DEPTH);
 	log_reset();
 	pnx_app_push(&A_OPS);
-	AP_CHECK_EQ(pnx_app_depth(), PNX_APP_MAX_DEPTH);  // refused, not grown
+	AP_CHECK_EQ(pnx_app_depth(), PNX_APP_MAX_DEPTH); // refused, not grown
 	AP_CHECK(log_eq(0, "b.suspend"));
 	AP_CHECK(log_eq(1, "b.resume"));
-	AP_CHECK_EQ(s_log_n, 2);  // never reached a.enter
+	AP_CHECK_EQ(s_log_n, 2); // never reached a.enter
 
 	// --- the frame loop: fixed-step ticks, and a frame carrying less than one tick's worth
 	// of elapsed time ticks zero times
@@ -222,7 +222,7 @@ void test_app(void)
 	AP_CHECK(log_eq(0, "a.frame"));
 	AP_CHECK(log_eq(1, "a.draw"));
 
-	pnx_app_frame(NULL, 1, pnx_host_target());	// completes the tick the previous frame owed
+	pnx_app_frame(NULL, 1, pnx_host_target()); // completes the tick the previous frame owed
 	AP_CHECK_EQ(ctx.ticks, 1);
 
 	// --- several ticks' worth of elapsed time in one frame runs the tick loop that many
@@ -251,7 +251,7 @@ void test_app(void)
 	pnx_app_frame(NULL, PNX_TICK_MS * 5, pnx_host_target());
 	AP_CHECK(pnx_app_covered());
 	AP_CHECK(log_eq(0, "a.suspend"));
-	AP_CHECK_EQ(ctx.ticks, 0);	// not even one -- covered arrived this same frame
+	AP_CHECK_EQ(ctx.ticks, 0); // not even one -- covered arrived this same frame
 	// frame() still ran even though tick() did not -- see PNX_USE_APP header note on why.
 	AP_CHECK(log_eq(1, "a.frame"));
 
@@ -264,7 +264,7 @@ void test_app(void)
 	pnx_app_frame(NULL, PNX_TICK_MS, pnx_host_target());
 	AP_CHECK(!pnx_app_covered());
 	AP_CHECK(log_eq(0, "a.resume"));
-	AP_CHECK_EQ(ctx.ticks, 1);	// ticking from a zeroed accumulator, not a caught-up one
+	AP_CHECK_EQ(ctx.ticks, 1); // ticking from a zeroed accumulator, not a caught-up one
 
 	// --- non-lifecycle events are forwarded, not swallowed; lifecycle ones never are
 	memset(&ctx, 0, sizeof(ctx));
@@ -281,7 +281,7 @@ void test_app(void)
 	AP_CHECK_EQ(ev.type, PNX_EVENT_BUTTON_DOWN);
 	AP_CHECK(pnx_app_poll_event(&ev));
 	AP_CHECK_EQ(ev.type, PNX_EVENT_BUTTON_UP);
-	AP_CHECK(!pnx_app_poll_event(&ev));	 // the two focus events were consumed, not forwarded
+	AP_CHECK(!pnx_app_poll_event(&ev)); // the two focus events were consumed, not forwarded
 
 	// --- a tick that changes the stack mid-loop hands any ticks still owed this frame, and
 	// the frame/draw calls after the loop, to whoever is on top NOW -- not the state that
@@ -289,8 +289,8 @@ void test_app(void)
 	memset(&ctx, 0, sizeof(ctx));
 	pnx_app_init(&ctx);
 	pnx_app_push(&A_OPS);
-	pnx_app_pop();											  // stack now empty
-	pnx_app_frame(NULL, PNX_TICK_MS * 3, pnx_host_target());  // must not crash on an empty top
+	pnx_app_pop();											 // stack now empty
+	pnx_app_frame(NULL, PNX_TICK_MS * 3, pnx_host_target()); // must not crash on an empty top
 	AP_CHECK_EQ(pnx_app_depth(), 0);
 
 	// --- pnx_app_frame feeds pnx_diag_frame() itself -- a game's FPS readout is otherwise

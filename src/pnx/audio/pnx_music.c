@@ -59,7 +59,7 @@ bool pnx_music_load(PnxSong* out, uint16_t asset_id)
 	// u16 tempo, u8 channels, u8 pad, then instruments, order, patterns.
 	if (payload < 4)
 		return false;
-	const uint16_t tempo = (uint16_t)(data[0] | (data[1] << 8));
+	const uint16_t tempo   = (uint16_t)(data[0] | (data[1] << 8));
 	const uint8_t channels = data[2];
 	if (channels != PNX_MUSIC_CHANNELS)
 	{
@@ -68,10 +68,10 @@ bool pnx_music_load(PnxSong* out, uint16_t asset_id)
 		return false;
 	}
 
-	const size_t inst_bytes = (size_t)instruments * 8u;
+	const size_t inst_bytes	 = (size_t)instruments * 8u;
 	const size_t order_bytes = ((size_t)order_len + 3u) & ~(size_t)3u;
-	const size_t row_bytes = (size_t)patterns * rows * channels * 2u;
-	const size_t expected = 4 + inst_bytes + order_bytes + row_bytes;
+	const size_t row_bytes	 = (size_t)patterns * rows * channels * 2u;
+	const size_t expected	 = 4 + inst_bytes + order_bytes + row_bytes;
 	if (payload < expected)
 	{
 		pnx_log("music %u: needs %u bytes, blob has %u", asset_id, (unsigned)expected,
@@ -86,14 +86,14 @@ bool pnx_music_load(PnxSong* out, uint16_t asset_id)
 	//
 	// The width is carried so a song written by a NEWER pipeline, with a wider record than
 	// this build understands, is refused rather than misread as garbage instruments.
-	out->synth = NULL;
-	out->synth_count = 0;
-	out->synth_stride = 0;
+	out->synth			  = NULL;
+	out->synth_count	  = 0;
+	out->synth_stride	  = 0;
 	const size_t trailing = payload - expected;
 	if (trailing >= 2)
 	{
-		const uint8_t* tail = data + expected;
-		const uint8_t count = tail[0];
+		const uint8_t* tail	 = data + expected;
+		const uint8_t count	 = tail[0];
 		const uint8_t stride = tail[1];
 		if (count && stride)
 		{
@@ -109,8 +109,8 @@ bool pnx_music_load(PnxSong* out, uint16_t asset_id)
 			}
 			else
 			{
-				out->synth = tail + 2;
-				out->synth_count = count;
+				out->synth		  = tail + 2;
+				out->synth_count  = count;
 				out->synth_stride = stride;
 			}
 		}
@@ -125,22 +125,22 @@ bool pnx_music_load(PnxSong* out, uint16_t asset_id)
 			pnx_log("music %u: instrument %u has waveform %u", asset_id, i, e[0]);
 			return false;
 		}
-		s_wave[i] = e[0];
-		s_env[i].attack_ms = (uint16_t)(e[1] | (e[2] << 8));
-		s_env[i].decay_ms = (uint16_t)(e[3] | (e[4] << 8));
-		s_env[i].sustain = e[5];
+		s_wave[i]			= e[0];
+		s_env[i].attack_ms	= (uint16_t)(e[1] | (e[2] << 8));
+		s_env[i].decay_ms	= (uint16_t)(e[3] | (e[4] << 8));
+		s_env[i].sustain	= e[5];
 		s_env[i].release_ms = (uint16_t)(e[6] | (e[7] << 8));
 	}
 
-	out->order = ins + inst_bytes;
-	out->rows = out->order + order_bytes;
-	out->instruments = s_env;
-	out->waveforms = s_wave;
-	out->pattern_count = patterns;
-	out->order_length = order_len;
+	out->order			  = ins + inst_bytes;
+	out->rows			  = out->order + order_bytes;
+	out->instruments	  = s_env;
+	out->waveforms		  = s_wave;
+	out->pattern_count	  = patterns;
+	out->order_length	  = order_len;
 	out->rows_per_pattern = rows;
 	out->instrument_count = instruments;
-	out->tempo_bpm = tempo;
+	out->tempo_bpm		  = tempo;
 
 	for (uint8_t i = 0; i < order_len; i++)
 	{
@@ -158,11 +158,11 @@ void pnx_music_play(const PnxSong* song, bool loop)
 {
 	if (!song || !song->rows || song->order_length == 0)
 		return;
-	s_song = song;
-	s_loop = loop;
-	s_playing = true;
-	s_order_pos = 0;
-	s_row = 0;
+	s_song		  = song;
+	s_loop		  = loop;
+	s_playing	  = true;
+	s_order_pos	  = 0;
+	s_row		  = 0;
 	s_next_row_ms = 0;
 	memset(s_channel_voice, PNX_AUDIO_NO_VOICE, sizeof(s_channel_voice));
 }
@@ -180,7 +180,7 @@ void pnx_music_stop(void)
 		}
 	}
 	s_playing = false;
-	s_song = NULL;
+	s_song	  = NULL;
 }
 
 bool pnx_music_playing(void)
@@ -205,7 +205,7 @@ void pnx_music_set_volume(uint8_t volume)
 static uint32_t row_ms(const PnxSong* s)
 {
 	const uint32_t bpm = s->tempo_bpm ? s->tempo_bpm : 120;
-	const uint32_t ms = 60000u / (bpm * 4u);
+	const uint32_t ms  = 60000u / (bpm * 4u);
 	return ms ? ms : 1u;
 }
 
@@ -217,11 +217,11 @@ static void play_row(const PnxSong* s, uint8_t pattern, uint8_t row)
 
 	for (int c = 0; c < PNX_MUSIC_CHANNELS; c++)
 	{
-		const uint8_t note = r[c * 2];
+		const uint8_t note		 = r[c * 2];
 		const uint8_t instrument = r[c * 2 + 1];
 
 		if (note == PNX_MUSIC_NO_NOTE)
-			continue;  // hold whatever is sounding
+			continue; // hold whatever is sounding
 
 		// Fade the previous note out fast rather than cutting it. Cutting was a step
 		// discontinuity in the waveform -- a click on every note change. A release long
@@ -261,7 +261,7 @@ static void play_row(const PnxSong* s, uint8_t pattern, uint8_t row)
 			pnx_music_decode_instrument(s, instrument, &in);
 			pnx_synth_set_instrument(c, &in);
 			pnx_synth_note_on(c, note, vol);
-			s_channel_voice[c] = PNX_AUDIO_NO_VOICE;  // the synth owns this channel
+			s_channel_voice[c] = PNX_AUDIO_NO_VOICE; // the synth owns this channel
 			continue;
 		}
 #endif
@@ -286,36 +286,36 @@ void pnx_music_decode_instrument(const PnxSong* s, uint8_t index, PnxInstrument*
 	out->osc_count = r[0] ? r[0] : 1;
 	if (out->osc_count > PNX_SYNTH_OSCILLATORS)
 		out->osc_count = PNX_SYNTH_OSCILLATORS;
-	out->filter_mode = r[1];
-	out->cutoff_base = r[2];
-	out->resonance = r[3];
+	out->filter_mode	   = r[1];
+	out->cutoff_base	   = r[2];
+	out->resonance		   = r[3];
 	out->cutoff_env_amount = r[4];
-	out->lfo_target = r[5];
-	out->lfo_rate = r[6];
-	out->lfo_depth = r[7];
-	out->pitch_env_amount = (int16_t)(r[8] | (r[9] << 8));
-	out->pitch_env_decay = r[10];
-	out->reverb_send = r[11];
-	out->chorus_send = r[12];
+	out->lfo_target		   = r[5];
+	out->lfo_rate		   = r[6];
+	out->lfo_depth		   = r[7];
+	out->pitch_env_amount  = (int16_t)(r[8] | (r[9] << 8));
+	out->pitch_env_decay   = r[10];
+	out->reverb_send	   = r[11];
+	out->chorus_send	   = r[12];
 
-	out->amp.attack_ms = (uint16_t)(r[14] | (r[15] << 8));
-	out->amp.decay_ms = (uint16_t)(r[16] | (r[17] << 8));
-	out->amp.sustain = r[18];
+	out->amp.attack_ms	= (uint16_t)(r[14] | (r[15] << 8));
+	out->amp.decay_ms	= (uint16_t)(r[16] | (r[17] << 8));
+	out->amp.sustain	= r[18];
 	out->amp.release_ms = (uint16_t)(r[20] | (r[21] << 8));
 
-	out->cutoff.attack_ms = (uint16_t)(r[22] | (r[23] << 8));
-	out->cutoff.decay_ms = (uint16_t)(r[24] | (r[25] << 8));
-	out->cutoff.sustain = r[26];
+	out->cutoff.attack_ms  = (uint16_t)(r[22] | (r[23] << 8));
+	out->cutoff.decay_ms   = (uint16_t)(r[24] | (r[25] << 8));
+	out->cutoff.sustain	   = r[26];
 	out->cutoff.release_ms = (uint16_t)(r[28] | (r[29] << 8));
 
 	for (int i = 0; i < PNX_SYNTH_OSCILLATORS; i++)
 	{
-		const uint8_t* o = r + 30 + i * 6;
-		out->osc[i].wave = o[0];
+		const uint8_t* o   = r + 30 + i * 6;
+		out->osc[i].wave   = o[0];
 		out->osc[i].volume = o[1];
 		out->osc[i].detune = (int16_t)(o[2] | (o[3] << 8));
 		out->osc[i].octave = (int8_t)o[4];
-		out->osc[i].duty = o[5];
+		out->osc[i].duty   = o[5];
 	}
 }
 #endif
@@ -330,7 +330,7 @@ void pnx_music_update(uint32_t now_ms)
 	if (now_ms < s_next_row_ms)
 		return;
 
-	const PnxSong* s = s_song;
+	const PnxSong* s	   = s_song;
 	const uint32_t per_row = row_ms(s);
 
 	// Catch up at most a few rows. A covered app can return seconds late, and replaying
@@ -362,4 +362,4 @@ void pnx_music_update(uint32_t now_ms)
 		s_next_row_ms = now_ms;
 }
 
-#endif	// PNX_USE_SEQUENCER
+#endif // PNX_USE_SEQUENCER

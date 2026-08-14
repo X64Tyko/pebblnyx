@@ -11,7 +11,7 @@ typedef struct
 {
 	char* buf;
 	size_t size;
-	size_t used;  // counts what WOULD be written, so truncation is detectable
+	size_t used; // counts what WOULD be written, so truncation is detectable
 } Sink;
 
 static void emit(Sink* s, char c)
@@ -39,8 +39,8 @@ static void emit_pad(Sink* s, char c, int count)
 static char* render_uint(uint32_t value, unsigned base, bool upper, char* tmp)
 {
 	const char* digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
-	char* p = tmp + NUM_BUF;
-	*--p = '\0';
+	char* p			   = tmp + NUM_BUF;
+	*--p			   = '\0';
 
 	if (value == 0)
 	{
@@ -91,11 +91,11 @@ int pnx_vformat(char* buf, size_t size, const char* fmt, va_list ap)
 
 		p++;
 		if (*p == '\0')
-			break;	// trailing '%' with nothing after it
+			break; // trailing '%' with nothing after it
 
 		// ---- flags
 		bool left_align = false;
-		char pad = ' ';
+		char pad		= ' ';
 		for (;; p++)
 		{
 			if (*p == '-')
@@ -120,10 +120,10 @@ int pnx_vformat(char* buf, size_t size, const char* fmt, va_list ap)
 			p++;
 
 		char tmp[NUM_BUF];
-		bool negative = false;
+		bool negative	   = false;
 		uint32_t magnitude = 0;
-		unsigned base = 10;
-		bool upper = false;
+		unsigned base	   = 10;
+		bool upper		   = false;
 
 		switch (*p)
 		{
@@ -132,13 +132,13 @@ int pnx_vformat(char* buf, size_t size, const char* fmt, va_list ap)
 				continue;
 
 			case 'c':
-			{
-				// char promotes to int through varargs.
-				const char c = (char)va_arg(ap, int);
-				const char one[2] = { c, '\0' };
-				emit_str(&s, one, width, left_align, ' ');
-				continue;
-			}
+				{
+					// char promotes to int through varargs.
+					const char c	  = (char)va_arg(ap, int);
+					const char one[2] = { c, '\0' };
+					emit_str(&s, one, width, left_align, ' ');
+					continue;
+				}
 
 			case '%':
 				emit(&s, '%');
@@ -146,14 +146,14 @@ int pnx_vformat(char* buf, size_t size, const char* fmt, va_list ap)
 
 			case 'd':
 			case 'i':
-			{
-				const int32_t v = va_arg(ap, int);
-				negative = v < 0;
-				// Negated through unsigned so INT32_MIN, which has no positive counterpart,
-				// does not overflow on the way.
-				magnitude = negative ? (uint32_t)(-(v + 1)) + 1u : (uint32_t)v;
-				break;
-			}
+				{
+					const int32_t v = va_arg(ap, int);
+					negative		= v < 0;
+					// Negated through unsigned so INT32_MIN, which has no positive counterpart,
+					// does not overflow on the way.
+					magnitude = negative ? (uint32_t)(-(v + 1)) + 1u : (uint32_t)v;
+					break;
+				}
 
 			case 'u':
 				magnitude = va_arg(ap, unsigned int);
@@ -163,19 +163,19 @@ int pnx_vformat(char* buf, size_t size, const char* fmt, va_list ap)
 				upper = true;
 				/* fall through */
 			case 'x':
-				base = 16;
+				base	  = 16;
 				magnitude = va_arg(ap, unsigned int);
 				break;
 
 			case 'p':
-			{
-				const uintptr_t v = (uintptr_t)va_arg(ap, void*);
-				emit(&s, '0');
-				emit(&s, 'x');
-				base = 16;
-				magnitude = (uint32_t)v;
-				break;
-			}
+				{
+					const uintptr_t v = (uintptr_t)va_arg(ap, void*);
+					emit(&s, '0');
+					emit(&s, 'x');
+					base	  = 16;
+					magnitude = (uint32_t)v;
+					break;
+				}
 
 			default:
 				// Unknown conversion: emit it literally rather than silently swallowing it, so
@@ -213,7 +213,7 @@ int pnx_vformat(char* buf, size_t size, const char* fmt, va_list ap)
 	if (size > 0)
 	{
 		const size_t terminator = s.used < size ? s.used : size - 1;
-		buf[terminator] = '\0';
+		buf[terminator]			= '\0';
 	}
 
 	return (int)s.used;

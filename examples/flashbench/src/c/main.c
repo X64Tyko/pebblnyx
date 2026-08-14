@@ -1,26 +1,22 @@
-// Flash read benchmark v2: does cost scale with OFFSET within a resource, with the
-// resource's own TOTAL SIZE, or both?
+// Flash read benchmark v3: does cost scale with a resource's OWN size, or with how much
+// OTHER content precedes it in the .pbpack?
 //
-// v1 (see MEASUREMENTS.md's "Flash / resource reads" for its numbers) read one 220KB
-// resource at seven offsets and got a flat ~40ms regardless of offset or length. That does
-// not match the ORIGINAL WorldTile streaming finding, which found reads costing 46-305ms
-// depending on offset within a 75KB resource -- and that finding was read off session-log
-// totals (elapsed time / call count), not bracketed per call the way this app does. The
-// two results cannot both be a clean O(offset) law in the same resource, so something is
-// different between them, and resource SIZE is the obvious candidate: WorldTile's map was
-// 75KB, v1's resource was 220KB -- 2.9x bigger, all at once, rather than swept.
+// v2 (see MEASUREMENTS.md's "Flash / resource reads") read five resources of different
+// total sizes and found cost scaling with size, flat across offset within a resource. But
+// it declared those five in ascending order, and `pbpack.py`'s own `finalize()` assigns
+// offsets by walking resources in DECLARATION order, each placed right after the last --
+// so the biggest resource was also always the one with the most other content before it
+// in the pack. Size and pack position were the same variable wearing two names; v2 could
+// not tell them apart.
 //
-// This version separates the two variables directly: five resources at different total
-// sizes (8KB, matching a WorldTile bank -- the post-fix streaming unit; 75KB, matching the
-// pre-banking map resource the original finding used; 32/150/220KB filling the curve
-// between and past them), each read at a near-origin offset (0) and a two-thirds-deep one
-// -- deliberately the same fraction the original finding's own language used ("two thirds
-// of the way through it"). Fixed 256B length throughout, so length is not a third variable.
-//
-// Reading the grid: for each size, deep/near > 1 means offset matters (the WorldTile
-// story); across sizes at the SAME offset fraction, growth means resource size matters
-// (the hypothesis v1 could not rule out). Both, neither, or one -- the grid answers it
-// rather than reasoning about it.
+// This version can: five IDENTICAL 8KB probes (the real WorldTile bank size), each
+// declared behind a different amount of padding -- 0, 50, 100, 150, 200 KB of other
+// content before it. Same size throughout. If cost still grows across the five, it is
+// pack POSITION driving it, not the probe's own size -- and that would also explain the
+// original WorldTile finding cleanly: maps are declared, and so packed, after their
+// atlases, so a map read always has more preceding content than an atlas read, regardless
+// of the map's own size. If the five come back flat, v2's size-only model holds and this
+// closes the question instead of reopening it.
 //
 // Getting the numbers off the watch: same discipline as the other pnx benchmarks. Waits
 // on SELECT so `pebble logs` can be attached first; SELECT flushes to pass-through
@@ -34,27 +30,16 @@
 #define PERSIST_BYTES 512
 #define SCENE_BYTES	  (4 * 1024)
 
-#define SIZE_COUNT 5
-static const uint32_t RES_BYTES[SIZE_COUNT] = {
-	8 * 1024u, 32 * 1024u, 75 * 1024u, 150 * 1024u, 220 * 1024u,
-};
-static const char* SIZE_LABEL[SIZE_COUNT] = { "8K", "32K", "75K", "150K", "220K" };
+#define POINT_COUNT 5
+// Bytes of other resource content declared -- and so packed -- before each probe. Not
+// read directly; this is what the read cost is being plotted against.
+static const uint32_t PRECEDING_KB[POINT_COUNT] = { 0, 50, 100, 150, 200 };
 
-// Resolved at runtime, not compile time -- RESOURCE_ID_* are plain uint32_t constants
-// from the SDK's own generated header, not something an array initializer can rely on
-// being constant-foldable across every toolchain. See main()'s populate step.
-static uint32_t s_resource_ids[SIZE_COUNT];
+static uint32_t s_probe_ids[POINT_COUNT];
 
-// Fixed throughout, matching PNX_PERSIST_KEY_BYTES scale, so length is never a variable
-// this grid has to account for.
-#define READ_LEN 256u
-
-// near = offset 0. deep = 66% into the resource -- "two thirds of the way through it",
-// the ORIGINAL WorldTile finding's own phrase, reused deliberately for a direct comparison.
-#define OFFSET_KIND_COUNT 2
-static const char* OFFSET_LABEL[OFFSET_KIND_COUNT] = { "near", "deep" };
-
-#define POINT_COUNT		(SIZE_COUNT * OFFSET_KIND_COUNT)
+#define READ_LEN 256u // fixed and small: this run is not about length or in-resource
+					  // offset, both already settled by v1/v2 -- every probe is read
+					  // at its own offset 0
 #define READS_PER_POINT 30
 #define WARMUP_FRAMES	20
 
@@ -81,24 +66,9 @@ typedef struct
 	uint8_t buf[READ_LEN];
 
 	char status[64];
-	char result[SIZE_COUNT][56];
-	char summary1[64], summary2[64];
+	char result[POINT_COUNT][56];
+	char fit[64];
 } App;
-
-static uint8_t point_size(uint8_t p)
-{
-	return (uint8_t)(p / OFFSET_KIND_COUNT);
-}
-static uint8_t point_kind(uint8_t p)
-{
-	return (uint8_t)(p % OFFSET_KIND_COUNT);
-}
-
-static uint32_t point_offset(uint8_t p)
-{
-	const uint32_t size = RES_BYTES[point_size(p)];
-	return (point_kind(p) == 0) ? 0 : (size * 66u / 100u);
-}
 
 static uint32_t per_call_us(uint32_t total_ms, uint32_t calls)
 {
@@ -107,57 +77,55 @@ static uint32_t per_call_us(uint32_t total_ms, uint32_t calls)
 
 static void start_bench(App* a)
 {
-	a->phase = PHASE_WARMUP;
+	a->phase	   = PHASE_WARMUP;
 	a->phase_frame = 0;
-	a->point = 0;
+	a->point	   = 0;
 	memset(a->ms, 0, sizeof(a->ms));
 	memset(a->calls, 0, sizeof(a->calls));
 	memset(a->mismatches, 0, sizeof(a->mismatches));
-	for (int i = 0; i < SIZE_COUNT; i++)
+	for (int i = 0; i < POINT_COUNT; i++)
 		a->result[i][0] = '\0';
 
 	pnx_diag_flush();
-	pnx_log("flashbench: run started -- %u sizes x %u offsets, %uB reads", (unsigned)SIZE_COUNT,
-			(unsigned)OFFSET_KIND_COUNT, (unsigned)READ_LEN);
+	pnx_log("flashbench: v3 run started -- %u probes, %uB each, %uB reads", POINT_COUNT, 8192,
+			(unsigned)READ_LEN);
+}
+
+// A signed two-point estimate against PRECEDING_KB rather than size -- every probe is the
+// same size, so a non-zero slope here is entirely a position effect.
+static void fit_two_point(uint32_t us_first, uint32_t us_last, int32_t* out_fixed,
+						  int32_t* out_slope)
+{
+	const int32_t dk = (int32_t)PRECEDING_KB[POINT_COUNT - 1] - (int32_t)PRECEDING_KB[0];
+	const int32_t dc = (int32_t)us_last - (int32_t)us_first;
+	*out_slope		 = dk ? dc / dk : 0;
+	*out_fixed		 = (int32_t)us_first - (*out_slope) * (int32_t)PRECEDING_KB[0];
 }
 
 static void report_results(App* a)
 {
-	for (int s = 0; s < SIZE_COUNT; s++)
+	uint32_t us[POINT_COUNT];
+	for (int p = 0; p < POINT_COUNT; p++)
 	{
-		const uint32_t near_us = per_call_us(a->ms[s * 2], a->calls[s * 2]);
-		const uint32_t deep_us = per_call_us(a->ms[s * 2 + 1], a->calls[s * 2 + 1]);
-		pnx_format(a->result[s], sizeof(a->result[s]), "%s: near=%u deep=%u", SIZE_LABEL[s],
-				   (unsigned)near_us, (unsigned)deep_us);
-		pnx_log("flashbench: %s -- near %uus/call, deep %uus/call (%u reads each)",
-				SIZE_LABEL[s], (unsigned)near_us, (unsigned)deep_us, (unsigned)READS_PER_POINT);
+		us[p] = per_call_us(a->ms[p], a->calls[p]);
+		pnx_format(a->result[p], sizeof(a->result[p]), "%uKB pre: %uus", PRECEDING_KB[p],
+				   (unsigned)us[p]);
+		pnx_log("flashbench: %uKB preceding -- %uus/call (%u reads, %u mismatches)",
+				PRECEDING_KB[p], (unsigned)us[p], (unsigned)READS_PER_POINT,
+				(unsigned)a->mismatches[p]);
 	}
 
-	// Does offset matter, within a size? Ratio deep/near, x10 fixed point, per size.
-	for (int s = 0; s < SIZE_COUNT; s++)
-	{
-		const uint32_t near_us = per_call_us(a->ms[s * 2], a->calls[s * 2]);
-		const uint32_t deep_us = per_call_us(a->ms[s * 2 + 1], a->calls[s * 2 + 1]);
-		const uint32_t ratio_x10 = near_us ? (deep_us * 10u) / near_us : 0;
-		pnx_log("flashbench: %s deep/near ratio %u.%ux", SIZE_LABEL[s],
-				(unsigned)(ratio_x10 / 10), (unsigned)(ratio_x10 % 10));
-	}
+	int32_t fixed, slope;
+	fit_two_point(us[0], us[POINT_COUNT - 1], &fixed, &slope);
+	pnx_format(a->fit, sizeof(a->fit), "~%dus + %dus/KB preceding", (int)fixed, (int)slope);
+	pnx_log("flashbench: FIT (0/%uKB preceding) ~%dus + %dus per KB preceding",
+			PRECEDING_KB[POINT_COUNT - 1], (int)fixed, (int)slope);
 
-	// Does resource SIZE matter, at the same offset fraction? Smallest vs largest, both
-	// offset kinds.
-	const uint32_t near_small = per_call_us(a->ms[0], a->calls[0]);
-	const uint32_t near_large =
-		per_call_us(a->ms[(SIZE_COUNT - 1) * 2], a->calls[(SIZE_COUNT - 1) * 2]);
-	const uint32_t deep_small = per_call_us(a->ms[1], a->calls[1]);
-	const uint32_t deep_large =
-		per_call_us(a->ms[(SIZE_COUNT - 1) * 2 + 1], a->calls[(SIZE_COUNT - 1) * 2 + 1]);
-	pnx_format(a->summary1, sizeof(a->summary1), "near: 8K=%u 220K=%u", (unsigned)near_small,
-			   (unsigned)near_large);
-	pnx_format(a->summary2, sizeof(a->summary2), "deep: 8K=%u 220K=%u", (unsigned)deep_small,
-			   (unsigned)deep_large);
-	pnx_log("flashbench: size effect -- near 8K=%uus 220K=%uus, deep 8K=%uus 220K=%uus",
-			(unsigned)near_small, (unsigned)near_large, (unsigned)deep_small,
-			(unsigned)deep_large);
+	// A near-zero slope here means position does not matter and v2's size-only model
+	// holds; a slope near v2's ~179us/KB means position was v2's real variable all along.
+	const uint32_t ratio_x10 = us[0] ? (us[POINT_COUNT - 1] * 10u) / us[0] : 0;
+	pnx_log("flashbench: 200KB/0KB preceding ratio %u.%ux (1.0x = position irrelevant)",
+			(unsigned)(ratio_x10 / 10), (unsigned)(ratio_x10 % 10));
 }
 
 static void advance(App* a)
@@ -176,8 +144,8 @@ static void advance(App* a)
 	if (a->phase != PHASE_RUN)
 		return;
 
-	pnx_log("flashbench: point %u/%u done -- %s %s, %uus/call", (unsigned)a->point + 1,
-			POINT_COUNT, SIZE_LABEL[point_size(a->point)], OFFSET_LABEL[point_kind(a->point)],
+	pnx_log("flashbench: point %u/%u done -- %uKB preceding, %uus/call", (unsigned)a->point + 1,
+			POINT_COUNT, PRECEDING_KB[a->point],
 			(unsigned)per_call_us(a->ms[a->point], a->calls[a->point]));
 
 	a->point++;
@@ -190,7 +158,7 @@ static void advance(App* a)
 
 static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 {
-	App* a = (App*)ctx;
+	App* a					  = (App*)ctx;
 	const uint32_t work_start = pnx_platform_now_ms();
 
 	PnxEvent ev;
@@ -207,18 +175,15 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 
 	if (a->phase == PHASE_RUN)
 	{
-		const uint8_t size_idx = point_size(a->point);
-		const uint32_t offset = point_offset(a->point);
 		const uint32_t t0 = pnx_platform_now_ms();
-		const size_t got =
-			pnx_platform_resource_read(s_resource_ids[size_idx], offset, a->buf, READ_LEN);
+		const size_t got  = pnx_platform_resource_read(s_probe_ids[a->point], 0, a->buf, READ_LEN);
 		const uint32_t t1 = pnx_platform_now_ms();
 		a->ms[a->point] += (t1 - t0);
 		a->calls[a->point]++;
-		if (got != READ_LEN || a->buf[0] != (uint8_t)(offset & 0xFF))
-		{
+		// Byte 0 of probe N is N & 0xFF (see gen_flashdata.py's salt) -- confirms this read
+		// landed on the probe meant for this point, not a deduplicated stand-in for another.
+		if (got != READ_LEN || a->buf[0] != (a->point & 0xFFu))
 			a->mismatches[a->point]++;
-		}
 	}
 
 	if (a->has_font)
@@ -232,27 +197,25 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 				pnx_format(a->status, sizeof(a->status), "starting...");
 				break;
 			case PHASE_RUN:
-				pnx_format(a->status, sizeof(a->status), "%s %s  %u/%u",
-						   SIZE_LABEL[point_size(a->point)], OFFSET_LABEL[point_kind(a->point)],
+				pnx_format(a->status, sizeof(a->status), "%uKB pre  %u/%u", PRECEDING_KB[a->point],
 						   (unsigned)a->phase_frame + 1, READS_PER_POINT);
 				break;
 			case PHASE_DONE:
 				pnx_format(a->status, sizeof(a->status), "done -- SELECT to rerun");
 				break;
 		}
-		pnx_text_draw(target, &a->font, "pnx flashbench v2", 10, 20, 0xFF);
+		pnx_text_draw(target, &a->font, "pnx flashbench v3", 10, 20, 0xFF);
 		pnx_text_draw(target, &a->font, a->status, 10, 40, 0xC7);
 
 		if (a->phase == PHASE_DONE)
 		{
 			int16_t y = 62;
-			for (int i = 0; i < SIZE_COUNT; i++)
+			for (int p = 0; p < POINT_COUNT; p++)
 			{
-				pnx_text_draw(target, &a->font, a->result[i], 10, y, 0xFF);
+				pnx_text_draw(target, &a->font, a->result[p], 10, y, 0xFF);
 				y = (int16_t)(y + 16);
 			}
-			pnx_text_draw(target, &a->font, a->summary1, 10, (int16_t)(y + 6), 0xF0);
-			pnx_text_draw(target, &a->font, a->summary2, 10, (int16_t)(y + 22), 0xF0);
+			pnx_text_draw(target, &a->font, a->fit, 10, (int16_t)(y + 6), 0xF0);
 		}
 	}
 
@@ -275,11 +238,11 @@ int main(void)
 	static const uint32_t RESOURCES[] = PNX_ASSET_RESOURCE_TABLE;
 	pnx_assets_init(&a.persistent, &a.scene, RESOURCES, PNX_ASSET_COUNT);
 
-	s_resource_ids[0] = RESOURCE_ID_FLASHDATA_8K;
-	s_resource_ids[1] = RESOURCE_ID_FLASHDATA_32K;
-	s_resource_ids[2] = RESOURCE_ID_FLASHDATA_75K;
-	s_resource_ids[3] = RESOURCE_ID_FLASHDATA_150K;
-	s_resource_ids[4] = RESOURCE_ID_FLASHDATA_220K;
+	s_probe_ids[0] = RESOURCE_ID_PROBE_0;
+	s_probe_ids[1] = RESOURCE_ID_PROBE_1;
+	s_probe_ids[2] = RESOURCE_ID_PROBE_2;
+	s_probe_ids[3] = RESOURCE_ID_PROBE_3;
+	s_probe_ids[4] = RESOURCE_ID_PROBE_4;
 
 	a.has_font = pnx_font_load(&a.font, PNX_ASSET_FONT_BENCH);
 	if (!a.has_font)

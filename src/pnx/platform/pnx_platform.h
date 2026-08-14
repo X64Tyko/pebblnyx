@@ -44,9 +44,9 @@ typedef struct PnxTarget PnxTarget;
 
 typedef struct
 {
-	uint8_t* data;	// byte at column 0 of this row; index it with x directly
-	int16_t min_x;	// first valid column
-	int16_t max_x;	// last valid column, inclusive
+	uint8_t* data; // byte at column 0 of this row; index it with x directly
+	int16_t min_x; // first valid column
+	int16_t max_x; // last valid column, inclusive
 } PnxRow;
 
 int16_t pnx_target_width(const PnxTarget* t);
@@ -86,10 +86,10 @@ size_t pnx_platform_resource_read(uint32_t resource_id, size_t offset, void* dst
 // samples shifted left eight, carrying no extra information for twice the bandwidth.
 typedef enum
 {
-	PNX_AUDIO_16KHZ_16BIT = 0,	// 32 KB/s
-	PNX_AUDIO_16KHZ_8BIT,		// 16 KB/s
-	PNX_AUDIO_8KHZ_16BIT,		// 16 KB/s
-	PNX_AUDIO_8KHZ_8BIT,		//  8 KB/s; the default
+	PNX_AUDIO_16KHZ_16BIT = 0, // 32 KB/s
+	PNX_AUDIO_16KHZ_8BIT,	   // 16 KB/s
+	PNX_AUDIO_8KHZ_16BIT,	   // 16 KB/s
+	PNX_AUDIO_8KHZ_8BIT,	   //  8 KB/s; the default
 } PnxAudioFormat;
 
 bool pnx_platform_audio_open(PnxAudioFormat format, uint8_t volume);
@@ -191,7 +191,7 @@ typedef enum
 void pnx_platform_text_draw(const char* text, PnxTextSize size, uint8_t colour, int32_t x,
 							int32_t y, int16_t w, int16_t h);
 
-#endif	// PNX_USE_SDK_TEXT
+#endif // PNX_USE_SDK_TEXT
 
 // ------------------------------------------------------------------------- input
 
@@ -212,17 +212,17 @@ typedef enum
 	PNX_EVENT_TOUCH_DOWN,
 	PNX_EVENT_TOUCH_MOVE,
 	PNX_EVENT_TOUCH_UP,
-	PNX_EVENT_FOCUS_LOST,  // fires ~297ms before the app is fully covered
+	PNX_EVENT_FOCUS_LOST, // fires ~297ms before the app is fully covered
 	PNX_EVENT_FOCUS_GAINED,
 } PnxEventType;
 
 typedef struct
 {
 	PnxEventType type;
-	uint32_t time_ms;  // stamped at delivery: the earliest observable moment, and what
-					   // any timing judgement must use
-	int16_t x, y;	   // touch only
-	uint8_t button;	   // button only
+	uint32_t time_ms; // stamped at delivery: the earliest observable moment, and what
+					  // any timing judgement must use
+	int16_t x, y;	  // touch only
+	uint8_t button;	  // button only
 } PnxEvent;
 
 // Pops the next queued event. False when empty. Events are queued rather than

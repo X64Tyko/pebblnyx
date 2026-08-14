@@ -17,12 +17,42 @@
 
 // k = 1: one third ink, two thirds destination.
 static const uint8_t s_blend_13[16] = {
-	0, 1, 1, 2, 0, 1, 2, 2, 1, 1, 2, 3, 1, 2, 2, 3,
+	0,
+	1,
+	1,
+	2,
+	0,
+	1,
+	2,
+	2,
+	1,
+	1,
+	2,
+	3,
+	1,
+	2,
+	2,
+	3,
 };
 
 // k = 2: two thirds ink.
 static const uint8_t s_blend_23[16] = {
-	0, 0, 1, 1, 1, 1, 1, 2, 1, 2, 2, 2, 2, 2, 3, 3,
+	0,
+	0,
+	1,
+	1,
+	1,
+	1,
+	1,
+	2,
+	1,
+	2,
+	2,
+	2,
+	2,
+	2,
+	3,
+	3,
 };
 
 // Alpha comes from the ink, not from the blend: text is opaque, and the coverage level
@@ -77,12 +107,12 @@ static void span_2bpp(uint8_t* row_base, int32_t x, const uint8_t* line, uint8_t
 	{
 		const uint8_t level = (uint8_t)((line[i >> 2] >> (6 - 2 * (i & 3))) & 3u);
 		if (level == 0)
-			continue;  // transparent, the common case
+			continue; // transparent, the common case
 		if (level == 3)
 		{
 			dst[i] = colour;
 			continue;
-		}  // full ink, no read needed
+		} // full ink, no read needed
 		dst[i] = blend_px(colour, dst[i], level == 1 ? s_blend_13 : s_blend_23);
 	}
 }
@@ -125,12 +155,12 @@ static inline void split_origin(uint8_t axis, int32_t x, int32_t y, int32_t* pen
 {
 	if (axis_vertical(axis))
 	{
-		*pen = y;
+		*pen  = y;
 		*base = x;
 	}
 	else
 	{
-		*pen = x;
+		*pen  = x;
 		*base = y;
 	}
 }
@@ -172,11 +202,11 @@ static void draw_glyph(PnxTarget* t, const PnxFont* f, const PnxGlyph* g, int32_
 					   int32_t base, uint8_t colour)
 {
 	if (!g->bits)
-		return;	 // a space: advance only
+		return; // a space: advance only
 
 	int32_t x, y;
 	glyph_origin(f->advance, g, pen, base, &x, &y);
-	const int16_t th = pnx_target_height(t);
+	const int16_t th	 = pnx_target_height(t);
 	const uint8_t stride = pnx_font_row_bytes(f, g->w);
 
 	int32_t j0 = 0, j1 = g->h;
@@ -236,8 +266,8 @@ int16_t pnx_text_width(const PnxFont* f, const char* s)
 
 typedef struct
 {
-	const char* end;   // one past the last character to DRAW on this line
-	const char* next;  // where the following line starts
+	const char* end;  // one past the last character to DRAW on this line
+	const char* next; // where the following line starts
 } PnxLineBreak;
 
 // Finds the next line break at width `w`.
@@ -252,7 +282,7 @@ typedef struct
 static PnxLineBreak next_line(const PnxFont* f, const char* s, int16_t w)
 {
 	const char* last_space = NULL;
-	int32_t width = 0;
+	int32_t width		   = 0;
 
 	for (const char* p = s; *p; p++)
 	{
@@ -265,7 +295,7 @@ static PnxLineBreak next_line(const PnxFont* f, const char* s, int16_t w)
 		const int32_t adv = glyph_advance(f, *p);
 		if (w > 0 && width + adv > w && p != s)
 		{
-			const char* end = last_space ? last_space : p;
+			const char* end	 = last_space ? last_space : p;
 			const char* next = last_space ? last_space + 1 : p;
 			// Collapse the run of spaces at the break, so a wrapped line does not start
 			// indented by whatever happened to follow the break point.
@@ -298,7 +328,7 @@ int16_t pnx_text_lines_wrapped(const PnxFont* f, const char* s, int16_t w)
 		const PnxLineBreak br = next_line(f, p, w);
 		lines++;
 		if (br.next == p)
-			break;	// cannot happen, but never loop on a bad font
+			break; // cannot happen, but never loop on a bad font
 		p = br.next;
 	}
 	return lines;
@@ -343,7 +373,7 @@ int16_t pnx_text_draw_wrapped(PnxTarget* t, const PnxFont* f, const char* s, int
 	if (!t || !f || !s)
 		return 0;
 
-	const int32_t step = pen_sign(f->advance);
+	const int32_t step	 = pen_sign(f->advance);
 	const int32_t across = base_sign(f->advance);
 
 	int16_t drawn = 0;
@@ -389,4 +419,4 @@ int16_t pnx_text_draw_wrapped(PnxTarget* t, const PnxFont* f, const char* s, int
 	return drawn;
 }
 
-#endif	// PNX_USE_TEXT
+#endif // PNX_USE_TEXT

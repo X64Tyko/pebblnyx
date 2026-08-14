@@ -646,16 +646,18 @@ harness** (it is how every milestone since M1 has been verified before touching 
    been, since the device probes so far talk to `pnx_platform_run` directly rather than
    through `pnx_app`. Landscape/screen-lock (M4c) and full audio-under-load (M4) are
    likewise still unconfirmed. See `ROADMAP.md`'s milestone tags.
-4. **Why `examples/flashbench`'s single-large-resource read cost grew over a stress run
-   rather than staying flat** (`examples/stressbench`). Thermal, heap fragmentation, and a
-   specific costly chunk index are all plausible; none is confirmed. See
-   `MEASUREMENTS.md`'s "Combined load" section.
+4. **Why `examples/stressbench`'s incremental save-step cost grew over the run rather
+   than staying flat** (28 -> 31 -> 43 ms across ~15 save cycles). Thermal, heap
+   fragmentation, and a specific costly chunk index are all plausible; none is confirmed.
+   See `MEASUREMENTS.md`'s "Combined load" section.
 
 Resolved rather than dropped: **combined-load frame cost** (`examples/stressbench`
 measured it directly -- worst frame grew to 43ms under a save step, audio's own worst gap
-moved with it, and zero audible glitches across the run) and the isolated glyph-blitter
-and flash-offset numbers this list used to carry as open (`examples/textbench`,
-`examples/flashbench` -- see `MEASUREMENTS.md`).
+moved with it, and zero audible glitches across the run), the isolated glyph-blitter
+numbers (`examples/textbench`), and **why flash reads cost what they cost**
+(`examples/flashbench` v1+v2 -- O(resource size) per call, not O(offset); see
+`MEASUREMENTS.md`'s "Flash / resource reads" section, which also reconciles this against
+the original WorldTile numbers that motivated M4d's banking fix in the first place).
 
 ## 12. Decisions rejected, with evidence
 

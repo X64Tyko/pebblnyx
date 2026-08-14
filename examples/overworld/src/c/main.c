@@ -27,7 +27,7 @@ typedef struct
 	uint8_t sprite_count;
 
 	uint8_t current_scene;
-	int32_t hero_tx, hero_ty;  // tiles
+	int32_t hero_tx, hero_ty; // tiles
 	uint8_t walk_phase;
 
 	uint32_t accumulator_ms, ticks;
@@ -65,15 +65,15 @@ static bool enter_scene(Game* g, uint8_t scene, int32_t tx, int32_t ty)
 	pnx_tilemap_stream_now(map, &g->camera);
 
 	g->current_scene = scene;
-	g->hero_tx = tx;
-	g->hero_ty = ty;
-	g->sprite_count = 0;
+	g->hero_tx		 = tx;
+	g->hero_ty		 = ty;
+	g->sprite_count	 = 0;
 
 	g->sprites[HERO] = (PnxSpriteInstance){
-		.x = tx * T + T / 2,
-		.y = ty * T + T,  // feet, centre of the tile
-		.sprite = 0,
-		.frame = HERO_STAND,
+		.x		 = tx * T + T / 2,
+		.y		 = ty * T + T, // feet, centre of the tile
+		.sprite	 = 0,
+		.frame	 = HERO_STAND,
 		.palette = PNX_SPRITE_PALETTE_DEFAULT,
 	};
 	g->sprite_count = 1;
@@ -83,10 +83,10 @@ static bool enter_scene(Game* g, uint8_t scene, int32_t tx, int32_t ty)
 	if (pnx_scene_sprite_count() > 1)
 	{
 		g->sprites[g->sprite_count++] = (PnxSpriteInstance){
-			.x = 8 * T + T / 2,
-			.y = 6 * T + T,
-			.sprite = 1,
-			.frame = 0,
+			.x		 = 8 * T + T / 2,
+			.y		 = 6 * T + T,
+			.sprite	 = 1,
+			.frame	 = 0,
 			.palette = PNX_SPRITE_PALETTE_DEFAULT,
 		};
 	}
@@ -114,9 +114,9 @@ static void try_move(Game* g, int32_t dx, int32_t dy)
 	g->hero_ty = ny;
 	g->walk_phase ^= 1;
 
-	const int32_t T = map->tile_px;
-	g->sprites[HERO].x = nx * T + T / 2;
-	g->sprites[HERO].y = ny * T + T;
+	const int32_t T		   = map->tile_px;
+	g->sprites[HERO].x	   = nx * T + T / 2;
+	g->sprites[HERO].y	   = ny * T + T;
 	g->sprites[HERO].frame = g->walk_phase ? HERO_STEP_A : HERO_STEP_B;
 
 	const PnxWarp* warp = pnx_map_warp_at(map, nx, ny);
@@ -134,7 +134,7 @@ static void try_move(Game* g, int32_t dx, int32_t dy)
 
 static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 {
-	Game* g = (Game*)ctx;
+	Game* g					  = (Game*)ctx;
 	const uint32_t work_start = pnx_platform_now_ms();
 
 	PnxEvent ev;

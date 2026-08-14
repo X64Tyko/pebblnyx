@@ -47,7 +47,7 @@
 //
 // The overlap is brief, so average cost is barely changed -- only the moment of a note
 // change runs both.
-#define PNX_SYNTH_SLOTS	 4	// the sequencer's four channels
+#define PNX_SYNTH_SLOTS	 4 // the sequencer's four channels
 #define PNX_SYNTH_VOICES (PNX_SYNTH_SLOTS * 2)
 
 // Where an LFO's output goes. One LFO with a target covers vibrato, tremolo, pulse-width
@@ -56,10 +56,10 @@
 typedef enum
 {
 	PNX_LFO_OFF = 0,
-	PNX_LFO_PITCH,	 // vibrato
-	PNX_LFO_VOLUME,	 // tremolo
-	PNX_LFO_DUTY,	 // PWM -- the most recognisable chiptune texture there is
-	PNX_LFO_CUTOFF,	 // filter wobble
+	PNX_LFO_PITCH,	// vibrato
+	PNX_LFO_VOLUME, // tremolo
+	PNX_LFO_DUTY,	// PWM -- the most recognisable chiptune texture there is
+	PNX_LFO_CUTOFF, // filter wobble
 } PnxLfoTarget;
 
 typedef enum
@@ -76,11 +76,11 @@ typedef enum
 // note.
 typedef struct
 {
-	uint8_t wave;	 // PnxWaveform
-	uint8_t volume;	 // 0..255, mixed within the voice before the filter
-	int16_t detune;	 // cents, -1200..+1200
-	int8_t octave;	 // relative to the note; the first oscillator is the reference
-	uint8_t duty;	 // 0..255, square only. 128 is a 50% square.
+	uint8_t wave;	// PnxWaveform
+	uint8_t volume; // 0..255, mixed within the voice before the filter
+	int16_t detune; // cents, -1200..+1200
+	int8_t octave;	// relative to the note; the first oscillator is the reference
+	uint8_t duty;	// 0..255, square only. 128 is a 50% square.
 } PnxOscillator;
 
 // An instrument: what a slot holds. Deliberately a plain struct with no pointers, so the
@@ -89,25 +89,25 @@ typedef struct
 typedef struct
 {
 	PnxOscillator osc[PNX_SYNTH_OSCILLATORS];
-	uint8_t osc_count;	// 1..PNX_SYNTH_OSCILLATORS
+	uint8_t osc_count; // 1..PNX_SYNTH_OSCILLATORS
 
-	PnxEnvelope amp;	 // volume ADSR
-	PnxEnvelope cutoff;	 // filter ADSR -- swept independently of volume
+	PnxEnvelope amp;	// volume ADSR
+	PnxEnvelope cutoff; // filter ADSR -- swept independently of volume
 
-	uint8_t filter_mode;		// PnxFilterMode
-	uint8_t cutoff_base;		// 0..255 mapped across the audible range
-	uint8_t resonance;			// 0..255. Without this a cutoff sweep is just quieter.
-	uint8_t cutoff_env_amount;	// how far the cutoff envelope moves the cutoff
+	uint8_t filter_mode;	   // PnxFilterMode
+	uint8_t cutoff_base;	   // 0..255 mapped across the audible range
+	uint8_t resonance;		   // 0..255. Without this a cutoff sweep is just quieter.
+	uint8_t cutoff_env_amount; // how far the cutoff envelope moves the cutoff
 
-	uint8_t lfo_target;	 // PnxLfoTarget
-	uint8_t lfo_rate;	 // 0..255 -> roughly 0.1..20 Hz
+	uint8_t lfo_target; // PnxLfoTarget
+	uint8_t lfo_rate;	// 0..255 -> roughly 0.1..20 Hz
 	uint8_t lfo_depth;
 
 	// Pitch envelope. Without one there are no drums: a kick is a fast downward sweep and
 	// a snare is noise plus a sweep, and doing them as PCM instead costs 16,000 bytes a
 	// second against ~160 for a whole song.
-	int16_t pitch_env_amount;  // cents at the start of the note
-	uint8_t pitch_env_decay;   // how fast it falls back to the played pitch
+	int16_t pitch_env_amount; // cents at the start of the note
+	uint8_t pitch_env_decay;  // how fast it falls back to the played pitch
 
 	// Effects are SENDS into one global instance each, not per-instrument instances. A
 	// reverb is four comb filters and two allpasses; per instrument that is N sets of
@@ -122,7 +122,7 @@ typedef struct
 // guessed at in aggregate.
 typedef struct
 {
-	uint8_t oscillators;  // 1..PNX_SYNTH_OSCILLATORS
+	uint8_t oscillators; // 1..PNX_SYNTH_OSCILLATORS
 	bool filter;
 	bool resonance;
 	bool lfo;
@@ -185,10 +185,10 @@ typedef struct
 	uint32_t elapsed_ms;
 	uint32_t samples;
 	uint32_t ns_per_sample;
-	uint32_t pct_of_realtime;  // hundredths of a percent of one core at the sample rate
+	uint32_t pct_of_realtime; // hundredths of a percent of one core at the sample rate
 	int32_t checksum;
 } PnxSynthBench;
 
 void pnx_synth_bench(uint32_t chunks, uint32_t count, PnxSynthBench* out);
 
-#endif	// PNX_USE_SYNTH
+#endif // PNX_USE_SYNTH

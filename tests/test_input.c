@@ -60,8 +60,8 @@ void test_input(void)
 	I_CHECK(!pnx_input_pressed(PNX_BUTTON_UP));
 
 	pnx_input_frame();
-	I_CHECK(!pnx_input_pressed(PNX_BUTTON_SELECT));	 // the edge was last frame's
-	I_CHECK(pnx_input_held(PNX_BUTTON_SELECT));		 // the hold is not
+	I_CHECK(!pnx_input_pressed(PNX_BUTTON_SELECT)); // the edge was last frame's
+	I_CHECK(pnx_input_held(PNX_BUTTON_SELECT));		// the hold is not
 
 	// Measured from the event's own stamp, not from the frame that noticed it.
 	I_CHECK_EQ(pnx_input_held_ms(PNX_BUTTON_SELECT, 1250), 250);
@@ -113,7 +113,7 @@ void test_input(void)
 		I_CHECK_EQ(pnx_input_cluster(0), clusters[i].pos0);
 		I_CHECK_EQ(pnx_input_cluster(1), PNX_BUTTON_SELECT);
 		I_CHECK_EQ(pnx_input_cluster(2), clusters[i].pos2);
-		I_CHECK_EQ(pnx_input_cluster(3), PNX_BUTTON_COUNT);	 // out of range, not position 0
+		I_CHECK_EQ(pnx_input_cluster(3), PNX_BUTTON_COUNT); // out of range, not position 0
 
 		// Holding the end nearest the screen's origin always reads -1, whichever physical
 		// button that turns out to be. That is the entire point of the mapping: a menu
@@ -130,8 +130,8 @@ void test_input(void)
 
 		pnx_input_frame();
 		feed(PNX_EVENT_BUTTON_UP, clusters[i].pos0, 30);
-		I_CHECK_EQ(pnx_input_axis(), 1);		  // still held at the far end
-		I_CHECK_EQ(pnx_input_axis_pressed(), 0);  // but nothing was pressed this frame
+		I_CHECK_EQ(pnx_input_axis(), 1);		 // still held at the far end
+		I_CHECK_EQ(pnx_input_axis_pressed(), 0); // but nothing was pressed this frame
 
 		// SELECT is not on the axis. A game that fires with it does not want the cursor
 		// moving as well.
@@ -158,7 +158,7 @@ void test_input(void)
 	// check the touch names the pixel that was painted.
 	pnx_host_reset();
 	{
-		PnxTarget* t = pnx_host_target();
+		PnxTarget* t	 = pnx_host_target();
 		const int16_t tx = 37, ty = 91;
 		pnx_gfx_fill_rect(t, tx, ty, 1, 1, 0xF3);
 

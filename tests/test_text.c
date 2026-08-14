@@ -62,29 +62,29 @@ void test_text(void);
 #define FONT_FIRST	  32
 #define FONT_LAST	  35
 #define FONT_GLYPHS	  3
-#define FONT_FALLBACK 1	 // '!' stands in for anything missing
+#define FONT_FALLBACK 1 // '!' stands in for anything missing
 
 static uint8_t* build_font_blob(size_t* out_len, uint8_t depth, uint8_t version)
 {
 	// 2x3 at 1bpp is one byte per row: 0b11xxxxxx. 4x2 likewise: 0b1111xxxx.
 	static const uint8_t bitmaps[5] = { 0xC0, 0xC0, 0xC0, 0xF0, 0xF0 };
-	const uint16_t bitmap_bytes = sizeof(bitmaps);
+	const uint16_t bitmap_bytes		= sizeof(bitmaps);
 
 	const size_t index_bytes = FONT_GLYPHS * PNX_FONT_GLYPH_BYTES;
-	const size_t map_bytes = FONT_LAST - FONT_FIRST + 1;
-	const size_t len = PNX_BLOB_HEADER_BYTES + 8 + index_bytes + map_bytes + bitmap_bytes;
+	const size_t map_bytes	 = FONT_LAST - FONT_FIRST + 1;
+	const size_t len		 = PNX_BLOB_HEADER_BYTES + 8 + index_bytes + map_bytes + bitmap_bytes;
 
 	uint8_t* b = calloc(1, len);
-	size_t o = 0;
+	size_t o   = 0;
 
 	b[o++] = 'P';
 	b[o++] = 'F';
 	b[o++] = version;
 	b[o++] = depth;
-	b[o++] = 8;	 // line_height
-	b[o++] = 6;	 // baseline
-	b[o++] = 0;	 // advance axis: left to right
-	b[o++] = 0;	 // orientation: buttons right
+	b[o++] = 8; // line_height
+	b[o++] = 6; // baseline
+	b[o++] = 0; // advance axis: left to right
+	b[o++] = 0; // orientation: buttons right
 
 	b[o++] = FONT_GLYPHS;
 	b[o++] = 0;
@@ -93,21 +93,21 @@ static uint8_t* build_font_blob(size_t* out_len, uint8_t depth, uint8_t version)
 	b[o++] = FONT_FIRST;
 	b[o++] = FONT_LAST;
 	b[o++] = FONT_FALLBACK;
-	b[o++] = 2;	 // space_advance
+	b[o++] = 2; // space_advance
 
 	// offset lo, offset hi, w, h, advance, bearing_x, bearing_y, pad
 	static const uint8_t index[FONT_GLYPHS][PNX_FONT_GLYPH_BYTES] = {
-		{ 0, 0, 0, 0, 2, 0, 0, 0 },	 // ' '
-		{ 0, 0, 2, 3, 3, 0, 3, 0 },	 // '!'
-		{ 3, 0, 4, 2, 6, 1, 5, 0 },	 // '"'
+		{ 0, 0, 0, 0, 2, 0, 0, 0 }, // ' '
+		{ 0, 0, 2, 3, 3, 0, 3, 0 }, // '!'
+		{ 3, 0, 4, 2, 6, 1, 5, 0 }, // '"'
 	};
 	memcpy(b + o, index, index_bytes);
 	o += index_bytes;
 
-	b[o++] = 0;					 // ' '
-	b[o++] = 1;					 // '!'
-	b[o++] = 2;					 // '"'
-	b[o++] = PNX_FONT_NO_GLYPH;	 // '#' is not carried
+	b[o++] = 0;					// ' '
+	b[o++] = 1;					// '!'
+	b[o++] = 2;					// '"'
+	b[o++] = PNX_FONT_NO_GLYPH; // '#' is not carried
 
 	memcpy(b + o, bitmaps, bitmap_bytes);
 
@@ -126,8 +126,8 @@ static void install_blob(uint32_t id, const char* path, const uint8_t* b, size_t
 		s_failures++;
 		return;
 	}
-	(void)fwrite(b, 1, len, f);	 // a short write here fails the blob a test loads right
-								 // after, which is a louder signal than checking it here
+	(void)fwrite(b, 1, len, f); // a short write here fails the blob a test loads right
+								// after, which is a louder signal than checking it here
 	fclose(f);
 	pnx_host_register_resource(id, path);
 }
@@ -173,7 +173,7 @@ static int ink_count(PnxTarget* t, uint8_t background)
 // The canvas is a window inside the host's 200x228 target rather than a target of its
 // own: only the coordinate mapping matters, and both orientations have to fit somewhere.
 
-#define ROT_W 40  // author canvas: wider than tall, which is the point of landscape
+#define ROT_W 40 // author canvas: wider than tall, which is the point of landscape
 #define ROT_H 30
 
 // The one glyph, deliberately asymmetric under BOTH mirrors and under transposition. A
@@ -220,9 +220,9 @@ static void rot_point(int ax, int ay, int w, int h, uint8_t axis, int* fx, int* 
 // layout pack_glyph_rows emits.
 static size_t pack_rot_glyph(uint8_t axis, uint8_t* out, uint8_t* out_w, uint8_t* out_h)
 {
-	const int rotated = (axis == PNX_ADVANCE_Y_POS || axis == PNX_ADVANCE_Y_NEG);
-	const int w = rotated ? ROT_GH : ROT_GW;
-	const int h = rotated ? ROT_GW : ROT_GH;
+	const int rotated	= (axis == PNX_ADVANCE_Y_POS || axis == PNX_ADVANCE_Y_NEG);
+	const int w			= rotated ? ROT_GH : ROT_GW;
+	const int h			= rotated ? ROT_GW : ROT_GH;
 	const size_t stride = (size_t)((w + 7) / 8);
 
 	memset(out, 0, stride * (size_t)h);
@@ -250,22 +250,22 @@ static uint8_t* build_rot_font(size_t* out_len, uint8_t axis)
 	uint8_t gw = 0, gh = 0;
 	const size_t bitmap_bytes = pack_rot_glyph(axis, bits, &gw, &gh);
 
-	const size_t glyphs = 2;
+	const size_t glyphs		 = 2;
 	const size_t index_bytes = glyphs * PNX_FONT_GLYPH_BYTES;
-	const size_t map_bytes = 'A' - ' ' + 1;
-	const size_t len = PNX_BLOB_HEADER_BYTES + 8 + index_bytes + map_bytes + bitmap_bytes;
+	const size_t map_bytes	 = 'A' - ' ' + 1;
+	const size_t len		 = PNX_BLOB_HEADER_BYTES + 8 + index_bytes + map_bytes + bitmap_bytes;
 
 	uint8_t* b = calloc(1, len);
-	size_t o = 0;
+	size_t o   = 0;
 
 	b[o++] = 'P';
 	b[o++] = 'F';
 	b[o++] = PNX_BLOB_VERSION;
-	b[o++] = 1;	 // depth
+	b[o++] = 1; // depth
 	b[o++] = ROT_LINE_HEIGHT;
 	b[o++] = ROT_BASELINE;
 	b[o++] = axis;
-	b[o++] = 0;	 // orientation: the stamp is checked elsewhere
+	b[o++] = 0; // orientation: the stamp is checked elsewhere
 
 	b[o++] = (uint8_t)glyphs;
 	b[o++] = 0;
@@ -273,20 +273,20 @@ static uint8_t* build_rot_font(size_t* out_len, uint8_t axis)
 	b[o++] = 0;
 	b[o++] = ' ';
 	b[o++] = 'A';
-	b[o++] = 1;			   // fallback: the inked glyph
-	b[o++] = ROT_ADVANCE;  // space_advance
+	b[o++] = 1;			  // fallback: the inked glyph
+	b[o++] = ROT_ADVANCE; // space_advance
 
 	const uint8_t index[2][PNX_FONT_GLYPH_BYTES] = {
-		{ 0, 0, 0, 0, ROT_ADVANCE, 0, 0, 0 },							 // ' '
-		{ 0, 0, gw, gh, ROT_ADVANCE, ROT_BEARING_X, ROT_BEARING_Y, 0 },	 // 'A'
+		{ 0, 0, 0, 0, ROT_ADVANCE, 0, 0, 0 },							// ' '
+		{ 0, 0, gw, gh, ROT_ADVANCE, ROT_BEARING_X, ROT_BEARING_Y, 0 }, // 'A'
 	};
 	memcpy(b + o, index, index_bytes);
 	o += index_bytes;
 
 	for (size_t i = 0; i < map_bytes; i++)
 		b[o + i] = PNX_FONT_NO_GLYPH;
-	b[o] = 0;				   // ' '
-	b[o + map_bytes - 1] = 1;  // 'A'
+	b[o]				 = 0; // ' '
+	b[o + map_bytes - 1] = 1; // 'A'
 	o += map_bytes;
 
 	memcpy(b + o, bits, bitmap_bytes);
@@ -307,7 +307,7 @@ static int windows_match(const uint8_t* snapshot, PnxTarget* t, uint8_t axis)
 			int fx = 0, fy = 0;
 			rot_point(ax, ay, ROT_W, ROT_H, axis, &fx, &fy);
 			const uint8_t want = snapshot[(size_t)ay * ROT_W + (size_t)ax];
-			const uint8_t got = px(t, (int16_t)fx, (int16_t)fy);
+			const uint8_t got  = px(t, (int16_t)fx, (int16_t)fy);
 			if (want != got)
 			{
 				if (mismatches < 4)
@@ -344,7 +344,7 @@ static void test_rotated_fonts(void)
 	pnx_arena_init(&scene, "rot-scene", 8192, 4);
 	pnx_assets_init(&persistent, &scene, resources, 4);
 
-	size_t len = 0;
+	size_t len	  = 0;
 	uint8_t* flat = build_rot_font(&len, PNX_ADVANCE_X_POS);
 	install_blob(resources[0], "build/test_font_rot_x.bin", flat, len);
 
@@ -365,7 +365,7 @@ static void test_rotated_fonts(void)
 		char path[64];
 		snprintf(path, sizeof(path), "build/test_font_rot_%u.bin", axis);
 
-		size_t rlen = 0;
+		size_t rlen	 = 0;
 		uint8_t* rot = build_rot_font(&rlen, axis);
 		install_blob(resources[1 + i], path, rot, rlen);
 
@@ -395,7 +395,7 @@ static void test_rotated_fonts(void)
 
 		pnx_host_reset();
 		const int16_t turned_adv = pnx_text_draw(t, &turned, "AA A", fx, fy, INK);
-		T_CHECK_EQ(turned_adv, flat_adv);  // a length, never negative
+		T_CHECK_EQ(turned_adv, flat_adv); // a length, never negative
 		T_CHECK_EQ(windows_match(snapshot, t, axis), 0);
 
 		// --- wrapped and centred, which is where line stacking and alignment show up. Both
@@ -449,7 +449,7 @@ void test_text(void)
 	pnx_arena_init(&scene, "text-scene", 16384, 4);
 	pnx_assets_init(&persistent, &scene, resources, 8);
 
-	size_t len = 0;
+	size_t len	  = 0;
 	uint8_t* blob = build_font_blob(&len, 1, PNX_BLOB_VERSION);
 	install_blob(resources[0], "build/test_font.bin", blob, len);
 
@@ -468,13 +468,13 @@ void test_text(void)
 	T_CHECK_EQ(pnx_font_glyph_index(&font, ' '), 0);
 	T_CHECK_EQ(pnx_font_glyph_index(&font, '!'), 1);
 	T_CHECK_EQ(pnx_font_glyph_index(&font, '"'), 2);
-	T_CHECK_EQ(pnx_font_glyph_index(&font, '#'), FONT_FALLBACK);   // in range, not carried
-	T_CHECK_EQ(pnx_font_glyph_index(&font, 'z'), FONT_FALLBACK);   // past last_cp
-	T_CHECK_EQ(pnx_font_glyph_index(&font, '\t'), FONT_FALLBACK);  // before first_cp
+	T_CHECK_EQ(pnx_font_glyph_index(&font, '#'), FONT_FALLBACK);  // in range, not carried
+	T_CHECK_EQ(pnx_font_glyph_index(&font, 'z'), FONT_FALLBACK);  // past last_cp
+	T_CHECK_EQ(pnx_font_glyph_index(&font, '\t'), FONT_FALLBACK); // before first_cp
 
 	PnxGlyph g;
 	pnx_font_glyph(&font, 0, &g);
-	T_CHECK(g.bits == NULL);  // a space has no bitmap at all
+	T_CHECK(g.bits == NULL); // a space has no bitmap at all
 	T_CHECK_EQ(g.advance, 2);
 
 	pnx_font_glyph(&font, 2, &g);
@@ -494,8 +494,8 @@ void test_text(void)
 	T_CHECK_EQ(pnx_text_width(&font, " "), 2);
 	T_CHECK_EQ(pnx_text_width(&font, "!"), 3);
 	T_CHECK_EQ(pnx_text_width(&font, "!\""), 9);
-	T_CHECK_EQ(pnx_text_width(&font, "#"), 3);			// fallback's advance, not zero
-	T_CHECK_EQ(pnx_text_width(&font, "!\n\"\"\""), 3);	// stops at the newline
+	T_CHECK_EQ(pnx_text_width(&font, "#"), 3);		   // fallback's advance, not zero
+	T_CHECK_EQ(pnx_text_width(&font, "!\n\"\"\""), 3); // stops at the newline
 
 	pnx_host_reset();
 	PnxTarget* t = pnx_host_target();
@@ -508,20 +508,20 @@ void test_text(void)
 	T_CHECK_EQ(px(t, 11, 17), INK);
 	T_CHECK_EQ(px(t, 10, 19), INK);
 	T_CHECK_EQ(px(t, 11, 19), INK);
-	T_CHECK_EQ(px(t, 12, 18), 0);	 // one past the right edge
-	T_CHECK_EQ(px(t, 9, 18), 0);	 // one before the left
-	T_CHECK_EQ(px(t, 10, 16), 0);	 // one above the top
-	T_CHECK_EQ(px(t, 10, 20), 0);	 // the baseline row itself is below this glyph
-	T_CHECK_EQ(ink_count(t, 0), 6);	 // 2x3 and nothing else
+	T_CHECK_EQ(px(t, 12, 18), 0);	// one past the right edge
+	T_CHECK_EQ(px(t, 9, 18), 0);	// one before the left
+	T_CHECK_EQ(px(t, 10, 16), 0);	// one above the top
+	T_CHECK_EQ(px(t, 10, 20), 0);	// the baseline row itself is below this glyph
+	T_CHECK_EQ(ink_count(t, 0), 6); // 2x3 and nothing else
 
 	// A non-zero x bearing must offset the bitmap without changing the advance.
 	pnx_host_reset();
 	T_CHECK_EQ(pnx_text_draw(t, &font, "\"", 10, 20, INK), 6);
-	T_CHECK_EQ(px(t, 10, 15), 0);  // bearing_x = 1, so the pen column stays clear
+	T_CHECK_EQ(px(t, 10, 15), 0); // bearing_x = 1, so the pen column stays clear
 	T_CHECK_EQ(px(t, 11, 15), INK);
 	T_CHECK_EQ(px(t, 14, 15), INK);
 	T_CHECK_EQ(px(t, 15, 15), 0);
-	T_CHECK_EQ(ink_count(t, 0), 8);	 // 4x2
+	T_CHECK_EQ(ink_count(t, 0), 8); // 4x2
 
 	// --- the advance a draw consumes must equal what measuring promised, or every
 	// centred label sits slightly wrong.
@@ -536,23 +536,23 @@ void test_text(void)
 	// --- clipping at each edge. The glyph is 2x3, so a partial overlap leaves a
 	// countable number of pixels rather than all or nothing.
 	pnx_host_reset();
-	pnx_text_draw(t, &font, "!", -1, 20, INK);	// one column off the left
+	pnx_text_draw(t, &font, "!", -1, 20, INK); // one column off the left
 	T_CHECK_EQ(ink_count(t, 0), 3);
 	T_CHECK_EQ(px(t, 0, 18), INK);
 
 	pnx_host_reset();
-	pnx_text_draw(t, &font, "!", 199, 20, INK);	 // one column on screen at the right
+	pnx_text_draw(t, &font, "!", 199, 20, INK); // one column on screen at the right
 	T_CHECK_EQ(ink_count(t, 0), 3);
 	T_CHECK_EQ(px(t, 199, 18), INK);
 
 	pnx_host_reset();
-	pnx_text_draw(t, &font, "!", 10, 2, INK);  // baseline 2: rows -1..1, one clipped
+	pnx_text_draw(t, &font, "!", 10, 2, INK); // baseline 2: rows -1..1, one clipped
 	T_CHECK_EQ(ink_count(t, 0), 4);
 	T_CHECK_EQ(px(t, 10, 0), INK);
 	T_CHECK_EQ(px(t, 10, 1), INK);
 
 	pnx_host_reset();
-	pnx_text_draw(t, &font, "!", 10, 229, INK);	 // rows 226..228, last one off-screen
+	pnx_text_draw(t, &font, "!", 10, 229, INK); // rows 226..228, last one off-screen
 	T_CHECK_EQ(ink_count(t, 0), 4);
 	T_CHECK_EQ(px(t, 10, 227), INK);
 
@@ -565,15 +565,15 @@ void test_text(void)
 	T_CHECK_EQ(ink_count(t, 0), 0);
 
 	// --- wrapping. Advances are 3 for '!' and 2 for ' ', so "! ! !" is 3+2+3+2+3 = 13.
-	T_CHECK_EQ(pnx_text_lines_wrapped(&font, "! ! !", 13), 1);	// exactly fits
-	T_CHECK_EQ(pnx_text_lines_wrapped(&font, "! ! !", 12), 2);	// last '!' pushed over
+	T_CHECK_EQ(pnx_text_lines_wrapped(&font, "! ! !", 13), 1); // exactly fits
+	T_CHECK_EQ(pnx_text_lines_wrapped(&font, "! ! !", 12), 2); // last '!' pushed over
 	T_CHECK_EQ(pnx_text_lines_wrapped(&font, "! ! !", 8), 2);
-	T_CHECK_EQ(pnx_text_lines_wrapped(&font, "! ! !", 3), 3);  // one glyph per line
+	T_CHECK_EQ(pnx_text_lines_wrapped(&font, "! ! !", 3), 3); // one glyph per line
 	T_CHECK_EQ(pnx_text_lines_wrapped(&font, "", 100), 0);
 
 	// An explicit newline breaks regardless of remaining width.
 	T_CHECK_EQ(pnx_text_lines_wrapped(&font, "!\n!", 100), 2);
-	T_CHECK_EQ(pnx_text_lines_wrapped(&font, "!\n\n!", 100), 3);  // blank line preserved
+	T_CHECK_EQ(pnx_text_lines_wrapped(&font, "!\n\n!", 100), 3); // blank line preserved
 
 	// A word wider than the box hard-breaks rather than running out of it. "!!!!" is 12
 	// wide; at width 7 that is two glyphs, then two more.
@@ -582,15 +582,15 @@ void test_text(void)
 	// Even a box narrower than a single glyph must terminate, one character per line.
 	T_CHECK_EQ(pnx_text_lines_wrapped(&font, "!!!", 1), 3);
 
-	T_CHECK_EQ(pnx_text_height_wrapped(&font, "! ! !", 8), 16);	 // 2 lines x 8
+	T_CHECK_EQ(pnx_text_height_wrapped(&font, "! ! !", 8), 16); // 2 lines x 8
 	T_CHECK_EQ(pnx_text_height_wrapped(&font, "", 8), 0);
 
 	// --- wrapped drawing places successive baselines one line_height apart
 	pnx_host_reset();
 	T_CHECK_EQ(pnx_text_draw_wrapped(t, &font, "! !", 10, 20, 3, 0, INK, PNX_ALIGN_LEFT), 2);
-	T_CHECK_EQ(px(t, 10, 17), INK);	  // first line, baseline 20
-	T_CHECK_EQ(px(t, 10, 25), INK);	  // second, baseline 28
-	T_CHECK_EQ(ink_count(t, 0), 12);  // two 2x3 glyphs, the space dropped
+	T_CHECK_EQ(px(t, 10, 17), INK);	 // first line, baseline 20
+	T_CHECK_EQ(px(t, 10, 25), INK);	 // second, baseline 28
+	T_CHECK_EQ(ink_count(t, 0), 12); // two 2x3 glyphs, the space dropped
 
 	// `h` bounds the box: at one line's worth only the first line is drawn.
 	pnx_host_reset();
@@ -624,15 +624,15 @@ void test_text(void)
 	// 0b00_01_10_11.
 	{
 		const size_t idx = PNX_BLOB_HEADER_BYTES + 8;
-		uint8_t* e = blob + idx + PNX_FONT_GLYPH_BYTES;	 // glyph 1
-		e[0] = 0;
-		e[1] = 0;  // offset 0
-		e[2] = 4;
-		e[3] = 1;  // 4x1
-		e[4] = 5;  // advance
-		e[5] = 0;
-		e[6] = 1;			   // bearings
-		blob[len - 5] = 0x1B;  // first byte of the bitmap block
+		uint8_t* e		 = blob + idx + PNX_FONT_GLYPH_BYTES; // glyph 1
+		e[0]			 = 0;
+		e[1]			 = 0; // offset 0
+		e[2]			 = 4;
+		e[3]			 = 1; // 4x1
+		e[4]			 = 5; // advance
+		e[5]			 = 0;
+		e[6]			 = 1;	 // bearings
+		blob[len - 5]	 = 0x1B; // first byte of the bitmap block
 	}
 	install_blob(resources[1], "build/test_font2.bin", blob, len);
 
@@ -648,13 +648,13 @@ void test_text(void)
 	const uint8_t dst_ch = 1, ink_ch = 3;
 	const uint8_t want1 = (uint8_t)((ink_ch * 1 + dst_ch * 2 + 1) / 3);
 	const uint8_t want2 = (uint8_t)((ink_ch * 2 + dst_ch * 1 + 1) / 3);
-	const uint8_t px1 = (uint8_t)(0xC0 | (want1 << 4) | (want1 << 2) | want1);
-	const uint8_t px2 = (uint8_t)(0xC0 | (want2 << 4) | (want2 << 2) | want2);
+	const uint8_t px1	= (uint8_t)(0xC0 | (want1 << 4) | (want1 << 2) | want1);
+	const uint8_t px2	= (uint8_t)(0xC0 | (want2 << 4) | (want2 << 2) | want2);
 
-	T_CHECK_EQ(px(t, 10, 19), 0x55);  // level 0: untouched
-	T_CHECK_EQ(px(t, 11, 19), px1);	  // level 1: one third ink
-	T_CHECK_EQ(px(t, 12, 19), px2);	  // level 2: two thirds
-	T_CHECK_EQ(px(t, 13, 19), 0xFF);  // level 3: straight ink, no read
+	T_CHECK_EQ(px(t, 10, 19), 0x55); // level 0: untouched
+	T_CHECK_EQ(px(t, 11, 19), px1);	 // level 1: one third ink
+	T_CHECK_EQ(px(t, 12, 19), px2);	 // level 2: two thirds
+	T_CHECK_EQ(px(t, 13, 19), 0xFF); // level 3: straight ink, no read
 
 	// --- the loader must refuse anything it cannot trust, because the blitter does no
 	// checking of its own.
@@ -663,31 +663,31 @@ void test_text(void)
 	PnxFont bad;
 
 	install_blob(resources[2], "build/test_font_short.bin", blob, len - 3);
-	T_CHECK(!pnx_font_load(&bad, 2));  // truncated: sizes disagree
+	T_CHECK(!pnx_font_load(&bad, 2)); // truncated: sizes disagree
 
 	blob[2] = PNX_BLOB_VERSION - 1;
 	install_blob(resources[3], "build/test_font_old.bin", blob, len);
-	T_CHECK(!pnx_font_load(&bad, 3));  // a stale build
+	T_CHECK(!pnx_font_load(&bad, 3)); // a stale build
 	blob[2] = PNX_BLOB_VERSION;
 
 	blob[0] = 'P';
 	blob[1] = 'A';
 	install_blob(resources[4], "build/test_font_magic.bin", blob, len);
-	T_CHECK(!pnx_font_load(&bad, 4));  // an atlas is not a font
+	T_CHECK(!pnx_font_load(&bad, 4)); // an atlas is not a font
 	blob[0] = 'P';
 	blob[1] = 'F';
 
 	blob[3] = 3;
 	install_blob(resources[5], "build/test_font_depth.bin", blob, len);
-	T_CHECK(!pnx_font_load(&bad, 5));  // only 1 and 2 exist
+	T_CHECK(!pnx_font_load(&bad, 5)); // only 1 and 2 exist
 	blob[3] = 1;
 
 	// A bitmap offset past the block would have the blitter reading arena memory as
 	// pixels -- the failure this validation exists to prevent.
 	{
-		uint8_t* e = blob + PNX_BLOB_HEADER_BYTES + 8 + PNX_FONT_GLYPH_BYTES;
+		uint8_t* e			= blob + PNX_BLOB_HEADER_BYTES + 8 + PNX_FONT_GLYPH_BYTES;
 		const uint8_t saved = e[0];
-		e[0] = 200;
+		e[0]				= 200;
 		install_blob(resources[6], "build/test_font_oob.bin", blob, len);
 		T_CHECK(!pnx_font_load(&bad, 6));
 		e[0] = saved;
@@ -695,9 +695,9 @@ void test_text(void)
 
 	// A codepoint mapping to a glyph that does not exist, likewise.
 	{
-		uint8_t* map = blob + PNX_BLOB_HEADER_BYTES + 8 + FONT_GLYPHS * PNX_FONT_GLYPH_BYTES;
+		uint8_t* map		= blob + PNX_BLOB_HEADER_BYTES + 8 + FONT_GLYPHS * PNX_FONT_GLYPH_BYTES;
 		const uint8_t saved = map[0];
-		map[0] = 9;
+		map[0]				= 9;
 		install_blob(resources[7], "build/test_font_badmap.bin", blob, len);
 		T_CHECK(!pnx_font_load(&bad, 7));
 		map[0] = saved;

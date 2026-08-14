@@ -66,12 +66,12 @@ static void test_fx(void)
 	CHECK(pnx_fx_to_int(pnx_fx_from_int(32768)) != 32768);
 
 	CHECK_EQ(pnx_fx_to_int(pnx_fx_div(pnx_fx_from_int(10), pnx_fx_from_int(4))), 2);
-	CHECK_EQ(pnx_fx_div(pnx_fx_from_int(1), 0), 0);	 // defined, not UB
+	CHECK_EQ(pnx_fx_div(pnx_fx_from_int(1), 0), 0); // defined, not UB
 
 	// The floor property is the one that matters: world-to-tile conversion must round
 	// toward negative infinity, or a pixel at -1 lands in tile 0 instead of tile -1.
 	CHECK_EQ(pnx_fx_floor(pnx_fx_from_int(-1)), -1);
-	CHECK_EQ(pnx_fx_floor(-1), -1);	 // -1/65536 floors to -1, not 0
+	CHECK_EQ(pnx_fx_floor(-1), -1); // -1/65536 floors to -1, not 0
 	CHECK_EQ(pnx_fx_floor(pnx_fx_from_int(-1) + 1), -1);
 
 	CHECK_EQ(pnx_fx_abs(pnx_fx_from_int(-3)), pnx_fx_from_int(3));
@@ -81,8 +81,8 @@ static void test_fx(void)
 	CHECK_EQ(pnx_isqrt(0), 0);
 	CHECK_EQ(pnx_isqrt(1), 1);
 	CHECK_EQ(pnx_isqrt(144), 12);
-	CHECK_EQ(pnx_isqrt(145), 12);  // floors
-	CHECK_EQ(pnx_isqrt(-5), 0);	   // defined for garbage input
+	CHECK_EQ(pnx_isqrt(145), 12); // floors
+	CHECK_EQ(pnx_isqrt(-5), 0);	  // defined for garbage input
 }
 
 // ---------------------------------------------------------------------- formatting
@@ -136,7 +136,7 @@ static void test_fmt(void)
 	CHECK_MATCHES_LIBC("[%5d]", 42);
 	CHECK_MATCHES_LIBC("[%-5d]", 42);
 	CHECK_MATCHES_LIBC("[%05d]", 42);
-	CHECK_MATCHES_LIBC("[%05d]", -42);	// sign before zeros, not after
+	CHECK_MATCHES_LIBC("[%05d]", -42); // sign before zeros, not after
 	CHECK_MATCHES_LIBC("[%5s]", "ab");
 	CHECK_MATCHES_LIBC("[%-5s]", "ab");
 	CHECK_MATCHES_LIBC("[%08x]", 0x1234u);
@@ -187,12 +187,12 @@ static void test_arena(void)
 
 	// Exhaustion returns NULL rather than aborting, so a caller can degrade.
 	CHECK(pnx_arena_alloc(&a, 100000, 4) == NULL);
-	CHECK(pnx_arena_alloc(&a, 8, 4) != NULL);  // still usable after a failed request
+	CHECK(pnx_arena_alloc(&a, 8, 4) != NULL); // still usable after a failed request
 
 	const size_t peak_before = a.peak;
 	pnx_arena_reset(&a);
 	CHECK_EQ(a.used, 0);
-	CHECK_EQ(a.peak, peak_before);	// peak survives reset: it is the budgeting number
+	CHECK_EQ(a.peak, peak_before); // peak survives reset: it is the budgeting number
 
 	int32_t* arr = PNX_ARENA_CALLOC_ARRAY(&a, int32_t, 16);
 	CHECK(arr != NULL);

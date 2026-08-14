@@ -42,10 +42,10 @@
 
 typedef enum
 {
-	PNX_WAVE_SQUARE = 0,  // hollow, cuts through a mix; the default lead
-	PNX_WAVE_SAW,		  // bright, buzzy; bass and strings
-	PNX_WAVE_TRIANGLE,	  // soft, flute-like
-	PNX_WAVE_NOISE,		  // percussion
+	PNX_WAVE_SQUARE = 0, // hollow, cuts through a mix; the default lead
+	PNX_WAVE_SAW,		 // bright, buzzy; bass and strings
+	PNX_WAVE_TRIANGLE,	 // soft, flute-like
+	PNX_WAVE_NOISE,		 // percussion
 	PNX_WAVE_COUNT
 } PnxWaveform;
 
@@ -65,34 +65,34 @@ uint32_t pnx_note_hz(uint8_t midi_note);
 
 typedef struct
 {
-	uint32_t written;		 // bytes handed to the stream since init
-	uint32_t worst_deficit;	 // worst shortfall against the consume rate, in bytes
-	uint32_t short_writes;	 // times the device accepted less than offered
+	uint32_t written;		// bytes handed to the stream since init
+	uint32_t worst_deficit; // worst shortfall against the consume rate, in bytes
+	uint32_t short_writes;	// times the device accepted less than offered
 	uint32_t feeds;
-	uint32_t capacity;	// bytes accepted before the first short write -- the device's
-						// buffer depth, which it offers no way to query
-	uint32_t carried;	// bytes currently held over from a short write
+	uint32_t capacity; // bytes accepted before the first short write -- the device's
+					   // buffer depth, which it offers no way to query
+	uint32_t carried;  // bytes currently held over from a short write
 	// Samples the output clamp actually had to cut, and the loudest value seen going into
 	// it. Two numbers that separate "too hot" from every other cause of harshness -- and the
 	// clamp was silent before, so those were indistinguishable from a log.
 	uint32_t clipped;
-	uint32_t peak;	// pre-clamp magnitude; 127 is full scale
+	uint32_t peak; // pre-clamp magnitude; 127 is full scale
 
-	uint16_t left_playing;	// times the speaker stopped being in Playing state. Each one
-							// is playback halting and resuming, which is heard as the
-							// sound starting over.
-	uint8_t state;			// most recent PnxAudioState
-	uint16_t worst_gap_ms;	// longest interval between feeds, all time
-	uint16_t gap_ms;		// most recent interval. Reported separately because the all-time
-							// maximum is pinned by a single hitch and then hides the steady
-							// state -- one 54ms stall made 32ms feeding look like 54ms
-							// feeding for the rest of the run.
-	uint16_t feed_min;		// smallest and largest bytes mixed in one call. A pulse at the
-	uint16_t feed_max;		// frame rate (~27Hz) sounds like a thrum, and an uneven feed
-							// is the mechanism that would cause one.
-	uint8_t active_voices;	// snapshot from the last mix, not a live count. An update that
-							// has already reached its lead returns without mixing and leaves
-							// this stale; use pnx_audio_voice_active for the current state.
+	uint16_t left_playing; // times the speaker stopped being in Playing state. Each one
+						   // is playback halting and resuming, which is heard as the
+						   // sound starting over.
+	uint8_t state;		   // most recent PnxAudioState
+	uint16_t worst_gap_ms; // longest interval between feeds, all time
+	uint16_t gap_ms;	   // most recent interval. Reported separately because the all-time
+						   // maximum is pinned by a single hitch and then hides the steady
+						   // state -- one 54ms stall made 32ms feeding look like 54ms
+						   // feeding for the rest of the run.
+	uint16_t feed_min;	   // smallest and largest bytes mixed in one call. A pulse at the
+	uint16_t feed_max;	   // frame rate (~27Hz) sounds like a thrum, and an uneven feed
+						   // is the mechanism that would cause one.
+	uint8_t active_voices; // snapshot from the last mix, not a live count. An update that
+						   // has already reached its lead returns without mixing and leaves
+						   // this stale; use pnx_audio_voice_active for the current state.
 } PnxAudioStats;
 
 // `volume` is 0..100, matching the platform.
@@ -160,4 +160,4 @@ void pnx_audio_set_lowpass(uint16_t cutoff_hz);
 uint16_t pnx_audio_lowpass(void);
 PnxAudioFormat pnx_audio_format(void);
 
-#endif	// PNX_USE_AUDIO
+#endif // PNX_USE_AUDIO

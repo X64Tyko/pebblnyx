@@ -58,7 +58,14 @@ static const uint8_t SPEEDS[] = { 1, 2, 4, 8 };
 // crosses a WorldTile CORNER, which asks the streamer for tiles in two directions at once
 // and is the case a four-way demo never reaches.
 static const int8_t HEADING[8][2] = {
-	{ 0, -1 }, { 1, -1 }, { 1, 0 }, { 1, 1 }, { 0, 1 }, { -1, 1 }, { -1, 0 }, { -1, -1 },
+	{ 0, -1 },
+	{ 1, -1 },
+	{ 1, 0 },
+	{ 1, 1 },
+	{ 0, 1 },
+	{ -1, 1 },
+	{ -1, 0 },
+	{ -1, -1 },
 };
 #define HEADING_COUNT 8
 
@@ -78,19 +85,19 @@ typedef struct
 
 	uint8_t current_scene;
 	int32_t hero_tx, hero_ty;
-	uint8_t heading;  // index into HEADING
+	uint8_t heading; // index into HEADING
 	bool walking;
 	uint8_t walk_phase;
-	uint8_t speed;	// index into SPEEDS
+	uint8_t speed; // index into SPEEDS
 	bool autopilot;
 	uint32_t last_input_ms;
 
-	uint8_t missing;  // WorldTiles the last stream call could not reach
+	uint8_t missing; // WorldTiles the last stream call could not reach
 	uint32_t worst_missing;
 	uint32_t accumulator_ms, ticks;
 	char hud[48];
-	size_t scene_bytes;	 // arena used by the current scene, for the comparison
-	bool have_plain;	 // false when the big arena would not fit
+	size_t scene_bytes; // arena used by the current scene, for the comparison
+	bool have_plain;	// false when the big arena would not fit
 	bool ready;
 } Game;
 
@@ -102,7 +109,11 @@ static const uint32_t RESOURCES[] = PNX_ASSET_RESOURCE_TABLE;
 //
 //   manifest maps:  0 field  1 plain  2 hut  3 crypt  4 keep
 static const uint8_t SCENE_FOR_MAP[] = {
-	PNX_SCENE_FIELD, PNX_SCENE_PLAIN, PNX_SCENE_HUT, PNX_SCENE_CRYPT, PNX_SCENE_KEEP,
+	PNX_SCENE_FIELD,
+	PNX_SCENE_PLAIN,
+	PNX_SCENE_HUT,
+	PNX_SCENE_CRYPT,
+	PNX_SCENE_KEEP,
 };
 static const char* const MAP_NAME[] = { "field", "plain", "hut", "crypt", "keep" };
 
@@ -120,9 +131,9 @@ static uint8_t map_of_scene(uint8_t scene)
 
 static void place_hero(Game* g, int32_t tx, int32_t ty, int32_t T)
 {
-	g->hero_tx = tx;
-	g->hero_ty = ty;
-	g->sprites[HERO].x = tx * T + T / 2;  // feet, centre of the tile
+	g->hero_tx		   = tx;
+	g->hero_ty		   = ty;
+	g->sprites[HERO].x = tx * T + T / 2; // feet, centre of the tile
 	g->sprites[HERO].y = ty * T + T;
 }
 
@@ -137,10 +148,10 @@ static bool enter_scene(Game* g, uint8_t scene, int32_t tx, int32_t ty)
 	const int32_t T = map->tile_px;
 
 	g->current_scene = scene;
-	g->sprite_count = 0;
+	g->sprite_count	 = 0;
 	g->sprites[HERO] = (PnxSpriteInstance){
-		.sprite = 0,
-		.frame = 0,
+		.sprite	 = 0,
+		.frame	 = 0,
 		.palette = PNX_SPRITE_PALETTE_DEFAULT,
 	};
 	g->sprite_count = 1;
@@ -183,7 +194,7 @@ static void toggle_world(Game* g)
 		return;
 	}
 	const bool streaming = (g->current_scene == PNX_SCENE_FIELD);
-	const uint8_t to = streaming ? PNX_SCENE_PLAIN : PNX_SCENE_FIELD;
+	const uint8_t to	 = streaming ? PNX_SCENE_PLAIN : PNX_SCENE_FIELD;
 	const int32_t tx = g->hero_tx, ty = g->hero_ty;
 	if (!enter_scene(g, to, tx, ty))
 	{
@@ -215,7 +226,7 @@ static bool try_move(Game* g, int32_t dx, int32_t dy)
 		return false;
 
 	place_hero(g, nx, ny, map->tile_px);
-	g->walk_phase = (uint8_t)((g->walk_phase + 1) % 3);
+	g->walk_phase		   = (uint8_t)((g->walk_phase + 1) % 3);
 	g->sprites[HERO].frame = g->walk_phase;
 
 	const PnxWarp* warp = pnx_map_warp_at(map, nx, ny);
@@ -276,7 +287,7 @@ static void autopilot(Game* g)
 
 static void draw_residency(PnxTarget* t, const PnxMap* m, const PnxCamera* cam)
 {
-	const int32_t span = (int32_t)m->tile_px * m->worldtile;
+	const int32_t span	 = (int32_t)m->tile_px * m->worldtile;
 	const int32_t cam_wx = cam->x / span, cam_wy = cam->y / span;
 
 	const int16_t gw = (int16_t)(m->wt_cols * GRID_CELL);
@@ -290,8 +301,8 @@ static void draw_residency(PnxTarget* t, const PnxMap* m, const PnxCamera* cam)
 	{
 		for (uint8_t wx = 0; wx < m->wt_cols; wx++)
 		{
-			const bool live = m->wt_slot[(uint32_t)wy * m->wt_cols + wx] != PNX_MAP_NO_SLOT;
-			const bool here = (wx == cam_wx && wy == cam_wy);
+			const bool live		= m->wt_slot[(uint32_t)wy * m->wt_cols + wx] != PNX_MAP_NO_SLOT;
+			const bool here		= (wx == cam_wx && wy == cam_wy);
 			const uint8_t shade = here ? 0xFF : (live ? 0xEA : 0xD5);
 			pnx_gfx_fill_rect(t, x0 + wx * GRID_CELL, y0 + wy * GRID_CELL, GRID_CELL - GRID_PAD,
 							  GRID_CELL - GRID_PAD, shade);
@@ -308,8 +319,8 @@ static void draw_atlas_pool(PnxTarget* t, const PnxMap* m, const PnxFont* f)
 		return;
 	char line[24];
 	char* p = line;
-	*p++ = 'A';
-	*p++ = ':';
+	*p++	= 'A';
+	*p++	= ':';
 	for (uint8_t i = 0; i < m->atlas_count && p < line + sizeof(line) - 3; i++)
 	{
 		// '0'..'n' for a resident atlas, '.' for one whose slot has been evicted.
@@ -323,7 +334,7 @@ static void draw_atlas_pool(PnxTarget* t, const PnxMap* m, const PnxFont* f)
 
 static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 {
-	Game* g = (Game*)ctx;
+	Game* g					  = (Game*)ctx;
 	const uint32_t work_start = pnx_platform_now_ms();
 
 	// UP and DOWN steer, turning the heading one compass point each way; SELECT is the
@@ -361,21 +372,21 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 					break;
 				}
 			}
-			g->walking = (sx || sy);
-			g->autopilot = false;
+			g->walking		 = (sx || sy);
+			g->autopilot	 = false;
 			g->last_input_ms = now;
 			continue;
 		}
 		if (ev.type == PNX_EVENT_TOUCH_UP)
 		{
-			g->walking = false;
+			g->walking		 = false;
 			g->last_input_ms = now;
 			continue;
 		}
 		if (ev.type != PNX_EVENT_BUTTON_DOWN)
 			continue;
 
-		g->autopilot = false;
+		g->autopilot	 = false;
 		g->last_input_ms = now;
 		switch (ev.button)
 		{
@@ -400,8 +411,8 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 	if (!g->autopilot && now - g->last_input_ms > AUTOPILOT_IDLE_MS)
 	{
 		g->autopilot = true;
-		g->walking = false;
-		g->speed = 0;
+		g->walking	 = false;
+		g->speed	 = 0;
 	}
 
 	g->accumulator_ms += elapsed_ms;
@@ -504,7 +515,7 @@ int main(void)
 	static Game g;
 	memset(&g, 0, sizeof(g));
 	g.autopilot = true;
-	g.heading = 2;	// east, so the patrol starts across the map rather than into a wall
+	g.heading	= 2; // east, so the patrol starts across the map rather than into a wall
 
 	if (!pnx_arena_init(&g.persistent, "persistent", PERSIST_ARENA_BYTES, 4))
 	{
