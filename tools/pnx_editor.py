@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import base64
 import contextlib
 import errno
 import http.server
@@ -1621,6 +1622,61 @@ class Project:
                     out.append({"path": os.path.relpath(full, self.root), "name": fn,
                                 "bytes": os.path.getsize(full)})
         return out
+
+    def art_import(self, name, data, replace=False):
+        """Copy a file the user picked into the project's `art/` folder.
+
+        Until this existed the editor could only ever see art that was already inside the
+        project, and it offered no way to put it there -- every sheet dropdown was filled
+        by walking `art/`, so importing a sprite sheet meant finding the project folder in
+        a file manager and copying the PNG in by hand. For the packaged editor that is a
+        folder the user has never seen and has no reason to know the location of.
+
+        Decoded rather than trusted. The extension says nothing about the contents, and
+        the pipeline is the wrong place to discover that a .png is a renamed .webp: it
+        fails there as a build error about an asset, pointing at the file rather than at
+        the moment it came in. Pillow parses it here, at the only moment the user is
+        holding the file and can pick a different one.
+        """
+        from PIL import Image
+
+        # The BASENAME only. A browser gives a bare filename for a picked file but a full
+        # path for a dropped one on some platforms, and either could carry separators; the
+        # destination is chosen here, not by the client.
+        base = os.path.basename((name or "").replace("\\", "/")).strip()
+        stem, ext = os.path.splitext(base)
+        stem = re.sub(r"[^A-Za-z0-9._-]", "_", stem).strip("._-")
+        if not stem:
+            raise ValueError("that file has no usable name")
+        if ext.lower() != ".png":
+            raise ValueError(f"art is imported as PNG; {base!r} is {ext or 'extensionless'}")
+
+        # A sprite sheet for a 200x228 screen is kilobytes. Something megabytes wide is a
+        # photo picked by mistake, and the useful moment to say so is before it is sitting
+        # in the project being offered in every sheet dropdown.
+        if len(data) > 16 * 1024 * 1024:
+            raise ValueError(f"{base!r} is {len(data) / 1048576:.0f} MB -- that is not a "
+                             f"sprite sheet for a 200x228 screen")
+
+        try:
+            im = Image.open(io.BytesIO(data))
+            im.verify()                     # structure; consumes the file object
+            im = Image.open(io.BytesIO(data))
+            im.load()                       # and the pixels, which verify() does not read
+        except Exception as e:              # noqa: BLE001
+            raise ValueError(f"{base!r} is not a readable PNG: {e}") from None
+        if im.format != "PNG":
+            raise ValueError(f"{base!r} is a {im.format or 'unknown'} file named .png")
+
+        rel = os.path.join("art", stem + ".png")
+        full = self._safe(rel)
+        if os.path.exists(full) and not replace:
+            raise ValueError(f"art/{stem}.png already exists -- import it under another "
+                             f"name, or confirm the replacement")
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "wb") as f:
+            f.write(data)
+        return {"path": rel, "w": im.width, "h": im.height, "bytes": len(data)}
 
     def sprite_read(self, rel):
         """Load a PNG as ARGB2222 indices, so it can be edited in device colours."""
@@ -5099,6 +5155,14 @@ select.sw{font:11px ui-monospace,monospace}
 #slice button:hover{border-color:var(--accent)}
 #slnote{font-size:.72rem;color:var(--dim)}
 
+/* The import target. A dashed well rather than a bare button because it is also a drop
+   zone, and a button does not look like somewhere you can let go of a file. */
+.drop{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;
+  border:1px dashed var(--line);border-radius:6px;padding:.5rem .6rem;margin-bottom:.5rem;
+  transition:border-color .12s,background .12s}
+.drop.over{border-color:var(--accent);background:rgba(255,255,255,.05)}
+.drop.over *{pointer-events:none}
+
 /* Sprites. The palette is the device's 64 colours laid out as an 8x8 block, so picking
    one is a glance rather than a scroll through hex codes. */
 .pal{display:grid;grid-template-columns:repeat(8,1fr);gap:2px}
@@ -5365,6 +5429,14 @@ button:disabled{opacity:.45;cursor:not-allowed}
   <div id="import" style="display:none;flex:1;overflow:auto;padding:1.5rem">
     <div class="imp">
       <div class="fields">
+        <!-- The same import as the Sprites tab, because this tab is *called* Import and
+             could only ever offer files that were already in the project. -->
+        <div id="atdrop" class="drop" style="flex-basis:100%">
+          <input id="atfile" type="file" accept="image/png" multiple hidden>
+          <button id="atpick">Import PNG…</button>
+          <span class="dim">or drop one here</span>
+          <small id="atimplog" class="dim"></small>
+        </div>
         <label>Sheet<select id="sheet"></select></label>
         <label>Tile px<input id="tile" type="number" value="16" min="4" step="4"></label>
         <label>Region x<input id="rx" type="number" value="0" min="0"></label>
@@ -5654,6 +5726,40 @@ button:disabled{opacity:.45;cursor:not-allowed}
   <div id="pixel" style="display:none;flex:1;overflow:auto;padding:1.25rem">
     <div class="fontgrid">
       <div class="fontctl">
+        <!-- Frames picked off a sheet. The declare form below can only describe a
+             vertical stack, which is the layout this engine's own examples happen to use
+             and not the one most sheets ship in — a run of poses across a row, several
+             rows to a character. Anything else meant writing the rectangles by hand. -->
+        <section><h2>From sheet</h2>
+          <!-- Bringing the file in. Every sheet list here is filled by walking the
+               project's art/ folder, and until this there was no way to put anything in
+               it from the editor -- importing a sprite sheet meant finding the project
+               directory in a file manager, which for the packaged editor is a folder the
+               user has never seen. -->
+          <div id="shdrop" class="drop">
+            <input id="shfile" type="file" accept="image/png" multiple hidden>
+            <button id="shpick">Import PNG…</button>
+            <span class="dim">or drop one here</span>
+          </div>
+          <small id="shimplog" class="dim"></small>
+          <div class="fields col">
+            <label>Sheet<select id="shsheet"></select></label>
+            <label>Frame w<input id="shfw" type="number" value="16" min="1" max="255"></label>
+            <label>Frame h<input id="shfh" type="number" value="24" min="1" max="255"></label>
+            <label>Origin x<input id="shox" type="number" value="0" min="0"
+              title="where the grid starts, for sheets with a border"></label>
+            <label>Origin y<input id="shoy" type="number" value="0" min="0"></label>
+            <label>Gap x<input id="shgx" type="number" value="0" min="0"
+              title="spacing between frames, for sheets drawn on a grid with gutters"></label>
+            <label>Gap y<input id="shgy" type="number" value="0" min="0"></label>
+          </div>
+          <div class="row" style="margin-top:.4rem">
+            <button id="shslice" class="primary">Slice</button>
+            <button id="shclear">Clear picks</button>
+          </div>
+          <small id="shlog">Click frames in the order the animation plays.</small>
+        </section>
+
         <section><h2>Canvas</h2>
           <div class="fields col">
             <label>Width<input id="pxw" type="number" value="16" min="1" max="128"></label>
@@ -5694,28 +5800,6 @@ button:disabled{opacity:.45;cursor:not-allowed}
           <small id="pxnote">Saved into the project, then importable as a sprite.</small>
         </section>
 
-        <!-- Frames picked off a sheet. The declare form below can only describe a
-             vertical stack, which is the layout this engine's own examples happen to use
-             and not the one most sheets ship in — a run of poses across a row, several
-             rows to a character. Anything else meant writing the rectangles by hand. -->
-        <section><h2>From sheet</h2>
-          <div class="fields col">
-            <label>Sheet<select id="shsheet"></select></label>
-            <label>Frame w<input id="shfw" type="number" value="16" min="1" max="255"></label>
-            <label>Frame h<input id="shfh" type="number" value="24" min="1" max="255"></label>
-            <label>Origin x<input id="shox" type="number" value="0" min="0"
-              title="where the grid starts, for sheets with a border"></label>
-            <label>Origin y<input id="shoy" type="number" value="0" min="0"></label>
-            <label>Gap x<input id="shgx" type="number" value="0" min="0"
-              title="spacing between frames, for sheets drawn on a grid with gutters"></label>
-            <label>Gap y<input id="shgy" type="number" value="0" min="0"></label>
-          </div>
-          <div class="row" style="margin-top:.4rem">
-            <button id="shslice" class="primary">Slice</button>
-            <button id="shclear">Clear picks</button>
-          </div>
-          <small id="shlog">Click frames in the order the animation plays.</small>
-        </section>
 
         <!-- The declaration half. Painting a PNG left the sprite undeclared, so nothing
              could load it — the same dead end a map without a scene has. Frames come from
@@ -9365,7 +9449,7 @@ for(const id of ['pxw','pxh','pxframes'])
 $('#pxzoom').addEventListener('input',()=>{PX.zoom=+$('#pxzoom').value; pxDraw()});
 $('#pxgrid').addEventListener('change',pxDraw);
 
-async function pxLoadList(){
+async function pxLoadList(select){
   const files=await (await fetch('/api/art')).json();
   $('#pxopen').innerHTML='<option value="">—</option>'+
     files.map(f=>`<option value="${f.path}">${f.path}</option>`).join('');
@@ -9374,12 +9458,97 @@ async function pxLoadList(){
   S.art=files;
   const sh=$('#shsheet');
   if(sh){
-    const cur=sh.value;
+    // `select` wins over the current value: after an import the sheet you just brought in
+    // is the one you meant to slice, and leaving the old selection makes the import look
+    // like it did nothing.
+    const cur=select||sh.value;
     sh.innerHTML=files.map(f=>`<option${f.path===cur?' selected':''}>${f.path}</option>`)
       .join('');
   }
   drawSpriteForm();
 }
+
+// Importing art. Files arrive either from the picker or from a drop, and both end here:
+// read as base64, posted, then the sheet lists reload with the new file selected.
+//
+// One at a time rather than in parallel. Two imports landing together can collide on a
+// name, and the answer to "that already exists" is a question for the user -- which has
+// to be asked about one file, in order, not about whichever of four requests replied
+// first.
+//
+// `logId` is which tab is watching. The endpoint and the destination folder are the same
+// wherever the file was dropped -- only the line that reports it differs.
+async function importArt(files,logId){
+  const log=$(logId||'#shimplog');
+  const say=(msg,bad)=>{ log.className=bad?'bad':'dim'; log.textContent=msg };
+  let last=null, done=0;
+  for(const file of files){
+    say(`importing ${file.name}…`);
+    let data;
+    try{
+      data=await new Promise((ok,fail)=>{
+        const fr=new FileReader();
+        fr.onerror=()=>fail(new Error('could not be read'));
+        // The result is a data: URL; everything after the comma is the base64 payload.
+        fr.onload=()=>ok(String(fr.result).split(',')[1]||'');
+        fr.readAsDataURL(file);
+      });
+    }catch(e){ say(`${file.name}: ${e.message}`,true); continue }
+
+    let r=await post('/api/art/import',{name:file.name,data});
+    if(!r.ok && /already exists/.test(r.error||'')){
+      if(!confirm(`art/${file.name} already exists.\n\nReplace it?`)){
+        say(`${file.name} skipped`); continue;
+      }
+      r=await post('/api/art/import',{name:file.name,data,replace:true});
+    }
+    if(!r.ok){ say(`${file.name}: ${r.error}`,true); continue }
+    last=r.path; done++;
+  }
+  if(!last) return;
+  // Both lists, whichever tab the file came in through: the two tabs read the same folder,
+  // and a sheet imported on one being absent from the other is the same dead end again.
+  await pxLoadList(last);
+  if(typeof loadSheets==='function'){
+    await loadSheets();
+    const sel=$('#sheet');
+    if(sel && [...sel.options].some(o=>o.value===last)){
+      sel.value=last;
+      // 'input', which is what the atlas fields are actually bound to. Assigning .value
+      // fires nothing, so the region analysis would still be describing the old sheet.
+      sel.dispatchEvent(new Event('input',{bubbles:true}));
+    }
+  }
+  const f=S.art.find(a=>a.path===last)||{};
+  // Bytes under a kilobyte. A 168-byte sheet rounding to "0 KB" reads as an import that
+  // brought in nothing, which is the one thing the message exists to disprove.
+  const size=!f.bytes ? ''
+    : f.bytes<1024 ? ` — ${f.bytes} B` : ` — ${Math.round(f.bytes/1024)} KB`;
+  say(done===1 ? `${last}${size}` : `${done} files imported, ${last} selected`);
+}
+
+// Wires one import well: a button that opens the picker, and the same box as a drop
+// target. Called for both tabs, because "bring a file in" should not be two behaviours.
+function wireImport(zoneId,fileId,pickId,logId){
+  const zone=$(zoneId), input=$(fileId), pick=$(pickId);
+  if(!zone||!input||!pick) return;
+  pick.onclick=()=>input.click();
+  input.onchange=async()=>{
+    await importArt([...input.files],logId);
+    // Cleared so picking the same file twice fires change again, which is what someone
+    // does after replacing the file on disk.
+    input.value='';
+  };
+  // dragover must be cancelled or the browser navigates to the dropped file instead,
+  // which throws away the whole editor and any unsaved canvas with it.
+  for(const ev of ['dragenter','dragover'])
+    zone.addEventListener(ev,e=>{ e.preventDefault(); zone.classList.add('over') });
+  for(const ev of ['dragleave','drop'])
+    zone.addEventListener(ev,e=>{ e.preventDefault(); zone.classList.remove('over') });
+  zone.addEventListener('drop',e=>importArt([...(e.dataTransfer.files||[])],logId));
+}
+wireImport('#shdrop','#shfile','#shpick','#shimplog');
+wireImport('#atdrop','#atfile','#atpick','#atimplog');
 
 $('#pxopen').addEventListener('change',async()=>{
   const path=$('#pxopen').value; if(!path) return;
@@ -10272,6 +10441,19 @@ def make_handler(session):
                     d = json.loads(raw)
                     self._send(200, json.dumps(
                         {"users": session.proj.sprite_users(d["name"])}))
+                elif self.path == "/api/art/import":
+                    d = json.loads(raw)
+                    # base64 rather than multipart: every other route here is a JSON POST,
+                    # and one endpoint with its own body format would be the only place
+                    # this server has to parse an envelope.
+                    try:
+                        blob = base64.b64decode(d.get("data", ""), validate=True)
+                    except Exception:                    # noqa: BLE001
+                        raise ValueError("the upload did not arrive intact") from None
+                    self._send(200, json.dumps(
+                        {"ok": True,
+                         **session.proj.art_import(d.get("name", ""), blob,
+                                                   bool(d.get("replace")))}))
                 elif self.path == "/api/map/props":
                     d = json.loads(raw)
                     session.proj.set_map_props(
