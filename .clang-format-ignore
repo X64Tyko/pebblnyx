@@ -1,0 +1,9 @@
+# Generated files -- formatting them is pointless (tools/pnx_assets.py overwrites them on
+# every asset rebuild, in its own machine style) and reformatting only produces noise in a
+# diff against what the generator actually emits. See tools/lint.sh.
+**/assets_gen.h
+**/resource_ids.auto.h
+**/resource_ids.auto.c
+**/appinfo.auto.c
+build/**
+**/build/**

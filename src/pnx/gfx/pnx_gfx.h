@@ -24,33 +24,33 @@
 // tile boundary; pixels let the camera move smoothly and the tilemap simply starts its
 // first column part-way off screen.
 
-typedef struct {
-  int32_t x, y;          // top-left of the view, in world pixels
-  int16_t view_w, view_h;
+typedef struct
+{
+	int32_t x, y;  // top-left of the view, in world pixels
+	int16_t view_w, view_h;
 } PnxCamera;
 
-void pnx_camera_init(PnxCamera *c, int16_t view_w, int16_t view_h);
+void pnx_camera_init(PnxCamera* c, int16_t view_w, int16_t view_h);
 
 // Centres on a world point, then clamps so the view never leaves the world. Clamping
 // here rather than at the call site is deliberate: every caller wants it, and forgetting
 // it shows up as a strip of garbage at a map edge.
-void pnx_camera_center(PnxCamera *c, int32_t wx, int32_t wy,
-                       int32_t world_w, int32_t world_h);
+void pnx_camera_center(PnxCamera* c, int32_t wx, int32_t wy, int32_t world_w, int32_t world_h);
 
 // ------------------------------------------------------------------------- blits
 
-void pnx_gfx_clear(PnxTarget *t, uint8_t colour);
+void pnx_gfx_clear(PnxTarget* t, uint8_t colour);
 
 // Flip bits for pnx_blit_4bpp. X is 1 so an old `true` still means a horizontal flip.
 #define PNX_FLIP_NONE 0
-#define PNX_FLIP_X    1
-#define PNX_FLIP_Y    2
+#define PNX_FLIP_X	  1
+#define PNX_FLIP_Y	  2
 
 // Blits a 4bpp image at a screen position. `mirror` flips horizontally, which is how a
 // character faces left with no extra art -- the measured sprite sheets contain a walk
 // cycle in one direction only.
-void pnx_blit_4bpp(PnxTarget *t, const uint8_t *src, const PnxPalette *palette,
-                   int32_t x, int32_t y, int16_t w, int16_t h, uint8_t flip);
+void pnx_blit_4bpp(PnxTarget* t, const uint8_t* src, const PnxPalette* palette, int32_t x,
+				   int32_t y, int16_t w, int16_t h, uint8_t flip);
 
 // Draws one metatiled tile: four 8x8 quadrants composed into a 16x16.
 //
@@ -58,14 +58,13 @@ void pnx_blit_4bpp(PnxTarget *t, const uint8_t *src, const PnxPalette *palette,
 // per-row cost -- 32 row lookups and clip computations instead of 16 -- and row overhead
 // is what dominates here: the measured frame cost fell 7,400 -> 5,100 us purely by
 // reducing per-pixel and per-row work, not by changing what is drawn.
-void pnx_blit_metatile(PnxTarget *t, const PnxAtlas *atlas, uint8_t tile,
-                       int32_t x, int32_t y);
+void pnx_blit_metatile(PnxTarget* t, const PnxAtlas* atlas, uint8_t tile, int32_t x, int32_t y);
 
 // Same, with the palette supplied rather than looked up -- used for palette-swapped
 // draws, and by tests that build an atlas without a loaded palette table.
-void pnx_blit_metatile_with(PnxTarget *t, const PnxAtlas *atlas, uint8_t tile,
-                            const PnxPalette *palette, int32_t x, int32_t y);
+void pnx_blit_metatile_with(PnxTarget* t, const PnxAtlas* atlas, uint8_t tile,
+							const PnxPalette* palette, int32_t x, int32_t y);
 
 // Filled rectangle in screen space, clipped. For dialog boxes and HUD panels.
-void pnx_gfx_fill_rect(PnxTarget *t, int32_t x, int32_t y, int16_t w, int16_t h,
-                       uint8_t colour);
+void pnx_gfx_fill_rect(PnxTarget* t, int32_t x, int32_t y, int16_t w, int16_t h,
+					   uint8_t colour);

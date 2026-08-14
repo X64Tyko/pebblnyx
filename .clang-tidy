@@ -1,0 +1,120 @@
+# Static analysis for pebblnyx's C code. Scope: the portable framework core and host
+# platform (see tests/Makefile's own header comment for exactly which files that is --
+# tools/gen_compile_commands.py derives compile_commands.json from that same Makefile
+# rather than restating the list). pnx_platform_pebble.c and example/game code need
+# <pebble.h> and the ARM SDK's cross-compile environment to type-check at all, which is
+# out of scope for the same reason tests/Makefile itself does not build them.
+#
+# This is C, not C++: no exceptions, no RTTI, no templates, no STL. The check list below
+# is a curated subset of the C++-oriented default catalogue, not the wildcard `*-*` --
+# most of clang-tidy's checks (google-*, modernize-*, cppcoreguidelines-*, hicpp-*,
+# fuchsia-*, abseil-*, boost-*, objc-*, altera-*, darwin-*, zircon-*, mpi-*,
+# llvmlibc-*, openmp-*) either do not apply to C or enforce a C++ idiom this codebase
+# does not and should not follow.
+#
+# Comments cannot live inside the `Checks:` block scalar below -- YAML block scalars
+# take every following indented line as literal content, `#` included, so a first
+# attempt at explaining each exclusion inline ended up quoted into the check list as
+# text instead of suppressing anything. The rationale lives here instead:
+#
+#   -readability-braces-around-statements  `if (cond) return;` on one line is the
+#     established idiom (pnx_arena.c alone has a dozen), not a lapse.
+#   -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling  wants
+#     memset_s, a C11 Annex K function no target here implements; never actionable.
+#   -performance-no-int-to-ptr  casting an aligned uintptr_t back to a pointer is
+#     exactly what the arena allocator's alignment step does, on purpose.
+#   -readability-math-missing-parentheses  flags things like `a + b * c` and
+#     `x << 1 | y`; this codebase already relies on normal C precedence throughout and
+#     parenthesizing every mixed expression would be a much bigger, noisier change than
+#     the ambiguity risk justifies.
+#   -bugprone-implicit-widening-of-multiplication-result  flags `uint16_t * uint16_t`
+#     assigned/passed as a wider type -- correct and intentional throughout the fixed-
+#     point audio and offset math (see pnx_audio.c, pnx_synth.c); the width is chosen
+#     deliberately at each call site, not accidental.
+#   -misc-use-internal-linkage  wants every free function `static` unless exported,
+#     which is already true for the actual API surface; the handful it flags are host
+#     test helpers already scoped to their one translation unit's use.
+#   -bugprone-casting-through-void  its own fix suggests `reinterpret_cast`, which does
+#     not exist in C -- the whole finding is a C++ idiom applied to a C codebase. The
+#     void* stopover it flags (`(PnxPalette *)(const void *)data`) is how a raw resource
+#     blob becomes a typed view in C; there is no other way to spell it.
+#   -bugprone-signed-char-misuse / -cert-str34-c  every site flagged is a wavetable or
+#     PCM sample (`int8_t`) widened to `int32_t` for mixing -- sign-extension is the
+#     CORRECT behaviour there (a sample's sign is its amplitude's sign), not the
+#     unsigned-data-misread-as-signed bug this check exists to catch.
+#   -cert-err33-c  wants every return value checked, including printf/snprintf/fwrite in
+#     test diagnostics -- a convention this codebase has never followed (every A_CHECK/
+#     T_CHECK-style macro in tests/ prints unchecked) and checking 30-odd call sites
+#     would fight that established pattern rather than fix anything. The two real
+#     instances this surfaced (an unchecked fseek, a short fwrite in a test helper) were
+#     fixed directly rather than silenced -- see pnx_platform_host.c and test_text.c.
+Checks: >
+  clang-diagnostic-*,
+  bugprone-*,
+  clang-analyzer-*,
+  performance-*,
+  misc-*,
+  readability-*,
+  cert-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -misc-include-cleaner,
+  -misc-unused-parameters,
+  -misc-use-internal-linkage,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -readability-uppercase-literal-suffix,
+  -readability-function-cognitive-complexity,
+  -readability-isolate-declaration,
+  -readability-avoid-nested-conditional-operator,
+  -readability-implicit-bool-conversion,
+  -readability-braces-around-statements,
+  -readability-math-missing-parentheses,
+  -bugprone-casting-through-void,
+  -bugprone-signed-char-misuse,
+  -cert-str34-c,
+  -cert-err33-c,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -performance-no-int-to-ptr
+
+WarningsAsErrors: ''
+HeaderFilterRegex: 'src/pnx/.*\.h$'
+FormatStyle: file
+
+CheckOptions:
+  # PnxArena, PnxCamera, PnxAudioStats -- every exported type is PascalCase with a Pnx
+  # prefix; every function and variable is snake_case with a pnx_ prefix. Matching what
+  # is already there, not proposing a new one.
+  - key: readability-identifier-naming.TypedefNameCase
+    value: CamelCase
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.GlobalConstantCase
+    value: UPPER_CASE
+  # `s_` is the established prefix for a translation unit's own private static state
+  # (s_writer, s_palettes, s_cluster...) -- deliberately lower_case so it doesn't read
+  # as a manifest constant, since the whole point of the prefix is "this can change out
+  # from under you". UPPER_CASE remains required for the bare lookup tables (TIER_STRING,
+  # SIZE_LABEL) that are not state.
+  - key: readability-identifier-naming.GlobalConstantIgnoredRegexp
+    value: '^s_.*$'
+  - key: readability-identifier-naming.MacroDefinitionCase
+    value: UPPER_CASE
+  # pnx_fx_to_int/pnx_fx_floor (src/pnx/core/pnx_fx.h) are function-like macros
+  # deliberately named like the functions they stand in for, so a call site reads the
+  # same whether the fixed-point op is a macro or ever becomes a real inline function.
+  - key: readability-identifier-naming.MacroDefinitionIgnoredRegexp
+    value: '^pnx_fx_[a-z_]+$'
+  # `T` for a tile's pixel size shows up next to a `PnxTarget *t` parameter in three
+  # different files (pnx_gfx.c, pnx_tilemap.c, test_stream.c) -- capitalized on purpose
+  # so it cannot collide with the target pointer that convention is even more established.
+  - key: readability-identifier-naming.VariableIgnoredRegexp
+    value: '^T$'
+  # test_assets.c/test_gfx.c/test_stream.c are long, deliberately exhaustive lists of
+  # checks, not complex control flow -- the statement count measures the fixture size,
+  # not anything worth restructuring. Default is 800; the longest here is ~1100.
+  - key: readability-function-size.StatementThreshold
+    value: '1500'

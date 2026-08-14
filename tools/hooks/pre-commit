@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Git pre-commit hook: blocks a commit that would introduce a formatting or clang-tidy
+# regression, or break the host test suite. Installed by tools/install_git_hooks.sh --
+# see that script's header for why a hook has to be installed rather than just tracked.
+#
+# Runs against the tree as it will be committed (a staged-but-unbuilt change or a
+# dirty-but-unstaged file both need catching), not just staged files, since tools/lint.sh
+# and the host tests operate on files on disk either way -- narrowing to `git diff
+# --cached --name-only` would pass a commit that leaves the working tree red.
+#
+# `git commit --no-verify` skips this, same as any git hook -- that escape hatch is
+# intentional, not a gap to close.
+
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+echo "pre-commit: tools/lint.sh"
+if ! tools/lint.sh; then
+	echo "pre-commit: lint failed -- fix above, or 'git commit --no-verify' to skip" >&2
+	exit 1
+fi
+
+echo "pre-commit: host test suite"
+if ! (cd tests && make test) >/tmp/pnx-pre-commit-tests.log 2>&1; then
+	echo "pre-commit: tests failed -- see /tmp/pnx-pre-commit-tests.log" >&2
+	tail -30 /tmp/pnx-pre-commit-tests.log >&2
+	exit 1
+fi
+
+echo "pre-commit: OK"

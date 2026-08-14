@@ -109,6 +109,15 @@ over Bluetooth, behind a log stream that drops the first messages.
 cd tests && make test
 ```
 
+Style and static analysis run over the same portable slice, plus `.c`/`.h` formatting
+everywhere else -- see `.clang-format`'s and `.clang-tidy`'s own header comments for what
+each does and does not cover:
+
+```sh
+tools/lint.sh          # check
+tools/lint.sh fix      # reformat in place, then check clang-tidy
+```
+
 Content is built from a manifest, then the app builds for the watch and prints its own
 size breakdown:
 

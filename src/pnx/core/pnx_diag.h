@@ -21,7 +21,7 @@
 #if PNX_USE_DIAGNOSTICS
 
 // Buffers a message. Safe before the log stream exists.
-void pnx_log(const char *fmt, ...);
+void pnx_log(const char* fmt, ...);
 
 // Emits everything buffered, then switches to pass-through so later calls go straight
 // out. Call it from a button handler, or on a timer a few seconds after launch.
@@ -34,23 +34,24 @@ bool pnx_diag_flushed(void);
 // callback; the rest of the period is idle wait we do not control.
 void pnx_diag_frame(uint32_t frame_ms, uint32_t work_ms);
 
-typedef struct {
-  uint32_t fps_x10;      // frames per second, times ten
-  uint32_t frame_us;     // mean whole-frame period
-  uint32_t work_us;      // mean time inside our callback
-  uint32_t worst_us;     // worst callback in the current window
-  uint32_t frames;       // frames in the completed window
+typedef struct
+{
+	uint32_t fps_x10;	// frames per second, times ten
+	uint32_t frame_us;	// mean whole-frame period
+	uint32_t work_us;	// mean time inside our callback
+	uint32_t worst_us;	// worst callback in the current window
+	uint32_t frames;	// frames in the completed window
 } PnxFrameStats;
 
-const PnxFrameStats *pnx_diag_stats(void);
+const PnxFrameStats* pnx_diag_stats(void);
 
 #else
 
 // Zero-cost when disabled: the calls vanish and the format strings never reach .rodata.
-#define pnx_log(...)            ((void)0)
-#define pnx_diag_flush()        ((void)0)
-#define pnx_diag_flushed()      (false)
-#define pnx_diag_frame(a, b)    ((void)0)
-#define pnx_diag_stats()        (NULL)
+#define pnx_log(...)		 ((void)0)
+#define pnx_diag_flush()	 ((void)0)
+#define pnx_diag_flushed()	 (false)
+#define pnx_diag_frame(a, b) ((void)0)
+#define pnx_diag_stats()	 (NULL)
 
-#endif  // PNX_USE_DIAGNOSTICS
+#endif	// PNX_USE_DIAGNOSTICS

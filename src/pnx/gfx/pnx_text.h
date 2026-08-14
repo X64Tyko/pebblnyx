@@ -37,10 +37,11 @@
 
 #include <stdint.h>
 
-typedef enum {
-  PNX_ALIGN_LEFT = 0,
-  PNX_ALIGN_CENTER,
-  PNX_ALIGN_RIGHT,
+typedef enum
+{
+	PNX_ALIGN_LEFT = 0,
+	PNX_ALIGN_CENTER,
+	PNX_ALIGN_RIGHT,
 } PnxTextAlign;
 
 // ---------------------------------------------------------------------- measuring
@@ -50,20 +51,20 @@ typedef enum {
 // slightly off, and the reason these are not two independent implementations.
 
 // Advance width of `s` on one line, ignoring any newline in it.
-int16_t pnx_text_width(const PnxFont *f, const char *s);
+int16_t pnx_text_width(const PnxFont* f, const char* s);
 
 // Height `s` needs when wrapped into `w` pixels: line_height per line, no trailing gap.
-int16_t pnx_text_height_wrapped(const PnxFont *f, const char *s, int16_t w);
+int16_t pnx_text_height_wrapped(const PnxFont* f, const char* s, int16_t w);
 
 // Lines `s` wraps to at width `w`. Useful for paging dialogue before drawing it.
-int16_t pnx_text_lines_wrapped(const PnxFont *f, const char *s, int16_t w);
+int16_t pnx_text_lines_wrapped(const PnxFont* f, const char* s, int16_t w);
 
 // ------------------------------------------------------------------------ drawing
 
 // One line, no wrapping, clipped. Returns the advance width actually consumed, so
 // successive draws can be chained -- a label followed by a value in another colour.
-int16_t pnx_text_draw(PnxTarget *t, const PnxFont *f, const char *s,
-                      int32_t x, int32_t y, uint8_t colour);
+int16_t pnx_text_draw(PnxTarget* t, const PnxFont* f, const char* s, int32_t x, int32_t y,
+					  uint8_t colour);
 
 // Word-wrapped into a box. `x, y` is the baseline of the FIRST line; `w` is the wrap
 // width. `h` bounds the drawing -- lines whose baseline would fall past `y + h` are not
@@ -73,8 +74,8 @@ int16_t pnx_text_draw(PnxTarget *t, const PnxFont *f, const char *s,
 // than letting it run out of the box. Honours '\n' as a forced break.
 //
 // Returns the number of lines drawn.
-int16_t pnx_text_draw_wrapped(PnxTarget *t, const PnxFont *f, const char *s,
-                              int32_t x, int32_t y, int16_t w, int16_t h,
-                              uint8_t colour, PnxTextAlign align);
+int16_t pnx_text_draw_wrapped(PnxTarget* t, const PnxFont* f, const char* s, int32_t x,
+							  int32_t y, int16_t w, int16_t h, uint8_t colour,
+							  PnxTextAlign align);
 
-#endif  // PNX_USE_TEXT
+#endif	// PNX_USE_TEXT

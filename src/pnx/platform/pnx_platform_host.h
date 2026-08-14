@@ -19,20 +19,20 @@ void pnx_host_reset(void);
 uint32_t pnx_host_resource_reads(void);
 
 // The flat render target, for asserting on pixels directly.
-PnxTarget *pnx_host_target(void);
+PnxTarget* pnx_host_target(void);
 
 // The most recent block written to the audio stream, and the running total.
-const void *pnx_host_audio_last(size_t *bytes);
+const void* pnx_host_audio_last(size_t* bytes);
 uint32_t pnx_host_audio_total(void);
 
 // The most recent string passed to pnx_platform_text_draw. Absent when the SDK text hook
 // is compiled out -- see PNX_USE_SDK_TEXT.
 #if PNX_USE_SDK_TEXT
-const char *pnx_host_last_text(void);
+const char* pnx_host_last_text(void);
 #endif
 
 // Points a resource id at a file on disk, so tests load the same blobs the device does.
-void pnx_host_register_resource(uint32_t resource_id, const char *path);
+void pnx_host_register_resource(uint32_t resource_id, const char* path);
 
 // Calls to each persist operation since the last pnx_host_reset. On device a WRITE costs
 // ~7ms per call regardless of size -- see docs/MEASUREMENTS.md -- so this is the number a

@@ -24,25 +24,27 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-typedef enum {
-  // Portrait, the display's native orientation. The cluster falls under one thumb, which
-  // reads as a menu column: an RPG, anything with a cursor.
-  PNX_ORIENT_BUTTONS_RIGHT = 0,
+typedef enum
+{
+	// Portrait, the display's native orientation. The cluster falls under one thumb, which
+	// reads as a menu column: an RPG, anything with a cursor.
+	PNX_ORIENT_BUTTONS_RIGHT,
 
-  // Held so the cluster runs along the top edge, under both index fingers: shoulder
-  // triggers, which is what makes a shooter playable. Content is rotated clockwise into
-  // the framebuffer.
-  PNX_ORIENT_BUTTONS_TOP = 1,
+	// Held so the cluster runs along the top edge, under both index fingers: shoulder
+	// triggers, which is what makes a shooter playable. Content is rotated clockwise into
+	// the framebuffer.
+	PNX_ORIENT_BUTTONS_TOP,
 
-  // Cluster along the bottom edge, under both thumbs: flippers, for pinball. Content is
-  // rotated anticlockwise.
-  PNX_ORIENT_BUTTONS_BOTTOM = 2,
+	// Cluster along the bottom edge, under both thumbs: flippers, for pinball. Content is
+	// rotated anticlockwise.
+	PNX_ORIENT_BUTTONS_BOTTOM,
 
-  PNX_ORIENT_COUNT
+	PNX_ORIENT_COUNT
 } PnxOrientation;
 
 // Only possible at all because these games are played OFF the wrist, in two hands -- a
 // watch strapped to an arm cannot be turned sideways and still read. See docs/PLATFORM.md.
-static inline bool pnx_orient_is_landscape(uint8_t o) {
-  return o == PNX_ORIENT_BUTTONS_TOP || o == PNX_ORIENT_BUTTONS_BOTTOM;
+static inline bool pnx_orient_is_landscape(uint8_t o)
+{
+	return o == PNX_ORIENT_BUTTONS_TOP || o == PNX_ORIENT_BUTTONS_BOTTOM;
 }

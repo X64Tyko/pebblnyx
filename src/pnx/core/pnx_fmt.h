@@ -29,6 +29,6 @@
 
 // snprintf semantics: always NUL-terminates when size > 0, and returns the length the
 // output WOULD have had, so truncation is detectable by comparing against size.
-int pnx_vformat(char *buf, size_t size, const char *fmt, va_list ap);
+int pnx_vformat(char* buf, size_t size, const char* fmt, va_list ap);
 
-int pnx_format(char *buf, size_t size, const char *fmt, ...);
+int pnx_format(char* buf, size_t size, const char* fmt, ...);

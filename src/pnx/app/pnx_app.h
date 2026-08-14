@@ -46,15 +46,16 @@
 // the app is covered -- resonant's sequencer advances against the wall clock rather than
 // the tick specifically so a notification does not slow the music down with it. Most
 // states leave `frame` NULL.
-typedef struct {
-  void (*enter)(void *ctx);              // just pushed
-  void (*exit)(void *ctx);               // just popped, permanently
-  void (*suspend)(void *ctx);            // covered -- by a push, or by the OS
-  void (*resume)(void *ctx);             // uncovered -- by a pop, or by the OS
-  void (*input)(void *ctx);              // once per rendered frame, before tick
-  void (*tick)(void *ctx);               // fixed PNX_TICK_MS steps; skipped while covered
-  void (*frame)(void *ctx);              // once per rendered frame, even while covered
-  void (*draw)(void *ctx, PnxTarget *target);
+typedef struct
+{
+	void (*enter)(void* ctx);	 // just pushed
+	void (*exit)(void* ctx);	 // just popped, permanently
+	void (*suspend)(void* ctx);	 // covered -- by a push, or by the OS
+	void (*resume)(void* ctx);	 // uncovered -- by a pop, or by the OS
+	void (*input)(void* ctx);	 // once per rendered frame, before tick
+	void (*tick)(void* ctx);	 // fixed PNX_TICK_MS steps; skipped while covered
+	void (*frame)(void* ctx);	 // once per rendered frame, even while covered
+	void (*draw)(void* ctx, PnxTarget* target);
 } PnxAppOps;
 
 #ifndef PNX_APP_MAX_DEPTH
@@ -63,13 +64,13 @@ typedef struct {
 
 // `ctx` is passed to every hook unchanged -- one game-global struct, the same way every
 // other pnx module that takes a callback works. Call once, before the first push.
-void pnx_app_init(void *ctx);
+void pnx_app_init(void* ctx);
 
 // Suspends the current top (if any), pushes `ops`, and calls its enter. Silently refused
 // past PNX_APP_MAX_DEPTH -- logged, not asserted, because a game that overflows this in a
 // release build should keep running the state it already has rather than crash on a mode
 // nobody will ever notice was skipped.
-void pnx_app_push(const PnxAppOps *ops);
+void pnx_app_push(const PnxAppOps* ops);
 
 // Exits the current top and pops it, then resumes whatever is now on top, if anything.
 // A no-op on an empty stack.
@@ -80,7 +81,7 @@ void pnx_app_pop(void);
 // plainly if the stack was empty. For a transition that replaces the current mode rather
 // than layering over it, e.g. returning from a menu straight to a different top-level
 // screen.
-void pnx_app_replace(const PnxAppOps *ops);
+void pnx_app_replace(const PnxAppOps* ops);
 
 uint8_t pnx_app_depth(void);
 
@@ -92,10 +93,10 @@ bool pnx_app_covered(void);
 // the top state's input, its tick loop, its per-frame hook, and its draw, in that order.
 // Also calls pnx_diag_frame() itself, once, on every call including the early returns on
 // an empty stack -- a game does not need to call it too.
-void pnx_app_frame(void *unused_ctx, uint32_t elapsed_ms, PnxTarget *target);
+void pnx_app_frame(void* unused_ctx, uint32_t elapsed_ms, PnxTarget* target);
 
 // Events left over after pnx_app_frame has consumed FOCUS_LOST/FOCUS_GAINED for itself. A
 // state's own input() calls this instead of pnx_platform_poll_event directly.
-bool pnx_app_poll_event(PnxEvent *out);
+bool pnx_app_poll_event(PnxEvent* out);
 
-#endif  // PNX_USE_APP
+#endif	// PNX_USE_APP

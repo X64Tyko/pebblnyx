@@ -32,7 +32,7 @@ uint32_t pnx_platform_now_ms(void);
 
 // ------------------------------------------------------------------------ output
 
-void pnx_platform_log(const char *message);
+void pnx_platform_log(const char* message);
 
 // ---------------------------------------------------------------- render target
 //
@@ -42,15 +42,16 @@ void pnx_platform_log(const char *message);
 
 typedef struct PnxTarget PnxTarget;
 
-typedef struct {
-  uint8_t *data;      // byte at column 0 of this row; index it with x directly
-  int16_t min_x;      // first valid column
-  int16_t max_x;      // last valid column, inclusive
+typedef struct
+{
+	uint8_t* data;	// byte at column 0 of this row; index it with x directly
+	int16_t min_x;	// first valid column
+	int16_t max_x;	// last valid column, inclusive
 } PnxRow;
 
-int16_t pnx_target_width(const PnxTarget *t);
-int16_t pnx_target_height(const PnxTarget *t);
-PnxRow pnx_target_row(PnxTarget *t, int16_t y);
+int16_t pnx_target_width(const PnxTarget* t);
+int16_t pnx_target_height(const PnxTarget* t);
+PnxRow pnx_target_row(PnxTarget* t, int16_t y);
 
 // ---------------------------------------------------------------------- resources
 //
@@ -61,12 +62,11 @@ PnxRow pnx_target_row(PnxTarget *t, int16_t y);
 // a time would cost ~6.7 ms/frame to save memory that is not scarce.
 
 // False if the id is unknown. Size is the whole resource.
-bool pnx_platform_resource_size(uint32_t resource_id, size_t *out_size);
+bool pnx_platform_resource_size(uint32_t resource_id, size_t* out_size);
 
 // Reads a byte range into dst, returning bytes actually read (0 on failure). One call
 // per asset blob is the intended usage.
-size_t pnx_platform_resource_read(uint32_t resource_id, size_t offset,
-                                  void *dst, size_t bytes);
+size_t pnx_platform_resource_read(uint32_t resource_id, size_t offset, void* dst, size_t bytes);
 
 // ------------------------------------------------------------------------- audio
 //
@@ -84,15 +84,16 @@ size_t pnx_platform_resource_read(uint32_t resource_id, size_t offset,
 //
 // 8-bit is the right choice with an 8-bit mixer -- a 16-bit stream would be the same
 // samples shifted left eight, carrying no extra information for twice the bandwidth.
-typedef enum {
-  PNX_AUDIO_16KHZ_16BIT = 0,   // 32 KB/s
-  PNX_AUDIO_16KHZ_8BIT,        // 16 KB/s
-  PNX_AUDIO_8KHZ_16BIT,        // 16 KB/s
-  PNX_AUDIO_8KHZ_8BIT,         //  8 KB/s; the default
+typedef enum
+{
+	PNX_AUDIO_16KHZ_16BIT = 0,	// 32 KB/s
+	PNX_AUDIO_16KHZ_8BIT,		// 16 KB/s
+	PNX_AUDIO_8KHZ_16BIT,		// 16 KB/s
+	PNX_AUDIO_8KHZ_8BIT,		//  8 KB/s; the default
 } PnxAudioFormat;
 
 bool pnx_platform_audio_open(PnxAudioFormat format, uint8_t volume);
-size_t pnx_platform_audio_write(const void *data, size_t bytes);
+size_t pnx_platform_audio_write(const void* data, size_t bytes);
 void pnx_platform_audio_close(void);
 bool pnx_platform_audio_is_open(void);
 
@@ -100,11 +101,12 @@ bool pnx_platform_audio_is_open(void);
 // bytes in aggregate" and "the buffer never emptied" are different claims, and only the
 // second one keeps playback continuous. A stream that drains transitions out of Playing
 // and restarts on the next write, which sounds like the note beginning again.
-typedef enum {
-  PNX_AUDIO_IDLE = 0,
-  PNX_AUDIO_PLAYING,
-  PNX_AUDIO_DRAINING,
-  PNX_AUDIO_UNKNOWN,
+typedef enum
+{
+	PNX_AUDIO_IDLE = 0,
+	PNX_AUDIO_PLAYING,
+	PNX_AUDIO_DRAINING,
+	PNX_AUDIO_UNKNOWN,
 } PnxAudioState;
 
 PnxAudioState pnx_platform_audio_state(void);
@@ -118,16 +120,16 @@ PnxAudioState pnx_platform_audio_state(void);
 // The render cap is a property of the display, not of the speaker. A timer feeding every
 // few milliseconds keeps the buffer full with a fraction of the lead, which fixes the
 // stutter and the latency together.
-typedef void (*PnxTickFn)(void *ctx);
-void pnx_platform_set_audio_timer(PnxTickFn fn, void *ctx, uint16_t interval_ms);
+typedef void (*PnxTickFn)(void* ctx);
+void pnx_platform_set_audio_timer(PnxTickFn fn, void* ctx, uint16_t interval_ms);
 
 // Bytes per second for a format, so the mixer can size a frame's worth of samples.
-static inline uint32_t pnx_audio_byte_rate(PnxAudioFormat f) {
-  const uint32_t rate = (f == PNX_AUDIO_16KHZ_16BIT || f == PNX_AUDIO_16KHZ_8BIT)
-                        ? 16000u : 8000u;
-  const uint32_t width = (f == PNX_AUDIO_16KHZ_16BIT || f == PNX_AUDIO_8KHZ_16BIT)
-                         ? 2u : 1u;
-  return rate * width;
+static inline uint32_t pnx_audio_byte_rate(PnxAudioFormat f)
+{
+	const uint32_t rate =
+		(f == PNX_AUDIO_16KHZ_16BIT || f == PNX_AUDIO_16KHZ_8BIT) ? 16000u : 8000u;
+	const uint32_t width = (f == PNX_AUDIO_16KHZ_16BIT || f == PNX_AUDIO_8KHZ_16BIT) ? 2u : 1u;
+	return rate * width;
 }
 
 // ------------------------------------------------------------------------ persist
@@ -150,13 +152,13 @@ static inline uint32_t pnx_audio_byte_rate(PnxAudioFormat f) {
 // Reads up to `bytes` into `dst`. `*out_bytes` is what was actually stored under the key
 // (which may be less than `bytes`, or the call fails and leaves it at 0). False if the key
 // has never been written.
-bool pnx_platform_persist_read(uint32_t key, void *dst, size_t bytes, size_t *out_bytes);
+bool pnx_platform_persist_read(uint32_t key, void* dst, size_t bytes, size_t* out_bytes);
 
 // Overwrites the key wholesale -- there is no partial or appending write. `bytes` must not
 // exceed PNX_PERSIST_KEY_BYTES; the platform truncates rather than failing, because a save
 // format that stays inside the limit should never learn from a runtime error that it did
 // not.
-bool pnx_platform_persist_write(uint32_t key, const void *data, size_t bytes);
+bool pnx_platform_persist_write(uint32_t key, const void* data, size_t bytes);
 
 bool pnx_platform_persist_delete(uint32_t key);
 bool pnx_platform_persist_exists(uint32_t key);
@@ -173,10 +175,11 @@ bool pnx_platform_persist_exists(uint32_t key);
 
 #if PNX_USE_SDK_TEXT
 
-typedef enum {
-  PNX_TEXT_SMALL = 0,
-  PNX_TEXT_MEDIUM,
-  PNX_TEXT_LARGE,
+typedef enum
+{
+	PNX_TEXT_SMALL = 0,
+	PNX_TEXT_MEDIUM,
+	PNX_TEXT_LARGE,
 } PnxTextSize;
 
 // Valid only inside a frame callback: on device it needs the graphics context that only
@@ -185,44 +188,47 @@ typedef enum {
 // The ESCAPE HATCH, not the text path -- see PNX_USE_SDK_TEXT in pnx_config.h. Games with
 // fonts should build with it off, which removes this declaration and turns any remaining
 // call into a compile error rather than a silently expensive draw.
-void pnx_platform_text_draw(const char *text, PnxTextSize size, uint8_t colour,
-                            int32_t x, int32_t y, int16_t w, int16_t h);
+void pnx_platform_text_draw(const char* text, PnxTextSize size, uint8_t colour, int32_t x,
+							int32_t y, int16_t w, int16_t h);
 
-#endif  // PNX_USE_SDK_TEXT
+#endif	// PNX_USE_SDK_TEXT
 
 // ------------------------------------------------------------------------- input
 
-typedef enum {
-  PNX_BUTTON_BACK = 0,
-  PNX_BUTTON_UP,
-  PNX_BUTTON_SELECT,
-  PNX_BUTTON_DOWN,
-  PNX_BUTTON_COUNT
+typedef enum
+{
+	PNX_BUTTON_BACK = 0,
+	PNX_BUTTON_UP,
+	PNX_BUTTON_SELECT,
+	PNX_BUTTON_DOWN,
+	PNX_BUTTON_COUNT
 } PnxButton;
 
-typedef enum {
-  PNX_EVENT_NONE = 0,
-  PNX_EVENT_BUTTON_DOWN,
-  PNX_EVENT_BUTTON_UP,
-  PNX_EVENT_TOUCH_DOWN,
-  PNX_EVENT_TOUCH_MOVE,
-  PNX_EVENT_TOUCH_UP,
-  PNX_EVENT_FOCUS_LOST,     // fires ~297ms before the app is fully covered
-  PNX_EVENT_FOCUS_GAINED,
+typedef enum
+{
+	PNX_EVENT_NONE = 0,
+	PNX_EVENT_BUTTON_DOWN,
+	PNX_EVENT_BUTTON_UP,
+	PNX_EVENT_TOUCH_DOWN,
+	PNX_EVENT_TOUCH_MOVE,
+	PNX_EVENT_TOUCH_UP,
+	PNX_EVENT_FOCUS_LOST,  // fires ~297ms before the app is fully covered
+	PNX_EVENT_FOCUS_GAINED,
 } PnxEventType;
 
-typedef struct {
-  PnxEventType type;
-  uint32_t time_ms;   // stamped at delivery: the earliest observable moment, and what
-                      // any timing judgement must use
-  int16_t x, y;       // touch only
-  uint8_t button;     // button only
+typedef struct
+{
+	PnxEventType type;
+	uint32_t time_ms;  // stamped at delivery: the earliest observable moment, and what
+					   // any timing judgement must use
+	int16_t x, y;	   // touch only
+	uint8_t button;	   // button only
 } PnxEvent;
 
 // Pops the next queued event. False when empty. Events are queued rather than
 // delivered as callbacks so the game reads input at a defined point in the frame
 // rather than re-entrantly.
-bool pnx_platform_poll_event(PnxEvent *out);
+bool pnx_platform_poll_event(PnxEvent* out);
 
 bool pnx_platform_has_touch(void);
 
@@ -249,7 +255,7 @@ bool pnx_platform_screen_locked(void);
 // Called once per rendered frame. `elapsed_ms` is measured, not assumed: the display
 // paces at ~37.33ms but jitters, and while covered the app is throttled to ~0.4fps, so
 // a frame can arrive carrying seconds. Clamp before feeding a fixed-timestep sim.
-typedef void (*PnxFrameFn)(void *ctx, uint32_t elapsed_ms, PnxTarget *target);
+typedef void (*PnxFrameFn)(void* ctx, uint32_t elapsed_ms, PnxTarget* target);
 
 // Called after the frame's pixels, once the framebuffer has been RELEASED.
 //
@@ -258,11 +264,11 @@ typedef void (*PnxFrameFn)(void *ctx, uint32_t elapsed_ms, PnxTarget *target);
 // from inside the capture window was measurably audible as periodic blips on a single
 // sustained tone, with the mixer's own output proven clean and no underrun reported.
 // Anything that talks to the system rather than to pixels goes here.
-typedef void (*PnxPostFrameFn)(void *ctx);
+typedef void (*PnxPostFrameFn)(void* ctx);
 void pnx_platform_set_post_frame_fn(PnxPostFrameFn fn);
 
 // Sets up the window and runs until the app exits. Returns on exit.
-void pnx_platform_run(PnxFrameFn frame, void *ctx);
+void pnx_platform_run(PnxFrameFn frame, void* ctx);
 
 // Requests exit at the next opportunity.
 void pnx_platform_quit(void);

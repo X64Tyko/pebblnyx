@@ -1,0 +1,69 @@
+# Formatting rules for pebblnyx's C code: Unreal Engine's coding standard -- tab
+# indent (width 4), opening brace on its own line, pointers bound to the type rather
+# than the variable. See ~/.config/JetBrains/CLion2025.3/scratches/code_formatting.h
+# for the worked example this was matched against. See tools/lint.sh for how this is
+# invoked; `clang-format -i` applies it, `tools/lint.sh` (check mode) only checks it.
+#
+# Superseded the framework's original hand-matched style (2-space, attached braces,
+# right-aligned pointers) wholesale -- not a per-file choice, so there is one style
+# for the whole tree rather than a UE-styled island next to the old convention.
+Language: Cpp
+BasedOnStyle: Google
+
+UseTab: Always
+TabWidth: 4
+IndentWidth: 4
+ColumnLimit: 96
+
+PointerAlignment: Left
+DerivePointerAlignment: false
+ReferenceAlignment: Left
+
+# Allman: every brace -- function, class, if/else, loop, switch -- opens on its own
+# line. Covers `} else` too (BeforeElse, implied by the Allman preset): the worked
+# example puts `else` on its own line and then opens ITS brace on the line after that.
+BreakBeforeBraces: Allman
+
+# None of the "let it stay on one line" allowances survive Allman -- the worked
+# example puts a brace-less `if`'s single-statement body on its own line rather than
+# folding it back onto the `if`, and nothing in it collapses a short function or block.
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+
+# Tight, no-blank-line-between macro/enum tables (e.g. FRAMES_PER_SUBPHASE next to
+# WARMUP_FRAMES) are common and worth keeping column-aligned. Plain `Consecutive` (not
+# the AcrossEmptyLinesAndComments variant) stops that alignment from reaching through a
+# blank line or comment into an unrelated block further down the file, which read as a
+# bug the one time it was tried -- an isolated #define picked up padding matching a
+# macro several paragraphs away.
+AlignConsecutiveMacros: Consecutive
+AlignConsecutiveDeclarations: false
+AlignConsecutiveAssignments: false
+AlignTrailingComments: true
+AlignAfterOpenBracket: Align
+AlignOperands: Align
+AlignEscapedNewlines: Left
+
+# `{ 5, 13, 20 }`, not `{5, 13, 20}` -- every hand-written initializer list in this tree
+# spaces the braces.
+Cpp11BracedListStyle: false
+
+# The local header first, blank line, then system headers (see any pnx_*.c) is a
+# deliberate group split, not accidental ordering -- do not merge the blocks or resort
+# across them.
+SortIncludes: Never
+IncludeBlocks: Preserve
+
+SpaceBeforeParens: ControlStatements
+SpacesInParentheses: false
+SpaceAfterCStyleCast: false
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+ReflowComments: false
+IndentCaseLabels: true
+BinPackArguments: true
+BinPackParameters: true
+ExperimentalAutoDetectBinPacking: false

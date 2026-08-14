@@ -49,10 +49,10 @@ typedef uint8_t PnxSaveSlot;
 
 // The header rides inside chunk 0 rather than spending a key of its own -- see the "16
 // keys" note above. 2B magic, 1B version, 1B chunk count, 2B payload length, 2B checksum.
-#define PNX_SAVE_HEADER_BYTES 8
+#define PNX_SAVE_HEADER_BYTES	8
 #define PNX_SAVE_CHUNK0_PAYLOAD (PNX_PERSIST_KEY_BYTES - PNX_SAVE_HEADER_BYTES)
 #define PNX_SAVE_MAX_PAYLOAD \
-  (PNX_SAVE_CHUNK0_PAYLOAD + (PNX_SAVE_CHUNKS_PER_SLOT - 1) * PNX_PERSIST_KEY_BYTES)
+	(PNX_SAVE_CHUNK0_PAYLOAD + (PNX_SAVE_CHUNKS_PER_SLOT - 1) * PNX_PERSIST_KEY_BYTES)
 
 // Starts a save: computes the chunking for `bytes` of `data` at `version`, and writes
 // chunk 0 (header plus the first slice of payload) immediately, so pnx_save_pending is
@@ -64,7 +64,7 @@ typedef uint8_t PnxSaveSlot;
 // Only one save may be in flight at a time; a second pnx_save_begin before the first
 // finishes abandons it (logged) and starts the new one. False if `bytes` exceeds
 // PNX_SAVE_MAX_PAYLOAD or the first chunk fails to write.
-bool pnx_save_begin(PnxSaveSlot slot, const void *data, size_t bytes, uint8_t version);
+bool pnx_save_begin(PnxSaveSlot slot, const void* data, size_t bytes, uint8_t version);
 
 // True while `slot` has chunks left from a pnx_save_begin that has not finished. A game
 // calls pnx_save_step() once per frame while this holds.
@@ -80,7 +80,7 @@ bool pnx_save_step(PnxSaveSlot slot);
 // One-shot and blocking: begins a save and writes every chunk before returning. For
 // save-on-blur; see the header comment for why blocking is correct there and wrong in the
 // frame loop. `data` only needs to stay valid for the duration of this call.
-bool pnx_save_write(PnxSaveSlot slot, const void *data, size_t bytes, uint8_t version);
+bool pnx_save_write(PnxSaveSlot slot, const void* data, size_t bytes, uint8_t version);
 
 // Writes every remaining chunk of a save already started with pnx_save_begin. Rarely
 // needed directly -- pnx_save_write covers the one-shot case -- but here for a game that
@@ -98,14 +98,14 @@ bool pnx_save_flush(PnxSaveSlot slot);
 // something it silently got wrong. A save with an OLDER or equal version is accepted as-is
 // -- this module does not migrate formats, a game that needs that reads the stored
 // version back out and does it itself.
-bool pnx_save_load(PnxSaveSlot slot, void *out, size_t max_bytes, uint8_t version,
-                   size_t *out_bytes);
+bool pnx_save_load(PnxSaveSlot slot, void* out, size_t max_bytes, uint8_t version,
+				   size_t* out_bytes);
 
 // The version stored in a slot, without decoding the payload. False (and *out_version
 // untouched) if the slot does not hold a valid save.
-bool pnx_save_peek_version(PnxSaveSlot slot, uint8_t *out_version);
+bool pnx_save_peek_version(PnxSaveSlot slot, uint8_t* out_version);
 
 bool pnx_save_exists(PnxSaveSlot slot);
 bool pnx_save_delete(PnxSaveSlot slot);
 
-#endif  // PNX_USE_SAVE
+#endif	// PNX_USE_SAVE
