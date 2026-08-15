@@ -18,6 +18,16 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// -------------------------------------------------------------------- 1-bit output
+//
+// Shared with pnx_text.c: a glyph blit and an indexed blit are different ways of deciding
+// WHICH pixels to touch, but on a 1-bit target they write the SAME way once that decision
+// is made, so both funnel through one rule rather than keeping two.
+#if PNX_DISPLAY_BW
+bool pnx_bw_is_ink(uint8_t colour);
+void pnx_bw_set_pixel(uint8_t* row_data, int32_t x, bool ink);
+#endif
+
 // ------------------------------------------------------------------------ camera
 //
 // World coordinates are pixels, not tiles. Tile-sized steps make scrolling jerk at the
@@ -49,6 +59,11 @@ void pnx_gfx_clear(PnxTarget* t, uint8_t colour);
 // Blits a 4bpp image at a screen position. `mirror` flips horizontally, which is how a
 // character faces left with no extra art -- the measured sprite sheets contain a walk
 // cycle in one direction only.
+//
+// `src` is 4bpp indexed on a colour build and a ~bw resource (pack_unit_2bpp,
+// tools/pnx_assets.py) on a 1-bit one -- one format per build (PNX_DISPLAY_BW), not a
+// per-call choice, so the signature does not carry it. `palette` is read on a colour
+// build and ignored on a 1-bit one, kept only so both builds share one call shape.
 void pnx_blit_4bpp(PnxTarget* t, const uint8_t* src, const PnxPalette* palette, int32_t x,
 				   int32_t y, int16_t w, int16_t h, uint8_t flip);
 

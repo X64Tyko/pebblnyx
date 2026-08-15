@@ -34,6 +34,51 @@ uint32_t pnx_platform_now_ms(void);
 
 void pnx_platform_log(const char* message);
 
+// ---------------------------------------------------------------- display size
+//
+// The SDK hands each per-platform compile its own PBL_DISPLAY_WIDTH/HEIGHT as compiler
+// defines (docs/PORTING.md, "The .pbw is seven apps in a zip") -- not something read at
+// runtime through a PnxTarget, which does not exist yet at boot. Game code that needs the
+// screen size before the first frame (camera setup, a static buffer) uses
+// PNX_DISPLAY_WIDTH/HEIGHT instead of a literal, and the same source compiles correctly
+// into all seven per-platform binaries with no #if of its own.
+//
+// The host build carries no PBL_* defines, so it gets PNX_HOST_WIDTH/HEIGHT here --
+// overridable (PNX_DEFINES=PNX_HOST_WIDTH=144 on a wscript build, or -D on a host test
+// binary) so host tests can exercise more than emery's screen size without a device.
+#ifdef PNX_PLATFORM_HOST
+#ifndef PNX_HOST_WIDTH
+#define PNX_HOST_WIDTH 200
+#endif
+#ifndef PNX_HOST_HEIGHT
+#define PNX_HOST_HEIGHT 228
+#endif
+#define PNX_DISPLAY_WIDTH  PNX_HOST_WIDTH
+#define PNX_DISPLAY_HEIGHT PNX_HOST_HEIGHT
+#else
+#define PNX_DISPLAY_WIDTH  PBL_DISPLAY_WIDTH
+#define PNX_DISPLAY_HEIGHT PBL_DISPLAY_HEIGHT
+#endif
+
+// PNX_DISPLAY_BW: 1 on flint/diorite/aplite (PBL_BW, another SDK-injected define -- see
+// docs/PORTING.md's per-platform table), 0 everywhere else. The blitter reads this to pick
+// between writing a GColor8 byte per pixel and setting a bit in a packed 1-bit row -- see
+// pnx_gfx.c's span writers. PNX_HOST_BW defaults to 0 so ordinary host tests keep drawing
+// colour; a test that wants to exercise the 1-bit path sets it explicitly, since the host
+// has no PBL_BW of its own to derive from.
+#ifdef PNX_PLATFORM_HOST
+#ifndef PNX_HOST_BW
+#define PNX_HOST_BW 0
+#endif
+#define PNX_DISPLAY_BW PNX_HOST_BW
+#else
+#ifdef PBL_BW
+#define PNX_DISPLAY_BW 1
+#else
+#define PNX_DISPLAY_BW 0
+#endif
+#endif
+
 // ---------------------------------------------------------------- render target
 //
 // Row-based rather than a flat pointer, because the device's framebuffer is accessed

@@ -2,16 +2,25 @@
 
 #if PNX_USE_TEXT
 
+#include "pnx_gfx.h" // pnx_bw_is_ink / pnx_bw_set_pixel, shared with the 1-bit blitter
+
 // ------------------------------------------------------------------------ blending
 //
-// Only depth 2 needs this. ARGB2222 gives each channel two bits, so a blend is a table
-// indexed by (ink, dst) -- 16 entries per ratio, 32 bytes for both, shared across R, G
-// and B. That is the whole cost of antialiased text, and it is why the alternative
-// (blending in a wider space and quantising back) was not worth considering.
+// Only depth 2 needs this, and only on a colour target: a 1-bit screen has no destination
+// shade to blend towards, so the whole table -- and the two colour-target span writers
+// below it -- compile out under PNX_DISPLAY_BW rather than sit there unused. Its 1-bit
+// replacement is bw_span_2bpp, further down, which rounds coverage to a bit instead.
+//
+// ARGB2222 gives each channel two bits, so a blend is a table indexed by (ink, dst) --
+// 16 entries per ratio, 32 bytes for both, shared across R, G and B. That is the whole
+// cost of antialiased text, and it is why the alternative (blending in a wider space and
+// quantising back) was not worth considering.
 //
 // Entry [s][d] is round((s * k + d * (3 - k)) / 3) for k = 1 and k = 2. The tables are
 // written out rather than computed so they cost no runtime and no bss; test_gfx.c checks
 // them against the formula, which is what keeps a typo here from becoming a colour bug.
+
+#if !PNX_DISPLAY_BW
 
 #define BLEND(s, d) ((uint8_t)(s) * 4u + (uint8_t)(d))
 
@@ -117,6 +126,60 @@ static void span_2bpp(uint8_t* row_base, int32_t x, const uint8_t* line, uint8_t
 	}
 }
 
+#endif // !PNX_DISPLAY_BW
+
+#if PNX_DISPLAY_BW
+
+// 1-bit target versions of the two span writers above. Same coverage tests, same clipping
+// contract -- only the destination write differs, a framebuffer bit (pnx_bw_set_pixel,
+// pnx_gfx.h) instead of a GColor8 byte, and `colour` is resolved to ink-or-paper ONCE by
+// the caller rather than per pixel, same as pnx_gfx_fill_rect's 1-bit path.
+
+static void bw_span_1bpp(uint8_t* row_base, int32_t x, const uint8_t* line, bool ink,
+						 int32_t w, int16_t min_x, int16_t max_x)
+{
+	int32_t i0 = 0, i1 = w;
+	if (x + i0 < min_x)
+		i0 = min_x - x;
+	if (x + i1 > max_x + 1)
+		i1 = max_x + 1 - x;
+	if (i1 <= i0)
+		return;
+
+	for (int32_t i = i0; i < i1; i++)
+	{
+		// MSB first: pixel i is bit 7 - (i & 7) of byte i >> 3, same as the colour-target
+		// span_1bpp above -- this is the glyph's own coverage bitmap, unrelated to the
+		// LSB-first framebuffer bit pnx_bw_set_pixel writes on the other end.
+		if (line[i >> 3] & (uint8_t)(0x80u >> (i & 7)))
+			pnx_bw_set_pixel(row_base, x + i, ink);
+	}
+}
+
+// A 1-bit target has no blend to land partial coverage in, so majority coverage (level 2
+// or 3 of 0..3) draws and anything less does not -- the nearest a fixed threshold gets to
+// what a human squinting at the antialiased result would call "on".
+static void bw_span_2bpp(uint8_t* row_base, int32_t x, const uint8_t* line, bool ink,
+						 int32_t w, int16_t min_x, int16_t max_x)
+{
+	int32_t i0 = 0, i1 = w;
+	if (x + i0 < min_x)
+		i0 = min_x - x;
+	if (x + i1 > max_x + 1)
+		i1 = max_x + 1 - x;
+	if (i1 <= i0)
+		return;
+
+	for (int32_t i = i0; i < i1; i++)
+	{
+		const uint8_t level = (uint8_t)((line[i >> 2] >> (6 - 2 * (i & 3))) & 3u);
+		if (level >= 2)
+			pnx_bw_set_pixel(row_base, x + i, ink);
+	}
+}
+
+#endif // PNX_DISPLAY_BW
+
 // ---------------------------------------------------------------------- direction
 //
 // Layout happens in the font's own frame -- advances along the baseline, line_height
@@ -208,6 +271,9 @@ static void draw_glyph(PnxTarget* t, const PnxFont* f, const PnxGlyph* g, int32_
 	glyph_origin(f->advance, g, pen, base, &x, &y);
 	const int16_t th	 = pnx_target_height(t);
 	const uint8_t stride = pnx_font_row_bytes(f, g->w);
+#if PNX_DISPLAY_BW
+	const bool ink = pnx_bw_is_ink(colour);
+#endif
 
 	int32_t j0 = 0, j1 = g->h;
 	if (y < 0)
@@ -224,11 +290,19 @@ static void draw_glyph(PnxTarget* t, const PnxFont* f, const PnxGlyph* g, int32_
 		const uint8_t* line = g->bits + (uint32_t)j * stride;
 		if (f->depth == 1)
 		{
+#if PNX_DISPLAY_BW
+			bw_span_1bpp(row.data, x, line, ink, g->w, row.min_x, row.max_x);
+#else
 			span_1bpp(row.data, x, line, colour, g->w, row.min_x, row.max_x);
+#endif
 		}
 		else
 		{
+#if PNX_DISPLAY_BW
+			bw_span_2bpp(row.data, x, line, ink, g->w, row.min_x, row.max_x);
+#else
 			span_2bpp(row.data, x, line, colour, g->w, row.min_x, row.max_x);
+#endif
 		}
 	}
 }

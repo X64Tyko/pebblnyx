@@ -22,7 +22,18 @@ SRC      = test_core.c test_assets.c test_gfx.c test_text.c test_audio.c test_in
            ../src/pnx/platform/pnx_platform_host.c
 OUT      = build/test_core
 
-.PHONY: all test test-c test-assets clean
+# A second binary, deliberately separate from $(OUT) rather than a mode of it: it needs
+# -DPNX_HOST_BW=1, which the main binary must NOT carry, since the point of the main one
+# is that ordinary colour behaviour stays the default. Only pnx_assets.c is linked in --
+# this checks the loader's format auto-detection against real pipeline output, not the
+# whole framework -- so it does not need every other module's .c file.
+BW_SRC   = test_pack2bit_bw.c \
+           ../src/pnx/core/pnx_arena.c ../src/pnx/core/pnx_fmt.c ../src/pnx/core/pnx_diag.c \
+           ../src/pnx/assets/pnx_assets.c \
+           ../src/pnx/platform/pnx_platform_host.c
+BW_OUT   = build/test_pack2bit_bw
+
+.PHONY: all test test-c test-assets test-bw clean
 all: test
 
 # Every header under src/, not a hand-listed subset. The list used to name only core and
@@ -41,7 +52,11 @@ $(OUT): $(SRC) $(HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(SRC) -o $(OUT)
 
-test: test-c test-assets
+$(BW_OUT): $(BW_SRC) $(HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -DPNX_HOST_BW=1 $(BW_SRC) -o $(BW_OUT)
+
+test: test-c test-assets test-bw
 
 test-c: $(OUT)
 	@./$(OUT)
@@ -50,6 +65,14 @@ test-c: $(OUT)
 # a claim that needs testing as much as any C function does.
 test-assets:
 	@python3 test_assets.py
+
+# Proves the fix for a real bug: a build shipped 2bpp ~bw resources while compiled to
+# expect 4bpp ones, and `pebble build` never caught it because it only proves the C
+# compiles. This loads the pipeline's actual overworld output -- both the ~bw file and
+# the untagged one -- through a real PNX_HOST_BW=1 build and checks the loader tells
+# them apart correctly. See test_pack2bit_bw.c.
+test-bw: $(BW_OUT)
+	@./$(BW_OUT)
 
 clean:
 	rm -rf build

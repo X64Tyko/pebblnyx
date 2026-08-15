@@ -3,9 +3,14 @@
 #
 # DESIGN.md's open questions name this directly: "Combined-load frame cost. Each subsystem
 # is measured; the sum, everything running at once against a single frame budget, never
-# has been." This app is that sum. Graphics is synthesised (a fill_rect grid, not a real
-# tilemap -- see main.c) rather than measured again; audio, text and save are the real
-# framework paths, run together on purpose.
+# has been." This app is that sum. Graphics used to be synthesised (a fill_rect grid
+# standing in for a tilemap, reasoning that tile-blit cost was already measured on its own
+# in MEASUREMENTS.md) -- that stood until M9's 1-bit blitter existed to stress: the fill
+# grid never touched a real atlas, sprite or tilemap draw, so it could not exercise the
+# ~bw span writer, the palette-free BW path, or a sprite's canonical bw_variant bake under
+# load the way a real map and a real character do. The fill_rect grid stays (it is still
+# real load on pnx_gfx_fill_rect/clear), but a real map and sprite now draw alongside it.
+# Audio, text and save are unchanged -- they were already the real framework paths.
 
 [project]
 name = "stressbench"
@@ -26,3 +31,68 @@ out = "font_bench.bin"
 # Just something continuously streaming -- a loudness or musicality is not the point here.
 [sample.tone]
 file = "art/laser.wav"
+
+# ---------------------------------------------------------------------------- graphics
+#
+# Placeholder art (tools/pnx_placeholder.py's own generators), not hand-authored: the
+# point of this app is load, not content, and a repo cannot ship a third-party sheet
+# anyway (see that tool's own header for why the other examples do this too).
+
+[[atlas]]
+name = "tiles"
+sheet = "art/tileset.png"
+tile = 16
+region = [0, 0, 6, 1]
+max_tiles = 6
+out = "tiles.bin"
+autopick = ["floor", "wall", "accent"]
+
+[[sprite]]
+name = "hero"
+sheet = "art/hero.png"
+frames = [[0, 0, 16, 24], [0, 24, 16, 24], [0, 48, 16, 24]]
+out = "hero.bin"
+# A recolour, so the combined load also bakes and draws a sprite variant -- the case
+# bw_variant exists for (tools/pnx_assets.py's own comment above it in pack_sprite).
+variants = ["art/hero_alt.png"]
+bw_variant = "hero_alt"
+
+[sprite.anim]
+stand = 0
+step_a = 1
+step_b = 2
+
+[legend."."]
+tile = "floor"
+flags = []
+
+[legend."#"]
+tile = "wall"
+flags = ["solid"]
+
+[legend."~"]
+tile = "accent"
+flags = []
+
+[[map]]
+name = "field"
+out = "map_field.bin"
+start = [1, 1]
+# Bigger than one screen (emery's 200x228 is ~12x14 tiles at 16px) so the camera driven
+# in main.c genuinely scrolls and streams rather than showing the whole map at once --
+# real tilemap load, not a static picture.
+rows = """
+##########################
+#.......~................#
+#...............~........#
+#........................#
+#........~...............#
+#................~.......#
+#.~......................#
+#.........~..............#
+#.................~......#
+#..~.....................#
+#..........~.............#
+#..................~.....#
+##########################
+"""

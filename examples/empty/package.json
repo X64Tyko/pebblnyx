@@ -10,7 +10,7 @@
     "uuid": "cf4b2994-1419-4678-b470-32b41b40ba5b",
     "sdkVersion": "3",
     "enableMultiJS": false,
-    "targetPlatforms": ["emery"],
+    "targetPlatforms": ["emery", "flint"],
     "watchapp": { "watchface": false },
     "messageKeys": [],
     "resources": { "media": [] }

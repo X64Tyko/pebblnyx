@@ -29,14 +29,28 @@
 #define PNX_USE_TEXT 1
 #endif
 
+// Defaults from the HARDWARE, not from a blanket "on": PBL_SPEAKER is a compiler define
+// the SDK hands exactly the platforms that have one (emery, flint -- see docs/PORTING.md,
+// "The .pbw is seven apps in a zip"), so a build for gabbro/basalt/chalk/diorite/aplite
+// sees no PBL_SPEAKER and this correctly defaults to off with no manifest or #if of the
+// game's own. The host build has no PBL_* defines at all and keeps the old default of on,
+// since a host test wants audio available unless a test specifically turns it off. Still
+// overridable either way: PNX_DEFINES=PNX_USE_AUDIO=0 forces it off on a speakered
+// platform, and =1 forces it on for someone who wants to find out what happens.
 #ifndef PNX_USE_AUDIO
+#if defined(PNX_PLATFORM_HOST) || defined(PBL_SPEAKER)
 #define PNX_USE_AUDIO 1
+#else
+#define PNX_USE_AUDIO 0
+#endif
 #endif
 
-// The sequencer is the music half of audio. A game with sound effects but no music
-// wants PNX_USE_AUDIO=1 and this 0.
+// The sequencer is the music half of audio. Follows PNX_USE_AUDIO's derived default so a
+// speakerless platform does not pay for a sequencer with nothing to feed, but stays a
+// separate knob: a game with sound effects but no music wants PNX_USE_AUDIO=1 and this 0,
+// which is still available by setting it explicitly.
 #ifndef PNX_USE_SEQUENCER
-#define PNX_USE_SEQUENCER 1
+#define PNX_USE_SEQUENCER PNX_USE_AUDIO
 #endif
 
 // Button edges, hold times, and the orientation-aware cluster mapping. A game that reads

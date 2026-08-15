@@ -13,7 +13,13 @@
     "sdkVersion": "3",
     "enableMultiJS": false,
     "targetPlatforms": [
-      "emery"
+      "emery",
+      "gabbro",
+      "flint",
+      "basalt",
+      "chalk",
+      "diorite",
+      "aplite"
     ],
     "watchapp": {
       "watchface": false

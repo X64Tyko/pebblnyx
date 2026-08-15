@@ -45,7 +45,14 @@ def build(ctx):
     # PNX_DEFINES lets a build override pnx_config.h without editing it, which is what
     # makes "does turning this module off actually reclaim the bytes?" a one-line check:
     #     PNX_DEFINES=PNX_USE_DIAGNOSTICS=0 pebble build
-    extra = [d for d in os.environ.get('PNX_DEFINES', '').split() if d]
+    #
+    # stressbench specifically defaults PNX_USE_DIAGNOSTICS off, unlike every other
+    # example here: its whole point is reporting the combined-load cost a SHIPPED game
+    # would see, and diagnostics -- the on-screen overlay and deferred log ring -- is an
+    # opt-out every real release makes before it ships (pnx_config.h's own comment).
+    # Measuring with it on would be reporting a dev-build number as a shipped one. Still
+    # overridable: PNX_DEFINES=PNX_USE_DIAGNOSTICS=1 turns it back on to see the delta.
+    extra = ['PNX_USE_DIAGNOSTICS=0'] + [d for d in os.environ.get('PNX_DEFINES', '').split() if d]
 
     binaries = []
     cached_env = ctx.env

@@ -47,10 +47,15 @@ def parse_header(blob):
             "a": blob[3], "b": blob[4], "c": blob[5], "d": blob[6]}
 
 
+PALETTE_ENTRIES = 16
+PALETTE_BYTES = PALETTE_ENTRIES
+
+
 def parse_palettes(blob):
     h = parse_header(blob)
     n = h["a"]
-    return [list(blob[HEADER + i * 16: HEADER + (i + 1) * 16]) for i in range(n)]
+    return [list(blob[HEADER + i * PALETTE_BYTES: HEADER + i * PALETTE_BYTES + PALETTE_ENTRIES])
+            for i in range(n)]
 
 
 def parse_atlas(blob):

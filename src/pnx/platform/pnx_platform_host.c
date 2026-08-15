@@ -26,21 +26,17 @@
 #include <string.h>
 #include <time.h>
 
-#ifndef PNX_HOST_WIDTH
-#define PNX_HOST_WIDTH 200
-#endif
-#ifndef PNX_HOST_HEIGHT
-#define PNX_HOST_HEIGHT 228
-#endif
-
+// PNX_HOST_WIDTH/HEIGHT and PNX_DISPLAY_WIDTH/HEIGHT come from pnx_platform.h, which is
+// where the override hook (PNX_HOST_WIDTH) and its default now live -- shared with any
+// game code that needs the screen size before a PnxTarget exists.
 struct PnxTarget
 {
 	uint8_t* pixels;
 	int16_t w, h;
 };
 
-static uint8_t s_pixels[PNX_HOST_WIDTH * PNX_HOST_HEIGHT];
-static PnxTarget s_target = { s_pixels, PNX_HOST_WIDTH, PNX_HOST_HEIGHT };
+static uint8_t s_pixels[PNX_DISPLAY_WIDTH * PNX_DISPLAY_HEIGHT];
+static PnxTarget s_target = { s_pixels, PNX_DISPLAY_WIDTH, PNX_DISPLAY_HEIGHT };
 
 static PnxEvent s_queued[32];
 static int s_queued_count;

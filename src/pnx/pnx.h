@@ -1,8 +1,18 @@
 // Pebblnyx umbrella header.
 //
-// A game includes this and nothing else from the framework. Module headers are pulled
-// in only when the corresponding PNX_USE_* is set, so a disabled module leaves no
+// A game includes this and nothing else from the framework. Most module headers are
+// pulled in only when the corresponding PNX_USE_* is set, so a disabled module leaves no
 // declarations behind and no way to accidentally call into code that was not compiled.
+//
+// audio/pnx_audio.h and audio/pnx_music.h are the deliberate exception, included
+// unconditionally: PNX_USE_AUDIO now defaults from PBL_SPEAKER (pnx_config.h), so it is
+// off by construction on gabbro/basalt/chalk/diorite/aplite, and a device-derived default
+// is exactly the case docs/PORTING.md's "opt-outs must stub, not delete" rule is for --
+// game code that calls pnx_music_play must keep compiling on a watch with no speaker, not
+// fail with an undeclared identifier the game never asked to guard against. Both headers
+// declare real APIs when the module is on and inline no-ops when it is off; only
+// audio/pnx_synth.h stays gated here, because PNX_USE_SYNTH is a measurement gate, not a
+// hardware capability, and has no stub branch of its own (see its own file for why).
 
 #pragma once
 
@@ -35,13 +45,8 @@
 #include "input/pnx_input.h"
 #endif
 
-#if PNX_USE_AUDIO
 #include "audio/pnx_audio.h"
-#endif
-
-#if PNX_USE_SEQUENCER
 #include "audio/pnx_music.h"
-#endif
 
 #if PNX_USE_SYNTH
 #include "audio/pnx_synth.h"

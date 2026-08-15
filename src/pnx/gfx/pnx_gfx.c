@@ -2,6 +2,106 @@
 
 #include <string.h>
 
+// -------------------------------------------------------------------- 1-bit output
+//
+// A 1-bit target (PNX_DISPLAY_BW, pnx_platform.h) never sees a GColor8 byte written into
+// it -- the framebuffer packs 8 pixels per byte, and a pixel is either ink (black, bit
+// clear) or paper (white, bit set), per the SDK's own "0 = black, 1 = white". Bit order is
+// LSB-first (bit x&7 of byte x>>3), read off the classic Pebble "Buffers and Bitmaps"
+// guide -- unconfirmed on real flint/diorite/aplite hardware, same caveat PORTING.md
+// already carries for the tag resolution these platforms answer to.
+//
+// Two write sites need this, not one: art (span_2bpp_packed, below) decides ink/paper/
+// dither per pixel from a ~bw resource's own bytes and skips transparent pixels; a solid
+// fill (pnx_gfx_fill_rect, pnx_gfx_clear) decides ink/paper ONCE for the whole colour and
+// writes every pixel, transparency never entering into it.
+//
+// A build is exclusively 2bpp here, not a choice between two art formats: the ordinary
+// 4bpp-indexed decoder this file also has (span_4bpp) never runs under PNX_DISPLAY_BW, and
+// there used to be a THIRD path here -- reading 4bpp-indexed source through a palette's
+// ink mask -- for the one case that could not be packed 2bpp: a sprite recoloured by
+// `variants`, where baking ink/paper into the bytes and sharing one bitmap across
+// recolours cannot both be true. That case is resolved differently now (a per-sprite
+// canonical variant, tools/pnx_assets.py), which is what let this collapse to one format
+// engine-wide instead of two coexisting at once.
+
+#if PNX_DISPLAY_BW
+
+// The same R*3 + G*6 + B*1 weighting tools/pnx_assets.py's pack_unit_2bpp uses to bake
+// ink/paper into art at build time, applied here to a raw colour argument instead --
+// fill_rect/clear and pnx_text.c never index a palette at all, so a call here is the only
+// place either of them decides ink vs paper. Exposed (pnx_gfx.h) for pnx_text.c.
+bool pnx_bw_is_ink(uint8_t c)
+{
+	const uint8_t r = (c >> 4) & 3, g = (c >> 2) & 3, b = c & 3;
+	return (3 * r + 6 * g + b) < 15; // half of 30
+}
+
+// Exposed for the same reason: pnx_text.c's own glyph span writers set the same bit this
+// module does, just from a coverage level instead of a palette index.
+void pnx_bw_set_pixel(uint8_t* data, int32_t x, bool ink)
+{
+	if (ink)
+		data[x >> 3] &= (uint8_t)~(1u << (x & 7));
+	else
+		data[x >> 3] |= (uint8_t)(1u << (x & 7));
+}
+
+// Fills [x0, x1] inclusive with a single ink/paper value -- pnx_gfx_fill_rect and
+// pnx_gfx_clear's 1-bit path. Byte-at-a-time once the run is byte-aligned, since a dialog
+// box or a full-screen clear is exactly the wide, flat fill that is worth it for.
+static void bw_fill_span(uint8_t* data, int32_t x0, int32_t x1, bool ink)
+{
+	if (x1 < x0)
+		return;
+	const uint8_t fill = ink ? 0x00 : 0xFF;
+
+	while (x0 <= x1 && (x0 & 7))
+	{
+		pnx_bw_set_pixel(data, x0, ink);
+		x0++;
+	}
+	while (x0 + 7 <= x1)
+	{
+		data[x0 >> 3] = fill;
+		x0 += 8;
+	}
+	while (x0 <= x1)
+	{
+		pnx_bw_set_pixel(data, x0, ink);
+		x0++;
+	}
+}
+
+// Reads a ~bw resource directly (docs/PORTING.md; pack_unit_2bpp, tools/pnx_assets.py):
+// 2 bits/pixel, MSB first, 0 transparent / 1 paper / 2 ink / 3 dither. No palette lookup
+// at all: ink/paper/dither was decided at build time, so the byte itself is the answer.
+//
+// `dither_y` is the absolute screen row: pack_unit_2bpp does not store the checkerboard
+// pattern, it is read back from screen position at blit time, the same reasoning that
+// keeps a metatile's palette lookup out of the packed bytes.
+static void span_2bpp_packed(uint8_t* row_base, int32_t x, const uint8_t* line, int32_t w,
+							 int16_t min_x, int16_t max_x, int32_t dither_y)
+{
+	int32_t i0 = 0, i1 = w;
+	if (x + i0 < min_x)
+		i0 = min_x - x;
+	if (x + i1 > max_x + 1)
+		i1 = max_x + 1 - x;
+
+	for (int32_t i = i0; i < i1; i++)
+	{
+		const uint8_t byte	= line[i >> 2];
+		const uint8_t state = (uint8_t)((byte >> (6 - 2 * (i & 3))) & 3u);
+		if (state == 0)
+			continue; // transparent
+		const bool ink = (state == 3) ? (((x + i + dither_y) & 1) == 0) : (state == 2);
+		pnx_bw_set_pixel(row_base, x + i, ink);
+	}
+}
+
+#endif // PNX_DISPLAY_BW
+
 // ------------------------------------------------------------------------ camera
 
 void pnx_camera_init(PnxCamera* c, int16_t view_w, int16_t view_h)
@@ -29,18 +129,28 @@ void pnx_camera_center(PnxCamera* c, int32_t wx, int32_t wy, int32_t world_w, in
 void pnx_gfx_clear(PnxTarget* t, uint8_t colour)
 {
 	const int16_t h = pnx_target_height(t);
+#if PNX_DISPLAY_BW
+	const bool ink = pnx_bw_is_ink(colour);
+#endif
 	for (int16_t y = 0; y < h; y++)
 	{
 		PnxRow row = pnx_target_row(t, y);
 		if (!row.data)
 			continue;
+#if PNX_DISPLAY_BW
+		bw_fill_span(row.data, row.min_x, row.max_x, ink);
+#else
 		memset(row.data + row.min_x, colour, (size_t)(row.max_x - row.min_x) + 1);
+#endif
 	}
 }
 
 void pnx_gfx_fill_rect(PnxTarget* t, int32_t x, int32_t y, int16_t w, int16_t h, uint8_t colour)
 {
 	const int16_t th = pnx_target_height(t);
+#if PNX_DISPLAY_BW
+	const bool ink = pnx_bw_is_ink(colour);
+#endif
 	for (int32_t j = 0; j < h; j++)
 	{
 		const int32_t py = y + j;
@@ -58,7 +168,11 @@ void pnx_gfx_fill_rect(PnxTarget* t, int32_t x, int32_t y, int16_t w, int16_t h,
 		if (x1 < x0)
 			continue;
 
+#if PNX_DISPLAY_BW
+		bw_fill_span(row.data, x0, x1, ink);
+#else
 		memset(row.data + x0, colour, (size_t)(x1 - x0) + 1);
+#endif
 	}
 }
 
@@ -66,6 +180,11 @@ void pnx_gfx_fill_rect(PnxTarget* t, int32_t x, int32_t y, int16_t w, int16_t h,
 //
 // Reads each source byte once and unpacks both nibbles. The odd-pixel prologue exists
 // because clipping can start the run on a low nibble, where the pair loop cannot begin.
+//
+// Colour-target only: a 1-bit build never calls this and never links it in, since a
+// build compiles the 4bpp path or the 1-bit one, never both (docs/PORTING.md, "the 1-bit
+// path and the 4bpp path never coexist").
+#if !PNX_DISPLAY_BW
 static void span_4bpp(uint8_t* row_base, int32_t x, const uint8_t* line, const uint8_t* pal,
 					  int32_t w, int16_t min_x, int16_t max_x)
 {
@@ -104,6 +223,7 @@ static void span_4bpp(uint8_t* row_base, int32_t x, const uint8_t* line, const u
 			dst[i] = pal[v];
 	}
 }
+#endif // !PNX_DISPLAY_BW
 
 void pnx_blit_metatile(PnxTarget* t, const PnxAtlas* atlas, uint8_t tile, int32_t x, int32_t y)
 {
@@ -113,14 +233,26 @@ void pnx_blit_metatile(PnxTarget* t, const PnxAtlas* atlas, uint8_t tile, int32_
 void pnx_blit_metatile_with(PnxTarget* t, const PnxAtlas* atlas, uint8_t tile,
 							const PnxPalette* palette, int32_t x, int32_t y)
 {
+	// `palette` is meaningless on a 1-bit build -- a ~bw quadrant's ink/paper/dither is
+	// baked into its bytes, nothing looks a colour up any more -- so the parameter is kept
+	// only for one call shape across both builds; on BW it is never read past this line.
+#if PNX_DISPLAY_BW
+	if (!atlas->metatiles)
+		return;
+#else
 	if (!palette || !atlas->metatiles)
 		return;
+#endif
 
-	const uint16_t* quads	 = &atlas->metatiles[(uint32_t)tile * 4];
-	const int32_t T			 = atlas->tile_px;
-	const int32_t half		 = T / 2;
+	const uint16_t* quads = &atlas->metatiles[(uint32_t)tile * 4];
+	const int32_t T		  = atlas->tile_px;
+	const int32_t half	  = T / 2;
+#if PNX_DISPLAY_BW
+	const int32_t sub_stride = half / 4; // bytes per quadrant row, ~bw packed 2bpp
+#else
 	const int32_t sub_stride = half / 2; // bytes per quadrant row at 4bpp
-	const int16_t th		 = pnx_target_height(t);
+#endif
+	const int16_t th = pnx_target_height(t);
 
 	int32_t j0 = 0, j1 = T;
 	if (y < 0)
@@ -142,8 +274,12 @@ void pnx_blit_metatile_with(PnxTarget* t, const PnxAtlas* atlas, uint8_t tile,
 		{
 			const uint8_t* line =
 				atlas->pixels + (uint32_t)pair[k] * atlas->sub_bytes + qj * sub_stride;
+#if PNX_DISPLAY_BW
+			span_2bpp_packed(row.data, x + k * half, line, half, row.min_x, row.max_x, y + j);
+#else
 			span_4bpp(row.data, x + k * half, line, palette->entries, half, row.min_x,
 					  row.max_x);
+#endif
 		}
 	}
 }
@@ -151,11 +287,25 @@ void pnx_blit_metatile_with(PnxTarget* t, const PnxAtlas* atlas, uint8_t tile,
 void pnx_blit_4bpp(PnxTarget* t, const uint8_t* src, const PnxPalette* palette, int32_t x,
 				   int32_t y, int16_t w, int16_t h, uint8_t flip)
 {
+	// `palette` is meaningless on a 1-bit build -- see pnx_blit_metatile_with's own
+	// comment -- so the precondition drops it there rather than refusing every call.
+#if PNX_DISPLAY_BW
+	if (!src)
+		return;
+#else
 	if (!src || !palette)
 		return;
+#endif
 
-	const int16_t th	 = pnx_target_height(t);
-	const int32_t stride = w / 2; // 4bpp: two pixels per byte
+	const int16_t th = pnx_target_height(t);
+	// 4 pixels/byte, ~bw packed 2bpp, on a 1-bit build; 2 pixels/byte, 4bpp indexed,
+	// otherwise -- unconditional, not a per-call question any more (see atlas_load_into's
+	// own comment in pnx_assets.c for why there is no longer a per-blob format to answer).
+#if PNX_DISPLAY_BW
+	const int32_t stride = w / 4;
+#else
+	const int32_t stride = w / 2;
+#endif
 
 	// Vertical clip up front, so the row loop never runs for invisible rows.
 	int32_t j0 = 0, j1 = h;
@@ -184,14 +334,20 @@ void pnx_blit_4bpp(PnxTarget* t, const uint8_t* src, const PnxPalette* palette, 
 		// per-pixel cost -- only this index changes.
 		const int32_t sj	= (flip & PNX_FLIP_Y) ? (h - 1 - j) : j;
 		const uint8_t* line = src + sj * stride;
-		const uint8_t* pal	= palette->entries;
-		uint8_t* dst		= row.data + x;
+#if !PNX_DISPLAY_BW
+		const uint8_t* pal = palette->entries;
+		uint8_t* dst	   = row.data + x;
+#endif
 
 		// Two paths rather than a `mirror ?` per pixel. The forward one is the shared
 		// span; mirrored cannot use it because destination and source walk opposite ways.
 		if (!(flip & PNX_FLIP_X))
 		{
+#if PNX_DISPLAY_BW
+			span_2bpp_packed(row.data, x, line, w, row.min_x, row.max_x, y + j);
+#else
 			span_4bpp(row.data, x, line, pal, w, row.min_x, row.max_x);
+#endif
 		}
 		else
 		{
@@ -199,11 +355,20 @@ void pnx_blit_4bpp(PnxTarget* t, const uint8_t* src, const PnxPalette* palette, 
 			// does not line up and each pixel is addressed individually.
 			for (int32_t i = i0; i < i1; i++)
 			{
-				const int32_t si	 = w - 1 - i;
+				const int32_t si = w - 1 - i;
+#if PNX_DISPLAY_BW
+				const uint8_t byte	= line[si >> 2];
+				const uint8_t state = (uint8_t)((byte >> (6 - 2 * (si & 3))) & 3u);
+				if (state == 0)
+					continue;
+				const bool ink = (state == 3) ? (((x + i + y + j) & 1) == 0) : (state == 2);
+				pnx_bw_set_pixel(row.data, x + i, ink);
+#else
 				const uint8_t packed = line[si >> 1];
 				const uint8_t v		 = (si & 1) ? (uint8_t)(packed & 0x0F) : (uint8_t)(packed >> 4);
 				if (v != PNX_PALETTE_TRANSPARENT)
 					dst[i] = pal[v];
+#endif
 			}
 		}
 	}

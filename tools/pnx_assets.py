@@ -60,7 +60,7 @@ MAP_FLIP_Y = 0x0800
 # Blob format versions. A mismatch between a stale .bin and a newer runtime is exactly
 # the kind of failure that presents as garbage pixels rather than an error, so every
 # blob is tagged and the runtime checks.
-BLOB_VERSION = 8
+BLOB_VERSION = 10  # v10: palettes are colour-only again -- no per-entry 1-bit ink mask
 MAGIC_ATLAS = b"PA"
 MAGIC_SPRITE = b"PS"
 MAGIC_MAP = b"PM"
@@ -344,6 +344,14 @@ def rotate_levels(rows, orient):
 PALETTE_ENTRIES = 16
 PALETTE_USABLE = PALETTE_ENTRIES - 1
 TRANSPARENT_INDEX = 0
+PALETTE_BYTES = PALETTE_ENTRIES
+
+# A 1-bit platform never indexes a palette at all -- its atlas/sprite pixels are ~bw
+# resources (pack_unit_2bpp, below) with ink/paper/dither already baked in per pixel, and
+# a solid fill or a glyph classifies its own raw colour directly (pnx_bw_is_ink,
+# pnx_gfx.c). An earlier version of this pipeline gave PnxPalette a per-entry ink mask for
+# a 4bpp-plus-mask fallback path; that path is gone (a build is exclusively one art format
+# now), and palettes.bin is colour-only again -- no ~bw variant, no second format.
 
 # Metatiling trades render time for space, so auto-selection needs a threshold rather
 # than "any saving at all". See docs/MEASUREMENTS.md for the device numbers behind it.
@@ -637,11 +645,17 @@ def build_metatiles(tiles, pal_of, T, quiet=False):
     return bank, defs
 
 
-def finish_atlas(atlas, tile_flags, shared, orient=ORIENT_BUTTONS_RIGHT):
+def finish_atlas(atlas, tile_flags, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False):
     """Palettise and pack. Called once map compilation has settled tile flags.
 
     `shared` is the running list of palettes from earlier atlases, so a later atlas
     reuses or extends what already exists instead of building its own.
+
+    `pack_2bit` additionally builds `atlas["blob_bw"]` (docs/PORTING.md's `~bw` escape
+    hatch): the SAME header, per-tile palette assignment, flags and (if metatiled) index
+    table as `atlas["blob"]`, with only the pixel payload re-encoded at 2bpp instead of
+    4bpp -- see pack_unit_2bpp. Sharing that structure is what lets the ~bw variant be a
+    pure pixel-format swap rather than a second copy of the whole packing decision.
     """
     tiles, T = atlas["tiles"], atlas["tile_px"]
     sets = atlas_colour_sets(atlas)
@@ -722,11 +736,24 @@ def finish_atlas(atlas, tile_flags, shared, orient=ORIENT_BUTTONS_RIGHT):
                 + pad4(bytes(assign)) + pad4(flags) + bytes(table) + pixels)
         atlas["blob"] = blob_header(MAGIC_ATLAS, T, len(tiles), 1, orient=orient) + body
         atlas["subtiles"] = len(bank)
+
+        if pack_2bit:
+            # Same table, same assign, same flags -- pack_unit_2bpp needs no palette, so
+            # the quadrant's raw pixels are all that changes.
+            pixels_bw = b"".join(pack_unit_2bpp(bank[i]) for i in range(len(bank)))
+            body_bw = (len(bank).to_bytes(2, "little") + b"\0\0"
+                      + pad4(bytes(assign)) + pad4(flags) + bytes(table) + pixels_bw)
+            atlas["blob_bw"] = blob_header(MAGIC_ATLAS, T, len(tiles), 1, orient=orient) + body_bw
     else:
         pixels = b"".join(pack_unit_4bpp(t, palettes[a]) for t, a in zip(tiles, assign))
         body = pad4(bytes(assign)) + pad4(flags) + pixels
         atlas["blob"] = blob_header(MAGIC_ATLAS, T, len(tiles), 0, orient=orient) + body
         atlas["subtiles"] = 0
+
+        if pack_2bit:
+            pixels_bw = b"".join(pack_unit_2bpp(t) for t in tiles)
+            body_bw = pad4(bytes(assign)) + pad4(flags) + pixels_bw
+            atlas["blob_bw"] = blob_header(MAGIC_ATLAS, T, len(tiles), 0, orient=orient) + body_bw
     atlas["palettes"] = palettes
     atlas["assign"] = assign
 
@@ -898,15 +925,30 @@ def settle_palettes(atlases, sprites, shared):
         shared[:] = merge_palettes(sprite_colour_sets(sp), shared)[0]
 
 
+def gcolor_luminance(c):
+    """0..30: the same R*3 + G*6 + B*1 weighting tile_stats already uses for `mean`, reused
+    here rather than invented fresh so a project has one notion of "dark" throughout."""
+    r, g, b = gcolor_rgb(c)
+    return 3 * r + 6 * g + b
+
+
+# Half of gcolor_luminance's 0..30 range -- the default split between ink and paper, used
+# by every build unless a project overrides it. Named so the editor's live 1-bit preview
+# (tools/pnx_editor.py's slider) and this default cannot silently drift apart.
+DEFAULT_INK_THRESHOLD = 15
+
+
 def palette_bytes(palette):
-    """16 entries, index 0 transparent. Sets are sorted for deterministic builds; an Ordered
-    palette keeps the order it was given, because its positions are already referenced by
-    packed pixel data."""
+    """16 entries, index 0 transparent. Sets are sorted for deterministic builds; an
+    Ordered palette keeps the order it was given, because its positions are already
+    referenced by packed pixel data. Colour only -- a 1-bit platform never loads
+    palettes.bin at all (PnxPalette's own comment, pnx_assets.h)."""
     entries = [TRANSPARENT_INDEX] + (list(palette) if isinstance(palette, Ordered)
                                      else sorted(palette))
     if len(entries) > PALETTE_ENTRIES:
         raise BuildError(f"palette has {len(entries)} entries, max {PALETTE_ENTRIES}")
-    return bytes(entries + [0] * (PALETTE_ENTRIES - len(entries)))
+    entries = entries + [0] * (PALETTE_ENTRIES - len(entries))
+    return bytes(entries)
 
 
 def pack_unit_4bpp(pixels, palette):
@@ -917,6 +959,47 @@ def pack_unit_4bpp(pixels, palette):
     out = bytearray()
     for i in range(0, len(pixels), 2):
         out.append((lut[pixels[i]] << 4) | lut[pixels[i + 1]])
+    return bytes(out)
+
+
+# `~bw` escape hatch (docs/PORTING.md): 2 bits per pixel, MSB first, 4 pixels per byte --
+# half the bytes of 4bpp indexed storage, against the quarter a bare ink/paper bit would
+# cost and could not round-trip transparency through. States, keeping 0's meaning from the
+# 4bpp path -- "the blitter never touches this pixel":
+#
+#   00 transparent   -- skipped, exactly like index 0 in the 4bpp path
+#   01 paper         -- opaque, light  (luminance >= the ink threshold)
+#   10 ink           -- opaque, dark   (luminance <  the ink threshold)
+#   11 dither        -- a partially-transparent GColor8 alpha (the two middle levels M3's
+#                        blend LUT exists for on colour, with no colour-only equivalent on
+#                        a 1-bit screen) becomes a checkerboard of ink and paper instead of
+#                        being rounded to one or the other -- the nearest thing to "grey"
+#                        available at one bit per pixel. Decoded from (x + y) & 1 at blit
+#                        time, not stored: the pattern is a function of screen position, so
+#                        storing it per pixel would only be spending bytes to hold a
+#                        constant.
+#
+# Not palette-indexed at all, unlike pack_unit_4bpp: ink/paper/dither is a property of the
+# RAW GColor8 value's own alpha and luminance, not of which merged palette a tile landed in
+# -- which is also why a ~bw variant can share the 4bpp variant's metatile index table and
+# per-tile palette assignment untouched; only the pixel payload differs between the two.
+def pack_unit_2bpp(pixels, threshold=DEFAULT_INK_THRESHOLD):
+    def state(c):
+        if c == TRANSPARENT:
+            return 0
+        alpha = (c >> 6) & 3
+        if alpha != 3:              # 0b01 or 0b10: a partially-transparent GColor8
+            return 3
+        return 2 if gcolor_luminance(c) < threshold else 1
+
+    out = bytearray()
+    for i in range(0, len(pixels), 4):
+        byte = 0
+        for k in range(4):
+            j = i + k
+            s = state(pixels[j]) if j < len(pixels) else 0
+            byte |= s << (6 - 2 * k)
+        out.append(byte)
     return bytes(out)
 
 
@@ -1121,12 +1204,25 @@ def pack_sprite(root, spec, orient=ORIENT_BUTTONS_RIGHT):
                     f"Drop it from `variants` and declare it as its own sprite instead.")
         variants.append({"name": vname, "path": vpath, "frames": vframes})
 
+    # Which source is canonical for this sprite's ~bw bake (finish_sprite_with_variants):
+    # a colour recolour has nothing to distinguish on a screen with no colour, so BW does
+    # not attempt to preserve "variant selection" at all -- there is exactly one 1-bit
+    # rendering of a sprite, chosen here rather than guessed. Unset means the base.
+    bw_variant = spec.get("bw_variant")
+    if bw_variant is not None and bw_variant not in {v["name"] for v in variants}:
+        raise BuildError(
+            f"sprite {name!r}: bw_variant = {bw_variant!r} is not one of its variants "
+            f"({', '.join(v['name'] for v in variants) or '(none declared)'})")
+
     return {"name": name, "w": sw, "h": sh, "frames": fixed, "variants": variants,
+            "bw_variant": bw_variant,
             "out": spec["out"], "anim": spec.get("anim", {}), "repaired": repaired}
 
 
-def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT):
-    """One bitmap, one palette per variant.
+def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False):
+    """One bitmap, one palette per variant, on colour. On a 1-bit build (`pack_2bit`) this
+    still emits exactly one ~bw blob -- see the comment above `sprite["blob_bw"]` below for
+    why colour's variant-sharing trick has no BW equivalent and what replaces it.
 
     Every frame packs against a single ORDERED palette rather than per-frame merged ones. It
     has to be one palette: the pixel data is shared across variants, so the index of a colour
@@ -1173,18 +1269,34 @@ def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT):
     sprite["assign"] = assign
     sprite["variant_slots"] = variant_slots
 
+    if pack_2bit:
+        # A 1-bit screen has nothing to distinguish a recolour by, so BW does not try to
+        # preserve variant selection the way colour does -- there is exactly one 1-bit
+        # rendering of this sprite, baked from whichever source `bw_variant` names (the
+        # base, if unset). `assign` is carried along unchanged only to keep the blob's
+        # shape identical to the plain (no-variants) ~bw sprite -- pnx_sprite_load expects
+        # an assign array of this length regardless of format, even though nothing reads
+        # its values on a 1-bit build (PnxSprite's own comment, pnx_assets.h).
+        bw_frames = frames
+        if sprite.get("bw_variant"):
+            bw_frames = next(v["frames"] for v in sprite["variants"]
+                             if v["name"] == sprite["bw_variant"])
+        pixels_bw = b"".join(pack_unit_2bpp(f) for f in bw_frames)
+        sprite["blob_bw"] = (blob_header(MAGIC_SPRITE, sprite["w"], sprite["h"], len(frames),
+                                        orient=orient) + pad4(bytes(assign)) + pixels_bw)
+
     frame_bytes = sprite["w"] * sprite["h"] // 2 * len(frames)
     saved = frame_bytes * len(sprite["variants"])
     print(f"    {name}: 1 shared palette, {len(sprite['variants'])} variant(s) collapsed "
-          f"({saved:,} B saved, {len(variant_slots) * PALETTE_ENTRIES} B of palettes)")
+          f"({saved:,} B saved, {len(variant_slots) * PALETTE_BYTES} B of palettes)")
     return sprite
 
 
-def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT):
+def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False):
     frames = sprite["frames"]
 
     if sprite.get("variants"):
-        return finish_sprite_with_variants(sprite, shared, orient)
+        return finish_sprite_with_variants(sprite, shared, orient, pack_2bit)
 
     sets = sprite_colour_sets(sprite)
 
@@ -1203,6 +1315,12 @@ def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT):
                                  orient=orient) + body
     sprite["palettes"] = palettes
     sprite["assign"] = assign
+
+    if pack_2bit:
+        pixels_bw = b"".join(pack_unit_2bpp(f) for f in frames)
+        sprite["blob_bw"] = (blob_header(MAGIC_SPRITE, sprite["w"], sprite["h"], len(frames),
+                                        orient=orient) + pad4(bytes(assign)) + pixels_bw)
+
     print(f"    {sprite['name']}: uses {len(set(assign))} palette(s), "
           f"{len(palettes) - before} new to the project")
     return sprite
@@ -2936,6 +3054,14 @@ def write_blob(path, blob):
     return len(blob)
 
 
+def bw_variant_path(out):
+    """`tiles.bin` -> `tiles~bw.bin`. The SDK resolves tags by globbing the declared
+    file's own directory for `<stem>*<ext>` (docs/PORTING.md), so this is the entire
+    naming contract -- same directory, same base name, `~bw` before the extension."""
+    stem, ext = os.path.splitext(out)
+    return f"{stem}~bw{ext}"
+
+
 def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0,
                     scenes=None, songs=None, samples=None, fonts=None,
                     blob_files=None, orient=ORIENT_BUTTONS_RIGHT, flag_names=None):
@@ -3401,15 +3527,28 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
     print("palettes:")
     # Two phases, and the order is a correctness requirement rather than a habit -- see
     # settle_palettes. Every palette is settled first; only then is a pixel packed.
+    # `~bw` escape hatch (docs/PORTING.md): ON by default for every project, not opt-in --
+    # a colour platform never receives one of these files regardless (the SDK's own `~`
+    # tag resolution only matches a bw platform against `~bw`), so there is no cost to a
+    # project that never ships one, and PNX_PACK_2BIT (pnx_config.h) defaults from the
+    # same PBL_BW signal that decides whether the SDK ships them -- the two agree
+    # automatically rather than needing PNX_DEFINES set by hand. `pack_2bit = false`
+    # opts a project out entirely, which only has a reason to exist if a project ships
+    # its own PNX_PACK_2BIT=0 override and wants the pipeline to match it.
+    pack_2bit = bool(project.get("pack_2bit", True))
+    if pack_2bit:
+        print("  pack_2bit: emitting ~bw resource variants (default on -- see "
+              "docs/PORTING.md; set pack_2bit = false in [project] to opt out)")
+
     shared = []
     settle_palettes(atlases, sprites, shared)
     for a in atlases:
-        finish_atlas(a, flags_by_atlas[a["name"]], shared, orient)
+        finish_atlas(a, flags_by_atlas[a["name"]], shared, orient, pack_2bit)
     # The first point at which both halves are known: which atlases chose metatiles, and
     # which legend characters were painted flipped.
     check_flip_metatiles(maps, atlases)
     for sp in sprites:
-        finish_sprite(sp, shared, orient)
+        finish_sprite(sp, shared, orient, pack_2bit)
 
     by_name = {a["name"]: a for a in atlases}
     for m in maps:
@@ -3436,9 +3575,11 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
         finish_map(m, flags_by_atlas, assets, sizes, table,
                    m["worldtile"], m["atlas_slots"], m["resident"],
                    m["bank_bytes"], first_bank, orient)
+    # Colour only, no ~bw variant: a 1-bit platform never loads this resource at all (see
+    # PnxPalette's own comment, pnx_assets.h) -- there is nothing for a ~bw tag to shrink.
     palette_blob = (blob_header(MAGIC_PALETTES, len(shared), orient=orient)
                     + b"".join(palette_bytes(p) for p in shared))
-    print(f"  {len(shared)} palettes, {len(shared) * PALETTE_ENTRIES} B shared across "
+    print(f"  {len(shared)} palettes, {len(shared) * PALETTE_BYTES} B shared across "
           f"every asset -- set PNX_PALETTE_SLOTS >= {len(shared)}")
 
     dialog = pack_dialog(dialog_specs, orient) if dialog_specs else None
@@ -3464,10 +3605,19 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
         entries.append(("atlas", a["name"],
                         write_blob(os.path.join(out_dir, a["out"]), a["blob"])))
         blobs.append((a["name"], a["out"]))
+        if a.get("blob_bw"):
+            # `~` tag beside the untagged file, same directory, same base name -- that is
+            # the whole mechanism (docs/PORTING.md: "the build globs for tiles*.bin"). Not
+            # added to entries/blobs: those drive ONE platform's budget total and
+            # package.json's media list, and a bw platform never ships both files at once,
+            # so counting this one too would price a byte twice for a total no build pays.
+            write_blob(os.path.join(out_dir, bw_variant_path(a["out"])), a["blob_bw"])
     for sp in sprites:
         entries.append(("sprite", sp["name"],
                         write_blob(os.path.join(out_dir, sp["out"]), sp["blob"])))
         blobs.append((sp["name"], sp["out"]))
+        if sp.get("blob_bw"):
+            write_blob(os.path.join(out_dir, bw_variant_path(sp["out"])), sp["blob_bw"])
     for m in maps:
         entries.append(("map", m["name"],
                         write_blob(os.path.join(out_dir, m["out"]), m["blob"])))

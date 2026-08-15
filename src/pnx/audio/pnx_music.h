@@ -13,8 +13,6 @@
 
 #include "../pnx_config.h"
 
-#if PNX_USE_SEQUENCER
-
 #include "pnx_audio.h"
 #include "../assets/pnx_assets.h"
 
@@ -35,6 +33,9 @@
 // mismatch -- so both sides name this constant.
 #define PNX_SYNTH_RECORD_BYTES 48
 
+// Declared unconditionally, PNX_USE_SEQUENCER or not: a build with the sequencer disabled
+// (no speaker -- see PNX_USE_AUDIO's default in pnx_config.h) still has to compile game
+// code that holds a PnxSong. See "opt-outs must stub, not delete" in docs/PORTING.md.
 typedef struct
 {
 	const uint8_t* rows;  // pattern data, 2 bytes per channel per row
@@ -54,6 +55,8 @@ typedef struct
 	uint8_t instrument_count;
 	uint16_t tempo_bpm;
 } PnxSong;
+
+#if PNX_USE_SEQUENCER
 
 bool pnx_music_load(PnxSong* out, uint16_t asset_id);
 
@@ -80,5 +83,57 @@ void pnx_music_set_volume(uint8_t volume);
 // names itself.
 uint8_t pnx_music_pattern(void);
 uint8_t pnx_music_row(void);
+
+#else // !PNX_USE_SEQUENCER
+//
+// Inline no-ops, matching pnx_audio.h's rule: a game that calls pnx_music_play still
+// compiles and links on a platform where this defaulted off, it simply plays nothing.
+
+static inline bool pnx_music_load(PnxSong* out, uint16_t asset_id)
+{
+	(void)out;
+	(void)asset_id;
+	return false;
+}
+
+#if PNX_USE_SYNTH
+static inline void pnx_music_decode_instrument(const PnxSong* s, uint8_t index,
+											   PnxInstrument* out)
+{
+	(void)s;
+	(void)index;
+	if (out)
+		*out = (PnxInstrument){ 0 };
+}
+#endif
+
+static inline void pnx_music_play(const PnxSong* song, bool loop)
+{
+	(void)song;
+	(void)loop;
+}
+static inline void pnx_music_stop(void)
+{
+}
+static inline bool pnx_music_playing(void)
+{
+	return false;
+}
+static inline void pnx_music_update(uint32_t now_ms)
+{
+	(void)now_ms;
+}
+static inline void pnx_music_set_volume(uint8_t volume)
+{
+	(void)volume;
+}
+static inline uint8_t pnx_music_pattern(void)
+{
+	return 0;
+}
+static inline uint8_t pnx_music_row(void)
+{
+	return 0;
+}
 
 #endif // PNX_USE_SEQUENCER

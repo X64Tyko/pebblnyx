@@ -2328,9 +2328,14 @@ class Project:
         if at is not None:
             lines[at] = line
         else:
-            at = end
-            while at > start and lines[at - 1].strip() == "":
-                at -= 1
+            # One past the LAST actual `key = value` line, not "walk back from the block's
+            # end over blank lines" -- the block's end can include trailing comments that
+            # belong to whatever table follows [project], since detection only looks for
+            # the next `[`. A key that has never appeared before must not land among them.
+            at = start + 1
+            for j in range(start + 1, end):
+                if re.match(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*=", lines[j]):
+                    at = j + 1
             lines[at:at] = [line]
         with open(self.path, "w") as f:
             f.write("\n".join(lines))
@@ -2428,13 +2433,19 @@ class Project:
         return {"cols": rw, "rows": rh, "cells": cells, "capped": capped,
                 "limit": LIMIT, "sheet_tiles": [W // tile, H // tile]}
 
-    def analyse(self, rel, tile, region, max_tiles, colorkey, exclude=()):
+    def analyse(self, rel, tile, region, max_tiles, colorkey, exclude=(),
+               ink_threshold=pa.DEFAULT_INK_THRESHOLD):
         """Price a candidate carve before it is committed.
 
         This is the number that decides a project's content budget, and it is invisible
         until something is built -- so the editor computes it live. Region selection is
         where the budget is won: five complete tilesets are 111% of the appstore limit,
         while 128 tiles from each is 32%.
+
+        `ink_threshold` drives the 1-bit preview strip: docs/PORTING.md's "the pipeline
+        proposes a split by luminance [and] the editor lets you flip individual entries
+        against a live 1-bit preview" -- the slider half of that sentence. Per-entry
+        flipping is not built; every colour in the carve answers to the one threshold.
         """
         from PIL import Image
         path = os.path.join(self.root, rel)
@@ -2472,7 +2483,7 @@ class Project:
         colours = set().union(*sets) if sets else set()
 
         tile_bytes = tile * tile // 2
-        est = len(unique) * tile_bytes + len(pals) * 16 + pa.HEADER_BYTES
+        est = len(unique) * tile_bytes + len(pals) * pa.PALETTE_BYTES + pa.HEADER_BYTES
 
         # Render the kept tiles so the carve is visually checkable, not just numeric.
         strip = None
@@ -2491,6 +2502,32 @@ class Project:
                 grid.paste(cell, ((i % cols) * tile, (i // cols) * tile))
             grid = grid.resize((grid.width * 2, grid.height * 2), Image.NEAREST)
             strip = pv.data_uri(grid)
+
+        # Same tiles, rendered as a 1-bit platform would actually draw them: ink (black)
+        # where a pixel's luminance falls under the threshold, paper (white) otherwise,
+        # transparent left alone. Classifying per PIXEL rather than routing through `pals`
+        # is deliberate -- ink/paper is a property of the colour itself
+        # (tools/pnx_assets.py's palette_ink_mask), not of which merged palette a tile
+        # happened to land in, so this does not need pals to agree with what the real
+        # build would assign.
+        bw_strip = None
+        if unique:
+            cols = min(16, len(unique))
+            rows = (len(unique) + cols - 1) // cols
+            grid = Image.new("RGBA", (cols * tile, rows * tile), (0, 0, 0, 0))
+            for i, t in enumerate(unique):
+                cell = Image.new("RGBA", (tile, tile), (0, 0, 0, 0))
+                cp = cell.load()
+                for j in range(tile):
+                    for k in range(tile):
+                        c = t[j * tile + k]
+                        if c == pa.TRANSPARENT:  # the GColor8 byte, not a palette index
+                            continue
+                        ink = pa.gcolor_luminance(c) < ink_threshold
+                        cp[k, j] = (0, 0, 0, 255) if ink else (255, 255, 255, 255)
+                grid.paste(cell, ((i % cols) * tile, (i // cols) * tile))
+            grid = grid.resize((grid.width * 2, grid.height * 2), Image.NEAREST)
+            bw_strip = pv.data_uri(grid)
 
         # What this carve would do to the two ceilings it spends against, priced against
         # what the project already has. "6,248 bytes" is a number; "19,239 -> 25,487 of
@@ -2520,6 +2557,7 @@ class Project:
             "heap_before": heap,
             "heap_after": (heap - est) if heap is not None else None,
             "strip": strip,
+            "bw_strip": bw_strip,
             "thumb": pv.data_uri(im.resize((min(W, 480), int(H * min(W, 480) / W)),
                                            Image.NEAREST)),
         }
@@ -3293,9 +3331,13 @@ class Project:
                 del lines[at]
                 end -= 1
             elif value:
-                at = end
-                while at > start and lines[at - 1].strip() == "":
-                    at -= 1
+                # One past the LAST actual key line -- see save_project's own comment for
+                # why "walk back over blanks from the block's end" can land a new key
+                # among comments belonging to whatever table follows this atlas.
+                at = start
+                for j in range(start, end):
+                    if re.match(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*=", lines[j]):
+                        at = j + 1
                 lines[at:at] = [value]
                 end += 1
         with open(self.path, "w") as f:
@@ -3865,10 +3907,15 @@ rows = """
                 end -= (stop - at) - 1
             else:
                 # Before the first subtable, or the key would bind to a pattern.
-                at = next((j for j in range(start + 1, end)
-                           if lines[j].lstrip().startswith("[")), end)
-                while at > start and lines[at - 1].strip() == "":
-                    at -= 1
+                limit = next((j for j in range(start + 1, end)
+                             if lines[j].lstrip().startswith("[")), end)
+                # One past the last actual key line before that subtable -- not "walk
+                # back over blanks from the subtable", which can land a new key between
+                # a subtable's own explanatory comment and the subtable it describes.
+                at = start + 1
+                for j in range(start + 1, limit):
+                    if re.match(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*=", lines[j]):
+                        at = j + 1
                 lines[at:at] = [value]
                 end += 1
         with open(self.path, "w") as f:
@@ -4118,6 +4165,7 @@ rows = """
                      "frames": frames,
                      "anim": dict(spec.get("anim", {})),
                      "variants": list(spec.get("variants", [])),
+                     "bw_variant": spec.get("bw_variant"),
                      "colorkey": list(spec["colorkey"]) if spec.get("colorkey") else None,
                      "w": frames[0][2] if frames else None,
                      "h": frames[0][3] if frames else None,
@@ -4129,13 +4177,16 @@ rows = """
         return out
 
     def validate_sprite(self, name, sheet, frames, anim=None, variants=(),
-                        colorkey=None):
+                        colorkey=None, bw_variant=None):
         """Run a candidate sprite through the REAL pack_sprite and report what it says.
 
         Same bargain as validate_atlas: not a second implementation of the frame checks,
         the actual one -- so a frame running off the sheet, a set of frames that disagree
         on size, an odd pixel count that cannot pack at 4bpp, or an anim naming a frame
         that does not exist all fail here rather than after the block is in the manifest.
+        `bw_variant` gets the same treatment: pack_sprite is what actually knows the
+        variant names (derived from each path's basename), so this reports the real
+        rejection rather than reimplementing the check.
         """
         spec = {"name": name or "candidate", "sheet": sheet,
                 "frames": [list(f) for f in frames],
@@ -4146,6 +4197,8 @@ rows = """
             spec["variants"] = list(variants)
         if colorkey:
             spec["colorkey"] = list(colorkey)
+        if bw_variant:
+            spec["bw_variant"] = bw_variant
         if not spec["frames"]:
             return {"ok": False, "error": "a sprite needs at least one frame"}
         try:
@@ -4157,7 +4210,8 @@ rows = """
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
         return {"ok": True, "frames": len(spec["frames"]),
                 "w": built["w"], "h": built["h"],
-                "variants": len(spec.get("variants", []))}
+                "variants": len(spec.get("variants", [])),
+                "variant_names": [v["name"] for v in built["variants"]]}
 
     def _sprite_block(self, name):
         """(lines, start, end) for one [[sprite]], stepping over its [sprite.anim]."""
@@ -4186,7 +4240,8 @@ rows = """
         return [f"scene {s}" for s, spec in self.man.get("scene", {}).items()
                 if name in spec.get("sprites", [])]
 
-    def save_sprite(self, name, sheet, frames, anim=None, variants=(), colorkey=None):
+    def save_sprite(self, name, sheet, frames, anim=None, variants=(), colorkey=None,
+                    bw_variant=None):
         """Create or rewrite one [[sprite]] block, validated the way the build will."""
         if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
             raise ValueError("name must be lowercase letters, digits and underscores")
@@ -4197,7 +4252,8 @@ rows = """
                 raise ValueError(f"anim name {a!r} must be lowercase letters, digits and "
                                  f"underscores -- it becomes a C identifier")
 
-        check = self.validate_sprite(name, sheet, frames, anim, variants, colorkey)
+        check = self.validate_sprite(name, sheet, frames, anim, variants, colorkey,
+                                     bw_variant)
         if not check["ok"]:
             raise ValueError(check["error"])
 
@@ -4212,6 +4268,11 @@ rows = """
             ("colorkey", ("colorkey = [" + ", ".join(str(int(c)) for c in colorkey) + "]")
                          if colorkey else None),
             ("variants", "variants = " + json.dumps(list(variants)) if variants else None),
+            # Which variant (or the base, if unset) becomes this sprite's ONE 1-bit
+            # rendering -- see tools/pnx_assets.py's own comment above `bw_variant` in
+            # pack_sprite for why a monochrome screen does not try to preserve colour
+            # variant selection at all.
+            ("bw_variant", f'bw_variant = "{bw_variant}"' if bw_variant else None),
         ]
 
         block = self._sprite_block(name)
@@ -4247,9 +4308,18 @@ rows = """
                 if anim_at is not None:
                     anim_at -= 1
             elif value:
-                at = simple_end
-                while at > start and lines[at - 1].strip() == "":
-                    at -= 1
+                # One past the LAST actual `key = value` line, not "walk back over blank
+                # lines from the block's end" -- the block's own end can (and here,
+                # routinely does) include trailing comments that belong to the NEXT
+                # section, since block detection only looks for the next `[`. A sprite's
+                # own comments, sitting directly above one of ITS keys, are never touched
+                # by this either way: this only chooses where a key that has never
+                # appeared in the block before gets inserted, never where an existing
+                # one's neighbouring comment lives.
+                at = start + 1
+                for j in range(start + 1, simple_end):
+                    if re.match(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*=", lines[j]):
+                        at = j + 1
                 lines[at:at] = [value]
                 simple_end += 1
                 end += 1
@@ -4266,9 +4336,13 @@ rows = """
                                    + [f"{k} = {int(v)}" for k, v in anim.items()]
                                    if anim else [])
         elif anim:
-            at = end
-            while at > start and lines[at - 1].strip() == "":
-                at -= 1
+            # Same reasoning as the simple-key case above: after the last actual key
+            # line, not "walk back from the block's end over blanks", which can land the
+            # new subtable after comments that belong to whatever section follows.
+            at = start + 1
+            for j in range(start + 1, end):
+                if re.match(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*=", lines[j]):
+                    at = j + 1
             lines[at:at] = ["", "[sprite.anim]"] + [f"{k} = {int(v)}"
                                                     for k, v in anim.items()]
 
@@ -4595,11 +4669,13 @@ rows = """
                     del lines[at]
                     end -= 1
                 elif value:
-                    # Before the trailing blank lines, so the gap to the next table
-                    # survives rather than closing a little further on every edit.
-                    at = end
-                    while at > start and lines[at - 1].strip() == "":
-                        at -= 1
+                    # One past the LAST actual key line, not "walk back from the block's
+                    # end over blanks" -- see save_project's own comment for why that can
+                    # land a new key among comments belonging to whatever table follows.
+                    at = start + 1
+                    for j in range(start + 1, end):
+                        if re.match(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*=", lines[j]):
+                            at = j + 1
                     lines[at:at] = [value]
                     end += 1
 
@@ -5568,6 +5644,19 @@ button:disabled{opacity:.45;cursor:not-allowed}
         <small id="cropnote">—</small>
       </div>
       <div class="plate"><h3>Tiles kept</h3><img id="strip" alt=""></div>
+      <!-- What pack_unit_2bpp (tools/pnx_assets.py) actually bakes into the ~bw resource
+           flint/diorite/aplite build from -- same source art, no second import, no
+           re-authoring, just a different pixel format chosen at build time. The threshold
+           is docs/PORTING.md's "the pipeline proposes a split by luminance"; flipping
+           individual pixels against this preview is not built, so every colour in the
+           carve answers to the one slider. -->
+      <div class="plate"><h3>Tiles kept, 1-bit preview
+          <label class="mini" style="font-weight:normal">ink threshold
+            <input id="bwthresh" type="range" min="1" max="29" step="1" value="15">
+            <b id="bwthreshv">15</b> / 30
+          </label></h3>
+        <img id="bwstrip" alt="" style="background:#fff">
+      </div>
     </div>
   </div>
 
@@ -5869,6 +5958,13 @@ button:disabled{opacity:.45;cursor:not-allowed}
               title="stacked vertically down the sheet"></label>
             <label>Anim<input id="spanim" placeholder="stand,step_a,step_b" size="12"
               title="one name per frame, in order — these become C identifiers"></label>
+            <!-- A 1-bit screen has no colour to tell a recolour by, so a sprite with
+                 variants does not preserve variant SELECTION on one at all -- there is
+                 exactly one 1-bit rendering, baked from whichever source this names (the
+                 base, if left on "— base —"). tools/pnx_assets.py's pack_sprite. -->
+            <label>BW variant<select id="spbw"
+              title="which source becomes this sprite's one 1-bit rendering"
+              ><option value="">— base —</option></select></label>
           </div>
           <div class="row" style="margin-top:.4rem">
             <button id="spsave" class="primary">Save sprite</button>
@@ -7460,6 +7556,13 @@ function drawSpriteForm(){
 // Loading an existing sprite back into the form. Frame rectangles collapse to w/h/count
 // only when they really are a vertical stack; anything else is left to the manifest
 // rather than silently rewritten into a shape it never had.
+// tools/pnx_assets.py's pack_sprite derives a variant's NAME from its path the same way:
+// basename, extension stripped. Kept in step so the dropdown offers exactly the names the
+// pipeline would actually accept for bw_variant.
+function spVariantName(path){
+  return path.split('/').pop().replace(/\.[^.]*$/,'');
+}
+
 $('#spsel').onchange=()=>{
   const name=$('#spsel').value;
   if(!name){ spLog(''); return }
@@ -7476,6 +7579,10 @@ $('#spsel').onchange=()=>{
   $('#spanim').value=byIndex.filter(Boolean).join(',');
   spLog(stacked?'':'frames are not a vertical stack — saving will rewrite them as one',
         stacked?null:true);
+  const bw=$('#spbw'), names=(s.variants||[]).map(spVariantName);
+  bw.innerHTML='<option value="">— base —</option>'
+    +names.map(n=>`<option${n===s.bw_variant?' selected':''}>${n}</option>`).join('');
+  bw.disabled=!names.length;
   spShowFrames(name);
 };
 
@@ -7548,13 +7655,22 @@ $('#spsave').onclick=async()=>{
   // sheet with them: picking poses out of one file and declaring them against another
   // would validate and then draw the wrong art.
   const useSheet=SH.picks.length?SH.sheet:sheet;
+  // variants/colorkey have no edit control of their own in this panel -- carried through
+  // from what is already declared so saving a name/frame change does not silently drop
+  // them. bw_variant DOES have a control (#spbw), and depends on variants surviving this.
+  const existing=(S.data.sprites||[]).find(x=>x.name===$('#spsel').value)||{};
+  const variants=existing.variants||[];
+  const colorkey=existing.colorkey||null;
+  const bwVariant=$('#spbw').value||null;
   // Validated through the real pack_sprite before anything is written, the same way an
   // atlas carve is: a frame running off the sheet used to go into the manifest and only
   // fail when Build was pressed, leaving a broken block to remove by hand.
-  const v=await post('/api/sprite/validate',{name,sheet:useSheet,frames,anim});
+  const v=await post('/api/sprite/validate',
+    {name,sheet:useSheet,frames,anim,variants,colorkey,bw_variant:bwVariant});
   if(!v.ok){ spLog(v.error,true); return }
 
-  const r=await post('/api/sprite/save',{name,sheet:useSheet,frames,anim});
+  const r=await post('/api/sprite/save',
+    {name,sheet:useSheet,frames,anim,variants,colorkey,bw_variant:bwVariant});
   if(!r.ok){ spLog(r.error,true); return }
   await load(); drawSpriteForm(); $('#spsel').value=name;
   spLog(`Saved "${name}" — ${v.frames} frame(s) of ${v.w}x${v.h}`
@@ -8738,7 +8854,8 @@ function analyse(){
   pending=setTimeout(async()=>{
     const body={sheet:$('#sheet').value,tile:+$('#tile').value,
       region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
-      max_tiles:+$('#maxt').value,exclude:[...IMPEX],colorkey:KEY};
+      max_tiles:+$('#maxt').value,exclude:[...IMPEX],colorkey:KEY,
+      ink_threshold:+$('#bwthresh').value};
     if(!body.sheet) return;
     const r=await (await fetch('/api/analyse',{method:'POST',
       headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
@@ -8763,11 +8880,16 @@ function analyse(){
       cell(r.sheet_tiles.join('×'),'sheet tiles');
     $('#sheetimg').src=r.thumb;
     $('#strip').src=r.strip||'';
+    $('#bwstrip').src=r.bw_strip||'';
     drawCrop(r.sheet_tiles);
   },180);
 }
 for(const id of ['sheet','tile','rx','ry','rw','rh','maxt'])
   $('#'+id).addEventListener('input',()=>{ analyse(); drawSlice() });
+$('#bwthresh').addEventListener('input',()=>{
+  $('#bwthreshv').textContent=$('#bwthresh').value;
+  analyse();
+});
 
 $('#slzoom').addEventListener('input',()=>{
   $('#slzoomv').textContent=$('#slzoom').value+'×';
@@ -10433,7 +10555,8 @@ def make_handler(session):
                     self._send(200, json.dumps(session.proj.analyse(
                         d["sheet"], int(d["tile"]), d["region"],
                         int(d["max_tiles"]), tuple(key) if key else None,
-                        d.get("exclude", []))))
+                        d.get("exclude", []),
+                        int(d.get("ink_threshold", pa.DEFAULT_INK_THRESHOLD)))))
                 elif self.path == "/api/slice":
                     d = json.loads(raw)
                     self._send(200, json.dumps(session.proj.slice_grid(
@@ -10550,12 +10673,12 @@ def make_handler(session):
                     d = json.loads(raw)
                     self._send(200, json.dumps(session.proj.validate_sprite(
                         d.get("name"), d["sheet"], d["frames"], d.get("anim"),
-                        d.get("variants", []), d.get("colorkey"))))
+                        d.get("variants", []), d.get("colorkey"), d.get("bw_variant"))))
                 elif self.path == "/api/sprite/save":
                     d = json.loads(raw)
                     session.proj.save_sprite(d["name"], d["sheet"], d["frames"],
                                              d.get("anim"), d.get("variants", []),
-                                             d.get("colorkey"))
+                                             d.get("colorkey"), d.get("bw_variant"))
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/sprite/remove":
                     d = json.loads(raw)

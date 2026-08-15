@@ -248,7 +248,7 @@ int main(void)
 		return 1;
 	}
 	pnx_assets_init(&g.persistent, &g.scene, RESOURCES, PNX_ASSET_COUNT);
-	pnx_camera_init(&g.camera, 200, 228);
+	pnx_camera_init(&g.camera, PNX_DISPLAY_WIDTH, PNX_DISPLAY_HEIGHT);
 
 	if (!pnx_scenes_load(PNX_ASSET_SCENES_SCENES))
 	{

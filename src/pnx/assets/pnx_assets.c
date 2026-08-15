@@ -93,16 +93,24 @@ static const uint8_t* load_blob(uint16_t asset_id, const char* magic, uint8_t* o
 
 bool pnx_palettes_load(uint16_t asset_id)
 {
+#if PNX_DISPLAY_BW
+	// A no-op, deliberately -- see PnxPalette's own comment (pnx_assets.h) for why nothing
+	// on a 1-bit build ever indexes a palette. Kept callable, not compiled away, so game
+	// init code stays the same source on every platform; the asset id argument is unused
+	// because there is no resource to read.
+	(void)asset_id;
+	return true;
+#else
 	uint8_t count		= 0;
 	size_t payload		= 0;
 	const uint8_t* data = load_blob(asset_id, "PP", &count, NULL, NULL, &payload);
 	if (!data)
 		return false;
 
-	if (count == 0 || payload != (size_t)count * PNX_PALETTE_ENTRIES)
+	if (count == 0 || payload != (size_t)count * sizeof(PnxPalette))
 	{
 		pnx_log("palettes %u: %u palettes needs %u bytes, blob has %u", asset_id, count,
-				(unsigned)(count * PNX_PALETTE_ENTRIES), (unsigned)payload);
+				(unsigned)(count * sizeof(PnxPalette)), (unsigned)payload);
 		return false;
 	}
 	if (count > PNX_PALETTE_SLOTS)
@@ -117,6 +125,7 @@ bool pnx_palettes_load(uint16_t asset_id)
 	s_palettes		= (PnxPalette*)(const void*)data;
 	s_palette_count = count;
 	return true;
+#endif
 }
 
 const PnxPalette* pnx_palette(uint8_t slot)
@@ -129,6 +138,7 @@ uint16_t pnx_palette_count(void)
 	return s_palette_count;
 }
 
+#if !PNX_DISPLAY_BW
 void pnx_decode_4bpp(const uint8_t* src, const PnxPalette* palette, uint8_t* dst,
 					 uint16_t pixels)
 {
@@ -144,6 +154,7 @@ void pnx_decode_4bpp(const uint8_t* src, const PnxPalette* palette, uint8_t* dst
 			dst[i + 1] = palette->entries[lo];
 	}
 }
+#endif // !PNX_DISPLAY_BW
 
 uint32_t pnx_assets_bytes_loaded(void)
 {
@@ -287,12 +298,17 @@ static size_t pad4(size_t n)
 
 static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size_t cap)
 {
+#if !PNX_DISPLAY_BW
+	// A 1-bit build never indexes a palette at all (see PnxPalette's own comment,
+	// pnx_assets.h) -- its pixels are already ink/paper/dither, baked in at build time --
+	// so there is nothing to require loaded first.
 	if (!s_palettes)
 	{
 		pnx_log("atlas %u: load palettes first -- atlases carry indices, not colours",
 				asset_id);
 		return false;
 	}
+#endif
 
 	uint8_t tile_px = 0, count_lo = 0, layout = 0;
 	size_t payload = 0;
@@ -302,8 +318,15 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 		return false;
 
 	const uint16_t tile_count = count_lo;
-	const size_t tile_bytes	  = (size_t)tile_px * tile_px / 2;
-	const size_t tables		  = pad4(tile_count) * 2;
+	// One format, unconditionally: w*h/4 (~bw, pack_unit_2bpp in tools/pnx_assets.py) on a
+	// 1-bit build, w*h/2 (4bpp indexed) on a colour one. A build is exclusively one or the
+	// other (PNX_DISPLAY_BW) -- there is no per-blob format to detect any more.
+#if PNX_DISPLAY_BW
+	const size_t tile_bytes = (size_t)tile_px * tile_px / 4;
+#else
+	const size_t tile_bytes = (size_t)tile_px * tile_px / 2;
+#endif
+	const size_t tables = pad4(tile_count) * 2;
 
 	out->metatiles	   = NULL;
 	out->subtile_count = 0;
@@ -318,6 +341,7 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 					tile_count, tile_px, (unsigned)expected, (unsigned)payload);
 			return false;
 		}
+		out->tile_bytes	  = (uint8_t)tile_bytes;
 		out->tile_palette = data;
 		out->tile_flags	  = data + pad4(tile_count);
 		out->pixels		  = data + tables;
@@ -339,6 +363,7 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 			return false;
 		}
 
+		out->tile_bytes	   = (uint8_t)tile_bytes;
 		out->tile_palette  = data + 4;
 		out->tile_flags	   = data + 4 + pad4(tile_count);
 		out->metatiles	   = (const uint16_t*)(const void*)(data + 4 + tables);
@@ -358,9 +383,13 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 	}
 
 	out->tile_px	= tile_px;
-	out->tile_bytes = (uint8_t)tile_bytes;
 	out->tile_count = tile_count;
 
+#if !PNX_DISPLAY_BW
+	// tile_palette carries a slot per tile regardless of build -- the pipeline never
+	// strips it from a ~bw blob, since it is cheap and a project may want it back one day
+	// -- but nothing on a 1-bit build looks a palette up by it, so there is nothing to
+	// validate here either.
 	for (uint16_t i = 0; i < tile_count; i++)
 	{
 		if (out->tile_palette[i] >= s_palette_count)
@@ -370,6 +399,7 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 			return false;
 		}
 	}
+#endif
 	return true;
 }
 
@@ -380,11 +410,13 @@ bool pnx_atlas_load(PnxAtlas* out, uint16_t asset_id)
 
 bool pnx_sprite_load(PnxSprite* out, uint16_t asset_id)
 {
+#if !PNX_DISPLAY_BW
 	if (!s_palettes)
 	{
 		pnx_log("sprite %u: load palettes first", asset_id);
 		return false;
 	}
+#endif
 
 	uint8_t w = 0, h = 0, frames = 0;
 	size_t payload		= 0;
@@ -392,8 +424,13 @@ bool pnx_sprite_load(PnxSprite* out, uint16_t asset_id)
 	if (!data)
 		return false;
 
+	// One format, unconditionally -- see atlas_load_into's own comment.
+#if PNX_DISPLAY_BW
+	const size_t frame_bytes = (size_t)w * h / 4;
+#else
 	const size_t frame_bytes = (size_t)w * h / 2;
-	const size_t expected	 = pad4(frames) + frames * frame_bytes;
+#endif
+	const size_t expected = pad4(frames) + frames * frame_bytes;
 	if (w == 0 || h == 0 || frames == 0 || payload != expected)
 	{
 		pnx_log("sprite %u: %u frames of %ux%u needs %u bytes, blob has %u", asset_id, frames,

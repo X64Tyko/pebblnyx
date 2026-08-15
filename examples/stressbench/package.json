@@ -13,7 +13,13 @@
     "sdkVersion": "3",
     "enableMultiJS": false,
     "targetPlatforms": [
-      "emery"
+      "emery",
+      "gabbro",
+      "flint",
+      "basalt",
+      "chalk",
+      "diorite",
+      "aplite"
     ],
     "watchapp": {
       "watchface": false
@@ -25,6 +31,26 @@
           "type": "raw",
           "name": "PALETTES",
           "file": "palettes.bin"
+        },
+        {
+          "type": "raw",
+          "name": "TILES",
+          "file": "tiles.bin"
+        },
+        {
+          "type": "raw",
+          "name": "HERO",
+          "file": "hero.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD",
+          "file": "map_field.bin"
+        },
+        {
+          "type": "raw",
+          "name": "FIELD_0",
+          "file": "map_field_b0.bin"
         },
         {
           "type": "raw",

@@ -570,15 +570,23 @@ Gate: JS must be able to express a scene without exceeding ~10,000 operations/fr
 Reachable because the engine fits in 20% of one watch's budget. The matrix below is read
 from the SDK itself (`sdk-core/pebble/common/tools/pebble_sdk_platform.py`), not recalled:
 
-| Platform | Screen | Colour | App RAM | Speaker | Touch |
-|---|---|---|---|---|---|
-| `emery` | 200x228 rect | 64 | 128 KB | yes | yes |
-| `gabbro` | **260x260 round** | 64 | 128 KB | **no** | yes |
-| `flint` | 144x168 rect | **1-bit** | 64 KB | yes | no |
-| `basalt` | 144x168 rect | 64 | 64 KB | no | no |
-| `chalk` | 180x180 round | 64 | 64 KB | no | no |
-| `diorite` | 144x168 rect | **1-bit** | 64 KB | no | no |
-| `aplite` | 144x168 rect | 1-bit | **24 KB** | no | no |
+| Platform | Screen | Colour | App RAM | Resources | Speaker | Touch |
+|---|---|---|---|---|---|---|
+| `emery` | 200x228 rect | 64 | 128 KB | 256 KB | yes | yes |
+| `gabbro` | **260x260 round** | 64 | 128 KB | 256 KB | **no** | yes |
+| `flint` | 144x168 rect | **1-bit** | 64 KB | 256 KB | yes | no |
+| `basalt` | 144x168 rect | 64 | 64 KB | 256 KB | no | no |
+| `chalk` | 180x180 round | 64 | 64 KB | 256 KB | no | no |
+| `diorite` | 144x168 rect | **1-bit** | 64 KB | 256 KB | no | no |
+| `aplite` | 144x168 rect | 1-bit | **24 KB** | **128 KB** | no | no |
+
+**Resources is the appstore cap** (`MAX_RESOURCES_SIZE_APPSTORE`), what a submitted `.pbw`'s
+resource pack must fit under per platform -- not `MAX_RESOURCES_SIZE` (the on-device ceiling,
+1024 KB everywhere but `aplite`'s 512 KB), which only matters for sideloading. `aplite` is the
+only platform with a reduced appstore cap; every other one, `diorite` included despite its 64 KB
+RAM, gets the same 256 KB every colour platform does -- RAM and resource budget are independent
+ceilings and do not track each other. This is what `docs/PORTING.md`'s "the pipeline has to
+budget per platform rather than once" is against.
 
 `flint` and `gabbro` are the new hardware; the watch names are inferred from their
 capabilities and want confirming. Two consequences stand out before any work starts:

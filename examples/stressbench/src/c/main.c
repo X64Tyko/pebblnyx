@@ -2,17 +2,24 @@
 // on real hardware -- DESIGN.md's open question #3 ("each subsystem's cost is measured;
 // the sum never was"), answered directly rather than left as reasoning.
 //
-// Every frame, continuously: a synthetic full-screen graphics load (a checkerboard of
-// pnx_gfx_fill_rect calls covering all 200x228 pixels -- NOT a real tilemap, which is
-// already measured on its own in MEASUREMENTS.md's Render cost table; this is a stand-in
-// with a comparable pixel-touching cost, so it does not need its own atlas/manifest), one
-// glyph-blitted status line, and a continuously looping sample feeding through the
-// existing audio timer. Every few seconds, ON TOP of all of that, an incremental save
-// (pnx_save_begin, ~2000 bytes / ~8 chunks) starts and spends one pnx_save_step() per
-// frame until it finishes -- which is the actual M5-intended usage, and the one thing
-// this app exists to answer: does a save step landing in the SAME frame as the graphics
-// and text load blow the ~35ms budget, and does it starve the audio timer enough to show
-// up as a gap or a restart.
+// Every frame, continuously: a real map streamed and drawn under a continuously panning
+// camera, a real sprite (with a recoloured `variants` entry, so its 1-bit build bakes and
+// draws the canonical bw_variant rather than the base) walking a patrol loop, a HUD panel
+// (a checkerboard of pnx_gfx_fill_rect calls, bounded to a strip rather than the whole
+// screen now that real content sits under it) behind the status text, and a continuously
+// looping sample feeding through the existing audio timer. Every few seconds, ON TOP of
+// all of that, an incremental save (pnx_save_begin, ~2000 bytes / ~8 chunks) starts and
+// spends one pnx_save_step() per frame until it finishes -- which is the actual
+// M5-intended usage, and the one thing this app exists to answer: does a save step
+// landing in the SAME frame as the graphics, tilemap and text load blow the ~35ms budget,
+// and does it starve the audio timer enough to show up as a gap or a restart.
+//
+// The map and sprite exist so this app is what its own name says: M9's 1-bit blitter
+// (the exclusively-2bpp ~bw path, pnx_gfx.c) never ran under combined load before this,
+// because there was no real atlas/sprite/tilemap draw in the frame at all -- a synthetic
+// fill_rect grid exercises pnx_gfx_fill_rect/clear, but never span_2bpp_packed, the
+// palette-free BW path, or a sprite's canonical bw_variant bake. Placeholder art
+// (tools/pnx_placeholder.py), not hand-authored -- the point here is load, not content.
 //
 // Tracks the worst single frame seen with a save step active, the worst without one, and
 // audio stats immediately before/after each save cycle -- a contention signal, since the
@@ -30,7 +37,10 @@
 #include <string.h>
 
 #define PERSIST_BYTES 512
-#define SCENE_BYTES	  (4 * 1024)
+// Room for the tileset atlas, the hero sprite (base + its bw_variant bake), the field map
+// and its one WorldTile bank, and the font's glyph bitmaps -- all resident at once, which
+// is the point: everything this app stresses is loaded together, the same as a real scene.
+#define SCENE_BYTES (8 * 1024)
 
 #define TEST_SLOT		   ((PnxSaveSlot)0)
 #define SAVE_VERSION	   1
@@ -39,11 +49,20 @@
 
 static uint8_t s_payload[SAVE_PAYLOAD_BYTES];
 
+// Keeps the hero inside the field's walls -- see hero_position below.
+#define PATROL_MARGIN 24
+#define PATROL_SPEED  2 // world pixels per frame
+
 typedef struct
 {
 	PnxArena persistent, scene;
 	PnxFont font;
 	bool has_font;
+
+	PnxCamera camera;
+	PnxMap map;
+	PnxSprite hero;
+	bool has_map, has_hero;
 
 	bool running;
 	uint32_t frames;
@@ -83,21 +102,69 @@ static void log_cycle_end(App* a)
 	a->next_save_at_ms = pnx_platform_now_ms() + SAVE_INTERVAL_MS;
 }
 
-static void draw_synthetic_graphics(PnxTarget* target)
+// A checkerboard of pnx_gfx_fill_rect calls, same load shape as before this app drew real
+// content -- bounded to a HUD strip along the top now, rather than the whole screen,
+// since the tilemap and sprite need the rest of it to actually be visible. Tall enough to
+// hold all four status lines drawn below (the last at y=85) with room for their own line
+// height.
+#define HUD_PANEL_H 100
+
+static void draw_hud_panel(PnxTarget* target)
 {
 	static const uint8_t COLORS[2] = { 0xD5, 0xC7 }; // resonant's IN_DIM / IN_STEEL values
-	const int16_t w = pnx_target_width(target), h = pnx_target_height(target);
-	int idx = 0;
-	for (int16_t y = 0; y < h; y = (int16_t)(y + 16))
+	const int16_t w				   = pnx_target_width(target);
+	int idx						   = 0;
+	for (int16_t y = 0; y < HUD_PANEL_H; y = (int16_t)(y + 16))
 	{
 		for (int16_t x = 0; x < w; x = (int16_t)(x + 16))
 		{
 			const int16_t rw = (int16_t)((x + 16 <= w) ? 16 : (w - x));
-			const int16_t rh = (int16_t)((y + 16 <= h) ? 16 : (h - y));
+			const int16_t rh = (int16_t)((y + 16 <= HUD_PANEL_H) ? 16 : (HUD_PANEL_H - y));
 			pnx_gfx_fill_rect(target, x, y, rw, rh, COLORS[idx & 1]);
 			idx++;
 		}
 	}
+}
+
+// Walks a rectangular patrol loop just inside the field's walls, at a constant world-pixel
+// speed -- real, continuous movement, so the camera streaming under it is real load too,
+// not a static shot of one WorldTile. Frame index alternates step_a/step_b; mirror flips
+// on the two legs walking leftward, the same convention the other examples use.
+static void hero_position(uint32_t frames, const PnxMap* map, int32_t* wx, int32_t* wy,
+						  uint8_t* anim_frame, bool* mirror)
+{
+	const int32_t x0 = PATROL_MARGIN, x1 = pnx_tilemap_width(map) - PATROL_MARGIN;
+	const int32_t y0 = PATROL_MARGIN, y1 = pnx_tilemap_height(map) - PATROL_MARGIN;
+	const int32_t leg_x = x1 - x0, leg_y = y1 - y0;
+	const int32_t perim = 2 * (leg_x + leg_y);
+	int32_t d			= (int32_t)((frames * PATROL_SPEED) % (uint32_t)perim);
+
+	if (d < leg_x)
+	{
+		*wx		= x0 + d;
+		*wy		= y0;
+		*mirror = false;
+	}
+	else if ((d -= leg_x) < leg_y)
+	{
+		*wx		= x1;
+		*wy		= y0 + d;
+		*mirror = false;
+	}
+	else if ((d -= leg_y) < leg_x)
+	{
+		*wx		= x1 - d;
+		*wy		= y1;
+		*mirror = true;
+	}
+	else
+	{
+		d -= leg_x;
+		*wx		= x0;
+		*wy		= y1 - d;
+		*mirror = true;
+	}
+	*anim_frame = (uint8_t)(1 + ((frames / 6) % 2)); // alternate step_a (1) / step_b (2)
 }
 
 static void audio_tick(void* ctx)
@@ -134,7 +201,29 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 	if (a->running)
 	{
 		a->frames++;
-		draw_synthetic_graphics(target);
+
+		// The world, first: streamed and drawn under a continuously panning camera, with
+		// the sprite walking its patrol loop -- real tilemap and sprite load, the thing
+		// this app did not exercise before. The HUD panel and text draw over the top of
+		// it afterwards, same as any real game's overlay.
+		if (a->has_map)
+		{
+			int32_t hero_wx = 0, hero_wy = 0;
+			uint8_t anim_frame = 0;
+			bool mirror		   = false;
+			hero_position(a->frames, &a->map, &hero_wx, &hero_wy, &anim_frame, &mirror);
+
+			pnx_camera_center(&a->camera, hero_wx, hero_wy, pnx_tilemap_width(&a->map),
+							  pnx_tilemap_height(&a->map));
+			pnx_tilemap_stream(&a->map, &a->camera);
+			pnx_tilemap_draw(&a->map, target, &a->camera);
+
+			if (a->has_hero)
+				pnx_sprite_draw(&a->hero, target, &a->camera, hero_wx, hero_wy, anim_frame,
+								NULL, mirror);
+		}
+
+		draw_hud_panel(target);
 
 		if (!a->saving && pnx_platform_now_ms() >= a->next_save_at_ms)
 			log_cycle_start(a);
@@ -218,6 +307,19 @@ int main(void)
 
 	static const uint32_t RESOURCES[] = PNX_ASSET_RESOURCE_TABLE;
 	pnx_assets_init(&a.persistent, &a.scene, RESOURCES, PNX_ASSET_COUNT);
+
+	// A no-op on a 1-bit build (PnxPalette's own comment, pnx_assets.h) -- called anyway,
+	// same source on every platform, matching every other example's boot order.
+	if (!pnx_palettes_load(PNX_ASSET_PALETTES_PALETTES))
+		pnx_log("stress: palettes would not load");
+
+	pnx_camera_init(&a.camera, PNX_DISPLAY_WIDTH, PNX_DISPLAY_HEIGHT);
+	a.has_map = pnx_map_load(&a.map, PNX_ASSET_MAP_FIELD);
+	if (!a.has_map)
+		pnx_log("stress: map would not load -- running without tilemap load");
+	a.has_hero = pnx_sprite_load(&a.hero, PNX_ASSET_SPRITE_HERO);
+	if (!a.has_hero)
+		pnx_log("stress: hero sprite would not load -- running without sprite load");
 
 	a.has_font = pnx_font_load(&a.font, PNX_ASSET_FONT_BENCH);
 	if (!a.has_font)

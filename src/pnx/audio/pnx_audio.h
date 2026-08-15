@@ -20,8 +20,6 @@
 
 #include "../pnx_config.h"
 
-#if PNX_USE_AUDIO
-
 #include "../platform/pnx_platform.h"
 
 #include <stdint.h>
@@ -39,6 +37,11 @@
 //
 // Pitch falls out of the existing resampling: playing an L-sample cycle at
 // `note_hz * L` advances exactly note_hz cycles per second. No new mixing code.
+//
+// The types below are declared unconditionally, PNX_USE_AUDIO or not: a disabled build
+// still has to compile game code that names PNX_WAVE_SQUARE or holds a PnxEnvelope on the
+// stack, not just code that calls into the mixer. See "opt-outs must stub, not delete" in
+// docs/PORTING.md -- only the function bodies below actually branch on the module being on.
 
 typedef enum
 {
@@ -58,10 +61,6 @@ typedef struct
 	uint8_t sustain;
 	uint16_t release_ms;
 } PnxEnvelope;
-
-// MIDI note numbers: 60 is middle C. Frequency is looked up rather than computed, since
-// there is no FPU and a 12-entry table plus an octave shift is exact enough.
-uint32_t pnx_note_hz(uint8_t midi_note);
 
 typedef struct
 {
@@ -95,12 +94,18 @@ typedef struct
 						   // this stale; use pnx_audio_voice_active for the current state.
 } PnxAudioStats;
 
+#if PNX_USE_AUDIO
+
 // `volume` is 0..100, matching the platform.
 bool pnx_audio_init(PnxAudioFormat format, uint8_t volume);
 void pnx_audio_shutdown(void);
 
 // Call once per frame with a monotonic clock. Everything else is bookkeeping.
 void pnx_audio_update(uint32_t now_ms);
+
+// MIDI note numbers: 60 is middle C. Frequency is looked up rather than computed, since
+// there is no FPU and a 12-entry table plus an octave shift is exact enough.
+uint32_t pnx_note_hz(uint8_t midi_note);
 
 // Starts a sample on a free voice, or steals the quietest if none is free. Returns the
 // voice, or PNX_AUDIO_NO_VOICE if audio is not running.
@@ -159,5 +164,121 @@ bool pnx_audio_reopen(PnxAudioFormat format, uint8_t volume);
 void pnx_audio_set_lowpass(uint16_t cutoff_hz);
 uint16_t pnx_audio_lowpass(void);
 PnxAudioFormat pnx_audio_format(void);
+
+#else // !PNX_USE_AUDIO
+//
+// Inline no-ops, not missing declarations. A build with no speaker (docs/PORTING.md:
+// PBL_SPEAKER is absent on gabbro, basalt, chalk, diorite, aplite) sets PNX_USE_AUDIO to 0
+// automatically -- see pnx_config.h -- and game code that calls pnx_audio_note or checks
+// pnx_audio_stats() must still compile and behave sanely, not fail with an undeclared
+// identifier. That is what makes gabbro having no speaker the engine's problem, not every
+// caller's.
+
+static inline bool pnx_audio_init(PnxAudioFormat format, uint8_t volume)
+{
+	(void)format;
+	(void)volume;
+	return false;
+}
+static inline void pnx_audio_shutdown(void)
+{
+}
+static inline void pnx_audio_update(uint32_t now_ms)
+{
+	(void)now_ms;
+}
+static inline uint32_t pnx_note_hz(uint8_t midi_note)
+{
+	(void)midi_note;
+	return 0;
+}
+static inline uint8_t pnx_audio_play(const int8_t* pcm, uint32_t samples,
+									 uint32_t loop_start, uint32_t sample_hz, uint8_t volume)
+{
+	(void)pcm;
+	(void)samples;
+	(void)loop_start;
+	(void)sample_hz;
+	(void)volume;
+	return PNX_AUDIO_NO_VOICE;
+}
+static inline uint8_t pnx_audio_note(PnxWaveform wave, uint8_t midi_note, uint8_t volume,
+									 const PnxEnvelope* env, uint8_t priority)
+{
+	(void)wave;
+	(void)midi_note;
+	(void)volume;
+	(void)env;
+	(void)priority;
+	return PNX_AUDIO_NO_VOICE;
+}
+static inline void pnx_audio_release(uint8_t voice)
+{
+	(void)voice;
+}
+static inline void pnx_audio_release_in(uint8_t voice, uint16_t ms)
+{
+	(void)voice;
+	(void)ms;
+}
+static inline uint8_t pnx_audio_play_pri(const int8_t* pcm, uint32_t samples,
+										 uint32_t loop_start, uint32_t sample_hz,
+										 uint8_t volume, uint8_t priority,
+										 const PnxEnvelope* env)
+{
+	(void)pcm;
+	(void)samples;
+	(void)loop_start;
+	(void)sample_hz;
+	(void)volume;
+	(void)priority;
+	(void)env;
+	return PNX_AUDIO_NO_VOICE;
+}
+static inline void pnx_audio_stop(uint8_t voice)
+{
+	(void)voice;
+}
+static inline void pnx_audio_stop_all(void)
+{
+}
+static inline bool pnx_audio_voice_active(uint8_t voice)
+{
+	(void)voice;
+	return false;
+}
+// A pointer to a real, zeroed struct -- never NULL, so `*pnx_audio_stats()` in a diagnostic
+// overlay stays safe without every caller adding a null check just for the disabled build.
+static inline const PnxAudioStats* pnx_audio_stats(void)
+{
+	static const PnxAudioStats zero = { 0 };
+	return &zero;
+}
+static inline void pnx_audio_set_lead(uint16_t ms)
+{
+	(void)ms;
+}
+static inline uint16_t pnx_audio_lead(void)
+{
+	return 0;
+}
+static inline bool pnx_audio_reopen(PnxAudioFormat format, uint8_t volume)
+{
+	(void)format;
+	(void)volume;
+	return false;
+}
+static inline void pnx_audio_set_lowpass(uint16_t cutoff_hz)
+{
+	(void)cutoff_hz;
+}
+static inline uint16_t pnx_audio_lowpass(void)
+{
+	return 0;
+}
+static inline PnxAudioFormat pnx_audio_format(void)
+{
+	return (PnxAudioFormat)0;
+}
 
 #endif // PNX_USE_AUDIO

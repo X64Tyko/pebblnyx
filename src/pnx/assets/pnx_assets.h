@@ -31,6 +31,7 @@
 
 #include "../core/pnx_arena.h"
 #include "../core/pnx_orient.h"
+#include "../platform/pnx_platform.h" // PNX_DISPLAY_BW, for PnxPalette's own shape
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -41,7 +42,7 @@
 
 // Every blob carries this, so a stale .bin against a newer runtime is a clean error
 // rather than garbage pixels. Bumped whenever a format changes.
-#define PNX_BLOB_VERSION	  8
+#define PNX_BLOB_VERSION	  10 // v10: palettes are colour-only again (see PnxPalette)
 #define PNX_BLOB_HEADER_BYTES 8
 
 // ------------------------------------------------------------------- palettes
@@ -62,13 +63,32 @@
 // generated header so the two cannot drift.
 #define PNX_ASSET_PALETTES_SLOT 0
 
+// Colour only. A 1-bit build never indexes a palette at all: its atlas/sprite pixels are
+// ~bw resources (pack_unit_2bpp, tools/pnx_assets.py) with ink/paper/dither already baked
+// in at build time, and pnx_gfx_fill_rect/pnx_text.c classify their raw GColor8 `colour`
+// argument straight through pnx_bw_is_ink, no palette involved either. So this struct
+// carries no 1-bit-specific field any more (an earlier version did: a per-entry ink mask,
+// for a 4bpp-indexed-plus-mask fallback path that let a build mix 4bpp and ~bw art. That
+// path is gone -- a build is exclusively one format now -- and the mask went with it).
+//
+// pnx_palettes_load is still callable on every platform (see its own comment) so game
+// code stays the same source everywhere, but on a 1-bit build it never touches flash: the
+// palette table it would fill is not used by anything.
+//
+// Memory-mapped straight onto the blob (pnx_assets.c: `(PnxPalette*)data`), so this layout
+// is the wire format: tools/pnx_assets.py's palette_bytes must produce exactly
+// sizeof(PnxPalette) bytes per palette -- which is what pnx_palettes_load checks against,
+// so the two cannot silently drift the way a hand-copied byte count could.
 typedef struct
 {
 	uint8_t entries[PNX_PALETTE_ENTRIES]; // GColor8 values; [0] is transparent
 } PnxPalette;
 
-// Fills the table. Must be called before any atlas or sprite loads, since those carry
-// palette indices rather than palette data.
+// Fills the table on a colour build. Must be called before any atlas or sprite loads on
+// that build, since those carry palette indices rather than palette data -- but a no-op on
+// a 1-bit one (see PnxPalette's own comment): it neither reads a resource nor requires
+// calling before anything else there, kept callable only so init code is the same source
+// on every platform.
 bool pnx_palettes_load(uint16_t asset_id);
 
 // NULL if the slot is beyond what was loaded.
@@ -95,8 +115,12 @@ typedef struct
 	uint16_t tile_count;
 	uint16_t subtile_count;
 	uint8_t tile_px;
-	uint8_t tile_bytes; // bytes per whole tile at 4bpp
-	uint8_t sub_bytes;	// bytes per quadrant; 0 when flat
+	// Bytes per whole tile: w*h/2 (4bpp indexed) on a colour build, w*h/4 (~bw packed 2bpp,
+	// pack_unit_2bpp in tools/pnx_assets.py) on a 1-bit one. A build is exclusively one
+	// format or the other (PNX_DISPLAY_BW, pnx_platform.h) -- there is no per-blob
+	// ambiguity to record here, unlike an earlier version of this field.
+	uint8_t tile_bytes;
+	uint8_t sub_bytes; // bytes per quadrant; 0 when flat
 } PnxAtlas;
 
 static inline bool pnx_atlas_is_metatiled(const PnxAtlas* a)
@@ -106,11 +130,11 @@ static inline bool pnx_atlas_is_metatiled(const PnxAtlas* a)
 
 typedef struct
 {
-	const uint8_t* pixels;		  // frame_count * frame_bytes, 4bpp
+	const uint8_t* pixels;		  // frame_count * frame_bytes
 	const uint8_t* frame_palette; // frame_count, palette slot per frame
 	uint8_t w, h;
 	uint8_t frame_count;
-	uint16_t frame_bytes; // w * h / 2
+	uint16_t frame_bytes; // w*h/2 colour, w*h/4 1-bit -- see PnxAtlas's own field
 } PnxSprite;
 
 typedef struct
@@ -499,8 +523,15 @@ static inline const PnxPalette* pnx_sprite_frame_palette(const PnxSprite* s, uin
 // Expands 4bpp source into 8bpp GColor8. Transparent pixels are left untouched in dst,
 // so a caller can pre-fill a background. The real blitter (M3) does this inline with
 // clipping; this exists for code that just wants pixels.
+//
+// Not on a 1-bit build: it hands back GColor8 bytes, and PnxPalette carries none there
+// (see the struct's own comment) -- there is no colour for this to decode INTO. Code that
+// wants ink/paper directly should use pnx_bw_is_ink against the palette's ink_mask
+// instead (pnx_gfx.h), which is what the real blitter already does.
+#if !PNX_DISPLAY_BW
 void pnx_decode_4bpp(const uint8_t* src, const PnxPalette* palette, uint8_t* dst,
 					 uint16_t pixels);
+#endif
 
 // Map cells are u16, not u8. Ten bits of tile index (1024, up from 255), two flip bits, and
 // four reserved for a per-cell palette index into a future per-map palette table. Doubling
