@@ -87,6 +87,29 @@
 #define PNX_USE_DIALOG 1
 #endif
 
+// Circle-vs-segment ball physics for pinball-shaped games: gravity, static table
+// geometry, and flippers that pivot between two baked poses. See physics/pnx_physics.h.
+//
+// OFF by default for the same reason PNX_USE_SYNTH is: unmeasured on device. It costs a
+// pinball table nothing to turn on, but every other game nothing to leave off.
+#ifndef PNX_USE_PHYSICS
+#define PNX_USE_PHYSICS 0
+#endif
+
+// AABB collision: sprite-vs-tile movement resolution and sprite-vs-sprite overlap. Sits
+// on top of pnx_map_solid/pnx_map_flags (assets/pnx_assets.h), which already exist and
+// cost nothing extra -- this module is the sweep/resolve logic a game would otherwise
+// hand-roll on top of them, not a second source of truth about which tiles are solid.
+//
+// A separate knob from PNX_USE_PHYSICS on purpose: an RPG wants tile collision with no
+// pinball ball in sight, and a pinball table's ball never asks a tilemap anything, so
+// forcing one on with the other would tax whichever game does not want both.
+//
+// OFF by default, same reasoning as PNX_USE_PHYSICS: unmeasured on device.
+#ifndef PNX_USE_COLLISION
+#define PNX_USE_COLLISION 0
+#endif
+
 // Timing-window judging for Additions and similar. Cheap, but pointless in a game
 // with no timed input. See docs/GAME.md for the measured parameters.
 #ifndef PNX_USE_TIMING
@@ -129,12 +152,13 @@
 #define PNX_LOG_LINE_LEN 96
 #endif
 
-// Engages pnx_platform_set_screen_lock(true) at startup -- backlight held on, BACK
-// stops dismissing the app -- without game code ever having to call it. A build knob,
-// not a player-facing feature: a watch worn on the wrist wants the ordinary timeout,
-// but a QEMU emulator with no wrist and no ambient light to read the screen by often
-// does not, and being unable to see whether a game is running or merely dark reads as
-// a hang either way. Off by default; the editor's Device panel is what turns this on,
+// Engages pnx_platform_set_screen_lock(true) at startup -- backlight held on, without
+// game code ever having to call it (that flag is backlight-only; see
+// platform/pnx_platform.h's own comment for why it does NOT also affect BACK). A build
+// knob, not a player-facing feature: a watch worn on the wrist wants the ordinary
+// timeout, but a QEMU emulator with no wrist and no ambient light to read the screen by
+// often does not, and being unable to see whether a game is running or merely dark reads
+// as a hang either way. Off by default; the editor's Device panel is what turns this on,
 // via PNX_DEFINES=PNX_FORCE_SCREEN_LOCK=1 (see Emulator.start, tools/pnx_editor.py).
 #ifndef PNX_FORCE_SCREEN_LOCK
 #define PNX_FORCE_SCREEN_LOCK 0

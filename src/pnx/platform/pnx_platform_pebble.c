@@ -328,20 +328,25 @@ static void raw_up(ClickRecognizerRef r, void* c)
 	push_event(PNX_EVENT_BUTTON_UP, 0, 0, map_button(click_recognizer_get_button_id(r)));
 }
 
-// BACK, which the system would otherwise handle for us by dismissing the app.
+// BACK is NOT like the other three. Proven on-device (not merely read in a doc), by
+// instrumenting this exact handler and watching it never fire while the app still exited
+// on an ordinary tap: window_raw_click_subscribe does not claim BACK the way it claims
+// every other button -- the system pops the window on release regardless. Long or
+// repeating click handlers on BACK are refused outright, because a long press is a
+// hardware/firmware force-quit no app can see or suppress at ANY duration.
+// window_single_click_subscribe is the one thing that DOES claim it, and only for an
+// ordinary short click.
 //
-// Subscribing it at all takes that behaviour away, so this handler owes the default back:
-// unlocked, a release exits, exactly as it did before. Locked, it does not -- and the
-// event still reaches the queue either way, so a game can use BACK as a gesture of its
-// own while it holds the lock.
-//
-// The press is where nothing happens deliberately. Exiting on the release means a game
-// that wants to grab BACK on the way down still can.
-static void back_up(ClickRecognizerRef r, void* c)
+// So there is no such thing as "BACK held" -- push_event fires DOWN and UP back to back
+// from the one callback, which is an honest model of what the hardware actually gives:
+// pnx_input_pressed(PNX_BUTTON_BACK) works for one frame, pnx_input_held is never true
+// for it, and no amount of code here changes that. A game that wants a second HELD
+// flipper button wants DOWN, not BACK -- see examples/pinball/README.md for where that
+// ran into this.
+static void back_click(ClickRecognizerRef r, void* c)
 {
+	push_event(PNX_EVENT_BUTTON_DOWN, 0, 0, PNX_BUTTON_BACK);
 	push_event(PNX_EVENT_BUTTON_UP, 0, 0, PNX_BUTTON_BACK);
-	if (!s_screen_locked)
-		pnx_platform_quit();
 }
 
 static void click_config(void* context)
@@ -351,7 +356,13 @@ static void click_config(void* context)
 	window_raw_click_subscribe(BUTTON_ID_UP, raw_down, raw_up, NULL);
 	window_raw_click_subscribe(BUTTON_ID_SELECT, raw_down, raw_up, NULL);
 	window_raw_click_subscribe(BUTTON_ID_DOWN, raw_down, raw_up, NULL);
-	window_raw_click_subscribe(BUTTON_ID_BACK, raw_down, back_up, NULL);
+
+	// Tried subscribing BOTH a raw handler and this single-click handler on BACK, hoping
+	// to get real down/up timing while single-click merely masked the default exit.
+	// Proven not possible on-device: with both subscribed, the raw handlers never fired
+	// even once -- only this one did. BACK gives an app exactly one notification, period,
+	// after the physical press AND release have both already happened.
+	window_single_click_subscribe(BUTTON_ID_BACK, back_click);
 }
 
 static void touch_handler(const TouchEvent* event, void* context)

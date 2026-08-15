@@ -1,0 +1,18 @@
+# Pebble Pinbeasts. No baked content yet -- v1 draws everything with pnx_gfx_fill_rect
+# placeholders (see ../README.md), so there is nothing here for the asset pipeline to
+# pack. This file exists so the pebblnyx editor recognises the folder as a project at
+# all (tools/pnx_project.py: a project is a folder with a .pknproj OR an assets.toml) --
+# add real [[sprite]]/[[font]]/etc. sections here once actual art lands.
+
+[project]
+name = "Pebble Pinbeasts"
+resources = "resources"
+header = "src/c/assets_gen.h"
+budget_bytes = 262144
+orientation = "buttons_left"
+
+# Runtime already forces this unconditionally in main() via
+# pnx_platform_set_screen_lock(true) (BACK is the right flipper, not a spare button --
+# see ../README.md). This just makes the editor's Device panel/emulator launch agree
+# with what the app already does on its own, rather than fighting it during testing.
+force_screen_lock = true

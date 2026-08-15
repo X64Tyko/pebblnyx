@@ -59,11 +59,27 @@ def _extract_make_var(text, name):
     raise SystemExit(f"gen_compile_commands: could not find {name} in {MAKEFILE}")
 
 
+def _extract_recipe_extra_flags(text):
+    """Flags the $(OUT) recipe adds between $(CFLAGS) and $(SRC) -- e.g.
+    -DPNX_USE_PHYSICS=1, turned on for the main test binary only (pnx_physics.c is in
+    SRC, but PNX_USE_PHYSICS defaults off, so without this clang-tidy would see an empty
+    pnx_physics.h and every symbol from it as undeclared).
+
+    Parsed from the recipe line itself rather than hardcoded, for the same reason
+    CFLAGS/SRC are: a flag added to the recipe and not here would otherwise drift
+    silently the way this one briefly did.
+    """
+    m = re.search(r"^\$\(OUT\):.*\n(?:.*\n)*?\t\$\(CC\)\s+\$\(CFLAGS\)\s*(.*?)\s*\$\(SRC\)",
+                 text, re.M)
+    return shlex.split(m.group(1)) if m and m.group(1).strip() else []
+
+
 def main():
     with open(MAKEFILE) as f:
         text = f.read()
 
     cflags = shlex.split(_extract_make_var(text, "CFLAGS"))
+    extra = _extract_recipe_extra_flags(text)
     src = shlex.split(_extract_make_var(text, "SRC"))
     if not src:
         raise SystemExit("gen_compile_commands: SRC parsed empty -- Makefile format changed?")
@@ -76,7 +92,7 @@ def main():
             {
                 "directory": TESTS_DIR,
                 "file": abs_path,
-                "arguments": [cc, *cflags, "-c", rel],
+                "arguments": [cc, *cflags, *extra, "-c", rel],
             }
         )
 

@@ -279,19 +279,19 @@ bool pnx_platform_has_touch(void);
 
 // ------------------------------------------------------------------- screen lock
 //
-// Two things, and a game in the middle of a session wants both:
+// Holds the backlight on. A dim room and a screen that goes dark mid-turn reads as a
+// crash, and the usual remedy -- flick your wrist -- is not available to hands holding
+// the watch like a gamepad.
 //
-//   BACK stops dismissing the app. The system's default is to exit, which off the wrist
-//   is one misplaced finger between a player and their session. While locked, BACK still
-//   arrives as an ordinary button event -- a game can use it -- but it no longer ends the
-//   app. Unlocked, it exits exactly as it always did.
-//
-//   The backlight is held on. A dim room and a screen that goes dark mid-turn reads as a
-//   crash, and the usual remedy -- flick your wrist -- is not available to hands holding
-//   the watch like a gamepad.
-//
-// Left off by default: an app that never unlocks is an app the player has to force-quit,
-// and that is a decision for the game, at the moments it knows it is mid-play.
+// Does NOT stop BACK from exiting -- an earlier version of this comment claimed it did,
+// and that was never actually true. Proven wrong on-device (examples/pinball): a raw
+// click subscription does not claim BACK the way it claims every other button, the
+// system pops the window on release regardless of this flag, and a genuine long press is
+// an unconditional firmware force-quit no app can see or suppress AT ALL. See
+// platform/pnx_platform_pebble.c's back_click for what BACK actually gives a game (one
+// press+release pulse, never a held state) and examples/pinball/README.md for the
+// control-scheme fallout. This function is backlight-only now; name kept for the
+// (small) API-compat cost of not renaming it, not because it still does the other thing.
 void pnx_platform_set_screen_lock(bool locked);
 bool pnx_platform_screen_locked(void);
 

@@ -60,6 +60,14 @@
 #include "app/pnx_app.h"
 #endif
 
+#if PNX_USE_PHYSICS
+#include "physics/pnx_physics.h"
+#endif
+
+#if PNX_USE_COLLISION
+#include "collision/pnx_collision.h"
+#endif
+
 // Later milestones add their headers here behind their own #if guards:
 //   #if PNX_USE_TILEMAP
 //   #include "gfx/pnx_tilemap.h"

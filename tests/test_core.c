@@ -244,6 +244,7 @@ void test_stream(void);
 void test_synth(void);
 void test_save(void);
 void test_app(void);
+void test_physics(void);
 
 int main(void)
 {
@@ -261,6 +262,7 @@ int main(void)
 	test_synth();
 	test_save();
 	test_app();
+	test_physics();
 
 	printf("\n%d checks, %d failures\n", s_checks, s_failures);
 	return s_failures == 0 ? 0 : 1;
