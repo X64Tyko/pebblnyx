@@ -21,6 +21,7 @@
 #include "pnx_platform.h"
 #include "pnx_platform_host.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +43,12 @@ static PnxEvent s_queued[32];
 static int s_queued_count;
 static int s_queued_read;
 static bool s_quit;
+static bool s_round;
+
+void pnx_host_set_round(bool round)
+{
+	s_round = round;
+}
 
 uint32_t pnx_platform_now_ms(void)
 {
@@ -64,14 +71,48 @@ int16_t pnx_target_height(const PnxTarget* t)
 	return t ? t->h : 0;
 }
 
+// A mathematically circular mask inscribed in the target, not a copy of chalk or
+// gabbro's actual silicon mask -- getting the exact same pixel is not the point. The
+// point is a per-row min_x/max_x that is NOT [0, w-1], which is the one shape the
+// rectangle every other platform reports can never produce, and the one shape the
+// engine claims (docs/ROADMAP.md's M9: "PnxRow carries min_x/max_x... verify the
+// blitter honours them") to already handle correctly without ever having tested it.
+static void round_row_bounds(int16_t w, int16_t h, int16_t y, int16_t* min_x, int16_t* max_x)
+{
+	const double r	  = w / 2.0;
+	const double cx	  = (w - 1) / 2.0;
+	const double cy	  = (h - 1) / 2.0;
+	const double dy	  = y - cy;
+	const double d2	  = r * r - dy * dy;
+	const double half = d2 > 0.0 ? sqrt(d2) : 0.0;
+
+	int32_t lo = (int32_t)(cx - half + 0.5);
+	int32_t hi = (int32_t)(cx + half - 0.5);
+	if (lo < 0)
+		lo = 0;
+	if (hi > w - 1)
+		hi = w - 1;
+	if (hi < lo)
+		hi = lo; // the outermost row or two of an even diameter rounds to one pixel wide
+	*min_x = (int16_t)lo;
+	*max_x = (int16_t)hi;
+}
+
 PnxRow pnx_target_row(PnxTarget* t, int16_t y)
 {
 	PnxRow row = { 0 };
 	if (!t || y < 0 || y >= t->h)
 		return row;
-	row.data  = t->pixels + (size_t)y * t->w;
-	row.min_x = 0;
-	row.max_x = (int16_t)(t->w - 1);
+	row.data = t->pixels + (size_t)y * t->w;
+	if (s_round && t->w == t->h)
+	{
+		round_row_bounds(t->w, t->h, y, &row.min_x, &row.max_x);
+	}
+	else
+	{
+		row.min_x = 0;
+		row.max_x = (int16_t)(t->w - 1);
+	}
 	return row;
 }
 

@@ -33,7 +33,18 @@ BW_SRC   = test_pack2bit_bw.c \
            ../src/pnx/platform/pnx_platform_host.c
 BW_OUT   = build/test_pack2bit_bw
 
-.PHONY: all test test-c test-assets test-bw clean
+# A third binary, square (PNX_HOST_WIDTH == PNX_HOST_HEIGHT) so pnx_target_row's round
+# mask applies at all -- see PNX_DISPLAY_WIDTH/HEIGHT's own guard in test_round.c. gabbro
+# and chalk are the two round platforms; both are colour, so this links the same modules
+# test_pack2bit_bw.c does not need to, but not audio/save/app, which have nothing to do
+# with round clipping.
+ROUND_SRC = test_round.c \
+            ../src/pnx/core/pnx_arena.c ../src/pnx/core/pnx_fmt.c ../src/pnx/core/pnx_diag.c \
+            ../src/pnx/assets/pnx_assets.c ../src/pnx/gfx/pnx_gfx.c \
+            ../src/pnx/platform/pnx_platform_host.c
+ROUND_OUT = build/test_round
+
+.PHONY: all test test-c test-assets test-bw test-round clean
 all: test
 
 # Every header under src/, not a hand-listed subset. The list used to name only core and
@@ -56,7 +67,11 @@ $(BW_OUT): $(BW_SRC) $(HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -DPNX_HOST_BW=1 $(BW_SRC) -o $(BW_OUT)
 
-test: test-c test-assets test-bw
+$(ROUND_OUT): $(ROUND_SRC) $(HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -DPNX_HOST_WIDTH=200 -DPNX_HOST_HEIGHT=200 $(ROUND_SRC) -o $(ROUND_OUT)
+
+test: test-c test-assets test-bw test-round
 
 test-c: $(OUT)
 	@./$(OUT)
@@ -73,6 +88,13 @@ test-assets:
 # them apart correctly. See test_pack2bit_bw.c.
 test-bw: $(BW_OUT)
 	@./$(BW_OUT)
+
+# Proves the blitter honours a round display's per-row bounds (docs/ROADMAP.md's M9 round-
+# display item) rather than merely being designed to: poisons the whole framebuffer, draws
+# through pnx_host_set_round(true), and checks every pixel against the SAME per-row
+# [min_x, max_x] the blitter itself was given. See test_round.c.
+test-round: $(ROUND_OUT)
+	@./$(ROUND_OUT)
 
 clean:
 	rm -rf build

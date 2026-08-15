@@ -565,7 +565,7 @@ Only if the FFI overhead measurement supports it.
 
 Gate: JS must be able to express a scene without exceeding ~10,000 operations/frame.
 
-## M9 — The rest of the Pebble family
+## M9 — The rest of the Pebble family — DONE (pending device confirmation)
 
 Reachable because the engine fits in 20% of one watch's budget. The matrix below is read
 from the SDK itself (`sdk-core/pebble/common/tools/pebble_sdk_platform.py`), not recalled:
@@ -596,52 +596,115 @@ on emery.
 
 The work, in dependency order:
 
-1. **Resolution independence.** 200x228 is currently hardcoded in the host target, and the
-   camera clamp and tilemap viewport assume it. Drive all three from
-   `PBL_DISPLAY_WIDTH`/`HEIGHT`.
-2. **Round displays.** The platform seam already anticipated this: `PnxRow` carries
-   `min_x`/`max_x` because that is what `gbitmap_get_data_row_info` returns per row on a
-   round display. Verify the blitter honours them and that nothing assumes a rectangle.
-3. **1-bit output**, for `flint`, `diorite` and `aplite`. The largest engine change: the
-   4bpp indexed path needs a 1-bit sibling, thresholded or dithered *in the pipeline* and
-   shipped as per-platform blobs. See the risk below -- most of this cost is not engine work.
-4. **Audio only where there is a speaker** (`emery`, `flint`). `PNX_USE_AUDIO` already gates
-   it; what is untested is a build with it off.
-5. **Memory.** At ~13.4 KB static the engine fits every platform but `aplite`, where 24 KB
-   total leaves ~11 KB for game code, statics *and* heap. Note that moving statics to the
-   heap buys much less on the 64 KB platforms, because there both come from the same 64 KB
-   rather than from 128 KB. **That 13.4 KB is an `emery` build with everything compiled in**
-   -- see "The `.pbw` is seven apps in a zip" below, which is reason to re-measure it per
-   platform before the `aplite` verdict is taken as settled.
-6. **Pipeline.** Per-platform resources and per-platform atlas carves -- a 144x168 screen
-   wants a different carve budget than 260x260 -- plus `targetPlatforms` in `package.json`
-   and per-platform ceilings in the size report.
-7. **Tests.** Parameterise the host target over the matrix instead of hardcoding one screen.
+1. **Resolution independence.** `PNX_DISPLAY_WIDTH`/`HEIGHT` (`pnx_platform.h`) resolve to
+   the SDK's per-platform `PBL_DISPLAY_WIDTH`/`HEIGHT` on device, and an overridable
+   `PNX_HOST_WIDTH`/`HEIGHT` on host. The camera clamp and tilemap viewport already took
+   `view_w`/`view_h` as parameters, so the only fix needed was the two call sites hardcoding
+   `200, 228`: `overworld` and `resonant`.
 
-Done when: one game source builds and runs on `emery`, one round platform and one 1-bit
-platform, with the size report inside each ceiling. Broader done-when, once the packaging
-mechanics in `PORTING.md` are actually used: one game source with no `#if` in it, one
-build, one `.pbw`, running on `emery`, `gabbro` and `flint` -- colour rect, colour round,
-and 1-bit; per-platform compilation makes `#if PBL_*` the right tool inside `src/pnx`
-itself, and the point of the stub rule below is that none of it reaches game source.
+2. **Round displays, genuinely verified.** The blitter already read `PnxRow`'s `min_x`/
+   `max_x` fresh per row everywhere, but no host target had ever been anything but
+   rectangular, so nothing had exercised a row whose bounds weren't `[0, w-1]`.
+   `pnx_host_set_round()` (`pnx_platform_host.c`) adds a real per-row circular mask on a
+   square host target -- a mathematical circle, not chalk's or gabbro's actual silicon,
+   which isn't the point. `tests/test_round.c` poisons the framebuffer with a sentinel,
+   draws through it, and checks every pixel against the blitter's own per-row bounds:
+   **80,038 checks, 0 failures**, across `pnx_gfx_clear`, `pnx_gfx_fill_rect`, and both of
+   `pnx_blit_4bpp`'s paths, with the mirrored case positioned to straddle the mask edge in
+   the tightest corner.
 
-**Sequencing.** This has to land before M7 ships to the appstore, or the game ships for one
-watch out of seven. But it wants M6 settled first, since the app framework is what a port
-would otherwise churn. (M6 is now done -- see above.)
+3. **1-bit output is exclusively 2bpp.** `PORTING.md`'s original plan -- 1-bit as a palette
+   property, byte-identical 4bpp art everywhere -- is superseded. A 1-bit build packs
+   ink/paper/transparent/dither straight into the pixel bytes at build time
+   (`pack_unit_2bpp`, `tools/pnx_assets.py`; `span_2bpp_packed`, `pnx_gfx.c`) from the same
+   source art, shipped as a `~bw`-tagged resource beside the colour one. One decoder per
+   build, not two coexisting -- which is also why the palette itself doesn't exist on a
+   1-bit build: `pnx_palettes_load` is a compiled-in no-op (`pnx_assets.h`) and
+   `palettes.bin` is never loaded. `diorite` vs `basalt` on `overworld` (identical
+   capability otherwise, one colour one not): `diorite` is 572 B smaller in static
+   footprint despite smaller resources too.
 
-**The real risk is content, not code.** 1-bit art is a separate art pass, not a downscale of
-colour art, and three of seven platforms need it. Decide whether those platforms get their
-own art or are simply out of scope before building the 1-bit path, not after.
+   A `variants` recolour has no equivalent once ink/paper is baked in at build time -- two
+   recolours can classify differently by luminance, so they can't share one blob the way
+   they do on colour. `bw_variant` (a manifest key, and a dropdown in the sprite editor)
+   names which one source becomes the sprite's single 1-bit rendering; a monochrome screen
+   has nothing to distinguish a recolour by anyway. `overworld`'s `npc` and `stressbench`'s
+   `hero` both use it.
 
-**Before writing any of this code, read [`PORTING.md`](PORTING.md).** It works out how the
-SDK's own packaging (`~`-tagged per-platform resources, and the fact that `targetPlatforms`
-compiles the C once per platform rather than once total) has to shape the pipeline and the
-`PNX_USE_*` opt-out rule, gathered before the work starts specifically so it does not have
-to be re-derived during it. Headline findings: 1-bit is a **palette** property, not a
-second art pass, so tile/sprite blobs stay byte-identical across all seven platforms; and
-`aplite`'s 24KB verdict was reasoned from an `emery` build carrying subsystems `aplite`
-would never compile in, so it is an open question a real build must settle, not a
-conclusion already reached.
+   Ink/paper is derived from the colour art by luminance (`gcolor_luminance`), with the
+   editor's atlas import panel previewing it live against an adjustable threshold slider --
+   no separate 1-bit art pass exists or was needed. The split is project-wide (one
+   threshold) rather than per-entry.
+
+4. **Audio only where there's a speaker.** `PNX_USE_AUDIO`/`PNX_USE_SEQUENCER` default from
+   `PBL_SPEAKER` (`pnx_config.h`), the same define the SDK hands only `emery` and `flint`.
+   The opt-out stubs rather than deletes, per `PORTING.md`'s own rule: `pnx.h` always
+   declares the audio API, a real one when the module is compiled in and inline no-ops when
+   it's off, so a speakerless build like `resonant` on `gabbro` still compiles against
+   `pnx_music_play` unchanged rather than needing an `#ifdef` at every call site.
+
+5. **Memory, with real numbers.** `examples/stressbench`, rebuilt for every platform with a
+   real atlas, sprite, tilemap, audio, text and incremental save all running together
+   (diagnostics off, matching a shipped build): `aplite` sits at 54.85% of its 24 KB RAM
+   budget with 11,096 B of heap free. Per-platform compilation (`PBL_BW`, no `PBL_SPEAKER`,
+   etc.) means `aplite` never carries the subsystems the earlier ~13.4 KB
+   everything-compiled-in estimate counted.
+
+6. **Pipeline, partly done.** `targetPlatforms` and the SDK's `~` tag resolution were
+   already load-bearing before this milestone; what it added is the pipeline emitting the
+   `~bw` variant itself (`bw_variant_path`, `tools/pnx_assets.py`) for atlases and sprites.
+   Not done: per-platform atlas carve sizing (a 144x168 screen carves the same region a
+   260x260 one does) and per-platform ceilings inside `size_report.py` -- the Resources
+   column above is hand-accounted against the SDK's table, not pipeline-generated.
+
+7. **Tests, for the axes that mattered.** Rather than parameterising the host target over
+   all seven platforms' exact dimensions, the host platform gained the two capabilities
+   that needed testing: `PNX_HOST_BW` and `pnx_host_set_round`. `tests/test_pack2bit_bw.c`
+   proves the `~bw` format is read correctly and the untagged one is correctly refused on
+   the same build; `tests/test_round.c` is item 2's evidence. Both run as part of
+   `make test`.
+
+Done when: one game source builds and runs on `emery`, one round platform, and one 1-bit
+platform, with the size report inside each ceiling -- yes: `stressbench` builds clean on
+all seven with no `PNX_DEFINES` override anywhere, every platform inside both its resource
+and RAM ceilings (Result, below). One game source with no `#if` in it, one build, one
+`.pbw`, running on `emery`, `gabbro` and `flint` -- yes: `stressbench`'s `main.c` carries no
+`PBL_*` or `PNX_DISPLAY_BW` conditional, and one `pebble build` produces one `.pbw` with all
+seven per-platform binaries and resource packs.
+
+`PORTING.md`'s packaging mechanics -- `~` tag resolution, `targetPlatforms` compiling the C
+once per platform -- held exactly as read off the SDK. Its 1-bit design didn't; see item 3.
+Treat it as a historical record of the plan, not the shipped implementation.
+
+**Outstanding.** Nothing here has run on real `flint`, `diorite`, `aplite`, `gabbro` or
+`chalk` hardware -- every claim above is a host test or a build. The 1-bit bit-order
+(`pnx_gfx.c`'s LSB-first, read off the classic Pebble guide) and the round mask's exact
+shape are both unconfirmed against real silicon. Per-platform atlas carve sizing and
+size-report ceilings (item 6) aren't built. `gabbro`'s fill rate, at 1.48x `emery`'s pixel
+count, has only ever been estimated.
+
+**Result.** `examples/stressbench` is the combined-load app M4's own open question named
+("each subsystem is measured; the sum never was") -- built out during this milestone to
+actually deserve the name, since it used to synthesise its graphics load rather than draw a
+real atlas, sprite or tilemap. Built for all seven platforms at once, diagnostics off
+(matching a shipped build, not a dev one):
+
+| Platform | Screen | Colour | Resources | of appstore cap | RAM footprint | of RAM budget | Free heap |
+|---|---|---|---|---|---|---|---|
+| `emery` | 200x228 rect | 64 | 9,338 B | 3.56% / 256K | 16,256 B | 12.40% / 128K | 114,816 B |
+| `gabbro` | 260x260 round | 64 | 9,338 B | 3.56% / 256K | 13,828 B | 10.55% / 128K | 117,244 B |
+| `flint` | 144x168 rect | 1-bit | 8,666 B | 3.31% / 256K | 16,064 B | 24.51% / 64K | 49,472 B |
+| `basalt` | 144x168 rect | 64 | 9,338 B | 3.56% / 256K | 13,672 B | 20.86% / 64K | 51,864 B |
+| `chalk` | 180x180 round | 64 | 9,338 B | 3.56% / 256K | 13,672 B | 20.86% / 64K | 51,864 B |
+| `diorite` | 144x168 rect | 1-bit | 8,666 B | 3.31% / 256K | 13,480 B | 20.57% / 64K | 52,056 B |
+| `aplite` | 144x168 rect | 1-bit | 8,666 B | 6.61% / 128K | 13,480 B | **54.85% / 24K** | 11,096 B |
+
+No warnings on any platform, every one inside both ceilings with real margin -- `aplite`
+included, at 11 KB of heap free with a tilemap streaming under a moving camera, a sprite
+drawing its baked `bw_variant`, the audio timer feeding a looping sample, glyph text and an
+incremental save all running in the same frame. Backed by the full host suite: **726 + 367
++ 8 + 80,038 checks, 0 failures** (the original suite, the pipeline's own Python
+validation, `test_pack2bit_bw.c`, and `test_round.c`).
 
 ---
 

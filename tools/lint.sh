@@ -22,6 +22,35 @@ fi
 
 status=0
 
+# clang-tidy first, clang-format last -- deliberately, and not the order this script
+# started with. clang-tidy's own `[N/25] Processing file...` progress goes to stderr
+# regardless of --quiet (see that section's own comment for why it is let through live
+# rather than folded away), which is a lot of noise between here and the end of the
+# script. clang-format's check is the one most likely to fail right after a hand-edit,
+# and it is short -- so running it last puts its FAIL line, if any, immediately above
+# the caller's own "lint failed" message instead of buried under a screenful of
+# processing spam a terminal or CI log may have already scrolled past.
+
+echo "--- clang-tidy ---"
+python3 tools/gen_compile_commands.py
+mapfile -t TIDY_FILES < <(python3 -c "
+import json
+for e in json.load(open('tests/compile_commands.json')):
+    print(e['file'])
+")
+# clang-tidy exits 0 even when it has findings to report -- only a crash or a
+# --warnings-as-errors hit is non-zero -- so pass/fail is decided by whether anything
+# landed on stdout, the same way the format check below works.
+tidy_out=$(cd tests && clang-tidy -p . --quiet "${TIDY_FILES[@]}") || true
+if [[ -n "$tidy_out" ]]; then
+  echo "$tidy_out"
+  echo "clang-tidy: FAIL"
+  status=1
+else
+  echo "clang-tidy: OK (${#TIDY_FILES[@]} files -- see .clang-tidy's header for scope)"
+fi
+
+echo
 echo "--- clang-format ---"
 mapfile -d '' FILES < <(git ls-files -z '*.c' '*.h')
 IGNORE_PATTERNS=$(sed -e 's#\*\*/##' -e 's#/\*\*##' -e '/^#/d' -e '/^$/d' .clang-format-ignore)
@@ -51,30 +80,6 @@ else
   else
     echo "clang-format: OK ($((${#FILTERED[@]})) files)"
   fi
-fi
-
-echo
-echo "--- clang-tidy ---"
-python3 tools/gen_compile_commands.py
-mapfile -t TIDY_FILES < <(python3 -c "
-import json
-for e in json.load(open('tests/compile_commands.json')):
-    print(e['file'])
-")
-# clang-tidy exits 0 even when it has findings to report -- only a crash or a
-# --warnings-as-errors hit is non-zero -- so pass/fail is decided by whether anything
-# landed on stdout, the same way the format check above works. `--quiet`'s own
-# `[N/25] Processing file...` progress goes to stderr regardless of --quiet, so that
-# is let through live (for visibility) rather than folded into the pass/fail check --
-# an earlier version merged the two streams and failed on every run, progress lines
-# included, whether or not clang-tidy had found anything.
-tidy_out=$(cd tests && clang-tidy -p . --quiet "${TIDY_FILES[@]}") || true
-if [[ -n "$tidy_out" ]]; then
-  echo "$tidy_out"
-  echo "clang-tidy: FAIL"
-  status=1
-else
-  echo "clang-tidy: OK (${#TIDY_FILES[@]} files -- see .clang-tidy's header for scope)"
 fi
 
 exit $status

@@ -13,6 +13,15 @@ void pnx_host_queue_event(PnxEvent ev);
 // Clears queued events and zeroes the framebuffer.
 void pnx_host_reset(void);
 
+// Simulates a round display's per-row bounds (gabbro, chalk): pnx_target_row starts
+// reporting a circular min_x/max_x instead of the full row, the same shape
+// gbitmap_get_data_row_info reports on real round hardware -- see that function's own
+// comment in pnx_platform_pebble.c. Requires a square target (PNX_HOST_WIDTH ==
+// PNX_HOST_HEIGHT); every rectangular platform, which is every platform this framework
+// ships on except those two, never sets this. OFF by default, so the ordinary host
+// suite keeps testing the rectangle every other platform actually has.
+void pnx_host_set_round(bool round);
+
 // Ranged reads issued since the last pnx_host_reset. On device a read's cost is dominated
 // by how far into the resource it starts, so "how many reads" is the number a streaming
 // change has to be judged on -- and it is not observable anywhere else.
