@@ -842,11 +842,46 @@ class Emulator:
                 "busy": self.busy, "log": "".join(self.log[-400:])}
 
     # ------------------------------------------------------------- lifecycle
+    #
+    # `pebble sdk install` DOES install QEMU -- it lands at
+    # <sdk>/toolchain/bin/qemu-pebble, confirmed by running it directly. It just does not
+    # put that directory on PATH, and pebble-tool's own emulator spawn resolves
+    # `qemu-pebble` as a bare command via subprocess's normal PATH lookup (`PEBBLE_QEMU_
+    # PATH`, pebble_tool/sdk/emulator.py) rather than through the SDK-aware path
+    # resolution `pebble build` uses internally -- which is why a build can succeed while
+    # every emulator command silently fails to find it. So "installing the SDK doesn't
+    # install the emulator" was the right symptom read the wrong way: the binary is
+    # there, `pebble` just cannot see it without help.
+    #
+    # The fix mirrors pebble-tool's own layout (pebble_tool/util/get_persist_dir,
+    # pebble_tool/sdk/manager.py's `SDKs/current` symlink) rather than asking the user to
+    # edit their PATH: this editor already knows how to find the active SDK, so every
+    # `pebble` call below gets a PATH with that toolchain's `bin` prepended.
+    @staticmethod
+    def _sdk_persist_dir():
+        if platform.system() == "Darwin":
+            return os.path.expanduser("~/Library/Application Support/Pebble SDK")
+        legacy = os.path.expanduser("~/.pebble-sdk")
+        if os.path.isdir(legacy):
+            return legacy
+        data_home = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+        return os.path.join(data_home, "pebble-sdk")
+
+    @classmethod
+    def _pebble_env(cls):
+        """`os.environ`, with the active SDK's toolchain (qemu-pebble, arm-none-eabi-*)
+        on PATH -- see the lifecycle comment above for why this is needed at all."""
+        env = dict(os.environ)
+        toolchain_bin = os.path.join(cls._sdk_persist_dir(), "SDKs", "current",
+                                     "toolchain", "bin")
+        if os.path.isdir(toolchain_bin):
+            env["PATH"] = toolchain_bin + os.pathsep + env.get("PATH", "")
+        return env
 
     def _run(self, cmd, cwd=None):
         self.log.append(f"\n$ {' '.join(cmd)}\n")
         try:
-            p = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE,
+            p = subprocess.Popen(cmd, cwd=cwd, env=self._pebble_env(), stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, text=True, bufsize=1)
         except FileNotFoundError:
             self.log.append(f"{cmd[0]} not found -- install the Pebble SDK in Settings first\n")
@@ -906,7 +941,8 @@ class Emulator:
         if not pebble:
             return False
         try:
-            subprocess.run([pebble, "kill"], capture_output=True, timeout=15)
+            subprocess.run([pebble, "kill"], env=self._pebble_env(),
+                           capture_output=True, timeout=15)
         except (OSError, subprocess.TimeoutExpired):
             return False
         return True
@@ -922,7 +958,7 @@ class Emulator:
             return False
         try:
             r = subprocess.run([pebble, "emu-button", action, name, "--emulator", platform],
-                               capture_output=True, text=True, timeout=10)
+                               env=self._pebble_env(), capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             return False
         return r.returncode == 0

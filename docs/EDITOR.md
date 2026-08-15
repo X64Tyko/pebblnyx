@@ -429,12 +429,30 @@ behaviour in measured ways.
   stops what the other started. There was never a second copy of this state to keep in
   sync.
 
-- **How much a QEMU run can actually be trusted for anything measured.** Still open, and
-  more honestly than before: nothing in this pass actually booted one, since no
-  `qemu-pebble` binary was available where `Emulator` was built and tested. Every
-  API-level claim above (state file schema, `emu-button` semantics, `screendump` over
-  the monitor socket) is read from pebble-tool's own source and exercised against a real
-  `pebble` install where possible -- the boot itself is not.
+- **How much a QEMU run can actually be trusted for anything measured.** Partly
+  answered: a real `pebble build` / `install --emulator basalt` / `screendump` round
+  trip against `examples/stressbench` booted, installed and rendered its actual title
+  screen through this panel end to end. What surfaced along the way was not a QEMU
+  trust question but a PATH one -- see "installed but not found" below. Frame timing,
+  input latency and anything else that would make a QEMU number stand in for a device
+  measurement remain unchecked.
+
+## Installed but not found: `qemu-pebble` and PATH
+
+`pebble sdk install` does install the emulator -- `<sdk>/toolchain/bin/qemu-pebble`
+runs fine invoked directly -- it just does not put that directory on `PATH`, and
+pebble-tool resolves `qemu-pebble` as a bare command via ordinary PATH lookup
+(`PEBBLE_QEMU_PATH`, `pebble_tool/sdk/emulator.py`) rather than through the same
+SDK-aware path resolution `pebble build` uses internally. So a build succeeds while
+every emulator command silently fails to find the binary -- the reported symptom
+("installing the SDK doesn't install the emulator") was a real, reproducible bug, just
+not the one its own description suggested.
+
+Fixed in `Emulator._pebble_env` by mirroring pebble-tool's own layout convention
+(`pebble_tool.util.get_persist_dir`, and the `SDKs/current` symlink `sdk/manager.py`
+maintains) rather than asking an author to edit their PATH: every `pebble` subprocess
+this editor spawns gets that toolchain's `bin` prepended. Confirmed against the actual
+installed SDK, not inferred -- see the "How much a QEMU run can be trusted" note above.
 
 ## The embedded emulator, revisited
 
