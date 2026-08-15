@@ -386,12 +386,27 @@ def main():
         "--hidden-import=pnx_assets",
         "--hidden-import=pnx_preview",
         "--hidden-import=pnx_project",
+        # Same sibling-module-found-via-sys.path pattern as the three above (every
+        # tools/editor/*.py does `sys.path.insert(0, TOOLS)` then a plain `import`, which
+        # is exactly the shape PyInstaller's static analysis can fail to trace) -- these
+        # two were never listed, which worked only as long as nothing forced the point.
+        # selftest()'s own dynamic `__import__("size_report", ...)` does.
+        "--hidden-import=pnx_mapfile",
+        "--hidden-import=size_report",
         # **The engine ships inside the editor.** A project anywhere on disk builds
         # against this copy -- pnx_project stages it into <project>/src/c/pnx before each
         # build -- so the editor is not merely a content tool, it is what a game is
         # compiled against. Without this a distributed editor could open a project and
         # never build one.
         f"--add-data={FRAMEWORK}{os.pathsep}pnx",
+        # The editor's frontend, since tools/editor/split (0.1.0-beta.24): index.html,
+        # css/, js/ are real files on disk now, not a PAGE string baked into
+        # pnx_editor.py itself -- so they need to travel as data, the same as the engine
+        # sources above, or editor/routes/project.py's own `open(...index.html)` at
+        # import time fails inside the frozen bundle with nothing on screen to explain
+        # why. (Exactly what shipped as v0.1.0-beta.26: CI built and froze the binary
+        # fine, then it failed to even start.)
+        f"--add-data={os.path.join(TOOLS, 'editor', 'static')}{os.pathsep}editor/static",
         f"--paths={TOOLS}",
     ]
     if platform.system() == "Darwin":
