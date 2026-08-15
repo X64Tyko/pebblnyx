@@ -924,7 +924,15 @@ class Emulator:
                 if not self._run([pebble, "build"], cwd=project.root):
                     self.log.append("\n`pebble build` failed -- see above\n")
                     return
-                self._run([pebble, "install", "--emulator", platform], cwd=project.root)
+                # --vnc, even though nothing here speaks VNC: it is the flag that keeps
+                # QEMU headless. Without it, pebble_tool/sdk/emulator.py's own
+                # _spawn_qemu adds `-display sdl,show-cursor=on` and a real, visible
+                # window opens on whatever machine is running this editor -- which is
+                # also, evidently, where "6fps on emery" comes from: that is the SDL
+                # window's own software-rendered compositing bottlenecking, not the
+                # emulated hardware. screendump reads the framebuffer over the monitor
+                # socket either way, so headless costs this panel nothing.
+                self._run([pebble, "install", "--emulator", platform, "--vnc"], cwd=project.root)
             finally:
                 self.busy = False
 
