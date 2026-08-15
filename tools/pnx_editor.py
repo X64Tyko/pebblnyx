@@ -804,6 +804,10 @@ class Emulator:
         self.log = []
         self.busy = False
         self._lock = threading.Lock()
+        # One lock per platform, not one global lock: a slow emery screendump has no
+        # reason to make a concurrent basalt one wait, and nothing here runs more than
+        # one platform's emulator meaningfully at once anyway (see stop()'s own note).
+        self._frame_locks = {}
 
     @classmethod
     def _all_info(cls):
@@ -999,39 +1003,58 @@ class Emulator:
         `screendump` over the QEMU monitor's plain-text protocol -- not VNC. Polled by
         the panel on an interval rather than pushed, which trades video smoothness for
         needing no persistent connection and no client-side decoder beyond an <img> tag.
+
+        Two guards earned by a real bug, not written defensively up front: every call
+        used to write to the SAME fixed path (`pnx-emu-{platform}.ppm`) and the panel's
+        old poll timer fired on a fixed clock regardless of whether the previous request
+        had finished. Once a single call took longer than the poll interval -- one slow
+        screendump was enough -- two requests landed in two different server threads
+        (ThreadingTCPServer, one thread per connection) both reading, writing and
+        deleting that one file, each usually losing the race and timing out near the
+        full 1.5s wait. That is what "2.6fps and massive lag" actually was: not the
+        emulator running slowly, this editor fighting itself over a shared path. A
+        per-call unique filename removes the collision; the per-platform lock below
+        removes the wasted, doomed-to-lose-anyway concurrent attempts that caused it,
+        for whatever client-side timing this is ever called under next.
         """
         info = self.info(platform)
         port = info and info.get("qemu", {}).get("monitor")
         if not port or pa.Image is None:
             return None
-        ppm = os.path.join(tempfile.gettempdir(), f"pnx-emu-{platform}.ppm")
+        lock = self._frame_locks.setdefault(platform, threading.Lock())
+        if not lock.acquire(blocking=False):
+            return None
+        ppm = os.path.join(tempfile.gettempdir(),
+                           f"pnx-emu-{platform}-{threading.get_ident()}-{time.time_ns()}.ppm")
         try:
-            with socket.create_connection(("127.0.0.1", int(port)), timeout=1.0) as s:
-                s.settimeout(1.0)
-                with contextlib.suppress(OSError):
-                    s.recv(4096)                    # the monitor's own banner
-                s.sendall(f"screendump {ppm}\n".encode())
-                with contextlib.suppress(OSError):
-                    s.recv(4096)
-        except OSError:
-            return None
+            try:
+                with socket.create_connection(("127.0.0.1", int(port)), timeout=1.0) as s:
+                    s.settimeout(1.0)
+                    with contextlib.suppress(OSError):
+                        s.recv(4096)                    # the monitor's own banner
+                    s.sendall(f"screendump {ppm}\n".encode())
+                    with contextlib.suppress(OSError):
+                        s.recv(4096)
+            except OSError:
+                return None
 
-        deadline = time.time() + 1.5
-        while time.time() < deadline:
-            if os.path.exists(ppm) and os.path.getsize(ppm) > 0:
-                break
-            time.sleep(0.02)
-        else:
-            return None
+            deadline = time.time() + 1.5
+            while time.time() < deadline:
+                if os.path.exists(ppm) and os.path.getsize(ppm) > 0:
+                    break
+                time.sleep(0.02)
+            else:
+                return None
 
-        try:
-            with pa.Image.open(ppm) as img:
-                buf = io.BytesIO()
-                img.convert("RGB").save(buf, format="PNG")
-                return buf.getvalue()
-        except OSError:
-            return None
+            try:
+                with pa.Image.open(ppm) as img:
+                    buf = io.BytesIO()
+                    img.convert("RGB").save(buf, format="PNG")
+                    return buf.getvalue()
+            except OSError:
+                return None
         finally:
+            lock.release()
             with contextlib.suppress(OSError):
                 os.remove(ppm)
 
@@ -10042,10 +10065,10 @@ $('#sdkrefresh').onclick=()=>sdkStatus(true);
 //
 // Mirrors the SDK panel's own shape (status object with `busy`/`log`, poll only while
 // something is running) rather than inventing a second one -- see sdkStatus above.
-// Two intervals, not one: emuPoll asks "is anything running yet" every 1.5s the whole
-// time this tab is open, and emuFramePoll -- only alive once emuPoll's answer is yes --
-// pulls the screen faster, since that is the one a person is actually watching.
-let emuPoll=null, emuFramePoll=null;
+// emuPoll asks "is anything running yet" every 1.5s the whole time this tab is open;
+// the screen itself is emuFrameLoop below, which is NOT a fixed-interval timer -- see
+// its own comment for why that used to be a real bug, not just a smoothness question.
+let emuPoll=null;
 
 function emuPlatform(){
   const sel=$('#emuplatform');
@@ -10076,7 +10099,7 @@ function emuEnter(){
 function emuLeave(){
   emuTabActive=false;
   if(emuPoll){ clearInterval(emuPoll); emuPoll=null }
-  if(emuFramePoll){ clearInterval(emuFramePoll); emuFramePoll=null }
+  emuFrameRunning=false;
   if(emuHeld.size) emuRelease();
 }
 
@@ -10099,20 +10122,43 @@ async function emuStatus(){
        +'installs into pebble-tool’s own emulator.');
   if(s.log&&s.log.trim()) $('#emulog').textContent=s.log;
 
-  if(s.running&&!emuFramePoll){
-    emuFrame();
-    emuFramePoll=setInterval(emuFrame,800);
-  }else if(!s.running&&emuFramePoll){
-    clearInterval(emuFramePoll); emuFramePoll=null;
-  }
+  if(s.running) emuFrameLoop(); else emuFrameRunning=false;
 }
 
-// Cache-busted by the timestamp, not by a fetch+blob-URL dance: the browser already
-// knows how to load an <img> and quietly keep the last one on a failed request, which is
-// exactly what a screendump that has not landed yet (see Emulator.frame's 1.5s wait,
-// pnx_editor.py) should look like -- not a flash to a broken-image icon.
-function emuFrame(){
-  $('#emuscreen').src='/api/emulator/frame?platform='+emuPlatform()+'&t='+Date.now();
+// A fetch+blob-URL dance after all, not a cache-busted <img src> on a fixed timer --
+// the timer WAS the bug. setInterval fired every 800ms regardless of whether the
+// PREVIOUS request had finished, and once a single screendump took longer than that
+// (Emulator.frame's own wait can run up to 1.5s), requests piled up: several in
+// flight at once, each landing out of order, each one racing the others over what
+// used to be a single shared temp file server-side. That is what "2.6fps and massive
+// lag" actually was. Fixed on the server by giving every call its own filename and a
+// per-platform lock (pnx_editor.py); fixed here by never starting the NEXT fetch until
+// the current one has actually resolved -- a plain while loop awaiting each request in
+// turn, rather than a timer that cannot know how long the last one took. MIN_FRAME_GAP
+// is a yield to the event loop, not a target rate: the real pace is however long a
+// screendump genuinely takes, and this loop no longer fights itself over it.
+let emuFrameRunning=false;
+const EMU_MIN_FRAME_GAP=40;
+
+async function emuFrameLoop(){
+  if(emuFrameRunning) return;             // already looping
+  emuFrameRunning=true;
+  while(emuFrameRunning){
+    const platform=emuPlatform();
+    try{
+      const r=await fetch('/api/emulator/frame?platform='+platform+'&t='+Date.now());
+      if(r.status===200){
+        const url=URL.createObjectURL(await r.blob());
+        const old=$('#emuscreen').src;
+        $('#emuscreen').src=url;
+        if(old&&old.startsWith('blob:')) URL.revokeObjectURL(old);
+      }
+      // else 204 -- no frame landed in time (mid-boot, or the lock was held by a call
+      // still in flight); leave the last frame showing and try again next turn.
+    }catch(_){ /* network hiccup -- try again next turn */ }
+    if(!emuFrameRunning) break;
+    await new Promise(res=>setTimeout(res,EMU_MIN_FRAME_GAP));
+  }
 }
 
 $('#emuplatform').onchange=()=>{ S.emuPlatform=$('#emuplatform').value; emuStatus() };
