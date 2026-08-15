@@ -975,8 +975,15 @@ class Emulator:
         # this panel ever asked for.
         if not pebble or self.info(platform) is None:
             return False
+        # --vnc here too, and not just in start(): pebble-tool's own connection logic
+        # (ManagedEmulatorTransport._find_ports) treats a VNC-state mismatch against
+        # the running QEMU as a reason to KILL IT AND RESPAWN A FRESH ONE -- headless,
+        # started with --vnc, vs. this call without it would silently kill the emulator
+        # on the first button press and boot a new, visible, un-installed one in its
+        # place. That is not hypothetical: it is exactly what "buttons don't work, then
+        # a new emulator window opens" turned out to be.
         cmd = [pebble, "emu-button", action] + (list(buttons) if action == "push" else []) \
-            + ["--emulator", platform]
+            + ["--emulator", platform, "--vnc"]
         try:
             r = subprocess.run(cmd, env=self._pebble_env(), capture_output=True,
                                text=True, timeout=10)
