@@ -374,11 +374,20 @@ window.addEventListener('mousemove',ev=>{
 });
 window.addEventListener('mouseup',()=>{ rectDrag=null; maskPaint=null });
 
-// --- COMPLEX: paint the mask a pixel at a time, at the tile's own resolution.
+// --- COMPLEX: paint the mask a pixel at a time, directly on the tile's own art -- the
+// same zoomed-still-plus-overlay shape drawRectEditor() uses for SCALED, so deciding
+// which pixels are solid means looking at the pixels rather than a legend for them.
 
 function drawMaskGrid(){
-  const T=CARVE.tile_px, el=$('#temaskgrid');
-  el.style.gridTemplateColumns=`repeat(${T}, 16px)`;
+  const T=CARVE.tile_px, zoom=Math.max(4,Math.floor(128/T));
+  const img=$('#temaskimg'), el=$('#temaskgrid');
+  img.src=TE.tile.img;
+  img.style.width=(T*zoom)+'px';
+  img.style.height=(T*zoom)+'px';
+  el.style.width=(T*zoom)+'px';
+  el.style.height=(T*zoom)+'px';
+  el.style.gridTemplateColumns=`repeat(${T}, ${zoom}px)`;
+  el.style.gridAutoRows=`${zoom}px`;
   el.innerHTML='';
   for(let y=0;y<T;y++)
     for(let x=0;x<T;x++){

@@ -54,6 +54,12 @@
     <span id="dirty"></span>
     <button id="save">Save map</button>
     <button id="build" class="primary">Build</button>
+    <!-- Build (above) only ever ran the asset pipeline -- header, resource blobs -- and
+         never `pebble build`, so there was no button anywhere that produced a real,
+         shippable .pbw without also installing into the emulator, and nothing ever said
+         where the result landed. This is that button, reachable from every tab like
+         Build already is. -->
+    <button id="package" title="Build a real .pbw with pebble build -- what you'd actually ship, not just the asset preview Build above gives you">Package…</button>
   </header>
 
   <!-- The budgets, on every page, above whatever is being worked on.
@@ -358,14 +364,22 @@
           <!-- COMPLEX: a 1bpp mask, painted pixel by pixel at the tile's own resolution
                -- defaults to the art's own opacity (pack_collision_mask) until
                repainted, and "Reset to art" throws an authored override away to go back
-               to that. -->
+               to that. Painted ON the actual tile art (a zoomed still, same as SCALED's
+               #terectimg), not on a grid that stands in for it -- collision is a property
+               OF the pixels, and deciding which ones are solid is easier looking at the
+               pixels than at a legend for them. -->
           <div id="tecomplex" style="display:none">
             <div class="row" style="margin-bottom:.4rem;margin-top:.4rem">
-              <small class="dim">Click, or click-drag, to paint the mask.</small>
+              <small class="dim">Click, or click-drag, to paint the solid pixels.</small>
               <button id="temaskreset" title="discard any authored mask; use the art's own opacity">
                 Reset to art</button>
             </div>
-            <div id="temaskgrid" class="maskgrid"></div>
+            <div id="temaskwrap" style="position:relative;display:inline-block">
+              <img id="temaskimg" alt="" draggable="false"
+                   style="image-rendering:pixelated;display:block;
+                          border:1px solid var(--line)">
+              <div id="temaskgrid" class="maskgrid"></div>
+            </div>
           </div>
           <div class="row" style="margin-top:.7rem">
             <button id="tesave" class="primary">Save tile</button>
@@ -414,6 +428,11 @@
           </select></label>
           <button id="mpatadd" title="append an empty pattern">+ Pattern</button>
           <button id="mpatclone" title="copy this pattern to a new one">Clone</button>
+          <!-- Nothing in this tab was audible before -- every knob in Instrument
+               changed a number with no way to hear what it did. An approximation
+               (Web Audio, not the device's own synth), not exact -- see
+               audio-preview.js's own comment for what it doesn't reproduce. -->
+          <button id="mplay" title="play this pattern through the approximate preview synth">▶ Play pattern</button>
         </div>
         <div id="mrows" class="tracker"></div>
         <div class="mini"><span id="mpatlog" class="dim"></span></div>
@@ -724,6 +743,16 @@
         <div class="plate wide"><h3>Actual size</h3>
           <div id="px1wrap"><canvas id="pxcv1"></canvas></div>
           <small>What the watch shows. If it does not read here, it will not read there.</small>
+          <!-- A multi-frame sprite could only be INSPECTED here before, frame by frame
+               in the stack above -- never actually seen playing, which is the one thing
+               a walk cycle is drawn to look right doing. -->
+          <div class="row" style="margin-top:.6rem;align-items:center">
+            <button id="pxplay">▶ Play animation</button>
+            <span id="pxplaynote" class="dim"></span>
+          </div>
+          <div id="pxanimwrap" style="display:none;margin-top:.4rem">
+            <canvas id="pxanim"></canvas>
+          </div>
         </div>
       </div>
     </div>
@@ -825,6 +854,12 @@
             title="the appstore cap is 262144; the device ceiling is 1048576"></label>
           <label>Resources<input id="prres" size="18"></label>
           <label>Header<input id="prhdr" size="24"></label>
+          <!-- The Pebble app's Developer Connection address (Settings -> Developer in
+               the phone app), so Device's "Build & install" and "Attach logs" have
+               somewhere to send `pebble install --phone`/`pebble logs --phone` without
+               retyping it -- the same address until the phone's own IP changes. -->
+          <label>Device address<input id="prdevaddr" size="18" placeholder="192.168.1.23:9000"
+            title="the phone's IP:port from its Pebble app's Developer Connection screen -- used by Build & install and Attach logs on the Device tab"></label>
         </div>
         <button id="prsave" class="primary">Save project</button>
         <small id="prlog">The appstore rejects bundles over 262,144 B. The device's own
@@ -923,6 +958,32 @@
         <small id="emunote">—</small>
       </div>
 
+      <!-- Straight onto a real watch, over the phone app's own Developer Connection --
+           `pebble build` + `pebble install --phone`, and optionally attaching to
+           `pebble logs --phone` afterward. docs/EDITOR.md's own E3 note flagged log
+           streaming as missing even for the emulator; this is that, for hardware, which
+           is where it matters more -- the emulator's screen is at least watchable
+           without it. -->
+      <div class="plate wide"><h3>Real device</h3>
+        <p class="prose">Builds this project (the same asset build Build/Package use)
+          and installs it straight onto a watch. Turn on the phone app's own Developer
+          Connection first (its Settings), then set its address on the Project Settings
+          tab.</p>
+        <div class="row"><span id="devaddrnote" class="dim">—</span></div>
+        <div class="row" style="margin-top:.5rem">
+          <button id="devinstall" class="primary">Build &amp; install</button>
+        </div>
+        <small id="devnote">—</small>
+        <pre id="devinstalllog" class="devlog" style="margin-top:.5rem">—</pre>
+
+        <div class="row" style="margin-top:.9rem">
+          <button id="devlogstart">Attach logs</button>
+          <button id="devlogstop" style="display:none">Detach logs</button>
+          <span id="devlognote" class="dim"></span>
+        </div>
+        <pre id="devlogview" class="devlog" style="margin-top:.5rem">—</pre>
+      </div>
+
       <!-- BACK alone on the left, UP/SELECT/DOWN stacked on the right -- the physical
            layout every Pebble has, CloudPebble's emulator included. Fixed regardless of
            this project's orientation: the screendump is the raw device framebuffer, and
@@ -1010,4 +1071,5 @@
 </div>
 <script src="/static/js/app.js"></script>
 <script src="/static/js/atlas.js"></script>
+<script src="/static/js/audio-preview.js"></script>
 </body></html>

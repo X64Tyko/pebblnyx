@@ -3376,7 +3376,7 @@ def main():
     # so every one of them shares ONE global scope with all the others -- the split is
     # files, not module boundaries. A name declared twice across this list is exactly as
     # broken as declaring it twice in one file used to be.
-    js_files = ["app.js", "atlas.js"]
+    js_files = ["app.js", "atlas.js", "audio-preview.js"]
     js_by_file = {}
     for name in js_files:
         with open(os.path.join(editor_dir, "js", name), encoding="utf-8") as f:

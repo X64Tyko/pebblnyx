@@ -254,6 +254,18 @@ class MusicMixin:
             out.append(entry)
         return out
 
+    def sample_wav_bytes(self, name):
+        """The raw WAV bytes behind a declared [sample.*] -- for previewing it in the
+        browser (an <audio> element), not for the pipeline, which reads it itself.
+        `_safe` (CodeMixin) is what keeps this from serving anything outside the
+        project even given a manifest with a stray `../` in it."""
+        spec = self.man.get("sample", {}).get(name)
+        if not spec:
+            raise ValueError(f"no such sample: {name!r}")
+        full = self._safe(spec.get("file", ""))
+        with open(full, "rb") as f:
+            return f.read()
+
     def wav_files(self):
         """WAVs inside the project, so adding one needs no file dialog."""
         out = []

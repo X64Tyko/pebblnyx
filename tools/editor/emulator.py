@@ -65,6 +65,23 @@ class Emulator:
         # every single call. This keeps one connection open per platform instead.
         self._bridges = {}
         self._bridges_lock = threading.Lock()
+        # Separate from the emulator's own log/busy: packaging and running the emulator
+        # are two different things someone might want the state of independently, and
+        # sharing one log would interleave them.
+        self.package_log = []
+        self.package_busy = False
+        self.package_result = None
+        # Building straight onto a real watch over the phone app's Developer
+        # Connection -- its own log/busy/result for the same reason package's are
+        # separate from the emulator's.
+        self.install_log = []
+        self.install_busy = False
+        self.install_result = None
+        # `pebble logs --phone <address>`: a long-lived process, not a one-shot build,
+        # so it gets its own start/stop rather than living inside install_device --
+        # attaching to logs and installing a new build are independent actions.
+        self._logs_proc = None
+        self._logs_buf = []
 
     @classmethod
     def _all_info(cls):
@@ -246,8 +263,9 @@ class Emulator:
         with contextlib.suppress(Exception):
             entry["proc"].terminate()
 
-    def _run(self, cmd, cwd=None, extra_env=None):
-        self.log.append(f"\n$ {' '.join(cmd)}\n")
+    def _run(self, cmd, cwd=None, extra_env=None, log=None):
+        log = self.log if log is None else log
+        log.append(f"\n$ {' '.join(cmd)}\n")
         env = self._pebble_env()
         if extra_env:
             env.update(extra_env)
@@ -255,11 +273,11 @@ class Emulator:
             p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, text=True, bufsize=1)
         except FileNotFoundError:
-            self.log.append(f"{cmd[0]} not found -- install the Pebble SDK in Settings first\n")
+            log.append(f"{cmd[0]} not found -- install the Pebble SDK in Settings first\n")
             return False
         for line in p.stdout:
-            self.log.append(line)
-            del self.log[:-400]
+            log.append(line)
+            del log[:-400]
         return p.wait() == 0
 
     def start(self, project, platform):
@@ -321,6 +339,172 @@ class Emulator:
 
         threading.Thread(target=work, daemon=True).start()
         return True, None
+
+    @staticmethod
+    def _find_pbw(root):
+        """The most recently built `.pbw` in `<project>/build/` -- pebble-tool's own
+        output location. Newest by mtime rather than a name the editor guesses at,
+        because the name comes from `package.json`/`appinfo.json` and this has no
+        business re-deriving it."""
+        build_dir = os.path.join(root, "build")
+        if not os.path.isdir(build_dir):
+            return None
+        pbws = [os.path.join(build_dir, f) for f in os.listdir(build_dir)
+                if f.endswith(".pbw")]
+        return max(pbws, key=os.path.getmtime) if pbws else None
+
+    def package(self, project):
+        """Runs the SAME `pebble build` `start()` does, minus the emulator-only
+        PNX_FORCE_SCREEN_LOCK override that call adds (see its own comment) -- a
+        package is meant to be exactly what ships, not tuned for testing convenience.
+
+        Separate from `start()`/`busy` rather than reusing them: someone packaging a
+        release and someone testing in the emulator are two different things to be
+        doing, and blocking one on the other (or interleaving their logs) would be a
+        made-up conflict, not a real one.
+        """
+        pebble = Toolchain.pebble_path()
+        if not pebble:
+            return False, "pebble-tool is not installed -- see Settings"
+        with self._lock:
+            if self.package_busy:
+                return False, "a package build is already running"
+            self.package_busy = True
+        self.package_log = []
+        self.package_result = None
+
+        def work():
+            try:
+                self.package_log.append("=== building assets ===\n")
+                result = project.build()
+                self.package_log.append(result["output"])
+                if not result["ok"]:
+                    self.package_log.append("\nasset build failed -- see above\n")
+                    self.package_result = {"ok": False, "error": "asset build failed"}
+                    return
+                self.package_log.append("\n=== pebble build ===\n")
+                if not self._run([pebble, "build"], cwd=project.root, log=self.package_log):
+                    self.package_result = {"ok": False,
+                                           "error": "`pebble build` failed -- see output"}
+                    return
+                pbw = self._find_pbw(project.root)
+                if not pbw:
+                    self.package_result = {"ok": False,
+                                           "error": "pebble build succeeded but no .pbw "
+                                                    "turned up in build/"}
+                    return
+                self.package_log.append(f"\n{pbw}\n")
+                self.package_result = {"ok": True, "path": pbw,
+                                       "size": os.path.getsize(pbw)}
+            finally:
+                self.package_busy = False
+
+        threading.Thread(target=work, daemon=True).start()
+        return True, None
+
+    def package_status(self):
+        return {"busy": self.package_busy, "log": "".join(self.package_log[-400:]),
+                "result": self.package_result}
+
+    def install_device(self, project, address):
+        """`pebble build` + `pebble install --phone <address>` -- straight onto a real
+        watch over the phone app's Developer Connection, the same way `start()` installs
+        into QEMU. Applies PNX_FORCE_SCREEN_LOCK the same way `start()` does: a watch on
+        a desk being tested has the same "no wrist, no ambient light, a real timeout
+        looks like a hang" problem the emulator does, so this is a testing build, not a
+        shipping one -- `package()` is that.
+        """
+        pebble = Toolchain.pebble_path()
+        if not pebble:
+            return False, "pebble-tool is not installed -- see Settings"
+        if not address:
+            return False, "no device address set -- see Settings"
+        with self._lock:
+            if self.install_busy:
+                return False, "an install is already running"
+            self.install_busy = True
+        self.install_log = []
+        self.install_result = None
+
+        def work():
+            try:
+                self.install_log.append(f"=== building for {address} ===\n")
+                result = project.build()
+                self.install_log.append(result["output"])
+                if not result["ok"]:
+                    self.install_log.append("\nasset build failed -- see above\n")
+                    self.install_result = {"ok": False, "error": "asset build failed"}
+                    return
+                build_env = ({"PNX_DEFINES": "PNX_FORCE_SCREEN_LOCK=1"}
+                             if project.force_screen_lock else None)
+                if not self._run([pebble, "build"], cwd=project.root, extra_env=build_env,
+                                 log=self.install_log):
+                    self.install_result = {"ok": False,
+                                           "error": "`pebble build` failed -- see output"}
+                    return
+                self.install_log.append(f"\n=== installing to {address} ===\n")
+                if not self._run([pebble, "install", "--phone", address],
+                                 cwd=project.root, log=self.install_log):
+                    self.install_result = {"ok": False,
+                                           "error": "`pebble install` failed -- see output "
+                                                    "(is the Pebble app's Developer "
+                                                    "Connection on and pointed at this "
+                                                    "address?)"}
+                    return
+                self.install_result = {"ok": True}
+            finally:
+                self.install_busy = False
+
+        threading.Thread(target=work, daemon=True).start()
+        return True, None
+
+    def install_status(self):
+        return {"busy": self.install_busy, "log": "".join(self.install_log[-400:]),
+                "result": self.install_result}
+
+    def start_logs(self, address):
+        """Attaches to `pebble logs --phone <address>`, buffering lines for
+        `logs_status()` to poll -- the log streaming docs/EDITOR.md's E3 flagged as
+        missing even for the emulator panel ("shows each step's own output as it runs,
+        not the app's ongoing `pebble logs`"). One stream at a time: attaching to a new
+        address detaches whatever was running first, the same "only one thing is ever
+        usefully in front" reasoning `stop()` uses for the emulator itself.
+        """
+        pebble = Toolchain.pebble_path()
+        if not pebble:
+            return False, "pebble-tool is not installed -- see Settings"
+        if not address:
+            return False, "no device address set -- see Settings"
+        self.stop_logs()
+        try:
+            proc = subprocess.Popen([pebble, "logs", "--phone", address],
+                                    env=self._pebble_env(), stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, bufsize=1)
+        except FileNotFoundError:
+            return False, f"{pebble} not found"
+        self._logs_proc = proc
+        self._logs_buf = []
+
+        def read():
+            for line in proc.stdout:
+                self._logs_buf.append(line)
+                del self._logs_buf[:-500]
+            # The loop ends when pebble-tool's own process exits -- detached, crashed,
+            # or the phone dropped the connection. logs_status()'s "attached" reflects
+            # that on the next poll; nothing here needs to notice it happening.
+
+        threading.Thread(target=read, daemon=True).start()
+        return True, None
+
+    def stop_logs(self):
+        if self._logs_proc is not None:
+            with contextlib.suppress(Exception):
+                self._logs_proc.terminate()
+            self._logs_proc = None
+
+    def logs_status(self):
+        alive = self._logs_proc is not None and self._logs_proc.poll() is None
+        return {"attached": alive, "lines": "".join(self._logs_buf[-500:])}
 
     def stop(self):
         """`pebble kill` stops every running emulator, not just one platform's --

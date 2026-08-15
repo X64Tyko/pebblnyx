@@ -9,9 +9,18 @@ class ProjectKeysMixin:
     def force_screen_lock(self):
         return bool(self.project.get("force_screen_lock", False))
 
+    @property
+    def device_address(self):
+        # host:port of a phone running the Pebble app's Developer Connection --
+        # Emulator.install_device()'s `pebble install --phone` target. A project
+        # setting, not a one-off form field, because the address is the same every
+        # session until the phone's own IP changes.
+        return self.project.get("device_address", "")
+
     def set_project(self, key, value):
         """Rewrite one key of [project], creating it if the table lacks it."""
-        if key not in ("name", "budget_bytes", "resources", "header", "force_screen_lock"):
+        if key not in ("name", "budget_bytes", "resources", "header", "force_screen_lock",
+                       "device_address"):
             raise ValueError(f"{key!r} is not a [project] key the editor sets")
 
         if key == "budget_bytes":
@@ -32,6 +41,12 @@ class ProjectKeysMixin:
             # orientation -- nothing about it belongs in a shipped binary).
             value = str(value).strip().lower() in ("1", "true", "yes", "on")
             line = f"force_screen_lock = {'true' if value else 'false'}"
+        elif key == "device_address":
+            # host:port of a phone's Developer Connection. Allowed empty, unlike the
+            # other string keys below -- "not configured yet" and "just cleared it" are
+            # both ordinary states, not errors.
+            value = str(value).strip()
+            line = f'device_address = "{value}"'
         else:
             value = str(value).strip()
             if not value:

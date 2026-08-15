@@ -1238,6 +1238,47 @@ $('#build').onclick=async()=>{
   // exists on disk. Repaint immediately rather than on the next keystroke.
   budget(true);
 };
+
+// A real, shippable .pbw -- what Build (above) never produced, since it only ever ran
+// the asset pipeline. Reuses the shared Output panel Build already writes into, and
+// un-hides it if it was collapsed: this result is worth seeing even if the panel was
+// tucked away for something else.
+let packagePoll=null;
+$('#package').onclick=async()=>{
+  const log=$('#log');
+  $('#package').disabled=true;
+  log.className=''; log.textContent='Packaging…';
+  const r=await post('/api/package',{});
+  if(!r.ok){
+    $('#package').disabled=false;
+    log.className='bad'; log.textContent=r.error||'Could not start packaging.';
+    return;
+  }
+  if(!packagePoll) packagePoll=setInterval(packageStatus,700);
+};
+
+async function packageStatus(){
+  let s;
+  try{ s=await (await fetch('/api/package/status')).json() }catch(_){ return }
+  const log=$('#log');
+  log.textContent=(s.log||'').trim()||'Packaging…';
+  if(s.busy) return;
+  clearInterval(packagePoll); packagePoll=null;
+  $('#package').disabled=false;
+  if($('#outpanel').classList.contains('hidden')){
+    $('#outpanel').classList.remove('hidden'); $('#outtoggle').textContent='Hide';
+  }
+  if(s.result&&s.result.ok){
+    log.className='ok';
+    log.textContent=`Packaged: ${s.result.path}  (${KB(s.result.size)})\n\n`
+      +'Install it on a real watch through the Pebble app\'s Developer Connection '
+      +'(see Device), or submit it to the Rebble appstore: https://apps.rebble.io/dev\n\n'
+      +log.textContent;
+  }else{
+    log.className='bad';
+    log.textContent=((s.result&&s.result.error)||'Packaging failed.')+'\n\n'+log.textContent;
+  }
+}
 // ------------------------------------------------------------------ import view
 let sheets=[];
 function showTab(which){
@@ -1256,6 +1297,9 @@ function showTab(which){
   $('#music').style.display=mus?'block':'none';
   $('#device').style.display=dev?'block':'none';
   if(mus) drawMusic();
+  // Leaving the tab with a pattern still playing would keep the audio going against a
+  // grid nobody can see any more -- stopped rather than left to run out on its own.
+  else if(typeof stopPatternPlayback==='function') stopPatternPlayback();
   if(scn) drawScenes();
   if(dlg) drawDialog();
   if(fnt) drawFontList();
@@ -1588,12 +1632,14 @@ function drawProject(){
   // absolute path here would be written back as one and stop building elsewhere.
   $('#prres').value=d.project_resources||'';
   $('#prhdr').value=d.project_header||'';
+  $('#prdevaddr').value=d.device_address||'';
 }
 
 $('#prsave').onclick=async()=>{
   const log=$('#prlog');
   const want=[['name',$('#prname').value],['budget_bytes',$('#prbudget').value],
-              ['resources',$('#prres').value],['header',$('#prhdr').value]];
+              ['resources',$('#prres').value],['header',$('#prhdr').value],
+              ['device_address',$('#prdevaddr').value]];
   for(const [key,value] of want){
     const r=await post('/api/project/set',{key,value});
     if(!r.ok){ log.className='bad'; log.textContent=`${key}: ${r.error}`; return }
@@ -2016,6 +2062,18 @@ function drawInstrument(){
   paintHint();
   live.push(paintHint);
   idrow.appendChild(hint);
+  // Previews THIS instrument's live, unsaved settings -- `plain`/`sy` are the exact
+  // objects every knob below writes into, not a copy fetched back from the manifest --
+  // so dragging a knob and pressing this hears the drag, not what was last saved.
+  const preview = document.createElement('button');
+  preview.textContent = '▶';
+  preview.title = 'preview this instrument (approximate -- see the Music tab\'s own note)';
+  preview.style.marginLeft = 'auto';
+  preview.onclick = () => {
+    if(typeof playInstrument==='function')
+      playInstrument(plain, sy, noteToMidi('C4'), 0.5);
+  };
+  idrow.appendChild(preview);
   box.appendChild(idrow);
 
   const chain = document.createElement('div');
@@ -2252,6 +2310,15 @@ function drawSamples(){
       + `</i></span>`
       + `<span class="dim" style="width:6.5rem;text-align:right">`
       + (secs === null ? 'not built' : `${secs.toFixed(2)} s of 1.5`) + '</span> ';
+    // The actual WAV, not a synthesised approximation -- unlike a note or a pattern,
+    // there is nothing here to approximate.
+    const play = document.createElement('button');
+    play.textContent = '▶';
+    play.title = 'play this sample';
+    play.onclick = () => {
+      new Audio('/api/sample/wav?name=' + encodeURIComponent(sm.name)).play();
+    };
+    row.appendChild(play);
     const del = document.createElement('button');
     del.textContent = 'Remove';
     del.onclick = async () => {
@@ -3093,6 +3160,7 @@ function emuEnter(){
   $('#emulock').checked=!!(S.data&&S.data.force_screen_lock);
   emuStatus();
   if(!emuPoll) emuPoll=setInterval(emuStatus,1500);
+  devAddrNote();
 }
 
 $('#emulock').onchange=async()=>{
@@ -3101,6 +3169,91 @@ $('#emulock').onchange=async()=>{
   if(!r.ok){ $('#emulock').checked=!checked; $('#emunote').textContent=r.error; return }
   $('#emunote').textContent=`Saved. ${checked?'On':'Off'} for the next Build & run.`;
 };
+
+// ----------------------------------------------------- real device: install and logs
+//
+// pebble-tool's own `--phone <address>` target, over the Pebble app's Developer
+// Connection -- the address itself lives on the Project Settings tab (a project
+// setting: the same phone every session, until its IP changes), read here rather than
+// asked for again per action.
+
+function devAddress(){ return (S.data&&S.data.device_address)||'' }
+
+function devAddrNote(){
+  const addr=devAddress();
+  $('#devaddrnote').textContent=addr
+    ? `Installing to ${addr}`
+    : 'No device address set -- add one on the Project Settings tab.';
+}
+
+let devInstallPoll=null;
+$('#devinstall').onclick=async()=>{
+  const addr=devAddress();
+  if(!addr){
+    $('#devnote').textContent='Set a device address on the Project Settings tab first.';
+    return;
+  }
+  $('#devinstall').disabled=true;
+  $('#devnote').textContent='Building…';
+  $('#devinstalllog').textContent='—';
+  const r=await post('/api/device/install',{});
+  if(!r.ok){
+    $('#devinstall').disabled=false;
+    $('#devnote').textContent=r.error||'Could not start.';
+    return;
+  }
+  if(!devInstallPoll) devInstallPoll=setInterval(devInstallStatus,700);
+};
+
+async function devInstallStatus(){
+  let s;
+  try{ s=await (await fetch('/api/device/install/status')).json() }catch(_){ return }
+  const el=$('#devinstalllog');
+  el.textContent=s.log||'—'; el.scrollTop=el.scrollHeight;
+  if(s.busy) return;
+  clearInterval(devInstallPoll); devInstallPoll=null;
+  $('#devinstall').disabled=false;
+  $('#devnote').textContent=(s.result&&s.result.ok) ? 'Installed.'
+    : ((s.result&&s.result.error)||'Install failed -- see output below.');
+}
+
+let devLogsPoll=null;
+$('#devlogstart').onclick=async()=>{
+  const addr=devAddress();
+  if(!addr){
+    $('#devlognote').textContent='Set a device address on the Project Settings tab first.';
+    return;
+  }
+  const r=await post('/api/device/logs/start',{});
+  if(!r.ok){ $('#devlognote').textContent=r.error||'Could not attach.'; return }
+  $('#devlogstart').style.display='none';
+  $('#devlogstop').style.display='';
+  $('#devlognote').textContent=`Attached to ${addr}`;
+  if(!devLogsPoll) devLogsPoll=setInterval(devLogsStatus,1000);
+  devLogsStatus();
+};
+$('#devlogstop').onclick=async()=>{
+  await post('/api/device/logs/stop',{});
+  if(devLogsPoll){ clearInterval(devLogsPoll); devLogsPoll=null }
+  $('#devlogstart').style.display='';
+  $('#devlogstop').style.display='none';
+  $('#devlognote').textContent='Detached.';
+};
+async function devLogsStatus(){
+  let s;
+  try{ s=await (await fetch('/api/device/logs/status')).json() }catch(_){ return }
+  const el=$('#devlogview');
+  el.textContent=s.lines||'—'; el.scrollTop=el.scrollHeight;
+  // The process can end on its own -- the phone dropped the connection, `pebble` quit
+  // -- not just from the Detach button, so this notices that on the next poll rather
+  // than showing "Attached" forever against a stream that has actually gone quiet.
+  if(!s.attached&&devLogsPoll){
+    clearInterval(devLogsPoll); devLogsPoll=null;
+    $('#devlogstart').style.display='';
+    $('#devlogstop').style.display='none';
+    $('#devlognote').textContent='Disconnected.';
+  }
+}
 
 // Leaving the tab, not stopping the emulator -- pebble-tool keeps it running (that is
 // the whole point of the state file), this just stops paying for screenshots and status
@@ -3322,6 +3475,51 @@ function argbCss(v){
   const r=((v>>4)&3)*85,g=((v>>2)&3)*85,b=(v&3)*85;
   return `rgb(${r},${g},${b})`;
 }
+
+// A multi-frame sprite could only be inspected here before -- the full stack in
+// pxcv1, one pose at a time -- never actually seen playing, which is the one thing a
+// walk cycle is drawn to look right doing. Reads PX.data live on every tick rather
+// than snapshotting it, so painting a frame while the loop runs shows up in the very
+// next pass instead of needing Stop/Play to notice the edit.
+let pxAnimTimer=null, pxAnimFrame=0;
+const PX_ANIM_FPS=12;   // a typical Pebble game-loop cadence, not the device's own limit
+
+function pxDrawAnimFrame(){
+  const scale=Math.max(4,PX.zoom), cv=$('#pxanim');
+  cv.width=PX.w*scale; cv.height=PX.h*scale;
+  const g=cv.getContext('2d'); g.imageSmoothingEnabled=false;
+  g.clearRect(0,0,cv.width,cv.height);
+  const rowOffset=(pxAnimFrame%Math.max(1,PX.frames))*PX.h;
+  for(let y=0;y<PX.h;y++)for(let x=0;x<PX.w;x++){
+    const v=PX.data[(rowOffset+y)*PX.w+x];
+    if(!v) continue;
+    g.fillStyle=argbCss(v);
+    g.fillRect(x*scale,y*scale,scale,scale);
+  }
+}
+
+function pxAnimStop(){
+  if(pxAnimTimer){ clearInterval(pxAnimTimer); pxAnimTimer=null }
+  $('#pxplay').textContent='▶ Play animation';
+  $('#pxanimwrap').style.display='none';
+}
+
+$('#pxplay').onclick=()=>{
+  if(pxAnimTimer){ pxAnimStop(); return }
+  if(PX.frames<=1){
+    $('#pxplaynote').textContent='Single frame -- nothing to animate. Set Frames above 1.';
+    return;
+  }
+  $('#pxplaynote').textContent='';
+  pxAnimFrame=0;
+  $('#pxanimwrap').style.display='';
+  $('#pxplay').textContent='■ Stop';
+  pxDrawAnimFrame();
+  pxAnimTimer=setInterval(()=>{
+    pxAnimFrame=(pxAnimFrame+1)%Math.max(1,PX.frames);
+    pxDrawAnimFrame();
+  },1000/PX_ANIM_FPS);
+};
 
 function pxFill(x,y,target){
   // Iterative flood fill: a recursive one blows the stack on a full 128x128 canvas.

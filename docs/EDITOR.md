@@ -112,8 +112,21 @@ this map work" that this panel was never meant to replace.
 quantisation to the 64-colour palette, preview dedup savings, choose frames. Currently
 the fiddliest manual work by a distance.
 
-**E5 — Package.** One button: validate, build, enforce the budget, produce the `.pbw`,
-report size breakdown against every cap.
+**E5 — Package. DONE, as two buttons rather than one.** Build (header) only ever ran the
+asset pipeline -- validated, enforced the budget, reported the size breakdown -- and
+never `pebble build`, so there was no way to get an actual `.pbw` without also
+installing into the emulator, and nothing reported where it landed. Package (header,
+next to Build) is that: asset build, then `pebble build`, then the `.pbw`'s path and
+size in the Output panel with a line on what to do with it (sideload via the Pebble
+app's Developer Connection, or submit to the Rebble appstore). Two buttons instead of
+one because Build's asset-only meaning is relied on elsewhere already (map validation,
+"Press Build" messages) and conflating it with a slower native compile would change
+what pressing it means.
+
+The Device tab's own gap from E3's own note ("no log streaming yet") is closed for real
+hardware, if not yet the emulator: Build & install (`pebble build` +
+`pebble install --phone`) and Attach logs (`pebble logs --phone`, polled) both target
+the phone address set on Project Settings.
 
 **E6 — Music editor.** A tracker view over the sequencer's data model. Only meaningful
 after M4 exists, and probably the largest single piece.

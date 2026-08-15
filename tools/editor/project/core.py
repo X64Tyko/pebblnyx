@@ -128,6 +128,7 @@ class CoreMixin:
             "orientation": pa.ORIENT_NAMES[self.orientation],
             "screen": [self.SCREEN_W, self.SCREEN_H],
             "force_screen_lock": self.force_screen_lock,
+            "device_address": self.device_address,
             "budget": self.project.get("budget_bytes", 262144),
             "used": sum(os.path.getsize(os.path.join(self.res, f))
                         for f in os.listdir(self.res) if f.endswith(".bin"))
