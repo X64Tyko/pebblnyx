@@ -808,6 +808,13 @@ class Emulator:
         # reason to make a concurrent basalt one wait, and nothing here runs more than
         # one platform's emulator meaningfully at once anyway (see stop()'s own note).
         self._frame_locks = {}
+        # platform -> {"proc": Popen, "lock": Lock} -- see _bridge() and
+        # tools/pnx_emu_bridge.py for why this exists at all: `pebble emu-button` on
+        # its own measured at ~670-680ms per press, consistently, because it is a
+        # fresh CLI subprocess (and a fresh 0.5s-before-first-attempt connection)
+        # every single call. This keeps one connection open per platform instead.
+        self._bridges = {}
+        self._bridges_lock = threading.Lock()
 
     @classmethod
     def _all_info(cls):
@@ -882,10 +889,120 @@ class Emulator:
             env["PATH"] = toolchain_bin + os.pathsep + env.get("PATH", "")
         return env
 
-    def _run(self, cmd, cwd=None):
-        self.log.append(f"\n$ {' '.join(cmd)}\n")
+    # ---------------------------------------------------------- button bridge
+    #
+    # See tools/pnx_emu_bridge.py's own docstring for the full story. Short version:
+    # `pebble emu-button` is a fresh CLI subprocess per call, and its connection setup
+    # sleeps 0.5s before even attempting to connect -- every time, since the CLI has
+    # no way to hold a connection open between commands. Measured consistently at
+    # ~670-680ms per press. This spawns ONE long-lived helper (under pebble-tool's own
+    # Python, since libpebble2 lives in that venv, not this editor's) that opens the
+    # same websocket once and reuses it for every press against a given platform.
+
+    @staticmethod
+    def _bridge_interpreter():
+        """The Python interpreter pebble-tool itself runs under.
+
+        Read off `pebble`'s own shebang line rather than guessing a venv layout --
+        pip, pipx, uv and a plain venv each produce a different one, and the shebang
+        is the one thing every POSIX install already gets right, for the same reason
+        `pebble` itself runs at all. Windows console-script .exe wrappers have no
+        shebang to read; their interpreter is normally right next to them in the same
+        Scripts/bin directory, which is the fallback below.
+        """
+        pebble = Toolchain.pebble_path()
+        if not pebble:
+            return None
         try:
-            p = subprocess.Popen(cmd, cwd=cwd, env=self._pebble_env(), stdout=subprocess.PIPE,
+            with open(pebble, errors="ignore") as f:
+                first = f.readline()
+        except OSError:
+            first = ""
+        if first.startswith("#!"):
+            return first[2:].strip()
+        for name in ("python.exe", "python3.exe", "python", "python3"):
+            candidate = os.path.join(os.path.dirname(pebble), name)
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
+    def _spawn_bridge(self, platform):
+        interp = self._bridge_interpreter()
+        info = self.info(platform)
+        port = info and info.get("pypkjs", {}).get("port")
+        if not interp or not port:
+            return None
+        script = os.path.join(TOOLS, "pnx_emu_bridge.py")
+        try:
+            proc = subprocess.Popen([interp, script, "--port", str(port)],
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, text=True, bufsize=1)
+            ready = proc.stdout.readline()
+            if ready.strip() != "ready":
+                proc.kill()
+                return None
+        except OSError:
+            return None
+        return proc
+
+    def _bridge(self, platform):
+        """A live bridge for `platform`, spawning one if needed. None if it could not
+        be started for any reason -- callers fall back to the slower CLI path rather
+        than failing outright; a slow button is better than no button."""
+        with self._bridges_lock:
+            entry = self._bridges.get(platform)
+            if entry and entry["proc"].poll() is None:
+                return entry
+            proc = self._spawn_bridge(platform)
+            if not proc:
+                self._bridges.pop(platform, None)
+                return None
+            entry = {"proc": proc, "lock": threading.Lock()}
+            self._bridges[platform] = entry
+            return entry
+
+    def _bridge_send(self, platform, line):
+        """One command exchange with `platform`'s bridge, or None if it is
+        unavailable -- distinct from "ok"/"err ...", which mean the bridge itself
+        answered. None is the signal for button() to fall back to the CLI.
+        """
+        entry = self._bridge(platform)
+        if not entry:
+            return None
+        with entry["lock"]:
+            try:
+                entry["proc"].stdin.write(line + "\n")
+                entry["proc"].stdin.flush()
+                resp = entry["proc"].stdout.readline()
+            except (OSError, ValueError):
+                resp = ""
+        if not resp:
+            # The bridge died mid-exchange -- drop it so the NEXT call respawns one
+            # against whatever is actually running now, rather than writing into a
+            # closed pipe forever.
+            with self._bridges_lock:
+                if self._bridges.get(platform) is entry:
+                    del self._bridges[platform]
+            return None
+        return resp.strip()
+
+    def _kill_bridge(self, platform):
+        with self._bridges_lock:
+            entry = self._bridges.pop(platform, None)
+        if not entry:
+            return
+        with contextlib.suppress(Exception):
+            entry["proc"].stdin.close()
+        with contextlib.suppress(Exception):
+            entry["proc"].terminate()
+
+    def _run(self, cmd, cwd=None, extra_env=None):
+        self.log.append(f"\n$ {' '.join(cmd)}\n")
+        env = self._pebble_env()
+        if extra_env:
+            env.update(extra_env)
+        try:
+            p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, text=True, bufsize=1)
         except FileNotFoundError:
             self.log.append(f"{cmd[0]} not found -- install the Pebble SDK in Settings first\n")
@@ -918,6 +1035,11 @@ class Emulator:
 
         def work():
             try:
+                # A rebuild can respawn pypkjs on a different port (a version change,
+                # or a VNC-state mismatch elsewhere killing and restarting QEMU); a
+                # bridge holding the OLD port would fail every press until it noticed
+                # and respawned itself anyway, so just start that over now.
+                self._kill_bridge(platform)
                 self.log.append(f"\n=== {platform}: baking resources for "
                                 f"{pa.ORIENT_NAMES[project.orientation]} ===\n")
                 result = project.build()
@@ -925,7 +1047,14 @@ class Emulator:
                 if not result["ok"]:
                     self.log.append("\nasset build failed -- see above\n")
                     return
-                if not self._run([pebble, "build"], cwd=project.root):
+                # PNX_DEFINES is pnx_config.h's own escape hatch (any example's
+                # wscript reads it from the environment) -- not a wscript edit, so a
+                # project that never opted into PNX_FORCE_SCREEN_LOCK in its own
+                # source stays that way; this only ever affects the emulator's build,
+                # never a shipped one, because nothing outside this call sets it.
+                build_env = ({"PNX_DEFINES": "PNX_FORCE_SCREEN_LOCK=1"}
+                             if project.force_screen_lock else None)
+                if not self._run([pebble, "build"], cwd=project.root, extra_env=build_env):
                     self.log.append("\n`pebble build` failed -- see above\n")
                     return
                 # --vnc, even though nothing here speaks VNC: it is the flag that keeps
@@ -947,8 +1076,15 @@ class Emulator:
         """`pebble kill` stops every running emulator, not just one platform's --
         pebble-tool has no narrower command, and the fixed VNC/websockify ports it would
         allocate under `--vnc` (docs/EDITOR.md) mean only one is usefully in front at a
-        time anyway.
+        time anyway. Every bridge goes with it: each one holds a connection into an
+        emulator this is about to kill, and a bridge whose emulator is gone is not
+        "slow", it is dead weight the next button press would just have to notice and
+        replace anyway.
         """
+        with self._bridges_lock:
+            platforms = list(self._bridges)
+        for p in platforms:
+            self._kill_bridge(p)
         pebble = Toolchain.pebble_path()
         if not pebble:
             return False
@@ -966,7 +1102,6 @@ class Emulator:
         rather than one name at a time. `release` takes no buttons; it means "nothing is
         held any more", the same state a real hand lifted off every button reaches.
         """
-        pebble = Toolchain.pebble_path()
         if action not in ("push", "release"):
             return False
         if action == "push" and (not buttons
@@ -977,7 +1112,19 @@ class Emulator:
         # alive for `platform` the command can still exit 0 (it spawns a fresh QEMU
         # rather than refusing), which would silently boot an emulator no button on
         # this panel ever asked for.
-        if not pebble or self.info(platform) is None:
+        if self.info(platform) is None:
+            return False
+
+        line = "push " + " ".join(buttons) if action == "push" else "release"
+        resp = self._bridge_send(platform, line)
+        if resp is not None:
+            return resp == "ok"
+
+        # Bridge unavailable for some reason (interpreter not found, spawn failed,
+        # died mid-session) -- fall back to the CLI. Slow (~670ms/call, see
+        # pnx_emu_bridge.py), but a slow button beats a missing one.
+        pebble = Toolchain.pebble_path()
+        if not pebble:
             return False
         # --vnc here too, and not just in start(): pebble-tool's own connection logic
         # (ManagedEmulatorTransport._find_ports) treats a VNC-state mismatch against
@@ -1379,6 +1526,7 @@ class Project:
                             if a.get("name")],
             "orientation": pa.ORIENT_NAMES[self.orientation],
             "screen": [self.SCREEN_W, self.SCREEN_H],
+            "force_screen_lock": self.force_screen_lock,
             "budget": self.project.get("budget_bytes", 262144),
             "used": sum(os.path.getsize(os.path.join(self.res, f))
                         for f in os.listdir(self.res) if f.endswith(".bin"))
@@ -2653,9 +2801,13 @@ class Project:
     # appstore budget the whole status bar is measured against could not be changed from
     # the thing doing the measuring.
 
+    @property
+    def force_screen_lock(self):
+        return bool(self.project.get("force_screen_lock", False))
+
     def set_project(self, key, value):
         """Rewrite one key of [project], creating it if the table lacks it."""
-        if key not in ("name", "budget_bytes", "resources", "header"):
+        if key not in ("name", "budget_bytes", "resources", "header", "force_screen_lock"):
             raise ValueError(f"{key!r} is not a [project] key the editor sets")
 
         if key == "budget_bytes":
@@ -2667,6 +2819,15 @@ class Project:
                 raise ValueError("the budget must be between 1 KB and the device's 1 MB "
                                  "ceiling")
             line = f"budget_bytes = {value}"
+        elif key == "force_screen_lock":
+            # A TOML bool, not a quoted string -- read back by Emulator.start() as
+            # self.project.get("force_screen_lock", False), same as every other
+            # [project] key, and turned into PNX_DEFINES=PNX_FORCE_SCREEN_LOCK=1 for
+            # the emulator's own `pebble build` only (pnx_config.h's own comment says
+            # why this is a build knob, not a manifest content decision like
+            # orientation -- nothing about it belongs in a shipped binary).
+            value = str(value).strip().lower() in ("1", "true", "yes", "on")
+            line = f"force_screen_lock = {'true' if value else 'false'}"
         else:
             value = str(value).strip()
             if not value:
@@ -6569,6 +6730,16 @@ button:disabled{opacity:.45;cursor:not-allowed}
           <button id="emustart" class="primary">Build &amp; run</button>
           <button id="emustop">Stop</button>
         </div>
+        <label class="check" style="margin-top:.5rem">
+          <input id="emulock" type="checkbox">
+          Force backlight + BACK-lock on (PNX_FORCE_SCREEN_LOCK)</label>
+        <small>A build knob, not a project setting -- <code>pnx_config.h</code>'s own
+          screen-lock, engaged from startup instead of waiting for game code to call
+          it. Off the wrist there is no ambient light and no wrist to glance at, so a
+          real timeout just looks like a hang; this is saved into the manifest (so it
+          survives a reload) but only ever reaches a build through THIS panel's own
+          <code>pebble build</code> call, never a shipped one. Takes effect on the next
+          Build &amp; run / Rebuild.</small>
         <small id="emunote">—</small>
       </div>
 
@@ -10087,9 +10258,17 @@ let emuTabActive=false;
 function emuEnter(){
   emuTabActive=true;
   emuPlatform();
+  $('#emulock').checked=!!(S.data&&S.data.force_screen_lock);
   emuStatus();
   if(!emuPoll) emuPoll=setInterval(emuStatus,1500);
 }
+
+$('#emulock').onchange=async()=>{
+  const checked=$('#emulock').checked;
+  const r=await post('/api/project/set',{key:'force_screen_lock',value:checked});
+  if(!r.ok){ $('#emulock').checked=!checked; $('#emunote').textContent=r.error; return }
+  $('#emunote').textContent=`Saved. ${checked?'On':'Off'} for the next Build & run.`;
+};
 
 // Leaving the tab, not stopping the emulator -- pebble-tool keeps it running (that is
 // the whole point of the state file), this just stops paying for screenshots and status

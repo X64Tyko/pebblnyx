@@ -129,6 +129,17 @@
 #define PNX_LOG_LINE_LEN 96
 #endif
 
+// Engages pnx_platform_set_screen_lock(true) at startup -- backlight held on, BACK
+// stops dismissing the app -- without game code ever having to call it. A build knob,
+// not a player-facing feature: a watch worn on the wrist wants the ordinary timeout,
+// but a QEMU emulator with no wrist and no ambient light to read the screen by often
+// does not, and being unable to see whether a game is running or merely dark reads as
+// a hang either way. Off by default; the editor's Device panel is what turns this on,
+// via PNX_DEFINES=PNX_FORCE_SCREEN_LOCK=1 (see Emulator.start, tools/pnx_editor.py).
+#ifndef PNX_FORCE_SCREEN_LOCK
+#define PNX_FORCE_SCREEN_LOCK 0
+#endif
+
 // Palette table. Slots are claimed by atlas loads and by explicit variant loads, and
 // all are released together when a scene resets the arena. Bounded deliberately: a
 // framework cannot assume how much content a project has, and an unbounded table would

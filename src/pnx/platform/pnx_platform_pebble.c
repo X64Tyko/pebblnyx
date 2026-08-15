@@ -491,6 +491,12 @@ void pnx_platform_run(PnxFrameFn frame, void* ctx)
 	}
 	app_focus_service_subscribe(will_focus);
 
+#if PNX_FORCE_SCREEN_LOCK
+	// See pnx_config.h's own comment: a build knob for testing off the wrist, not
+	// something a game turns on for players.
+	pnx_platform_set_screen_lock(true);
+#endif
+
 	window_stack_push(s_window, true);
 	app_event_loop();
 
