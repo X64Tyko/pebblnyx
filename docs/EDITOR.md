@@ -429,13 +429,35 @@ behaviour in measured ways.
   stops what the other started. There was never a second copy of this state to keep in
   sync.
 
-- **How much a QEMU run can actually be trusted for anything measured.** Partly
-  answered: a real `pebble build` / `install --emulator basalt` / `screendump` round
-  trip against `examples/stressbench` booted, installed and rendered its actual title
-  screen through this panel end to end. What surfaced along the way was not a QEMU
-  trust question but a PATH one -- see "installed but not found" below. Frame timing,
-  input latency and anything else that would make a QEMU number stand in for a device
-  measurement remain unchecked.
+- **How much a QEMU run can actually be trusted for anything measured.** Answered, and
+  the answer is "logic yes, performance no." Functional correctness checks out in
+  full: a real `pebble build` / `install --emulator` / `screendump` round trip against
+  both `examples/stressbench` and `resonant` boots, installs, navigates and renders
+  correctly, buttons work, and `PNX_FORCE_SCREEN_LOCK` compiles and behaves as coded.
+
+  Frame rate does not check out. `resonant`'s own in-app FPS overlay read a stable
+  **8.1fps on `emery`** over 10+ seconds -- not editor polling, a number the firmware
+  itself computed -- and `stressbench`'s diagnostics frame counter agreed independently
+  at **~10.3fps** (93 frames over 9 wall-clock seconds), against pnx's own measured
+  real-hardware ceiling of ~26.8fps (`docs/MEASUREMENTS.md`). The SAME `stressbench`
+  build installed on `basalt` (cortex-m4, QEMU's mature board) visibly covered far more
+  of the map in the same 9 seconds -- qualitatively, dramatically faster than `emery`
+  (cortex-m33) under identical content and identical host hardware. That points at
+  QEMU's own cortex-m33 emulation being the bottleneck, not this editor's plumbing
+  (already the case that every other fix in this section addressed): cortex-m33 support
+  in upstream QEMU is far newer than the cortex-m3/m4 TCG path basalt/aplite ride on,
+  and Core Devices' own public work on a browser build of this same firmware
+  independently documents "slow TCI execution" as a real, acknowledged constraint (a
+  1-second minimum key-hold was added to compensate) -- a different QEMU backend
+  (TCI vs TCG) but the same underlying fact, a new board target that has not had
+  emulation speed as a design goal yet. `coredevices/PebbleOS#1542` (open, unrelated to
+  speed -- gabbro's own QEMU screen has missing pixels) is separate evidence the newer
+  boards' QEMU models are not considered fully settled even by their own maintainers.
+
+  So: this panel is real signal for "does the app do the right thing", not for "does it
+  hit its frame budget" -- that claim still needs real `emery` hardware, the same way
+  M0's latency numbers did (`docs/ROADMAP.md`). Nothing here should be read as a
+  regression in the app being tested if it looks slow specifically on `emery`.
 
 ## Installed but not found: `qemu-pebble` and PATH
 
