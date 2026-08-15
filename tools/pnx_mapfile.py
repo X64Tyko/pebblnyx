@@ -58,19 +58,25 @@ FORMAT (all little-endian)
     str_count   2
     strings         str_count * (u8 length, UTF-8 bytes)
     tiles           tile_count * (u16 atlas_str, u16 index, u16 role_str, u8 flip,
-                                  u8 flags)
+                                  u8 flags, u8 extended)
     warps           warp_count * (u8 at_x, u8 at_y, u16 dest_str, u8 to_x, u8 to_y,
                                   u8 gated)
     cells           w * h * u16, row-major, each an index into the tile table
+
+FORMAT_VERSION 2 added `extended` to the tile table (a placement-authored u8 tag, see
+MAP_EXTENDED in pnx_assets.py) -- a real byte, not a spare bit the way `rotate` was, so it
+could not ride in unclaimed space the way rotate did and the version had to bump. A v1
+file is refused rather than read with extended assumed 0, matching every other version
+mismatch this module refuses (see `read`'s own comment).
 """
 
 import struct
 
 MAGIC = b"PNXM"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 
 _HEADER = struct.Struct("<4sBBBBBBHHH")
-_TILE = struct.Struct("<HHHBB")
+_TILE = struct.Struct("<HHHBBB")
 NO_ROLE = 0xFFFF
 _WARP = struct.Struct("<BBHBBB")
 
@@ -83,10 +89,18 @@ class MapFileError(Exception):
 def write(path, w, h, start, tiles, cells, warps=()):
     """Write a map source file.
 
-    `tiles` is a list of dicts: {atlas, index, flip, flags}. `flip` is a string holding
-    any of "xy"; `flags` is the byte the pipeline's flag names resolve to. `cells` is a
-    flat list of w*h indices into `tiles`. `warps` is a list of
-    {at: [x, y], to: [name, x, y], gated: bool}.
+    `tiles` is a list of dicts: {atlas, index, flip, rotate, flags, extended}. `flip` is
+    a string holding any of "xy"; `rotate` is a bool (transpose -- see MAP_ROTATE in
+    pnx_assets.py for why one bit, not an angle); `flags` is the byte the pipeline's
+    flag names resolve to; `extended` is a u8 tag (see MAP_EXTENDED in pnx_assets.py),
+    0 if omitted. `cells` is a flat list of w*h indices into `tiles`. `warps` is a list
+    of {at: [x, y], to: [name, x, y], gated: bool}.
+
+    rotate rides in the same u8 as flip (bit 2, 0x04) rather than widening the row --
+    old files have that bit unset, which correctly decodes as rotate=False, so that one
+    was additive and did not bump FORMAT_VERSION. `extended` could not do the same trick
+    -- it is a value, not a flag, so it needed a whole byte of its own and FORMAT_VERSION
+    is 2 because of it.
     """
     if not (1 <= w <= 255 and 1 <= h <= 255):
         raise MapFileError(f"{w}x{h} is outside the 1..255 the format stores per axis")
@@ -116,6 +130,8 @@ def write(path, w, h, start, tiles, cells, warps=()):
             if axis not in "xy":
                 raise MapFileError(f"flip must be 'x', 'y' or both, not {axis!r}")
             flip |= 1 if axis == "x" else 2
+        if t.get("rotate", False):
+            flip |= 4
 
         # An entry names either a raw index into the atlas or a role the atlas defines.
         # A string in `index` is the role spelling, which is what from_rows produces from
@@ -128,8 +144,11 @@ def write(path, w, h, start, tiles, cells, warps=()):
             role, idx = NO_ROLE, int(raw)
             if not 0 <= idx <= 0xFFFF:
                 raise MapFileError(f"tile index {idx} does not fit a u16")
+        ext = int(t.get("extended", 0))
+        if not 0 <= ext <= 0xFF:
+            raise MapFileError(f"extended value {ext} does not fit a u8")
         tile_rows.append((intern(t["atlas"]), idx, role, flip,
-                          int(t.get("flags", 0)) & 0xFF))
+                          int(t.get("flags", 0)) & 0xFF, ext))
 
     warp_rows = []
     for wp in warps:
@@ -195,12 +214,14 @@ def loads(data, where="<bytes>"):
 
     tiles = []
     for _ in range(tile_count):
-        astr, idx, role, flip, flags = _TILE.unpack_from(data, at)
+        astr, idx, role, flip, flags, extended = _TILE.unpack_from(data, at)
         at += _TILE.size
         tiles.append({"atlas": name(astr),
                       "index": name(role) if role != NO_ROLE else idx,
                       "flip": ("x" if flip & 1 else "") + ("y" if flip & 2 else ""),
-                      "flags": flags})
+                      "rotate": bool(flip & 4),
+                      "flags": flags,
+                      "extended": extended})
 
     warps = []
     for _ in range(warp_count):

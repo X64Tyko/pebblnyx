@@ -410,9 +410,10 @@ void test_assets(void)
 	A_CHECK(pnx_map_solid(&ship, 0, 0));
 	A_CHECK(!pnx_map_solid(&ship, 10, 3));
 
-	// The door is an override: it uses the same tile as ordinary scenery but carries a
-	// warp flag. That is the case the sparse-override format exists to represent, so it
-	// is worth pinning that the two really do share a tile and differ in flags.
+	// The door draws the SAME art tile as ordinary scenery and differs only in the cell's
+	// own warp bit -- collision/warp are placement properties now (flip/rotate/warp all
+	// live in the cell's u16), not tile ones, so two placements of one tile can disagree
+	// about warp the same way they already could about flip.
 	A_CHECK_EQ(pnx_map_tile(&outdoor, 15, 9), pnx_map_tile(&outdoor, 7, 12));
 	A_CHECK(pnx_map_flags(&outdoor, 15, 9) & PNX_TILE_WARP);
 	A_CHECK(!(pnx_map_flags(&outdoor, 7, 12) & PNX_TILE_WARP));

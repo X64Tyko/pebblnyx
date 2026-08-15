@@ -58,9 +58,12 @@ static void draw_worldtile(const PnxMap* map, const PnxWorldTile* wt, PnxTarget*
 			// not alternate layout cell by cell in any real content.
 			if (pnx_atlas_is_metatiled(atlas))
 			{
-				// Flips are not applied to metatiles: mirroring a composed tile means mirroring
-				// the quadrant ORDER as well as each quadrant, and the pipeline does not emit
-				// flips for metatiled atlases for that reason.
+				// Flip/rotate are not applied to metatiles: mirroring or transposing a composed
+				// tile means reordering the quadrants as well as transforming each one, and the
+				// pipeline refuses BOTH on a metatiled atlas for that reason (check_flip_metatiles,
+				// tools/pnx_assets.py -- it names the check after flip, but folds rotate into the
+				// same "flipped" set it refuses on). So a metatiled atlas never carries either bit
+				// on a real cell, and this path can stay ignorant of both.
 				//
 				// The _with form, so a metatiled atlas honours the map's palette remap too. The
 				// plain one looks the palette up itself and would quietly ignore it -- which was
@@ -71,7 +74,8 @@ static void draw_worldtile(const PnxMap* map, const PnxWorldTile* wt, PnxTarget*
 			else
 			{
 				const uint8_t flip = (uint8_t)(((entry & PNX_MAP_FLIP_X) ? 1u : 0u) |
-											   ((entry & PNX_MAP_FLIP_Y) ? 2u : 0u));
+											   ((entry & PNX_MAP_FLIP_Y) ? 2u : 0u) |
+											   ((entry & PNX_MAP_ROTATE) ? PNX_FLIP_ROTATE : 0u));
 				pnx_blit_4bpp(target, pnx_atlas_tile(atlas, (uint8_t)local), pal, sx, sy,
 							  (int16_t)T, (int16_t)T, flip);
 			}

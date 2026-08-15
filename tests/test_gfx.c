@@ -125,6 +125,78 @@ void test_gfx(void)
 	G_CHECK_EQ(pixel_at(t, 10, 0), 0x40);
 	G_CHECK_EQ(pixel_at(t, 10, 1), 0x40);
 
+	// --- rotate: a single off-diagonal marker pixel, not a symmetric quadrant.
+	//
+	// A whole quadrant filled in (like HALF/topbar above) is the wrong shape to test
+	// this with: transpose moves a solid corner block to the SAME place a specific
+	// flip combination would, so a test built on one could pass against a blitter
+	// that silently treats PNX_FLIP_ROTATE as a plain flip and never transposes
+	// anything. One pixel off the main diagonal -- source (col 1, row 0) of a 4x4 --
+	// lands at a DIFFERENT destination cell for all eight {rotate, flip_x, flip_y}
+	// combinations, which is what actually pins the transpose down.
+	//
+	// Source: col=1,row=0 opaque, everything else transparent.
+	static const uint8_t mark[8] = {
+		0x01,
+		0x00,
+		0x00,
+		0x00,
+		0x00,
+		0x00,
+		0x00,
+		0x00,
+	};
+
+	// Plain rotate (no flip): dest(i,j) = source(sx=j, sy=i) -- solved for
+	// sx=1,sy=0 gives i=0,j=1.
+	pnx_gfx_clear(t, 0x40);
+	pnx_blit_4bpp(t, mark, &pal, 10, 10, 4, 4, PNX_FLIP_ROTATE);
+	G_CHECK_EQ(pixel_at(t, 10 + 0, 10 + 1), 0xFF);
+	G_CHECK_EQ(pixel_at(t, 10 + 1, 10 + 0), 0x40); // where a plain (non-rotated) blit
+												   // would have put it -- ruling out
+												   // PNX_FLIP_ROTATE being ignored
+	{
+		int hits = 0;
+		for (int16_t j = 0; j < 4; j++)
+			for (int16_t i = 0; i < 4; i++)
+				if (pixel_at(t, (int16_t)(10 + i), (int16_t)(10 + j)) == 0xFF)
+					hits++;
+		G_CHECK_EQ(hits, 1); // exactly the one marker pixel, nothing else touched
+	}
+
+	// rotate + flip_x: dest(i,j) = source(sx = 3-j, sy = i) -- solved gives i=0,j=2.
+	pnx_gfx_clear(t, 0x40);
+	pnx_blit_4bpp(t, mark, &pal, 10, 10, 4, 4, PNX_FLIP_ROTATE | PNX_FLIP_X);
+	G_CHECK_EQ(pixel_at(t, 10 + 0, 10 + 2), 0xFF);
+
+	// rotate + flip_y: dest(i,j) = source(sx = j, sy = 3-i) -- solved gives i=3,j=1.
+	pnx_gfx_clear(t, 0x40);
+	pnx_blit_4bpp(t, mark, &pal, 10, 10, 4, 4, PNX_FLIP_ROTATE | PNX_FLIP_Y);
+	G_CHECK_EQ(pixel_at(t, 10 + 3, 10 + 1), 0xFF);
+
+	// rotate + flip_x + flip_y (the anti-diagonal transpose): dest(i,j) =
+	// source(sx = 3-j, sy = 3-i) -- solved gives i=3,j=2.
+	pnx_gfx_clear(t, 0x40);
+	pnx_blit_4bpp(t, mark, &pal, 10, 10, 4, 4,
+				  PNX_FLIP_ROTATE | PNX_FLIP_X | PNX_FLIP_Y);
+	G_CHECK_EQ(pixel_at(t, 10 + 3, 10 + 2), 0xFF);
+
+	// Clipped at the left edge: the plain-rotate case above puts the marker at local
+	// column 0, so drawing at x = -1 pushes exactly that column off-screen (columns 1-3
+	// land at screen x 0-2, still visible) -- nothing on screen should be opaque, which
+	// rules out a rotate path that ignores the horizontal clip the way a naive per-pixel
+	// loop could.
+	pnx_gfx_clear(t, 0x40);
+	pnx_blit_4bpp(t, mark, &pal, -1, 10, 4, 4, PNX_FLIP_ROTATE);
+	{
+		int hits = 0;
+		for (int16_t j = 0; j < 4; j++)
+			for (int16_t i = 0; i < 3; i++) // screen x 0..2: columns 1-3 of the tile
+				if (pixel_at(t, i, (int16_t)(10 + j)) == 0xFF)
+					hits++;
+		G_CHECK_EQ(hits, 0);
+	}
+
 	// --- clipping off every edge must draw nothing outside the target and not crash
 	pnx_gfx_clear(t, 0x40);
 	pnx_blit_4bpp(t, HALF, &pal, -2, -2, 4, 4, false);

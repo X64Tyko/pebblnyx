@@ -40,27 +40,67 @@ except ImportError:
 TRANSPARENT = 0x00
 OPAQUE = 0xC0
 
-# Tile flags, mirrored in pnx_assets.h. Keep the two in step.
-FLAG_SOLID = 0x01
-FLAG_WARP = 0x02
+# Collision is a TILE property, not a cell one -- a wall's shape does not change
+# depending on where it is placed, so it lives once per art tile (PnxAtlas.tile_flags,
+# repurposed -- see finish_atlas) rather than being carried, or overridden, per cell.
+# SCALED and COMPLEX carry their actual shape (an inset rect / a 1bpp mask) in their own
+# sparse per-tile-id tables, keyed the same way -- too big for one byte each.
+COLLISION_NONE = 0
+COLLISION_SOLID = 1
+COLLISION_SCALED = 2
+COLLISION_COMPLEX = 3
+COLLISION_NAMES = {"solid": COLLISION_SOLID, "scaled": COLLISION_SCALED,
+                   "complex": COLLISION_COMPLEX}
 
-FLAG_NAMES = {"solid": FLAG_SOLID, "warp": FLAG_WARP}
+# Pre-shift warp bit in the legend's flag byte -- unrelated to collision now, so back to
+# owning the low bit on its own rather than sharing with a collision mode.
+TILE_WARP = 0x01
 
-# The rest of the flag byte, for names the manifest invents. The engine gives the whole
-# byte back through pnx_map_flags, so a project's own "water" or "ledge" needs no engine
-# change -- only a name, a bit, and a #define for the game code to test against.
-FLAG_USER_BITS = (0x04, 0x08, 0x10, 0x20, 0x40, 0x80)
-
-# Map cell bits, mirrored from PNX_MAP_* in pnx_assets.h. Ten bits of map-global tile id,
-# then the two flip bits the blitter honours.
+# Map cell bits, mirrored from PNX_MAP_* in pnx_assets.h.
+#
+# Was 10 bits of tile id + 2 flip bits + 4 unused, historically commented "reserved for
+# a per-cell palette" -- never built, and tile_palette already covers per-tile
+# recolouring. Collision moving to being a tile property (above) frees the 2 bits an
+# earlier pass spent on it here; ROTATE spends only 1 of them back, so there is 1 bit
+# still genuinely free after this.
+#
+# ROTATE is transpose, not an angle -- a single bit, not two. {rotate, flip_x, flip_y} is
+# 3 independent bits spanning all 8 symmetries of a square exactly (identity, the two
+# axis flips, 180 degrees, the two diagonal flips, and both 90-degree rotations, which
+# fall out of rotate combined with one flip) -- a rotation-angle encoding would have
+# needed a 4th bit to express the same 8 states without redundancy against flip.
 MAP_INDEX_MASK = 0x03FF
 MAP_FLIP_X = 0x0400
 MAP_FLIP_Y = 0x0800
+MAP_ROTATE = 0x1000
+MAP_WARP = 0x2000
+# A placement-authored u8 tag, same idea as warp: declared per legend char / .pnxmap tile
+# table entry ("extended = N"), folded into the bit here, the actual value living in the
+# WorldTile's own sparse table (slice_worldtiles) since a u16 cell has no room to carry it
+# inline. 0 means "no tag" and never sets the bit, so an ordinary map that never uses this
+# pays nothing -- ext_count is 0 in every WorldTile it slices. What a nonzero value MEANS
+# is entirely the game's business; this only gets it from manifest to pnx_map_extended.
+MAP_EXTENDED = 0x4000
+# 0x8000 still free
+
+
+def fold_flag_into_entry(entry, flag):
+    """The pre-shift warp bit -> its home in the cell's own u16.
+
+    Called once per cell at the same point id/flip are already assembled into `entry`,
+    so warp lives in the one place from here on -- `flags[i]` (the pre-shift array)
+    still gets built alongside for the Python-side reachability checks, but never
+    reaches a compiled blob after this.
+    """
+    return entry | (MAP_WARP if flag & TILE_WARP else 0)
 
 # Blob format versions. A mismatch between a stale .bin and a newer runtime is exactly
 # the kind of failure that presents as garbage pixels rather than an error, so every
 # blob is tagged and the runtime checks.
-BLOB_VERSION = 10  # v10: palettes are colour-only again -- no per-entry 1-bit ink mask
+BLOB_VERSION = 12  # v12: atlas blobs carry baked SCALED rects / COMPLEX masks (finish_atlas);
+                   # WorldTile payloads carry a sparse EXTENDED table (slice_worldtiles).
+                   # v11: collision/warp moved into the cell word; the old tile_flags[]-by-id
+                   # override bytes were dropped (retired, not reused for either of the above).
 MAGIC_ATLAS = b"PA"
 MAGIC_SPRITE = b"PS"
 MAGIC_MAP = b"PM"
@@ -470,6 +510,16 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
     rx, ry, rw, rh = spec["region"]
     max_tiles = int(spec.get("max_tiles", 255))
 
+    # Pixel offset: where the tile GRID starts, separate from `region`'s own tile-unit
+    # origin. A sheet whose art does not begin flush with the top-left corner -- a
+    # margin, a shared border strip, a sprite sheet with padding baked in by whatever
+    # drew it -- has no tile-aligned pixel to call (0,0), so `region` alone could never
+    # name its first cell. `offset` is that missing degree of freedom: it moves the WHOLE
+    # grid by up to T-1 px before `region` starts counting whole tiles from it.
+    ox, oy = (int(v) for v in spec.get("offset", (0, 0)))
+    if ox < 0 or oy < 0:
+        raise BuildError(f"atlas {name!r}: offset {[ox, oy]} must not be negative")
+
     # Tiles the author dropped in the editor, as indices into the REGION read left to
     # right, top to bottom -- which is the order the editor lays them out, so the number
     # in the manifest is the cell that was clicked.
@@ -497,10 +547,11 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
             excluded.add((rx + i % rw, ry + i // rw))
 
     sheet_w, sheet_h = im.size
-    if (rx + rw) * T > sheet_w or (ry + rh) * T > sheet_h:
+    if ox + (rx + rw) * T > sheet_w or oy + (ry + rh) * T > sheet_h:
         raise BuildError(
-            f"atlas {name!r}: region {rx},{ry} {rw}x{rh} tiles of {T}px runs past the "
-            f"sheet ({sheet_w}x{sheet_h}px). Region is in TILE units, not pixels.")
+            f"atlas {name!r}: region {rx},{ry} {rw}x{rh} tiles of {T}px, offset by "
+            f"{[ox, oy]}px, runs past the sheet ({sheet_w}x{sheet_h}px). Region is in "
+            f"TILE units, offset is in PIXELS -- both count from the sheet's top-left.")
 
     def flip_x(b):
         return b"".join(bytes(reversed(b[j * T:(j + 1) * T])) for j in range(T))
@@ -522,7 +573,7 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
             for j in range(T):
                 for i in range(T):
                     ri, rj = rotate_point(i, j, T, T, orient)
-                    buf[rj * T + ri] = to_gcolor8(px[tx * T + i, ty * T + j], ckey)
+                    buf[rj * T + ri] = to_gcolor8(px[ox + tx * T + i, oy + ty * T + j], ckey)
             key = bytes(buf)
             if not any(key):
                 empty += 1
@@ -582,7 +633,7 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
                     # can find in their PNG.
                     ri, rj = rotate_point(i, j, T, T, orient)
                     b = base_tile[rj * T + ri]
-                    v = to_gcolor8(vpx[tx * T + i, ty * T + j], ckey)
+                    v = to_gcolor8(vpx[ox + tx * T + i, oy + ty * T + j], ckey)
                     if (b == TRANSPARENT) != (v == TRANSPARENT):
                         raise BuildError(
                             f"atlas {name!r}: variant {vpath!r} differs in TRANSPARENCY at sheet "
@@ -617,7 +668,13 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
             # and a default that emits blobs the loader rejects is worse than no
             # feature at all. Flip to "auto" when pnx_atlas_load understands it.
             "repaired": repaired, "metatiles": spec.get("metatiles", False),
-            "variants": variants}
+            "variants": variants,
+            # Sheet TILE coordinates (not pixels -- `offset` already folded in above) each
+            # packed tile was first carved from, index-aligned with `tiles`. Not consumed
+            # by the build; the editor uses it to resolve a raw sheet cell back to the
+            # packed index it became, which is what makes a carved tile editable by name
+            # rather than only by number.
+            "origin": origin}
 
 
 def build_metatiles(tiles, pal_of, T, quiet=False):
@@ -658,7 +715,7 @@ def build_metatiles(tiles, pal_of, T, quiet=False):
     return bank, defs
 
 
-def finish_atlas(atlas, tile_flags, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False):
+def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False):
     """Palettise and pack. Called once map compilation has settled tile flags.
 
     `shared` is the running list of palettes from earlier atlases, so a later atlas
@@ -669,6 +726,15 @@ def finish_atlas(atlas, tile_flags, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2b
     table as `atlas["blob"]`, with only the pixel payload re-encoded at 2bpp instead of
     4bpp -- see pack_unit_2bpp. Sharing that structure is what lets the ~bw variant be a
     pure pixel-format swap rather than a second copy of the whole packing decision.
+
+    `collision` is parse_atlas_collision's {local index: (mode, extra)} -- the mode byte
+    packs into `flags` same as before, but SCALED's rect and COMPLEX's mask are too big
+    for one byte each and get their own SPARSE tail tables instead, appended after the
+    pixel payload in both `blob` and `blob_bw` (the shape does not depend on pixel
+    format, so there is no reason for two copies of it). A COMPLEX tile with no explicit
+    mask defaults to its own opacity -- pack_collision_mask against `tiles[i]` -- which is
+    why this has to run here rather than in parse_atlas_collision: the tile's own pixels
+    are not settled (mirrored, rotated, carved) until now.
     """
     tiles, T = atlas["tiles"], atlas["tile_px"]
     sets = atlas_colour_sets(atlas)
@@ -684,7 +750,29 @@ def finish_atlas(atlas, tile_flags, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2b
         raise BuildError(f"atlas {atlas['name']!r}: {len(palettes)} palettes, but the "
                          f"per-tile palette index is a u8")
 
-    flags = bytes(tile_flags.get(i, 0) for i in range(len(tiles)))
+    flags = bytes(collision.get(i, (COLLISION_NONE, None))[0] for i in range(len(tiles)))
+
+    # SCALED rects and COMPLEX masks, sparse -- most tiles are NONE or plain SOLID, which
+    # already fit in `flags` above and cost nothing more here.
+    scaled = bytearray()
+    scaled_count = 0
+    complex_masks = bytearray()
+    complex_count = 0
+    mask_bytes = (T * T + 7) // 8
+    for i, (mode, extra) in sorted(collision.items()):
+        if mode == COLLISION_SCALED:
+            rx, ry, rw, rh = extra
+            scaled += i.to_bytes(2, "little") + bytes([rx, ry, rw, rh])
+            scaled_count += 1
+        elif mode == COLLISION_COMPLEX:
+            # `extra` is already-packed mask bytes when the manifest authored one
+            # explicitly (parse_atlas_collision); otherwise fall back to the tile's own
+            # opacity, computed now because this is the first point the art is settled.
+            mask = extra if extra is not None else pack_collision_mask(tiles[i], T)
+            complex_masks += i.to_bytes(2, "little") + mask
+            complex_count += 1
+    shapes = (scaled_count.to_bytes(2, "little") + bytes(scaled)
+             + complex_count.to_bytes(2, "little") + bytes(complex_masks))
 
     # Decide by arithmetic, not by the flag alone. Metatile reuse scales with the size and
     # repetitiveness of a tileset: 1.29x across five full sheets, but only 1.04-1.12x on a
@@ -746,29 +834,36 @@ def finish_atlas(atlas, tile_flags, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2b
                 table += qid.to_bytes(2, "little")
 
         body = (len(bank).to_bytes(2, "little") + b"\0\0"
-                + pad4(bytes(assign)) + pad4(flags) + bytes(table) + pixels)
+                + pad4(bytes(assign)) + pad4(flags) + bytes(table) + pixels + shapes)
         atlas["blob"] = blob_header(MAGIC_ATLAS, T, len(tiles), 1, orient=orient) + body
         atlas["subtiles"] = len(bank)
 
         if pack_2bit:
-            # Same table, same assign, same flags -- pack_unit_2bpp needs no palette, so
-            # the quadrant's raw pixels are all that changes.
+            # Same table, same assign, same flags, same shapes -- pack_unit_2bpp needs no
+            # palette, so the quadrant's raw pixels are all that changes.
             pixels_bw = b"".join(pack_unit_2bpp(bank[i]) for i in range(len(bank)))
             body_bw = (len(bank).to_bytes(2, "little") + b"\0\0"
-                      + pad4(bytes(assign)) + pad4(flags) + bytes(table) + pixels_bw)
+                      + pad4(bytes(assign)) + pad4(flags) + bytes(table) + pixels_bw + shapes)
             atlas["blob_bw"] = blob_header(MAGIC_ATLAS, T, len(tiles), 1, orient=orient) + body_bw
     else:
         pixels = b"".join(pack_unit_4bpp(t, palettes[a]) for t, a in zip(tiles, assign))
-        body = pad4(bytes(assign)) + pad4(flags) + pixels
+        body = pad4(bytes(assign)) + pad4(flags) + pixels + shapes
         atlas["blob"] = blob_header(MAGIC_ATLAS, T, len(tiles), 0, orient=orient) + body
         atlas["subtiles"] = 0
 
         if pack_2bit:
             pixels_bw = b"".join(pack_unit_2bpp(t) for t in tiles)
-            body_bw = pad4(bytes(assign)) + pad4(flags) + pixels_bw
+            body_bw = pad4(bytes(assign)) + pad4(flags) + pixels_bw + shapes
             atlas["blob_bw"] = blob_header(MAGIC_ATLAS, T, len(tiles), 0, orient=orient) + body_bw
     atlas["palettes"] = palettes
     atlas["assign"] = assign
+    atlas["tile_flags"] = flags # kept beside the blob, not just baked into it -- see
+                                # "assign" above for the same reasoning (tests/editor
+                                # read this instead of re-parsing bytes back out)
+    atlas["scaled_rects"] = {i: extra for i, (mode, extra) in collision.items()
+                             if mode == COLLISION_SCALED}
+    atlas["complex_tiles"] = sorted(i for i, (mode, _) in collision.items()
+                                    if mode == COLLISION_COMPLEX)
 
     # A palette variant becomes an ORDERED palette per palette the atlas uses, whose k-th entry
     # is the recolour of the base's k-th entry. Ordered matters: an ordinary palette is a set that
@@ -799,8 +894,12 @@ def finish_atlas(atlas, tile_flags, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2b
               f"{len(table)} B per map that uses it (against {len(tiles) * (T*T//2):,} B "
               f"for a second atlas)")
 
+    shape_note = ""
+    if scaled_count or complex_count:
+        shape_note = (f", {scaled_count} scaled rect(s) + {complex_count} complex "
+                     f"mask(s) ({len(shapes):,} B)")
     print(f"    {atlas['name']}: uses {len(set(assign))} palette(s), "
-          f"{len(palettes) - before} new to the project")
+          f"{len(palettes) - before} new to the project{shape_note}")
     return atlas
 
 
@@ -1065,6 +1164,65 @@ def pad4(data):
     return data + b"\0" * ((-len(data)) % 4)
 
 
+def pack_collision_mask(buf, T):
+    """A COMPLEX tile's own opacity, as a 1bpp mask: 1 where the tile has ink, 0 where it
+    is transparent. `buf` is a T*T GColor8 buffer (atlas["tiles"]' own format --
+    TRANSPARENT is the sentinel, same convention pack_atlas already carves tiles into).
+
+    Row-major, MSB first -- the same bit order pack_unit_2bpp already uses, so "packed
+    bits" means one thing in this file rather than two conventions that happen to coexist.
+    """
+    out = bytearray((T * T + 7) // 8)
+    for i, v in enumerate(buf):
+        if v != TRANSPARENT:
+            out[i // 8] |= 0x80 >> (i % 8)
+    return bytes(out)
+
+
+def unpack_collision_mask(mask, T):
+    """Inverse of pack_collision_mask: packed 1bpp bytes -> a list of T '#'/'.' row
+    strings. Not used by the build -- it never needs a mask back as text -- but the
+    editor does, to show what a tile's mask currently looks like (authored or the tile's
+    own derived opacity) before someone repaints it.
+    """
+    rows = []
+    for j in range(T):
+        row = []
+        for i in range(T):
+            n = j * T + i
+            row.append("#" if mask[n // 8] & (0x80 >> (n % 8)) else ".")
+        rows.append("".join(row))
+    return rows
+
+
+def parse_collision_mask_ascii(text, T, atlas_name, idx):
+    """A COMPLEX tile's AUTHORED mask: T rows of T characters, '#' ink / '.' empty -- the
+    same ASCII-art convention a map's `rows` already uses, so this reads the same way at a
+    glance and survives a diff the same way. Overrides pack_collision_mask's default (the
+    tile's own opacity) with a shape drawn on purpose: a curve that should collide
+    narrower than its silhouette suggests, say, or a tile whose collision is deliberately
+    simpler than its art.
+
+    Built by converting the text to a synthetic GColor8 buffer and handing it to
+    pack_collision_mask, rather than packing bits directly -- one bit-packing routine for
+    the whole file, not two conventions that happen to agree today.
+    """
+    rows = text.strip("\n").split("\n")
+    if len(rows) != T or any(len(r) != T for r in rows):
+        raise BuildError(f"atlas {atlas_name!r}: tile {idx}'s mask must be exactly {T} "
+                         f"rows of {T} characters ('#' ink, '.' empty), got "
+                         f"{len(rows)} row(s) of {[len(r) for r in rows]} chars")
+    buf = bytearray(T * T)
+    for j, row in enumerate(rows):
+        for i, ch in enumerate(row):
+            if ch not in "#.":
+                raise BuildError(f"atlas {atlas_name!r}: tile {idx}'s mask has {ch!r} "
+                                 f"at {i},{j} -- only '#' (ink) and '.' (empty) are "
+                                 f"allowed")
+            buf[j * T + i] = OPAQUE if ch == "#" else TRANSPARENT
+    return pack_collision_mask(buf, T)
+
+
 # ------------------------------------------------------------------ semantic tiles
 
 def tile_stats(buf, T):
@@ -1123,6 +1281,77 @@ def autopick_tiles(atlas, names):
 
     print(f"    autopicked: " + ", ".join(f"{k}={v}" for k, v in picked.items()))
     return picked
+
+
+def parse_atlas_collision(spec, atlas, roles):
+    """[[atlas.collision]] -> {local tile index: (COLLISION_*, extra)}.
+
+    Collision is a property of the ART TILE (see COLLISION_NAMES' comment), so it is
+    declared here, on the atlas, keyed the same way `semantic` roles already are --
+    not on the legend, and not per map cell. `extra` is None for SOLID, an (x, y, w, h)
+    tile-local rect for SCALED, and for COMPLEX either None (the mask defaults to the
+    tile's own ink, computed once the atlas's pixels are finalised in finish_atlas -- not
+    here, since that pixel data is not settled yet) or already-packed mask bytes when the
+    entry authors one explicitly (`mask`, parse_collision_mask_ascii) -- an override, not
+    a description of the art, so it is parsed eagerly here rather than deferred.
+    """
+    T = atlas["tile_px"]
+    out = {}
+    for entry in spec.get("collision", []):
+        tile = entry.get("tile")
+        if isinstance(tile, str):
+            if tile not in roles:
+                raise BuildError(f"atlas {atlas['name']!r}: collision names role "
+                                 f"{tile!r}, which this atlas does not define. It "
+                                 f"provides: {', '.join(sorted(roles)) or '(none)'}")
+            idx = roles[tile]
+        elif isinstance(tile, int) and not isinstance(tile, bool):
+            idx = tile
+        else:
+            raise BuildError(f"atlas {atlas['name']!r}: collision entry `tile` must be "
+                             f"a role name or a tile index, not {tile!r}")
+        if not 0 <= idx < len(atlas["tiles"]):
+            raise BuildError(f"atlas {atlas['name']!r}: collision names tile {idx}, "
+                             f"out of range (0..{len(atlas['tiles'])-1})")
+        if idx in out:
+            raise BuildError(f"atlas {atlas['name']!r}: tile {idx} has two "
+                             f"[[atlas.collision]] entries")
+
+        kind = entry.get("type")
+        if kind not in COLLISION_NAMES:
+            raise BuildError(f"atlas {atlas['name']!r}: collision type {kind!r} for "
+                             f"tile {idx}, must be one of "
+                             f"{', '.join(sorted(COLLISION_NAMES))}")
+        mode = COLLISION_NAMES[kind]
+
+        extra = None
+        if mode == COLLISION_SCALED:
+            rect = entry.get("rect")
+            if (not isinstance(rect, (list, tuple)) or len(rect) != 4
+                   or not all(isinstance(v, int) and not isinstance(v, bool) for v in rect)):
+                raise BuildError(f"atlas {atlas['name']!r}: tile {idx} is scaled but "
+                                 f"`rect` is not four integers [x, y, w, h]")
+            rx, ry, rw, rh = rect
+            if rw <= 0 or rh <= 0 or rx < 0 or ry < 0 or rx + rw > T or ry + rh > T:
+                raise BuildError(f"atlas {atlas['name']!r}: tile {idx}'s rect "
+                                 f"{list(rect)} does not fit inside its {T}x{T} tile")
+            extra = (rx, ry, rw, rh)
+        elif "rect" in entry:
+            raise BuildError(f"atlas {atlas['name']!r}: tile {idx} is {kind}, not "
+                             f"scaled -- `rect` only means something there")
+
+        if mode == COLLISION_COMPLEX and "mask" in entry:
+            mask_text = entry["mask"]
+            if not isinstance(mask_text, str):
+                raise BuildError(f"atlas {atlas['name']!r}: tile {idx}'s mask must be "
+                                 f"a string of rows, not {mask_text!r}")
+            extra = parse_collision_mask_ascii(mask_text, T, atlas["name"], idx)
+        elif "mask" in entry:
+            raise BuildError(f"atlas {atlas['name']!r}: tile {idx} is {kind}, not "
+                             f"complex -- `mask` only means something there")
+
+        out[idx] = (mode, extra)
+    return out
 
 
 # --------------------------------------------------------------------------- sprite
@@ -1342,35 +1571,25 @@ def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False):
 # ------------------------------------------------------------------------------ map
 
 def parse_flag_names(raw):
-    """Every flag name the legend may use -> its bit, builtins included.
+    """[tile_flags] is retired, mid-redesign -- see MAP_EXTENDED's comment above.
 
-    Bits are written down rather than assigned in declaration order because a flag value
-    is baked into blobs AND compiled into game code. Reordering a list would silently
-    change what an already-built map means; an explicit bit cannot.
+    Custom per-tile flag names used to live in the free bits of the old tile_flags[]-by-id
+    byte. That byte is gone; its replacement is a sparse per-cell table keyed off the
+    MAP_EXTENDED bit, not built yet. No project's manifest actually declares [tile_flags]
+    today (checked before starting this), so refusing it here is a build-time nudge
+    toward the new mechanism once it exists, not a break of anything real.
     """
-    names = dict(FLAG_NAMES)
-    for name, bit in raw.items():
-        if name in FLAG_NAMES:
-            raise BuildError(f"tile_flags: {name!r} is a built-in flag "
-                             f"(0x{FLAG_NAMES[name]:02X}) and cannot be redefined")
-        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
-            raise BuildError(f"tile_flags: {name!r} must be lowercase letters, digits "
-                             f"and underscores -- it becomes a C identifier")
-        if bit not in FLAG_USER_BITS:
-            raise BuildError(
-                f"tile_flags: {name!r} = {bit} is not a free flag bit. The byte's low two "
-                f"bits are solid and warp; pick one of "
-                f"{', '.join('0x%02X' % b for b in FLAG_USER_BITS)}")
-        clash = next((n for n, b in names.items() if b == bit), None)
-        if clash:
-            raise BuildError(f"tile_flags: {name!r} and {clash!r} both claim "
-                             f"0x{bit:02X}")
-        names[name] = bit
-    return names
+    if raw:
+        raise BuildError(
+            "[tile_flags] is retired: custom per-tile flags are being redone as a sparse "
+            "per-cell table (the MAP_EXTENDED bit), not yet built. 'warp' is the only "
+            "flag name available right now -- collision moved to being a tile property, "
+            "see [[atlas.collision]] on the atlas that owns the tile.")
+    return {"warp": TILE_WARP}
 
 
 def parse_legend(raw, flag_names=None):
-    """legend char -> (tile, flag byte, atlas name or None, flip bits).
+    """legend char -> (tile, flag byte, atlas name or None, flip|rotate bits, extended tag).
 
     `tile` is either a role name the atlas defines or a raw index into it. Roles are the
     better thing to write -- they survive re-importing a sheet, and game code can name
@@ -1380,8 +1599,14 @@ def parse_legend(raw, flag_names=None):
     The optional `atlas` key is what lets one map draw from several tilesets: without it
     a role resolves against the map's first atlas, which is what every single-tileset
     manifest means and keeps writing.
+
+    `extended` is an optional u8 (0..255) the game defines the meaning of -- a door's
+    state, a spawn id, whatever a cell needs to carry that is not collision (a tile
+    property, see [[atlas.collision]]) and is not common enough to want its own bit. 0
+    means "no tag" and costs nothing; a nonzero value sets MAP_EXTENDED on every cell that
+    uses this character and lands in that WorldTile's sparse table (slice_worldtiles).
     """
-    flag_names = flag_names or FLAG_NAMES
+    flag_names = flag_names or {"warp": TILE_WARP}
     legend = {}
     for ch, entry in raw.items():
         if len(ch) != 1:
@@ -1390,7 +1615,8 @@ def parse_legend(raw, flag_names=None):
         for f in entry.get("flags", []):
             if f not in flag_names:
                 raise BuildError(f"legend {ch!r}: unknown flag {f!r} "
-                                 f"(known: {', '.join(sorted(flag_names))})")
+                                 f"(known: {', '.join(sorted(flag_names))}; collision is "
+                                 f"a tile property now -- see [[atlas.collision]])")
             flags |= flag_names[f]
 
         tile = entry["tile"]
@@ -1408,7 +1634,17 @@ def parse_legend(raw, flag_names=None):
                                  f"not {axis!r}")
             flip |= MAP_FLIP_X if axis == "x" else MAP_FLIP_Y
 
-        legend[ch] = (tile, flags, entry.get("atlas"), flip)
+        rotate = MAP_ROTATE if entry.get("rotate", False) else 0
+        if not isinstance(entry.get("rotate", False), bool):
+            raise BuildError(f"legend {ch!r}: rotate must be true or false, "
+                             f"not {entry['rotate']!r}")
+
+        extended = entry.get("extended", 0)
+        if isinstance(extended, bool) or not isinstance(extended, int) or not 0 <= extended <= 255:
+            raise BuildError(f"legend {ch!r}: extended must be an integer 0..255, "
+                             f"not {extended!r}")
+
+        legend[ch] = (tile, flags, entry.get("atlas"), flip | rotate, extended)
     return legend
 
 
@@ -1469,7 +1705,7 @@ def map_tile_bases(name, atlas_names, tile_counts, tile_px):
     return table, base
 
 
-def compile_map(spec, legend, roles_by_atlas, atlas_table, map_names):
+def compile_map(spec, legend, roles_by_atlas, atlas_table, map_names, collision_by_atlas):
     """ASCII rows -> a compiled map, ready for finish_map to slice and pack.
 
     `atlas_table` is this map's [(atlas, first_tile, tile_count)] partition, so a legend
@@ -1497,7 +1733,7 @@ def compile_map(spec, legend, roles_by_atlas, atlas_table, map_names):
     counts = {a: n for a, _, n in atlas_table}
     default_atlas = atlas_table[0][0]
     resolved, unusable, flipped = {}, {}, {}
-    for ch, (tile, flag, want_atlas, flip) in legend.items():
+    for ch, (tile, flag, want_atlas, flip, ext_val) in legend.items():
         which = want_atlas or default_atlas
         # The legend is project-wide but an atlas set is per map, so a character this map
         # cannot draw is only an error if this map USES it. Reported at the cell rather
@@ -1536,12 +1772,14 @@ def compile_map(spec, legend, roles_by_atlas, atlas_table, map_names):
         if flip:
             flipped.setdefault(which, []).append(ch)
 
-        # u16 little-endian: 10 bits of MAP-GLOBAL index, then PNX_MAP_FLIP_X / _Y, then
-        # four reserved bits for a per-cell palette.
-        resolved[ch] = (((bases[which] + local) & MAP_INDEX_MASK) | flip, flag)
+        # u16 little-endian: 10 bits of MAP-GLOBAL index, then PNX_MAP_FLIP_X/_Y/_ROTATE.
+        # WARP and EXTENDED are folded in below, per cell, since both are folded from a
+        # pre-shift byte/value rather than living in `flip` itself.
+        resolved[ch] = (((bases[which] + local) & MAP_INDEX_MASK) | flip, flag, ext_val)
 
     tiles = bytearray(w * h * 2)   # u16 per cell
     flags = bytearray(w * h)   # one byte per cell; tiles are u16, see below
+    extended = bytearray(w * h)   # one byte per cell; 0 means untagged
     painted = set()
     for y, row in enumerate(rows):
         for x, ch in enumerate(row):
@@ -1551,19 +1789,23 @@ def compile_map(spec, legend, roles_by_atlas, atlas_table, map_names):
                 raise BuildError(f"map {name!r}: unknown legend char {ch!r} at {x},{y} "
                                  f"(known: {' '.join(sorted(legend))})")
             painted.add(ch)
-            entry, flag = resolved[ch]
+            entry, flag, ext_val = resolved[ch]
+            entry = fold_flag_into_entry(entry, flag)
+            if ext_val:
+                entry |= MAP_EXTENDED
             tiles[(y * w + x) * 2] = entry & 0xFF
             tiles[(y * w + x) * 2 + 1] = entry >> 8
             flags[y * w + x] = flag
+            extended[y * w + x] = ext_val
 
-    return finish_compile(name, spec, w, h, tiles, flags, atlas_table, map_names,
-                          spec.get("warps", []),
+    return finish_compile(name, spec, w, h, tiles, flags, extended, atlas_table, map_names,
+                          spec.get("warps", []), collision_by_atlas,
                           flipped={a: [c for c in chars if c in painted]
                                    for a, chars in flipped.items()
                                    if any(c in painted for c in chars)})
 
 
-def compile_source_map(spec, root, roles_by_atlas, atlas_table, map_names):
+def compile_source_map(spec, root, roles_by_atlas, atlas_table, map_names, collision_by_atlas):
     """Compile a map whose cells live in a `.pnxmap` file rather than in the manifest.
 
     The tile table is the legend, indexed by number instead of by character -- so this
@@ -1615,21 +1857,32 @@ def compile_source_map(spec, root, roles_by_atlas, atlas_table, map_names):
         flip = 0
         for axis in t.get("flip", ""):
             flip |= MAP_FLIP_X if axis == "x" else MAP_FLIP_Y
+        if t.get("rotate", False):
+            flip |= MAP_ROTATE
         if flip:
             flipped.setdefault(which, []).append(str(i))
+        ext_val = t.get("extended", 0)
+        if isinstance(ext_val, bool) or not isinstance(ext_val, int) or not 0 <= ext_val <= 255:
+            raise BuildError(f"map {name!r}: tile {i}'s extended value must be an "
+                             f"integer 0..255, not {ext_val!r}")
         resolved.append((((bases[which] + idx) & MAP_INDEX_MASK) | flip,
-                         t.get("flags", 0)))
+                         t.get("flags", 0), ext_val))
 
     cells = doc["cells"]
     tiles = bytearray(w * h * 2)
     flags = bytearray(w * h)
+    extended = bytearray(w * h)
     used = set()
     for i, c in enumerate(cells):
         used.add(c)
-        entry, flag = resolved[c]
+        entry, flag, ext_val = resolved[c]
+        entry = fold_flag_into_entry(entry, flag)
+        if ext_val:
+            entry |= MAP_EXTENDED
         tiles[i * 2] = entry & 0xFF
         tiles[i * 2 + 1] = entry >> 8
         flags[i] = flag
+        extended[i] = ext_val
 
     # `start` and `warps` come from the FILE, not the manifest: they are positions in a
     # grid the file owns, and a manifest that could disagree with it would be a second
@@ -1637,28 +1890,63 @@ def compile_source_map(spec, root, roles_by_atlas, atlas_table, map_names):
     spec = dict(spec)
     spec["start"] = doc["start"]
 
-    return finish_compile(name, spec, w, h, tiles, flags, atlas_table, map_names,
-                          doc["warps"],
+    return finish_compile(name, spec, w, h, tiles, flags, extended, atlas_table, map_names,
+                          doc["warps"], collision_by_atlas,
                           flipped={a: [c for c in labels if int(c) in used]
                                    for a, labels in flipped.items()
                                    if any(int(c) in used for c in labels)})
 
 
-def finish_compile(name, spec, w, h, tiles, flags, atlas_table, map_names, warp_specs,
-                   flipped=None):
+def tile_collision_mode(atlas_table, collision_by_atlas, tile):
+    """A map-global tile id -> its art tile's COLLISION_* mode.
+
+    Walks atlas_table the same way the runtime resolves a drawn cell's tileset -- a
+    handful of entries, linear is fine. NONE for a tile no [[atlas.collision]] entry
+    named, which is the correct default: most tiles are plain floor/scenery.
+    """
+    for name, first, count in atlas_table:
+        if first <= tile < first + count:
+            return collision_by_atlas.get(name, {}).get(tile - first, (COLLISION_NONE, None))[0]
+    return COLLISION_NONE
+
+
+def solid_cells_for(tiles, atlas_table, collision_by_atlas):
+    """Per-cell exact-SOLID boolean plane, for the reachability checks below only.
+
+    Deliberately exact-SOLID, not SCALED or COMPLEX: those are only PARTIALLY solid (a
+    fence's bottom half; whatever a mask covers), and a flood fill has no way to know how
+    much of a cell a player could still slip through. Treating a mostly-solid COMPLEX
+    tile as open is the safe direction -- it costs a build that could theoretically have
+    caught a real seal-off and did not, not a build that fails over content that was
+    fine. Matches exactly what plain SOLID already did before any other mode existed.
+    """
+    out = bytearray(len(tiles) // 2)
+    for i in range(len(out)):
+        tile = (tiles[i * 2] | (tiles[i * 2 + 1] << 8)) & MAP_INDEX_MASK
+        out[i] = tile_collision_mode(atlas_table, collision_by_atlas, tile) == COLLISION_SOLID
+    return out
+
+
+def finish_compile(name, spec, w, h, tiles, flags, extended, atlas_table, map_names,
+                   warp_specs, collision_by_atlas, flipped=None):
     """Everything a compiled map is checked for, whatever it was authored in.
 
     Split out when maps gained a binary source format. The checks below -- a start inside
     a wall, a warp on a tile with no warp flag, a warp sealed off from the start -- are
     the pipeline's whole reason for existing, and a second authoring path that quietly
     skipped them would be worse than no second path at all. So `rows` and `.pnxmap` both
-    resolve to cells and flags and then arrive here.
+    resolve to cells, flags and extended tags and then arrive here.
+
+    `extended` has nothing to validate -- unlike warp, a tag has no invariant a build
+    could catch (any value is legal on any cell) -- so it just rides along to the
+    returned dict for rotate_maps and slice_worldtiles to carry into the blob.
     """
     flipped = flipped or {}
+    solid = solid_cells_for(tiles, atlas_table, collision_by_atlas)
     sx, sy = spec["start"]
     if not (0 <= sx < w and 0 <= sy < h):
         raise BuildError(f"map {name!r}: start {(sx, sy)} is outside the {w}x{h} map")
-    if flags[sy * w + sx] & FLAG_SOLID:
+    if solid[sy * w + sx]:
         raise BuildError(f"map {name!r}: start {(sx, sy)} is inside a solid tile")
 
     # Flood fill from the start over walkable tiles.
@@ -1683,12 +1971,12 @@ def finish_compile(name, spec, w, h, tiles, flags, atlas_table, map_names, warp_
         x, y = stack.pop()
         if (x, y) in reachable or not (0 <= x < w and 0 <= y < h):
             continue
-        if flags[y * w + x] & FLAG_SOLID:
+        if solid[y * w + x]:
             continue
         reachable.add((x, y))
         stack += [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
 
-    walkable = sum(1 for i in range(w * h) if not (flags[i] & FLAG_SOLID))
+    walkable = sum(1 for i in range(w * h) if not solid[i])
     sealed = walkable - len(reachable)
 
     warps = []
@@ -1697,11 +1985,11 @@ def finish_compile(name, spec, w, h, tiles, flags, atlas_table, map_names, warp_
         dest_name, dtx, dty = wp["to"]
         if not (0 <= tx < w and 0 <= ty < h):
             raise BuildError(f"map {name!r}: warp at {(tx, ty)} is outside the map")
-        if not flags[ty * w + tx] & FLAG_WARP:
+        if not flags[ty * w + tx] & TILE_WARP:
             raise BuildError(f"map {name!r}: warp at {(tx, ty)} sits on a tile with no "
                              f"'warp' flag -- the player would walk over it and nothing "
                              f"would happen")
-        if flags[ty * w + tx] & FLAG_SOLID:
+        if solid[ty * w + tx]:
             raise BuildError(f"map {name!r}: warp at {(tx, ty)} is on a SOLID tile -- the "
                              f"player can never stand on it, so it can never fire. No runtime "
                              f"state fixes this; move the warp to a walkable tile.")
@@ -1728,10 +2016,11 @@ def finish_compile(name, spec, w, h, tiles, flags, atlas_table, map_names, warp_
 
 
 
-    # The blob is built later by finish_map, once tile flag defaults are known.
+    # The blob is built later by finish_map, once the atlases are packed and the map can
+    # be sliced into WorldTiles.
     return {"name": name, "w": w, "h": h, "start": (sx, sy), "tiles": bytes(tiles),
             "out": spec["out"], "warps": warps, "reachable": reachable,
-            "flags": flags, "atlas_table": atlas_table,
+            "flags": flags, "extended": extended, "solid": solid, "atlas_table": atlas_table,
             # {atlas: [label]} for the tiles this map PAINTED flipped, kept only so
             # check_flip_metatiles can name them once the atlases are packed. A flipped
             # entry nobody used is nobody's problem, the same view taken of an entry that
@@ -1742,12 +2031,18 @@ def finish_compile(name, spec, w, h, tiles, flags, atlas_table, map_names, warp_
 
 
 def check_flip_metatiles(maps, atlases):
-    """Refuse a flipped legend character drawn from a metatiled atlas.
+    """Refuse a flipped OR rotated legend character drawn from a metatiled atlas.
 
-    Mirroring a composed tile means mirroring the quadrant ORDER as well as each quadrant,
-    which pnx_tilemap_draw does not do -- it skips the flip for metatiles entirely. So the
-    watch would draw the tile unmirrored, which reads as art that is subtly wrong rather
-    than as an error, and is the kind of thing nobody finds for a week.
+    Mirroring or transposing a composed tile means reordering the quadrants as well as
+    transforming each one, which pnx_tilemap_draw does not do -- it skips both for
+    metatiles entirely. So the watch would draw the tile untransformed, which reads as
+    art that is subtly wrong rather than as an error, and is the kind of thing nobody
+    finds for a week.
+
+    Named for flip because that came first, but `flipped` (built in compile_map /
+    compile_source_map) is really "carries any per-cell transform" -- rotate folds into
+    the same `flip` byte those functions test with `if flip:`, so a rotate-only entry
+    lands in this set exactly like a mirrored one and is refused the same way.
 
     Deliberately not in compile_map: whether an atlas is metatiled is decided in
     finish_atlas by weighing the saving, long after the maps are compiled. Checking here
@@ -1761,10 +2056,10 @@ def check_flip_metatiles(maps, atlases):
                 continue
             raise BuildError(
                 f"map {m['name']!r}: legend {', '.join(repr(c) for c in sorted(chars))} "
-                f"paints a FLIPPED tile from atlas {atlas_name!r}, which was packed as "
-                f"metatiles -- and the runtime does not flip those, so it would draw "
-                f"unmirrored. Either drop the flip, or put `metatiles = false` on that "
-                f"atlas and pay the flat tile cost.")
+                f"paints a FLIPPED or ROTATED tile from atlas {atlas_name!r}, which was "
+                f"packed as metatiles -- and the runtime does not transform those, so it "
+                f"would draw untransformed. Either drop the flip/rotate, or put "
+                f"`metatiles = false` on that atlas and pay the flat tile cost.")
 
 
 def swap_flip_bits(cells):
@@ -1811,6 +2106,7 @@ def rotate_maps(maps, orient):
         if orient in LANDSCAPE_ORIENTS:
             m["tiles"] = swap_flip_bits(m["tiles"])
         m["flags"], _, _ = rotate_grid(m["flags"], w, h, orient)
+        m["extended"], _, _ = rotate_grid(m["extended"], w, h, orient)
         m["start"] = rotate_point(*m["start"], w, h, orient)
         m["reachable"] = {rotate_point(x, y, w, h, orient) for x, y in m["reachable"]}
         m["warps"] = [rotate_point(tx, ty, w, h, orient)
@@ -1820,66 +2116,20 @@ def rotate_maps(maps, orient):
         m["w"], m["h"] = nw, nh
 
 
-def map_tile_owner(m, tile):
-    """A map-global tile id -> (atlas name, index within that atlas).
+def slice_worldtiles(m, worldtile):
+    """Cut the cell plane into WorldTiles.
 
-    Linear over the map's atlas table, which has at most a handful of entries -- the same
-    walk the runtime does per drawn cell.
-    """
-    for name, first, count in m["atlas_table"]:
-        if first <= tile < first + count:
-            return name, tile - first
-    return None, tile
+    Used to also carry each WorldTile's own COLLISION flag overrides -- retired along with
+    tile_flags[]-by-id (see MAP_ROTATE's comment): collision/warp are baked straight into
+    every cell's own u16 now (fold_flag_into_entry, at both places `m["tiles"]` gets
+    built), so there is no per-tile collision default for a cell to diverge from any more.
 
-
-def compute_tile_flags(maps):
-    """Pick each tile's default flags: whichever value it carries most often.
-
-    Derived rather than declared, so the manifest needs no new syntax and the legend
-    stays the single place behaviour is written down. Any cell disagreeing with its
-    tile's default becomes an override -- which is how one accent tile can be scenery in
-    one spot and a door in another.
-
-    Keyed by (atlas, index within that atlas) rather than by the cell's value, because a
-    cell now holds a MAP-global id: tile 5 of a map whose first atlas is `caveset` and
-    tile 5 of a map whose first atlas is `tiles` are different pictures, and tallying them
-    together would give both the other's flags.
-
-    Returns {atlas name: {tile index: flag byte}}.
-    """
-    tally = {}
-    for m in maps:
-        for i in range(len(m["flags"])):
-            # The tile plane is u16 per cell and the flag plane is u8, so they cannot be
-            # walked together: zipping the two byte strings paired each tile's LOW byte
-            # with one cell's flags and its high byte with the next cell's, which tallied
-            # every cell against the wrong neighbour. It never produced wrong pixels --
-            # finish_map decodes properly and emits an override wherever the default
-            # disagrees -- so the only symptom was maps carrying hundreds of overrides
-            # they did not need, and defaults that shifted with cell order.
-            tile = (m["tiles"][i * 2] | (m["tiles"][i * 2 + 1] << 8)) & 0x03FF
-            atlas, local = map_tile_owner(m, tile)
-            flag = m["flags"][i]
-            counts = tally.setdefault(atlas, {}).setdefault(local, {})
-            counts[flag] = counts.get(flag, 0) + 1
-
-    defaults = {}
-    for atlas, tiles in tally.items():
-        # Ties break toward the lower flag value rather than toward whichever the
-        # traversal happened to see first. Content compiles to the same bytes in either
-        # orientation only if every choice here is a function of the counts alone.
-        defaults[atlas] = {tile: max(counts.items(), key=lambda kv: (kv[1], -kv[0]))[0]
-                           for tile, counts in tiles.items()}
-    return defaults
-
-
-def slice_worldtiles(m, tile_defaults, worldtile):
-    """Cut the cell plane into WorldTiles, each carrying its own flag overrides.
-
-    Overrides ride along with the cells they describe rather than sitting in one map-wide
-    list, because a list would have to be resident whole for a map whose cells are not --
-    and because a WorldTile-local x,y keeps the 3-byte override record the format already
-    uses instead of widening it to reach a 255-cell map.
+    A DIFFERENT sparse table is built here instead, for a different reason: EXTENDED. A
+    cell's tag is arbitrary game data, not something with a tile-owned default to diverge
+    from in the first place, so it was never going to fold into a byte the way warp did --
+    it needs its own (x, y, value) triple, and this is exactly the shape the old override
+    table already had. So the mechanism that collision retired is reused, unchanged, for a
+    purpose collision never actually needed.
 
     Edge WorldTiles are stored clipped rather than padded out to a full square. The pool
     slot is still full size, so nothing downstream cares, and a 32x24 map does not pay for
@@ -1897,7 +2147,8 @@ def slice_worldtiles(m, tile_defaults, worldtile):
             ch = min(worldtile, h - y0)
 
             cells = bytearray()
-            overrides = bytearray()
+            ext = bytearray()
+            ext_count = 0
             used = set()
             for ly in range(ch):
                 for lx in range(cw):
@@ -1905,14 +2156,10 @@ def slice_worldtiles(m, tile_defaults, worldtile):
                     cells += m["tiles"][i * 2:i * 2 + 2]
                     tile = (m["tiles"][i * 2] | (m["tiles"][i * 2 + 1] << 8)) & 0x03FF
                     used.add(tile)
-                    if m["flags"][i] != tile_defaults.get(tile, 0):
-                        overrides += bytes([lx, ly, m["flags"][i]])
-
-            count = len(overrides) // 3
-            if count > 0xFFFF:
-                raise BuildError(
-                    f"map {m['name']!r}: WorldTile {wx},{wy} needs {count} flag overrides, "
-                    f"past the u16 limit -- the tile flag defaults must be badly chosen")
+                    val = m["extended"][i]
+                    if val:
+                        ext += bytes([lx, ly, val])
+                        ext_count += 1
 
             # Which atlases this WorldTile draws from, as a bit per entry in the map's
             # atlas table. The streamer reads it to pin those atlases BEFORE it reads the
@@ -1924,10 +2171,11 @@ def slice_worldtiles(m, tile_defaults, worldtile):
                         mask |= 1 << bit
                         break
 
+            payload = (bytes([cw, ch]) + bytes(cells)
+                      + ext_count.to_bytes(2, "little") + bytes(ext))
             tiles.append({"x": wx, "y": wy, "w": cw, "h": ch, "mask": mask,
-                          "cells": bytes(cells), "overrides": bytes(overrides),
-                          "payload": bytes([cw, ch]) + count.to_bytes(2, "little")
-                                     + bytes(cells) + bytes(overrides)})
+                          "cells": bytes(cells), "ext_count": ext_count,
+                          "payload": payload})
     return cols, rows, tiles
 
 
@@ -1999,8 +2247,7 @@ def bank_shift_for(slot_bytes, bank_bytes):
     return shift
 
 
-def prepare_map(m, flags_by_atlas, worldtile=WORLDTILE_DEFAULT,
-                bank_bytes=WORLDTILE_BANK_BYTES):
+def prepare_map(m, worldtile=WORLDTILE_DEFAULT, bank_bytes=WORLDTILE_BANK_BYTES):
     """Slice a map into WorldTiles and work out how many bank resources it needs.
 
     Split out of finish_map because of an ordering knot: a map's banks are resources, so
@@ -2009,17 +2256,10 @@ def prepare_map(m, flags_by_atlas, worldtile=WORLDTILE_DEFAULT,
     the only part that answers "how many banks", and it depends on nothing but the map, so
     it moves here and runs first.
     """
-    tile_defaults = {}
-    for name, first, count in m["atlas_table"]:
-        per_atlas = flags_by_atlas.get(name, {})
-        for local in range(count):
-            tile_defaults[first + local] = per_atlas.get(local, 0)
-
-    cols, rows, tiles = slice_worldtiles(m, tile_defaults, worldtile)
+    cols, rows, tiles = slice_worldtiles(m, worldtile)
     slot_bytes = (max(len(t["payload"]) for t in tiles) + 3) & ~3
     shift = bank_shift_for(slot_bytes, bank_bytes)
 
-    m["tile_defaults"] = tile_defaults
     m["wt"] = (cols, rows, tiles)
     m["slot_bytes"] = slot_bytes
     m["bank_shift"] = shift
@@ -2027,7 +2267,7 @@ def prepare_map(m, flags_by_atlas, worldtile=WORLDTILE_DEFAULT,
     return m
 
 
-def finish_map(m, flags_by_atlas, atlas_assets, atlas_bytes, pal_table=b"",
+def finish_map(m, atlas_assets, atlas_bytes, pal_table=b"",
                worldtile=WORLDTILE_DEFAULT, atlas_slots=None, resident=False,
                bank_bytes=WORLDTILE_BANK_BYTES, first_bank_asset=0,
                orient=ORIENT_BUTTONS_RIGHT):
@@ -2038,10 +2278,13 @@ def finish_map(m, flags_by_atlas, atlas_assets, atlas_bytes, pal_table=b"",
     Guessing wrong draws a map in another tileset's tiles -- a failure that looks like
     corrupted art rather than like a pairing mistake.
 
-    The flag table is flattened out of the per-atlas defaults into the map's own id space
-    and shipped WITH the map. Collision has to answer for a cell whose atlas is not
-    resident -- the player walks into a wall the streamer has not reached yet -- so it
-    cannot read its flags out of an atlas that may be gone.
+    No flag table any more -- collision/warp are read straight out of each cell's own
+    u16 (see MAP_ROTATE's comment). That answers the same "collision for a cell whose
+    atlas is not resident" case the flag table existed for, since the cell plane itself
+    is exactly as resident as it always was; nothing about that changed. EXTENDED does
+    still have a side table (see MAP_EXTENDED's comment) -- but it lives INSIDE each
+    WorldTile's own payload, not resident here, since a tag is only ever asked about for
+    a cell whose WorldTile (and so whose tag table) is already resident.
 
     The map's own resource holds only what stays resident. WorldTile payloads live in
     separate BANK resources -- see WORLDTILE_BANK_BYTES for why -- whose asset ids run
@@ -2063,7 +2306,6 @@ def finish_map(m, flags_by_atlas, atlas_assets, atlas_bytes, pal_table=b"",
         atlas table    atlas_count * (u16 asset id, u16 first_tile)
         atlas slots    (atlas_slots + 1) * u32, offsets into the atlas pool
         u16 first_bank_asset, pad
-        flag table     tile_total bytes, padded to 4
         palette remap  tile_total bytes when present, padded to 4
         warps          warp_count * 5, padded to 4
         wt masks       wt_cols * wt_rows bytes, padded to 4
@@ -2072,11 +2314,9 @@ def finish_map(m, flags_by_atlas, atlas_assets, atlas_bytes, pal_table=b"",
     """
     w, h = m["w"], m["h"]
     cols, rows, tiles = m["wt"]
-    tile_defaults = m["tile_defaults"]
     n = cols * rows
 
     tile_total = sum(count for _, _, count in m["atlas_table"])
-    flag_table = bytes(tile_defaults.get(tile, 0) for tile in range(tile_total))
 
     # The window is what the SCREEN can reach, so a map smaller than one window is fully
     # resident and never streams -- the adaptive half of "one format, one code path".
@@ -2093,7 +2333,6 @@ def finish_map(m, flags_by_atlas, atlas_assets, atlas_bytes, pal_table=b"",
     if atlas_slots is None:
         atlas_slots = needed
 
-    override_total = sum(len(t["overrides"]) // 3 for t in tiles)
     slot_bytes = m["slot_bytes"]
 
     pool = atlas_pool_layout([atlas_bytes[n] for n, _, _ in m["atlas_table"]], atlas_slots)
@@ -2125,7 +2364,6 @@ def finish_map(m, flags_by_atlas, atlas_assets, atlas_bytes, pal_table=b"",
         preamble += atlas_assets[name].to_bytes(2, "little") + first.to_bytes(2, "little")
     preamble += b"".join(o.to_bytes(4, "little") for o in pool)
     preamble += first_bank_asset.to_bytes(2, "little") + bytes(2)
-    preamble += pad4(flag_table)
     preamble += pad4(bytes(pal_table)) if pal_table else b""
     preamble += pad4(b"".join(bytes(x) for x in m["warps"]))
     preamble += pad4(bytes(t["mask"] for t in tiles))
@@ -2141,10 +2379,8 @@ def finish_map(m, flags_by_atlas, atlas_assets, atlas_bytes, pal_table=b"",
     m["atlas_slots"] = atlas_slots
     m["atlas_pool_bytes"] = pool[-1]
 
-    saved = w * h - override_total * 3   # a per-cell flag plane would be 1 byte/cell
     held = "all resident" if wt_slots == n else f"{wt_slots} of {n} resident"
-    print(f"  map {m['name']}: {cols}x{rows} WorldTiles of {worldtile} ({held}), "
-          f"{override_total} flag overrides ({saved} bytes saved over a per-cell plane)")
+    print(f"  map {m['name']}: {cols}x{rows} WorldTiles of {worldtile} ({held})")
     if m.get("worldtile_note"):
         print(f"    worldtile {m['worldtile_note']}")
     if len(banks) > 1:
@@ -2179,8 +2415,10 @@ def parse_map(blob, banks=()):
     format that could drift from this one.
 
     `banks` is the map's WorldTile bank blobs in order. Without them everything resident is
-    still readable -- dimensions, atlases, flags, warps -- and `cells` comes back empty,
-    which is the honest answer for a caller that only has the map's own resource.
+    still readable -- dimensions, atlases, flags, warps -- and `cells`/`extended` come back
+    empty, which is the honest answer for a caller that only has the map's own resource:
+    EXTENDED tags live inside each WorldTile's own payload (see slice_worldtiles), same as
+    cells, so both need the banks to be readable at all.
     """
     if blob[:2] != MAGIC_MAP:
         raise BuildError(f"not a map blob: magic {blob[:2]!r}")
@@ -2216,7 +2454,6 @@ def parse_map(blob, banks=()):
         at += (n + 3) & ~3
         return chunk
 
-    flag_table = take(tile_total)
     remap = take(tile_total) if flags & 1 else b""
     warps = take(warp_count * 5)
     masks = take(cols * rows)
@@ -2227,33 +2464,58 @@ def parse_map(blob, banks=()):
     # A WorldTile's home is arithmetic, not a lookup: payloads are padded to the slot
     # stride, so bank and offset both fall out of the index.
     cells = bytearray(w * h * 2) if banks else bytearray()
-    overrides = []
+    extended = {}
     for i in range(n if banks else 0):
         wx, wy = i % cols, i // cols
         bank = banks[i >> bank_shift]
         off = HEADER_BYTES + (i & (per_bank - 1)) * slot_bytes
         body = bank[off:off + slot_bytes]
         cw, ch = body[0], body[1]
-        count = int.from_bytes(body[2:4], "little")
         for ly in range(ch):
-            src = 4 + ly * cw * 2
+            src = 2 + ly * cw * 2
             dst = ((wy * worldtile + ly) * w + wx * worldtile) * 2
             cells[dst:dst + cw * 2] = body[src:src + cw * 2]
-        base = 4 + cw * ch * 2
-        for k in range(count):
-            ox, oy, of = body[base + k * 3:base + k * 3 + 3]
-            overrides.append((wx * worldtile + ox, wy * worldtile + oy, of))
+
+        ext_at = 2 + cw * ch * 2
+        ext_count = int.from_bytes(body[ext_at:ext_at + 2], "little")
+        ext_at += 2
+        for _ in range(ext_count):
+            lx, ly, val = body[ext_at], body[ext_at + 1], body[ext_at + 2]
+            extended[(wx * worldtile + lx, wy * worldtile + ly)] = val
+            ext_at += 3
 
     return {"w": w, "h": h, "worldtile": worldtile, "tile_px": tile_px,
             "cols": cols, "rows": rows, "bank_shift": bank_shift,
             "bank_count": (n + per_bank - 1) >> bank_shift,
             "first_bank_asset": first_bank_asset,
-            "atlas_table": atlas_table, "tile_flags": flag_table, "palette": remap,
+            "atlas_table": atlas_table, "palette": remap,
             "warps": [tuple(warps[i * 5:i * 5 + 5]) for i in range(warp_count)],
-            "masks": masks, "cells": bytes(cells), "overrides": overrides,
+            "masks": masks, "cells": bytes(cells), "extended": extended,
             "wt_slots": wt_slots, "wt_slot_bytes": slot_bytes,
             "atlas_slots": atlas_slots, "atlas_pool": pool,
             "atlas_pool_bytes": atlas_pool_bytes}
+
+
+def cell_warp(mp, x, y):
+    """A parsed map's cell (x, y) -> whether it carries the warp bit.
+
+    No cell_collision here any more: collision is a TILE property (see MAP_ROTATE's
+    comment), read from the OWNING ATLAS's tile_flags (finish_atlas), not from a map's
+    cells at all -- there is no per-cell value left to read.
+    """
+    i = (y * mp["w"] + x) * 2
+    entry = mp["cells"][i] | (mp["cells"][i + 1] << 8)
+    return bool(entry & MAP_WARP)
+
+
+def cell_extended(mp, x, y):
+    """A parsed map's cell (x, y) -> its EXTENDED tag value, or None if it carries none.
+
+    `mp["extended"]` is already a sparse {(x, y): value} dict (parse_map), built from
+    every WorldTile's own tag table -- so this is a lookup, not a scan, and empty for a
+    map parsed without its banks (nothing resident to look inside).
+    """
+    return mp["extended"].get((x, y))
 
 
 def check_warp_destinations(maps):
@@ -2268,7 +2530,7 @@ def check_warp_destinations(maps):
                 raise BuildError(
                     f"map {m['name']!r}: warp at {(tx, ty)} lands at {(dtx, dty)} in "
                     f"{dest['name']!r}, which is outside that {dest['w']}x{dest['h']} map")
-            if dest["flags"][dty * dest["w"] + dtx] & FLAG_SOLID:
+            if dest["solid"][dty * dest["w"] + dtx]:
                 raise BuildError(
                     f"map {m['name']!r}: warp at {(tx, ty)} lands at {(dtx, dty)} in "
                     f"{dest['name']!r}, which is a SOLID tile -- the player arrives "
@@ -3169,15 +3431,10 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
     L += [f"// Shared palette table. PNX_PALETTE_SLOTS must be at least this.",
           f"#define PNX_PALETTES_USED {palette_count}", ""]
 
-    custom = {n: b for n, b in (flag_names or {}).items() if n not in FLAG_NAMES}
-    if custom:
-        L += ["// Tile flags this project invented, from [tile_flags]. pnx_map_flags gives",
-              "// back the whole byte, so these are tested exactly like PNX_TILE_SOLID:",
-              "//",
-              "//   if (pnx_map_flags(map, x, y) & TILE_FLAG_WATER) { ... }"]
-        for name, bit in sorted(custom.items(), key=lambda kv: kv[1]):
-            L.append(f"#define TILE_FLAG_{c_ident(name)} 0x{bit:02X}")
-        L.append("")
+    # Custom [tile_flags] names used to get a TILE_FLAG_* #define here. Retired along
+    # with the byte they lived in -- parse_flag_names now refuses [tile_flags] outright,
+    # so `flag_names` past this point is always exactly the four built-in names and this
+    # block would never have fired. Comes back once MAP_EXTENDED's side table exists.
 
     named = [(sg["name"], sg.get("instrument_names") or []) for sg in (songs or [])]
     if any(n for _, n in named):
@@ -3388,6 +3645,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
     # map had no way to say which one it meant. Explicit `semantic` still wins over
     # `autopick`, so a manifest can start auto and be pinned down later.
     roles_by_atlas = {}
+    collision_by_atlas = {}
     for spec, atlas in zip(man.get("atlas", []), atlases):
         r = {}
         if "autopick" in spec:
@@ -3398,6 +3656,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
                                  f"out of range (0..{len(atlas['tiles'])-1})")
             r[role] = idx
         roles_by_atlas[atlas["name"]] = r
+        collision_by_atlas[atlas["name"]] = parse_atlas_collision(spec, atlas, r)
 
     sprites = [pack_sprite(root, sp, orient) for sp in man.get("sprite", [])]
 
@@ -3446,9 +3705,11 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
                 f"map {spec['name']!r} has neither `rows` nor `source`, so it has no cells")
 
         if has_source:
-            m = compile_source_map(spec, root, roles_by_atlas, table, map_names)
+            m = compile_source_map(spec, root, roles_by_atlas, table, map_names,
+                                   collision_by_atlas)
         else:
-            m = compile_map(spec, map_legend, roles_by_atlas, table, map_names)
+            m = compile_map(spec, map_legend, roles_by_atlas, table, map_names,
+                           collision_by_atlas)
         m["palette"] = spec.get("palette")
         m["tile_px"] = tile_px[names[0]]
 
@@ -3503,16 +3764,10 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
     check_warp_destinations(maps)
     rotate_maps(maps, orient)
 
-    # Tile flags live on the tileset, and compute_tile_flags keys its tally by the atlas a
-    # cell's tile actually belongs to -- so a map drawing from three tilesets contributes to
-    # all three, and none of them leak into each other.
-    flags_by_atlas = compute_tile_flags(maps)
-    flags_by_atlas = {a["name"]: flags_by_atlas.get(a["name"], {}) for a in atlases}
-
     # Slice every map before any asset id is handed out: a map's WorldTile banks are
     # resources of their own, so they need ids, and only slicing says how many there are.
     for m in maps:
-        prepare_map(m, flags_by_atlas, m["worldtile"], m["bank_bytes"])
+        prepare_map(m, m["worldtile"], m["bank_bytes"])
 
     dialog_specs = man.get("dialog", {})
 
@@ -3560,7 +3815,12 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
     shared = []
     settle_palettes(atlases, sprites, shared)
     for a in atlases:
-        finish_atlas(a, flags_by_atlas[a["name"]], shared, orient, pack_2bit)
+        # [[atlas.collision]]'s mode byte bakes into PnxAtlas.tile_flags, revived rather
+        # than removed: it was baked and loaded by the C reader but had no consumer
+        # anywhere in the engine before this (checked before touching it). SCALED's rect
+        # and COMPLEX's mask are too big for one byte each and get their own sparse
+        # tail tables, built inside finish_atlas itself now that the tiles are settled.
+        finish_atlas(a, collision_by_atlas[a["name"]], shared, orient, pack_2bit)
     # The first point at which both halves are known: which atlases chose metatiles, and
     # which legend characters were painted flipped.
     check_flip_metatiles(maps, atlases)
@@ -3589,7 +3849,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
 
         sizes = {n: len(by_name[n]["blob"]) for n in m["atlases"]}
         first_bank = asset_index[f"PNX_ASSET_BANK_{c_ident(m['name'])}_0"]
-        finish_map(m, flags_by_atlas, assets, sizes, table,
+        finish_map(m, assets, sizes, table,
                    m["worldtile"], m["atlas_slots"], m["resident"],
                    m["bank_bytes"], first_bank, orient)
     # Colour only, no ~bw variant: a 1-bit platform never loads this resource at all (see

@@ -296,6 +296,89 @@ static size_t pad4(size_t n)
 	return (n + 3u) & ~(size_t)3u;
 }
 
+// Byte-at-a-time, not a cast through a u16/u32 pointer: nothing here guarantees the
+// alignment a direct dereference would need, and this runs cold enough (per blob, not per
+// pixel) that the loop costs nothing worth avoiding it for.
+static uint32_t read_u32(const uint8_t* p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+		((uint32_t)p[3] << 24);
+}
+
+static uint16_t read_u16(const uint8_t* p)
+{
+	return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
+}
+
+// SCALED rects and COMPLEX masks, appended after an atlas's pixel payload (both layouts,
+// both bit depths -- the shape data does not depend on either). Sparse, so most atlases
+// have `remaining` bytes left over to say "none of either" in 4 bytes and stop.
+//
+// Incremental, not one `expected == payload` equality the way the fixed-size portion
+// above is checked: the whole point of a sparse table is that its size is not knowable
+// until its own count is read, so this walks forward and the caller checks what is left
+// AFTER, in `*out_consumed`, against what the blob actually holds.
+static bool parse_atlas_shapes(const uint8_t* p, size_t remaining, uint16_t tile_count,
+							   uint8_t tile_px, uint16_t asset_id, PnxAtlas* out,
+							   size_t* out_consumed)
+{
+	const size_t mask_bytes = ((size_t)tile_px * tile_px + 7) / 8;
+	size_t at				= 0;
+
+	if (remaining < at + 2)
+		goto short_read;
+	const uint16_t scaled_count = read_u16(p + at);
+	at += 2;
+	const size_t scaled_span = (size_t)scaled_count * 6;
+	if (remaining < at + scaled_span)
+		goto short_read;
+	out->scaled_rects = p + at;
+	out->scaled_count = scaled_count;
+	at += scaled_span;
+
+	if (remaining < at + 2)
+		goto short_read;
+	const uint16_t complex_count = read_u16(p + at);
+	at += 2;
+	const size_t complex_span = (size_t)complex_count * (2 + mask_bytes);
+	if (remaining < at + complex_span)
+		goto short_read;
+	out->complex_masks = p + at;
+	out->complex_count = complex_count;
+	at += complex_span;
+
+	// A tile index out of range means a corrupt or hand-built blob -- refused here rather
+	// than left for pnx_atlas_tile_scaled_rect/pnx_atlas_tile_complex_mask to read
+	// whatever a bad index happens to point at.
+	for (uint16_t i = 0; i < scaled_count; i++)
+	{
+		const uint16_t t = read_u16(out->scaled_rects + (size_t)i * 6);
+		if (t >= tile_count)
+		{
+			pnx_log("atlas %u: scaled rect %u names tile %u of %u", asset_id, i, t,
+					tile_count);
+			return false;
+		}
+	}
+	for (uint16_t i = 0; i < complex_count; i++)
+	{
+		const uint16_t t = read_u16(out->complex_masks + (size_t)i * (2 + mask_bytes));
+		if (t >= tile_count)
+		{
+			pnx_log("atlas %u: complex mask %u names tile %u of %u", asset_id, i, t,
+					tile_count);
+			return false;
+		}
+	}
+
+	*out_consumed = at;
+	return true;
+
+short_read:
+	pnx_log("atlas %u: shape tables run past the end of the blob", asset_id);
+	return false;
+}
+
 static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size_t cap)
 {
 #if !PNX_DISPLAY_BW
@@ -332,10 +415,15 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 	out->subtile_count = 0;
 	out->sub_bytes	   = 0;
 
+	// Both branches finish the same way: the fixed-size portion is still one equality
+	// check (>= here, exact once the trailing shape tables are accounted for below), and
+	// `expected` marks where SCALED/COMPLEX's tail begins.
+	size_t expected;
+
 	if (layout == 0)
 	{
-		const size_t expected = tables + tile_count * tile_bytes;
-		if (tile_px == 0 || tile_count == 0 || payload != expected)
+		expected = tables + tile_count * tile_bytes;
+		if (tile_px == 0 || tile_count == 0 || payload < expected)
 		{
 			pnx_log("atlas %u: %u tiles of %upx needs %u bytes, blob has %u", asset_id,
 					tile_count, tile_px, (unsigned)expected, (unsigned)payload);
@@ -354,9 +442,9 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 		const uint16_t subs		 = (uint16_t)(data[0] | (data[1] << 8));
 		const size_t sub_bytes	 = tile_bytes / 4;
 		const size_t table_bytes = (size_t)tile_count * 4 * 2;
-		const size_t expected	 = 4 + tables + table_bytes + (size_t)subs * sub_bytes;
+		expected				 = 4 + tables + table_bytes + (size_t)subs * sub_bytes;
 
-		if (tile_px == 0 || tile_count == 0 || subs == 0 || payload != expected)
+		if (tile_px == 0 || tile_count == 0 || subs == 0 || payload < expected)
 		{
 			pnx_log("atlas %u: %u tiles, %u subtiles needs %u bytes, blob has %u", asset_id,
 					tile_count, subs, (unsigned)expected, (unsigned)payload);
@@ -384,6 +472,20 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 
 	out->tile_px	= tile_px;
 	out->tile_count = tile_count;
+
+	// SCALED rects / COMPLEX masks, appended after the pixel payload in either layout.
+	size_t shapes_consumed = 0;
+	if (!parse_atlas_shapes(data + expected, payload - expected, tile_count, tile_px,
+							asset_id, out, &shapes_consumed))
+		return false;
+	if (expected + shapes_consumed != payload)
+	{
+		pnx_log(
+			"atlas %u: %u bytes past the shape tables go unaccounted for in a %u byte "
+			"blob",
+			asset_id, (unsigned)(payload - expected - shapes_consumed), (unsigned)payload);
+		return false;
+	}
 
 #if !PNX_DISPLAY_BW
 	// tile_palette carries a slot per tile regardless of build -- the pipeline never
@@ -461,17 +563,6 @@ bool pnx_sprite_load(PnxSprite* out, uint16_t asset_id)
 // per-call cost is amortised 256-fold, and it is paid when the player crosses a boundary
 // rather than every frame. The rule is unchanged; the unit is.
 
-static uint32_t read_u32(const uint8_t* p)
-{
-	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
-		((uint32_t)p[3] << 24);
-}
-
-static uint16_t read_u16(const uint8_t* p)
-{
-	return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
-}
-
 // Defined below with the rest of the streamer; pnx_map_load calls it to fill a map small
 // enough to be held whole before it returns.
 static bool worldtile_load_run(PnxMap* m, uint32_t first, uint8_t slot, uint8_t count);
@@ -541,10 +632,13 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 		return false;
 	}
 
-	const uint16_t n	  = (uint16_t)cols * rows;
+	const uint16_t n = (uint16_t)cols * rows;
+	// No flag table any more (v11): collision/warp are read out of each cell's own u16 and
+	// the tile's owning atlas, not a map-owned plane -- so the only optional table left is
+	// the palette remap (flags bit 0).
 	const size_t resident = 16 + (size_t)atlas_count * 4 + ((size_t)atlas_slots + 1) * 4 +
 		4 // first_bank_asset, pad
-		+ pad4(tile_total) + ((flags & 1) ? pad4(tile_total) : 0) +
+		+ ((flags & 1) ? pad4(tile_total) : 0) +
 		pad4((size_t)warps * sizeof(PnxWarp)) + pad4(n);
 
 	uint8_t* pre_mem = (uint8_t*)pnx_arena_alloc(s_arena, resident, 4);
@@ -631,8 +725,6 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 		s_bytes_loaded += sizeof(bh);
 	}
 
-	out->tile_flags = at;
-	at += pad4(tile_total);
 	out->tile_palette = NULL;
 	if (flags & 1)
 	{
@@ -864,20 +956,32 @@ static bool worldtile_accept(PnxMap* m, uint32_t i, uint8_t slot)
 	const uint8_t* dst = m->slot_mem + (size_t)slot * m->slot_bytes;
 	PnxWorldTile* wt   = &m->slots[slot];
 
-	wt->cell_w		   = dst[0];
-	wt->cell_h		   = dst[1];
-	wt->override_count = read_u16(dst + 2);
-	wt->cells		   = dst + 4;
-	wt->overrides	   = dst + 4 + (size_t)wt->cell_w * wt->cell_h * 2;
+	// v12: [cw, ch] + cells + ext_count(u16) + ext(ext_count * 3) -- EXTENDED's sparse tag
+	// table. Collision/warp already moved into the cell's own u16 (see PnxMap's own
+	// comment), so there is no collision override section any more, but this one
+	// genuinely needs a per-cell exception list (PnxWorldTile.ext's own comment,
+	// pnx_assets.h) -- renamed and repurposed, not reinstated unchanged.
+	wt->cell_w = dst[0];
+	wt->cell_h = dst[1];
+	wt->cells  = dst + 2;
 
-	const size_t need =
-		4 + (size_t)wt->cell_w * wt->cell_h * 2 + (size_t)wt->override_count * 3;
+	const size_t cells_need = 2 + (size_t)wt->cell_w * wt->cell_h * 2;
 	if (wt->cell_w == 0 || wt->cell_h == 0 || wt->cell_w > m->worldtile ||
-		wt->cell_h > m->worldtile || need > m->slot_bytes)
+		wt->cell_h > m->worldtile || cells_need + 2 > m->slot_bytes)
 	{
-		pnx_log("map: WorldTile %u claims %ux%u cells and %u overrides, %u bytes of %u",
-				(unsigned)i, wt->cell_w, wt->cell_h, wt->override_count, (unsigned)need,
-				m->slot_bytes);
+		pnx_log("map: WorldTile %u claims %ux%u cells, %u bytes of %u", (unsigned)i,
+				wt->cell_w, wt->cell_h, (unsigned)(cells_need + 2), m->slot_bytes);
+		return false;
+	}
+
+	wt->ext_count = read_u16(dst + cells_need);
+	wt->ext		  = dst + cells_need + 2;
+
+	const size_t need = cells_need + 2 + (size_t)wt->ext_count * 3;
+	if (need > m->slot_bytes)
+	{
+		pnx_log("map: WorldTile %u claims %u extended tag(s), %u bytes of %u", (unsigned)i,
+				wt->ext_count, (unsigned)need, m->slot_bytes);
 		return false;
 	}
 
@@ -1281,6 +1385,40 @@ bool pnx_font_load(PnxFont* out, uint16_t asset_id)
 }
 
 // ---------------------------------------------------------------------- accessors
+
+bool pnx_atlas_tile_scaled_rect(const PnxAtlas* a, uint16_t tile, uint8_t* x, uint8_t* y,
+								uint8_t* w, uint8_t* h)
+{
+	for (uint16_t i = 0; i < a->scaled_count; i++)
+	{
+		const uint8_t* e = a->scaled_rects + (size_t)i * 6;
+		if (read_u16(e) == tile)
+		{
+			if (x)
+				*x = e[2];
+			if (y)
+				*y = e[3];
+			if (w)
+				*w = e[4];
+			if (h)
+				*h = e[5];
+			return true;
+		}
+	}
+	return false;
+}
+
+const uint8_t* pnx_atlas_tile_complex_mask(const PnxAtlas* a, uint16_t tile)
+{
+	const size_t mask_bytes = ((size_t)a->tile_px * a->tile_px + 7) / 8;
+	for (uint16_t i = 0; i < a->complex_count; i++)
+	{
+		const uint8_t* e = a->complex_masks + (size_t)i * (2 + mask_bytes);
+		if (read_u16(e) == tile)
+			return e + 2;
+	}
+	return NULL;
+}
 
 const PnxWarp* pnx_map_warp_at(const PnxMap* m, int32_t x, int32_t y)
 {

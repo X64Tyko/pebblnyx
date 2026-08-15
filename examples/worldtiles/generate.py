@@ -159,6 +159,10 @@ out = "meadow.bin"
 autopick = ["floor", "wall", "accent"]
 metatiles = "auto"
 
+[[atlas.collision]]
+tile = "wall"
+type = "solid"
+
 [[atlas]]
 name = "ruins"
 sheet = "art/dungeon.png"
@@ -169,6 +173,10 @@ out = "ruins.bin"
 autopick = ["floor", "wall", "accent"]
 metatiles = "auto"
 
+[[atlas.collision]]
+tile = "wall"
+type = "solid"
+
 [[atlas]]
 name = "hall"
 sheet = "art/interior.png"
@@ -178,6 +186,10 @@ max_tiles = 48
 out = "hall.bin"
 autopick = ["floor", "wall", "accent"]
 metatiles = "auto"
+
+[[atlas.collision]]
+tile = "wall"
+type = "solid"
 
 # ----------------------------------------------------------------------------- legend
 #
@@ -193,7 +205,6 @@ flags = []
 [legend."#"]
 tile = "wall"
 atlas = "meadow"
-flags = ["solid"]
 
 [legend."D"]
 tile = "accent"
@@ -208,7 +219,6 @@ flags = []
 [legend."="]
 tile = "wall"
 atlas = "ruins"
-flags = ["solid"]
 
 [legend."E"]
 tile = "accent"
@@ -223,7 +233,6 @@ flags = []
 [legend."+"]
 tile = "wall"
 atlas = "hall"
-flags = ["solid"]
 
 [legend."F"]
 tile = "accent"

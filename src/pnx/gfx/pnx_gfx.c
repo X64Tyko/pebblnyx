@@ -314,6 +314,8 @@ void pnx_blit_4bpp(PnxTarget* t, const uint8_t* src, const PnxPalette* palette, 
 	if (y + h > th)
 		j1 = th - y;
 
+	const bool rotate = (flip & PNX_FLIP_ROTATE) != 0;
+
 	for (int32_t j = j0; j < j1; j++)
 	{
 		PnxRow row = pnx_target_row(t, (int16_t)(y + j));
@@ -330,14 +332,47 @@ void pnx_blit_4bpp(PnxTarget* t, const uint8_t* src, const PnxPalette* palette, 
 		if (i1 <= i0)
 			continue;
 
-		// Flip Y is free: read the source row from the other end. No second span writer, no
-		// per-pixel cost -- only this index changes.
-		const int32_t sj	= (flip & PNX_FLIP_Y) ? (h - 1 - j) : j;
-		const uint8_t* line = src + sj * stride;
 #if !PNX_DISPLAY_BW
 		const uint8_t* pal = palette->entries;
 		uint8_t* dst	   = row.data + x;
 #endif
+
+		if (rotate)
+		{
+			// Transpose: swap source row/column before flip_x/flip_y are applied to the
+			// result (see PNX_MAP_ROTATE's own comment for why this ordering is what
+			// spans all 8 symmetries with three independent bits). Pre-flip, a rotated
+			// destination row reads source COLUMN j -- constant across the row, so it is
+			// still hoisted here -- but source ROW i, which is the thing that varies
+			// PIXEL BY PIXEL as the row is walked. That is what costs the fast path: this
+			// branch is always per-pixel, never a span copy, regardless of flip_x/flip_y.
+			const int32_t sx_col = (flip & PNX_FLIP_X) ? (w - 1 - j) : j;
+			for (int32_t i = i0; i < i1; i++)
+			{
+				const int32_t sy_row = (flip & PNX_FLIP_Y) ? (h - 1 - i) : i;
+				const uint8_t* line	 = src + sy_row * stride;
+#if PNX_DISPLAY_BW
+				const uint8_t byte	= line[sx_col >> 2];
+				const uint8_t state = (uint8_t)((byte >> (6 - 2 * (sx_col & 3))) & 3u);
+				if (state == 0)
+					continue;
+				const bool ink = (state == 3) ? (((x + i + y + j) & 1) == 0) : (state == 2);
+				pnx_bw_set_pixel(row.data, x + i, ink);
+#else
+				const uint8_t packed = line[sx_col >> 1];
+				const uint8_t v =
+					(sx_col & 1) ? (uint8_t)(packed & 0x0F) : (uint8_t)(packed >> 4);
+				if (v != PNX_PALETTE_TRANSPARENT)
+					dst[i] = pal[v];
+#endif
+			}
+			continue;
+		}
+
+		// Flip Y is free: read the source row from the other end. No second span writer, no
+		// per-pixel cost -- only this index changes.
+		const int32_t sj	= (flip & PNX_FLIP_Y) ? (h - 1 - j) : j;
+		const uint8_t* line = src + sj * stride;
 
 		// Two paths rather than a `mirror ?` per pixel. The forward one is the shared
 		// span; mirrored cannot use it because destination and source walk opposite ways.

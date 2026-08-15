@@ -14,10 +14,12 @@ Run:  python3 tests/test_assets.py
 
 import contextlib
 import io
+import math
 import os
 import re
 import sys
 import tempfile
+import tomllib
 import time
 import textwrap
 
@@ -32,7 +34,16 @@ checks = 0
 
 
 def make_sheet(path, tiles_across=2, tile=16):
-    """A synthetic sheet with visually distinct tiles, so autopick has something to do."""
+    """A synthetic sheet with visually distinct tiles, so autopick has something to do.
+
+    Grayscale, spaced 60 apart, which is what survives this pipeline's palette
+    quantization at the default 2x2 (4 tiles) -- checked empirically, not derived: closer
+    spacing (tried scaling the step down to fit more tiles in 0..255) collapses several
+    tiles to the same post-quantization colour and autopick reports "too few distinct
+    tiles" against a sheet that LOOKS fine. A caller wanting more than 4 roles needs
+    genuinely separated colours, not more shades of grey -- see check_user_flags for one
+    built that way, rather than stretching this function past what it was tuned for.
+    """
     size = tiles_across * tile
     img = Image.new("RGBA", (size, size), (0, 0, 0, 255))
     px = img.load()
@@ -46,6 +57,23 @@ def make_sheet(path, tiles_across=2, tile=16):
                     v = min(255, shade + noise)
                     px[tx * tile + i, ty * tile + j] = (v, v, v, 255)
     img.save(path)
+
+
+def make_colour_sheet(path, colours, tile=16):
+    """A sheet of flat, VIVIDLY distinct tiles -- for a test that needs more roles than
+    make_sheet's grayscale ramp survives quantization at (see its own comment)."""
+    n = len(colours)
+    across = int(math.ceil(math.sqrt(n)))
+    size = across * tile
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 255))
+    px = img.load()
+    for idx, (r, g, b) in enumerate(colours):
+        tx, ty = idx % across, idx // across
+        for j in range(tile):
+            for i in range(tile):
+                px[tx * tile + i, ty * tile + j] = (r, g, b, 255)
+    img.save(path)
+    return across
 
 
 BASE_MAP = """
@@ -68,6 +96,9 @@ def manifest(root, **overrides):
             max_tiles = 16
             out = "tiles.bin"
             autopick = ["floor", "wall", "accent"]
+            [[atlas.collision]]
+            tile = "wall"
+            type = "solid"
         ''',
         "legend": '''
             [legend."."]
@@ -75,7 +106,7 @@ def manifest(root, **overrides):
             flags = []
             [legend."#"]
             tile = "wall"
-            flags = ["solid"]
+            flags = []
             [legend."D"]
             tile = "accent"
             flags = ["warp"]
@@ -396,11 +427,11 @@ def check_orientation():
             fp, rp = pnx_assets.parse_map(fm), pnx_assets.parse_map(rm)
             turned, _, _ = pnx_assets.rotate_grid(fp["cells"], fp["w"], fp["h"], orient,
                                                   stride=2)
+            # Collision/warp live IN the cell word now (fold_flag_into_entry), so this one
+            # check already covers what a separate "flags rotate with the plane" check
+            # used to verify by hand -- there is no second structure left to compare.
             check(f"{name}: tile plane is the portrait plane rotated",
                   turned == rp["cells"])
-            check(f"{name}: flag overrides rotate with the plane",
-                  sorted(pnx_assets.rotate_point(x, y, fp["w"], fp["h"], orient) + (f,)
-                         for x, y, f in fp["overrides"]) == sorted(rp["overrides"]))
 
             # --- and it costs nothing. Rotation permutes cells, so a map that changes
             #     size between orientations means a choice somewhere depends on the order
@@ -533,6 +564,9 @@ TWO_ATLASES = '''
     max_tiles = 16
     out = "tiles.bin"
     autopick = ["floor", "wall", "accent"]
+    [[atlas.collision]]
+    tile = "wall"
+    type = "solid"
 
     [[atlas]]
     name = "second"
@@ -550,7 +584,7 @@ TWO_LEGEND = '''
     flags = []
     [legend."#"]
     tile = "wall"
-    flags = ["solid"]
+    flags = []
     [legend."D"]
     tile = "accent"
     flags = ["warp"]
@@ -903,7 +937,7 @@ FLIP_LEGEND = '''
     flags = []
     [legend."#"]
     tile = "wall"
-    flags = ["solid"]
+    flags = []
     [legend."D"]
     tile = "accent"
     flags = ["warp"]
@@ -932,6 +966,9 @@ FLIP_ATLAS = '''
     # Explicit, because the flip bits are only honoured for flat tiles and "auto" would
     # let the sheet's redundancy decide whether this test is testing anything.
     metatiles = false
+    [[atlas.collision]]
+    tile = "wall"
+    type = "solid"
 '''
 
 FLIP_MAP = '''
@@ -959,12 +996,8 @@ def cell(mp, x, y):
     return cells(mp)[y * mp["w"] + x]
 
 
-def cell_flags(mp, x, y):
-    """The flag byte a cell actually carries: its tile's default, or its override."""
-    for ox, oy, of in mp["overrides"]:
-        if (ox, oy) == (x, y):
-            return of
-    return mp["tile_flags"][cell(mp, x, y) & pnx_assets.MAP_INDEX_MASK]
+def cell_warp(mp, x, y):
+    return pnx_assets.cell_warp(mp, x, y)
 
 
 def check_tile_indices_and_flips():
@@ -1029,58 +1062,149 @@ def check_tile_indices_and_flips():
 
 
 def check_user_flags():
-    named = '''
-        [tile_flags]
-        water = 0x04
-        ledge = 0x20
-    '''
+    """Collision as a TILE property ([[atlas.collision]]) + warp as a cell flag.
+
+    Was check_user_flags for the old tile_flags[]-by-id custom-bit mechanism, then for a
+    brief per-cell collision-mode design -- both retired (see MAP_ROTATE's comment in
+    pnx_assets.py). Collision cannot vary by placement any more, so two DIFFERENT roles
+    carry SCALED and COMPLEX here, not two legend characters painting the same tile:
+    that would be testing exactly the thing this design makes impossible on purpose.
+    """
+    atlas = FLIP_ATLAS.replace(
+        "region = [0, 0, 2, 2]", "region = [0, 0, 3, 3]").replace(
+        'autopick = ["floor", "wall", "accent"]',
+        'autopick = ["floor", "wall", "accent", "fence", "niche"]') + '''
+    [[atlas.collision]]
+    tile = "fence"
+    type = "scaled"
+    rect = [0, 8, 16, 8]
+    [[atlas.collision]]
+    tile = "niche"
+    type = "complex"
+'''
     legend = FLIP_LEGEND + '''
     [legend."~"]
-    tile = "floor"
-    flags = ["water"]
+    tile = "fence"
+    flags = []
+    extended = 7
     [legend."^"]
-    tile = "floor"
-    flags = ["water", "ledge"]
+    tile = "niche"
+    flags = ["warp"]
 '''
     body = FLIP_MAP.replace("#...#", "#~^.#")
 
     with tempfile.TemporaryDirectory() as root:
-        make_sheet(os.path.join(root, "sheet.png"))
-        path = manifest(root, legend=legend, atlas=FLIP_ATLAS, tile_flags=named,
-                        **maps(body))
+        make_colour_sheet(os.path.join(root, "sheet.png"), [
+            (220, 40, 40), (40, 220, 40), (40, 40, 220), (220, 220, 40), (220, 40, 220)])
+        path = manifest(root, legend=legend, atlas=atlas, **maps(body))
         out = os.path.join(root, "out")
         with contextlib.redirect_stdout(io.StringIO()):
             pnx_assets.build(path, out, os.path.join(out, "gen.h"))
 
-        d = defines(out)
-        check("a named flag reaches the header as its bit",
-              d.get("TILE_FLAG_WATER") == 0x04 and d.get("TILE_FLAG_LEDGE") == 0x20)
+        # Collision is a TILE property now, sitting on the atlas rather than any one
+        # map's cells -- checked directly against the atlas build, the same sequence
+        # `build()` runs internally, rather than through a map/cell round trip that
+        # would really be testing tile-id resolution a second time.
+        with open(path, "rb") as f:
+            man = tomllib.load(f)
+        spec = man["atlas"][0]
+        packed = pnx_assets.pack_atlas(root, spec)
+        roles = dict(pnx_assets.autopick_tiles(packed, spec["autopick"]))
+        collision = pnx_assets.parse_atlas_collision(spec, packed, roles)
+        shared = []
+        pnx_assets.settle_palettes([packed], [], shared)
+        finished = pnx_assets.finish_atlas(packed, collision, shared)
+        check("a scaled tile's mode reaches the atlas",
+              finished["tile_flags"][roles["fence"]] == pnx_assets.COLLISION_SCALED)
+        check("a complex tile's mode reaches the atlas",
+              finished["tile_flags"][roles["niche"]] == pnx_assets.COLLISION_COMPLEX)
+        check("an undeclared tile's mode defaults to NONE",
+              finished["tile_flags"][roles["floor"]] == pnx_assets.COLLISION_NONE)
 
+        # The shape data itself: not just the mode, but the rect/mask baked for it.
+        check("the scaled tile's rect round-trips",
+              finished["scaled_rects"][roles["fence"]] == (0, 8, 16, 8))
+        check("a non-scaled tile has no rect entry",
+              roles["wall"] not in finished["scaled_rects"])
+        check("the complex tile is listed",
+              roles["niche"] in finished["complex_tiles"])
+        check("a non-complex tile is not",
+              roles["wall"] not in finished["complex_tiles"])
+
+        # Parse the baked blob back the same way the C loader will, byte for byte, rather
+        # than trusting the Python-side dict alone -- that dict is a convenience the blob
+        # itself does not carry, so only the bytes prove the format round-trips.
+        blob = finished["blob"]
+        tile_count = len(packed["tiles"])
+        # finish_atlas's flat-layout body is [assign | flags | pixels | shapes] after the
+        # header; tile_bytes is not stored on the dict, so derive the pixel span from T
+        # and depth (colour build, 4bpp) instead of trusting a second copy of the number.
+        T = packed["tile_px"]
+        tile_bytes = T * T // 2  # colour build, 4bpp
+        body_at = pnx_assets.HEADER_BYTES
+        assign_span = (tile_count + 3) & ~3
+        flags_span = (tile_count + 3) & ~3
+        pixel_span = tile_count * tile_bytes
+        shapes_at = body_at + assign_span + flags_span + pixel_span
+        scaled_n = int.from_bytes(blob[shapes_at:shapes_at + 2], "little")
+        check("one scaled entry baked into the blob", scaled_n == 1)
+        srow = shapes_at + 2
+        s_tile = int.from_bytes(blob[srow:srow + 2], "little")
+        sx, sy, sw, sh = blob[srow + 2:srow + 6]
+        check("the blob's scaled entry names the fence tile", s_tile == roles["fence"])
+        check("the blob's scaled entry carries the authored rect",
+              (sx, sy, sw, sh) == (0, 8, 16, 8))
+        crow = srow + 6
+        complex_n = int.from_bytes(blob[crow:crow + 2], "little")
+        check("one complex entry baked into the blob", complex_n == 1)
+        c_tile = int.from_bytes(blob[crow + 2:crow + 4], "little")
+        check("the blob's complex entry names the niche tile", c_tile == roles["niche"])
+        mask = blob[crow + 4:crow + 4 + (T * T + 7) // 8]
+        check("the complex mask has at least one ink bit set for a non-empty tile",
+              any(mask))
+
+        # Warp is still a per-cell flag, so it is still checked through the compiled map.
         banks = []
         i = 0
         while os.path.exists(os.path.join(out, f"a_b{i}.bin")):
             banks.append(read_blob(out, f"a_b{i}.bin"))
             i += 1
         mp = pnx_assets.parse_map(read_blob(out, "a.bin"), banks)
-        # '~' and '^' paint the SAME tile as '.', so any flag difference between the
-        # three can only have come from the legend characters -- which is the thing
-        # worth asserting. Whichever value loses the per-tile tally becomes an override,
-        # so the effective byte is read through both.
-        check("a custom flag reaches the cell it was painted on",
-              cell_flags(mp, 1, 2) & 0x04)
-        check("two custom flags combine in one byte",
-              cell_flags(mp, 2, 2) & 0x04 and cell_flags(mp, 2, 2) & 0x20)
-        check("an unflagged cell of the same tile stays clear",
-              not cell_flags(mp, 3, 2) & (0x04 | 0x20))
+        check("warp reaches the cell it was painted on", cell_warp(mp, 2, 2))
+        check("an unflagged cell stays not warp", not cell_warp(mp, 1, 2))
 
-    expect_fail("redefining a built-in flag", "built-in",
-                tile_flags="[tile_flags]\nsolid = 0x04\n")
-    expect_fail("claiming a bit that is not free", "free flag bit",
-                tile_flags="[tile_flags]\nwater = 0x03\n")
-    expect_fail("two flags on one bit", "both claim",
-                tile_flags="[tile_flags]\nwater = 0x04\nledge = 0x04\n")
-    expect_fail("a flag name that is not an identifier", "C identifier",
-                tile_flags='[tile_flags]\n"deep water" = 0x04\n')
+        # EXTENDED: a placement-authored tag, same shape as warp but an arbitrary value
+        # instead of a bit, round-tripped through the WorldTile's own sparse table
+        # (slice_worldtiles) rather than the map's resident preamble.
+        check("extended reaches the cell it was painted on",
+              pnx_assets.cell_extended(mp, 1, 2) == 7)
+        check("an untagged cell carries no extended value",
+              pnx_assets.cell_extended(mp, 3, 2) is None)
+
+    expect_fail("two [[atlas.collision]] entries for one tile", "two",
+                atlas=FLIP_ATLAS + '''
+                    [[atlas.collision]]
+                    tile = "wall"
+                    type = "scaled"
+                    rect = [0, 0, 16, 16]
+                ''')
+    expect_fail("scaled with no rect", "rect",
+                atlas=FLIP_ATLAS.replace(
+                    'autopick = ["floor", "wall", "accent"]',
+                    'autopick = ["floor", "wall", "accent", "fence"]') + '''
+                    [[atlas.collision]]
+                    tile = "fence"
+                    type = "scaled"
+                ''')
+    expect_fail("a rect that does not fit the tile", "does not fit",
+                atlas=FLIP_ATLAS.replace(
+                    'autopick = ["floor", "wall", "accent"]',
+                    'autopick = ["floor", "wall", "accent", "fence"]') + '''
+                    [[atlas.collision]]
+                    tile = "fence"
+                    type = "scaled"
+                    rect = [10, 10, 10, 10]
+                ''')
     expect_fail("an unknown flag on a legend entry", "unknown flag",
                 legend='''
                     [legend."."]
@@ -1088,11 +1212,176 @@ def check_user_flags():
                     flags = ["swamp"]
                     [legend."#"]
                     tile = "wall"
-                    flags = ["solid"]
+                    flags = []
                     [legend."D"]
                     tile = "accent"
                     flags = ["warp"]
                 ''')
+    expect_fail("collision moved off the legend", "collision is a tile property",
+                legend='''
+                    [legend."."]
+                    tile = "floor"
+                    flags = ["solid"]
+                ''')
+    expect_fail("[tile_flags] is refused outright now", "retired",
+                tile_flags="[tile_flags]\nwater = 0x04\n")
+    expect_fail("extended out of range", "extended must be",
+                legend='''
+                    [legend."."]
+                    tile = "floor"
+                    extended = 256
+                    flags = []
+                    [legend."#"]
+                    tile = "wall"
+                    flags = []
+                    [legend."D"]
+                    tile = "accent"
+                    flags = ["warp"]
+                ''')
+
+
+def check_atlas_offset():
+    """`offset` moves the carve's pixel origin independently of `region`'s tile units --
+    a sheet whose art does not start flush with (0,0) (a margin, a shared border strip
+    another importer left behind) has no tile-aligned pixel to name otherwise.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        colours = [(220, 40, 40), (40, 220, 40), (40, 40, 220), (220, 220, 40)]
+        clean = os.path.join(root, "clean.png")
+        make_colour_sheet(clean, colours, tile=16)
+
+        # The same grid, prefixed by a 5x3px border in a colour that never appears in the
+        # grid itself -- large enough that an offset=[0,0] carve of THIS sheet would read
+        # a mix of border and grid pixels per tile, not merely a shifted grid.
+        ox, oy = 5, 3
+        clean_img = Image.open(clean)
+        w, h = clean_img.size
+        bordered_img = Image.new("RGBA", (w + ox, h + oy), (10, 10, 10, 255))
+        bordered_img.paste(clean_img, (ox, oy))
+        bordered = os.path.join(root, "bordered.png")
+        bordered_img.save(bordered)
+
+        spec_clean = {"name": "a", "sheet": "clean.png", "tile": 16,
+                      "region": [0, 0, 2, 2], "out": "a.bin"}
+        spec_off = {"name": "b", "sheet": "bordered.png", "tile": 16,
+                    "region": [0, 0, 2, 2], "offset": [ox, oy], "out": "b.bin"}
+
+        clean_atlas = pnx_assets.pack_atlas(root, spec_clean)
+        off_atlas = pnx_assets.pack_atlas(root, spec_off)
+        check("an offset carve matches the same grid with no border",
+              off_atlas["tiles"] == clean_atlas["tiles"])
+
+        # offset=[0,0] against the SAME bordered sheet must NOT match -- proving this
+        # actually exercises the offset rather than something the two sheets already
+        # agreed on by construction.
+        noff_atlas = pnx_assets.pack_atlas(
+            root, {**spec_off, "offset": [0, 0], "name": "c"})
+        check("an unset offset against a bordered sheet reads something different",
+              noff_atlas["tiles"] != clean_atlas["tiles"])
+
+        try:
+            pnx_assets.pack_atlas(root, {**spec_off, "offset": [-1, 0], "name": "d"})
+            check("a negative offset is refused", False)
+        except pnx_assets.BuildError as e:
+            check("a negative offset is refused", "negative" in str(e))
+
+        try:
+            pnx_assets.pack_atlas(root, {**spec_off, "offset": [100, 100], "name": "e"})
+            check("an offset that runs the region off the sheet is refused", False)
+        except pnx_assets.BuildError as e:
+            check("an offset that runs the region off the sheet is refused",
+                  "runs past" in str(e))
+
+        # `origin` (sheet TILE coordinates, offset already folded in) is what the editor
+        # resolves a raw carve cell back to its packed tile through -- it must name the
+        # SAME cells for the offset carve as the clean one, in the same order.
+        check("origin is index-aligned with tiles, offset already accounted for",
+              off_atlas["origin"] == clean_atlas["origin"])
+
+
+def check_complex_mask_authoring():
+    """A COMPLEX tile's mask can be authored explicitly (`mask`), overriding the default
+    derived from the tile's own opacity -- the format extension that makes COMPLEX
+    collision actually editable rather than merely computed.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        # A fully-opaque 4x4 tile: `mask` authors an X shape into it, which the tile's
+        # own opacity (all-ink) would never produce on its own -- so a mask that matches
+        # the X, rather than the full square, proves the override actually took.
+        make_colour_sheet(os.path.join(root, "sheet.png"), [(220, 40, 40)], tile=4)
+        atlas = {"name": "a", "tiles": [bytes([0xC0] * 16)], "tile_px": 4}
+        mask_text = "#..#\n.##.\n.##.\n#..#"
+        entry = {"tile": 0, "type": "complex", "mask": mask_text}
+        collision = pnx_assets.parse_atlas_collision({"collision": [entry]}, atlas, {})
+        mode, extra = collision[0]
+        check("an authored mask parses as COMPLEX", mode == pnx_assets.COLLISION_COMPLEX)
+
+        expected = pnx_assets.pack_collision_mask(
+            bytearray(0xC0 if c == "#" else 0x00 for c in mask_text.replace("\n", "")), 4)
+        check("the authored mask packs to the X shape, not the tile's own full opacity",
+              extra == expected)
+        full_opacity = pnx_assets.pack_collision_mask(bytearray([0xC0] * 16), 4)
+        check("...and that differs from what auto-derivation would have produced",
+              extra != full_opacity)
+
+        # unpack_collision_mask is the editor's own round trip (show a tile's current
+        # mask as text before repainting it) -- pack then unpack must reproduce exactly
+        # what was authored, or the editor would silently mutate a mask just by opening it.
+        check("unpack_collision_mask round-trips an authored mask",
+              pnx_assets.unpack_collision_mask(extra, 4) == mask_text.split("\n"))
+
+        expect_fail("a mask of the wrong shape", "must be exactly",
+                    atlas=FLIP_ATLAS.replace(
+                        'autopick = ["floor", "wall", "accent"]',
+                        'autopick = ["floor", "wall", "accent", "fence"]') + '''
+                        [[atlas.collision]]
+                        tile = "fence"
+                        type = "complex"
+                        mask = "##\\n##"
+                    ''')
+        # textwrap.dedent'd on its OWN, separately from FLIP_ATLAS: the two fragments sit
+        # at different Python-source indentation levels, and manifest()'s later dedent
+        # only strips what is common to the WHOLE combined string -- which is FLIP_ATLAS's
+        # shallower 4 spaces, not this block's deeper nesting. Left undone, every mask row
+        # here would carry ~20 leftover spaces of indentation and fail on shape, not on
+        # the invalid character this test is actually about.
+        bad_char_mask = textwrap.dedent('''
+            [[atlas.collision]]
+            tile = "fence"
+            type = "complex"
+            mask = """
+            xxxxxxxxxxxxxxxx
+            ................
+            ................
+            ................
+            ................
+            ................
+            ................
+            ................
+            ................
+            ................
+            ................
+            ................
+            ................
+            ................
+            ................
+            ................
+            """
+        ''')
+        expect_fail("a mask with an invalid character", "only '#'",
+                    atlas=FLIP_ATLAS.replace(
+                        'autopick = ["floor", "wall", "accent"]',
+                        'autopick = ["floor", "wall", "accent", "fence"]') + bad_char_mask)
+        expect_fail("mask on a non-complex tile", "only means something there",
+                    atlas=FLIP_ATLAS.replace(
+                        'autopick = ["floor", "wall", "accent"]',
+                        'autopick = ["floor", "wall", "accent", "fence"]') + '''
+                        [[atlas.collision]]
+                        tile = "fence"
+                        type = "scaled"
+                        rect = [0, 0, 16, 16]
+                        mask = "................"
+                    ''')
 
 
 def check_editor_atlas_removal():
@@ -1224,9 +1513,9 @@ def check_editor_legend():
 
         # A raw index, which is the whole point: no role, no [atlas.semantic] entry, and
         # still paintable.
-        proj.save_legend("q", 2, flags=["solid"])
+        proj.save_legend("q", 2, flags=["warp"])
         check("a legend entry written by index lands in the manifest",
-              proj.man["legend"]["q"] == {"tile": 2, "flags": ["solid"]})
+              proj.man["legend"]["q"] == {"tile": 2, "flags": ["warp"]})
 
         proj.save_legend("<", 2, flip=["x"])
         check("a flipped entry records its axis",
@@ -1244,7 +1533,7 @@ def check_editor_legend():
         # It once did, so every flag ticked closed the gap a little more.
         gap = lambda: open(proj.path).read().split('[legend."<"]')[0].endswith("\n\n")
         was = gap()
-        proj.save_legend("q", "wall", flags=["solid"])
+        proj.save_legend("q", "wall", flags=["warp"])
         proj.save_legend("q", "wall", flags=[])
         check("rewriting an entry keeps the blank line after it", gap() == was)
 
@@ -1295,7 +1584,14 @@ def check_editor_legend():
                 check(f"the editor refuses {label}", True)
 
 
-def check_editor_flags():
+def _check_editor_flags_RETIRED():
+    # [tile_flags] itself is retired (parse_flag_names refuses it outright -- see
+    # MAP_ROTATE's comment in pnx_assets.py), so this whole test now exercises a feature
+    # that cannot build. tools/pnx_editor.py's save_flag/remove_flag/flag_names methods
+    # are correspondingly dead code, not yet removed -- deferred to the editor UI pass
+    # for role/collision-type/rotate editing, so the removal happens alongside whatever
+    # replaces this rather than leaving a UI hole in between. Kept, renamed and disabled,
+    # rather than deleted outright, as the record of what that pass needs to account for.
     with tempfile.TemporaryDirectory() as root:
         make_sheet(os.path.join(root, "sheet.png"))
         proj = editor_project(root, atlas=FLIP_ATLAS, **maps(EDITOR_MAP))
@@ -1465,7 +1761,7 @@ def check_map_legend():
         make_sheet(os.path.join(root, "sheet.png"))
         proj = editor_project(root, atlas=FLIP_ATLAS, **maps(TWO_MAPS))
 
-        proj.save_legend("%", 1, "tiles", ["solid"], [], map_name="a")
+        proj.save_legend("%", 1, "tiles", ["warp"], [], map_name="a")
         proj.save_legend("%", 2, "tiles", [], [], map_name="b")
 
         by_name = {m["name"]: m for m in proj.man["map"]}
@@ -1671,7 +1967,7 @@ def check_mapfile_format():
         path = os.path.join(root, "m.pnxmap")
         tiles = [{"atlas": "tiles", "index": 0, "flags": 0, "flip": ""},
                  {"atlas": "tiles", "index": "wall", "flags": 1, "flip": "x"},
-                 {"atlas": "water", "index": 900, "flags": 2, "flip": "xy"}]
+                 {"atlas": "water", "index": 900, "flags": 2, "flip": "xy", "extended": 42}]
         cells = [0, 1, 2, 0, 1, 1]
         warps = [{"at": [1, 1], "to": ["cave", 3, 4], "gated": True}]
         mf.write(path, 3, 2, [2, 1], tiles, cells, warps)
@@ -1679,7 +1975,14 @@ def check_mapfile_format():
 
         check("a map file round-trips its grid",
               (doc["w"], doc["h"], doc["start"], doc["cells"]) == (3, 2, [2, 1], cells))
-        check("and its tile table", doc["tiles"] == tiles)
+        # read() adds "rotate" to every entry now (bit 2 of the same flip byte, see
+        # write()'s own comment) -- none of `tiles` set it, so it should read back False.
+        # It adds "extended" too, defaulting to 0 for the entries that did not set it.
+        check("and its tile table",
+              doc["tiles"] == [dict(t, rotate=False, extended=t.get("extended", 0))
+                               for t in tiles])
+        check("a nonzero extended value survives specifically",
+              doc["tiles"][2]["extended"] == 42)
         check("and its warps", doc["warps"] == warps)
         # A role survives as a role. Freezing it to whatever number it held at conversion
         # is the one thing that would make migrating a manifest a silent downgrade.
@@ -1732,8 +2035,13 @@ def check_source_maps():
         def write_map(cells, w=6, h=5, start=(1, 1), warps=(), tiles=None):
             tiles = tiles or [
                 {"atlas": "tiles", "index": "floor", "flags": 0, "flip": ""},
-                {"atlas": "tiles", "index": "wall", "flags": 1, "flip": ""},
-                {"atlas": "tiles", "index": "accent", "flags": 2, "flip": ""}]
+                # "wall" carries no flag of its own here -- SOLID is declared on the
+                # atlas now (manifest()'s default [[atlas.collision]]), not in a tile
+                # table's flags byte. TILE_WARP (0x01) is the only bit this byte still
+                # means anything for.
+                {"atlas": "tiles", "index": "wall", "flags": 0, "flip": ""},
+                {"atlas": "tiles", "index": "accent", "flags": pnx_assets.TILE_WARP,
+                 "flip": ""}]
             mf.write(os.path.join(root, "maps", "a.pnxmap"), w, h, start, tiles,
                      cells, warps)
 
@@ -2388,6 +2696,109 @@ def check_editor_update():
           <= pnx_editor.LOCK_FREE_PATHS)
 
 
+def check_editor_atlas_offset():
+    """`offset` threads through the Import tab's own endpoints the same way it does
+    through pack_atlas directly -- add/update round-trip it, and slice_grid resolves a
+    packed index against the OFFSET carve, not an unshifted one.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root)
+
+        # A second sheet: the same grid `make_sheet` already produced, prefixed by a
+        # border a naive offset=[0,0] carve would read into every tile.
+        clean = Image.open(os.path.join(root, "sheet.png")).convert("RGBA")
+        w, h = clean.size
+        ox, oy = 3, 2
+        bordered = Image.new("RGBA", (w + ox, h + oy), (5, 5, 5, 255))
+        bordered.paste(clean, (ox, oy))
+        bordered.save(os.path.join(root, "bordered.png"))
+
+        proj.add_atlas("b", "bordered.png", 16, [0, 0, 2, 2], 16, offset=[ox, oy])
+        check("offset round-trips through atlas_spec",
+              proj.atlas_spec("b")["offset"] == [ox, oy])
+
+        s = proj.slice_grid("bordered.png", 16, [0, 0, 2, 2], offset=[ox, oy])
+        uniq = [c for c in s["cells"] if c["state"] == "unique"]
+        check("slice_grid resolved cells against the offset carve",
+              len(uniq) > 0 and all(c["packed"] is not None for c in uniq))
+
+        proj.update_atlas("b", "bordered.png", 16, [0, 0, 2, 2], 16, offset=[0, 0])
+        check("offset clears back to [0, 0] rather than being written as a no-op line",
+              proj.atlas_spec("b")["offset"] == [0, 0])
+        check("the manifest still builds throughout", builds(proj.path, root, "out_off"))
+
+
+def check_editor_atlas_tiles_and_collision():
+    """carve_tiles (the packed-tile-aware view) and save/remove_atlas_collision -- the
+    backend the Import tab's per-tile editor (role + collision) is built on.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root)
+
+        info = proj.carve_tiles("sheet.png", 16, [0, 0, 2, 2], 16, name="tiles")
+        check("carve_tiles resolves the default atlas's autopicked roles",
+              {"floor", "wall", "accent"} <= {t["role"] for t in info["tiles"]})
+
+        def by_role(res, role):
+            return next(t for t in res["tiles"] if t["role"] == role)
+
+        check("the default manifest's wall is already SOLID (from the fixture)",
+              by_role(info, "wall")["collision"]["mode"] == pnx_assets.COLLISION_SOLID)
+        check("floor starts with no collision entry at all",
+              by_role(info, "floor")["collision"]["mode"] == pnx_assets.COLLISION_NONE)
+
+        proj.save_atlas_collision("tiles", "floor", pnx_assets.COLLISION_SCALED,
+                                  rect=[0, 8, 16, 8])
+        info2 = proj.carve_tiles("sheet.png", 16, [0, 0, 2, 2], 16, name="tiles")
+        floor2 = by_role(info2, "floor")
+        check("a saved SCALED rect round-trips through carve_tiles",
+              floor2["collision"]["mode"] == pnx_assets.COLLISION_SCALED
+              and floor2["collision"]["rect"] == [0, 8, 16, 8])
+        check("wall's own entry is untouched by editing floor",
+              by_role(info2, "wall")["collision"]["mode"] == pnx_assets.COLLISION_SOLID)
+        check("the manifest still builds after a SCALED save",
+              builds(proj.path, root, "out_tiles1"))
+
+        # Re-editing the SAME tile must REPLACE its entry, not add a second one for it --
+        # parse_atlas_collision refuses two [[atlas.collision]] entries for one tile, so a
+        # duplicate would fail the very next build silently until Build was pressed.
+        mask_rows = ["#" * 16] * 16
+        proj.save_atlas_collision("tiles", "floor", pnx_assets.COLLISION_COMPLEX,
+                                  mask_rows=mask_rows)
+        info3 = proj.carve_tiles("sheet.png", 16, [0, 0, 2, 2], 16, name="tiles")
+        floor3 = by_role(info3, "floor")
+        check("re-saving replaces the previous entry rather than duplicating it",
+              floor3["collision"]["mode"] == pnx_assets.COLLISION_COMPLEX)
+        check("an authored mask is flagged as authored, not auto-derived",
+              floor3["collision"]["authored"] is True)
+        check("the manifest still builds after replacing SCALED with COMPLEX",
+              builds(proj.path, root, "out_tiles2"))
+
+        proj.remove_atlas_collision("tiles", "floor")
+        info4 = proj.carve_tiles("sheet.png", 16, [0, 0, 2, 2], 16, name="tiles")
+        check("removing the entry reverts the tile to NONE",
+              by_role(info4, "floor")["collision"]["mode"] == pnx_assets.COLLISION_NONE)
+        check("wall is STILL untouched after floor's entry is removed",
+              by_role(info4, "wall")["collision"]["mode"] == pnx_assets.COLLISION_SOLID)
+        check("the manifest still builds after remove",
+              builds(proj.path, root, "out_tiles3"))
+
+        try:
+            proj.remove_atlas_collision("tiles", "floor")
+            check("removing a tile with no collision entry is refused", False)
+        except ValueError:
+            check("removing a tile with no collision entry is refused", True)
+
+        try:
+            proj.save_atlas_collision("tiles", "floor", pnx_assets.COLLISION_SCALED,
+                                      rect=[0, 0, 999, 999])
+            check("a rect that does not fit the tile is refused", False)
+        except ValueError:
+            check("a rect that does not fit the tile is refused", True)
+
+
 def main():
     # The font cases assert on blob contents directly rather than only on pass/fail, so
     # they count their own checks rather than going through expect_ok.
@@ -2650,7 +3061,7 @@ def main():
         flags = []
         [legend."#"]
         tile = "wall"
-        flags = ["solid"]
+        flags = []
         [legend."D"]
         tile = "accent"
         flags = ["warp"]
@@ -2662,7 +3073,7 @@ def main():
         flags = ["squishy"]
         [legend."#"]
         tile = "wall"
-        flags = ["solid"]
+        flags = []
         [legend."D"]
         tile = "accent"
         flags = ["warp"]
@@ -2777,6 +3188,8 @@ def main():
     check_worldtiles()
     check_tile_indices_and_flips()
     check_user_flags()
+    check_atlas_offset()
+    check_complex_mask_authoring()
 
     # --- fonts
     #
@@ -3022,8 +3435,10 @@ def main():
     check_editor_dialog()
     check_editor_map_props()
     check_editor_atlas_extras()
+    check_editor_atlas_offset()
+    check_editor_atlas_tiles_and_collision()
     check_editor_fonts_and_project()
-    check_editor_flags()
+    # check_editor_flags() -- retired, see _check_editor_flags_RETIRED's own comment
     check_editor_roles()
     check_editor_autopick()
     check_editor_map_atlases()

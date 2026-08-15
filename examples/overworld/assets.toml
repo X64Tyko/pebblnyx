@@ -58,6 +58,12 @@ autopick = ["floor", "wall", "accent"]
 # this much. true/false force it, "auto" uses the pipeline default of 12%.
 metatiles = 0.12
 
+# Collision is a property of the TILE now, not of where a map places it -- see the legend
+# below, which no longer carries a `solid` flag at all.
+[[atlas.collision]]
+tile = "wall"
+type = "solid"
+
 # --------------------------------------------------------------------------- sprites
 
 # Three 16x24 frames stacked vertically: a stand pose and two mid-strides. One direction
@@ -129,9 +135,12 @@ flags = []
 # No `atlas` here, deliberately: '#' is the wall of EVERY map, and every map's first
 # tileset defines a `wall` role. Pinning it to `tiles` broke `cave`, which draws from
 # `caveset` and uses '#' throughout -- see the `w` entry below for when pinning is right.
+#
+# No `flags = ["solid"]` any more either: collision is a property of the `wall` role
+# itself now (each atlas's `[[atlas.collision]]`), not of where a map places it, so a
+# legend entry just names which tile a character draws.
 [legend."#"]
 tile = "wall"
-flags = ["solid"]
 
 [legend."~"]
 tile = "accent"
@@ -151,7 +160,6 @@ flags = ["warp"]
 [legend."w"]
 tile = "floor"
 atlas = "water"
-flags = ["solid"]
 
 # ------------------------------------------------------------------------------ maps
 
@@ -276,6 +284,10 @@ metatiles = "auto"
 # you want, and no map or game code changes.
 autopick = ["floor", "wall", "accent"]
 
+[[atlas.collision]]
+tile = "wall"
+type = "solid"
+
 # ----------------------------------------------------------------------------- music
 
 # Instruments are generated waveforms, so a song costs only its notes -- a few hundred
@@ -392,6 +404,9 @@ metatiles = "auto"
 # you want, and no map or game code changes.
 autopick = ["floor", "wall", "accent"]
 
+[[atlas.collision]]
+tile = "wall"
+type = "solid"
 
 # Cells dropped in the editor. Indices into the region, read left to right,
 # top to bottom -- so they follow the region above and change with it.
@@ -420,6 +435,12 @@ metatiles = "auto"
 # imported; replace with an explicit [atlas.semantic] table once you know which tiles
 # you want, and no map or game code changes.
 autopick = ["floor", "wall", "accent"]
+
+# The `w` legend character names THIS atlas's `floor` role (open water, impassable) --
+# not the `wall` role, which is why the collision lives here rather than being implied.
+[[atlas.collision]]
+tile = "floor"
+type = "solid"
 
 
 [[atlas]]

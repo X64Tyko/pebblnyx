@@ -36,13 +36,29 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// Mirrors FLAG_* in tools/pnx_assets.py. Keep the two in step.
-#define PNX_TILE_SOLID 0x01
-#define PNX_TILE_WARP  0x02
+// Mirrors tools/pnx_assets.py. `PNX_TILE_WARP` is the one legend-level flag left -- collision
+// moved off the map and onto the tile (PNX_COLLISION_*, below), so it is no longer a bit a
+// legend entry names.
+#define PNX_TILE_WARP 0x01
+
+// Collision MODE: a 2-bit field describing a TILE, not a cell. Lives in the revived
+// PnxAtlas.tile_flags (one byte per art tile), which is why there is no per-cell exception
+// list any more -- a fence's collision does not change depending on where it is placed.
+// SCALED and COMPLEX name shape data (an inset rect, a 1bpp mask) that is not yet baked
+// into a C-consumable side table -- the mode round-trips, the shape does not yet.
+#define PNX_COLLISION_NONE	  0
+#define PNX_COLLISION_SOLID	  1
+#define PNX_COLLISION_SCALED  2
+#define PNX_COLLISION_COMPLEX 3
 
 // Every blob carries this, so a stale .bin against a newer runtime is a clean error
 // rather than garbage pixels. Bumped whenever a format changes.
-#define PNX_BLOB_VERSION	  10 // v10: palettes are colour-only again (see PnxPalette)
+#define PNX_BLOB_VERSION 12 // v12: atlas blobs carry baked SCALED rects / COMPLEX
+							// masks (PnxAtlas.scaled_rects/complex_masks);
+							// WorldTile payloads carry a sparse EXTENDED table
+							// (PnxWorldTile.ext). v11: collision/warp moved into
+							// the cell word; the old tile_flags[]-by-id override
+							// bytes were dropped.
 #define PNX_BLOB_HEADER_BYTES 8
 
 // ------------------------------------------------------------------- palettes
@@ -106,12 +122,32 @@ uint16_t pnx_palette_count(void);
 //
 // A quadrant always uses the palette of the tile it belongs to, which the pipeline's
 // dedup key guarantees, so palette lookup is unchanged between the two.
+// Field order below is deliberate, not incidental: every pointer first, then every u16,
+// then every u8, so the struct needs no padding between them (clang-tidy's own
+// optin.performance.Padding check is what caught the 13 wasted bytes an earlier,
+// declared-in-the-order-they-made-sense-to-explain layout carried). The comments keep
+// the earlier grouping in prose -- pixel data, then SCALED/COMPLEX shape data, then
+// sizes -- so reading order is unaffected even though declaration order now is not.
 typedef struct
 {
 	const uint8_t* pixels;		 // whole tiles, or the quadrant bank
 	const uint8_t* tile_palette; // tile_count, palette slot per tile
-	const uint8_t* tile_flags;	 // tile_count, PNX_TILE_*
+	const uint8_t* tile_flags;	 // tile_count, PNX_COLLISION_* mode (see the #define above)
 	const uint16_t* metatiles;	 // NULL when flat; else tile_count * 4 indices
+
+	// SCALED and COMPLEX shape data, sparse -- most tiles are NONE or plain SOLID, whose
+	// whole shape IS the mode byte above, so only the tiles that need more than that pay
+	// for it. Byte-packed rather than struct-mapped on purpose: a record starts wherever
+	// the previous one ended, which nothing guarantees is 2-byte aligned, so this is
+	// walked with pnx_atlas_tile_scaled_rect/pnx_atlas_tile_complex_mask rather than cast
+	// to a struct pointer the way PnxWarp's all-u8 layout safely can be.
+	const uint8_t* scaled_rects;  // scaled_count * 6B: u16 tile, u8 x, u8 y, u8 w, u8 h
+	const uint8_t* complex_masks; // complex_count * (2 + mask_bytes)B: u16 tile, then a
+								  // row-major MSB-first 1bpp mask, mask_bytes =
+								  // (tile_px*tile_px+7)/8
+
+	uint16_t scaled_count;
+	uint16_t complex_count;
 	uint16_t tile_count;
 	uint16_t subtile_count;
 	uint8_t tile_px;
@@ -126,6 +162,30 @@ typedef struct
 static inline bool pnx_atlas_is_metatiled(const PnxAtlas* a)
 {
 	return a->metatiles != NULL;
+}
+
+// Linear scans over `a->scaled_count`/`a->complex_count` entries -- both are sparse by
+// construction (most tiles are NONE or SOLID, which cost nothing here), the same
+// tradeoff pnx_map_warp_at already makes for a map's handful of warps.
+
+// SCALED's inset rect for `tile`, tile-local pixels. False (leaving x/y/w/h untouched) if
+// `tile` is not SCALED, which pnx_atlas_tile(a, tile)'s caller can also just check via
+// `a->tile_flags[tile] == PNX_COLLISION_SCALED` first if it wants to skip the scan.
+bool pnx_atlas_tile_scaled_rect(const PnxAtlas* a, uint16_t tile, uint8_t* x, uint8_t* y,
+								uint8_t* w, uint8_t* h);
+
+// COMPLEX's 1bpp mask for `tile`, or NULL if `tile` is not COMPLEX. `mask_bytes` is
+// (a->tile_px * a->tile_px + 7) / 8; pnx_atlas_mask_pixel is the bit test against it.
+const uint8_t* pnx_atlas_tile_complex_mask(const PnxAtlas* a, uint16_t tile);
+
+// One bit out of a mask pnx_atlas_tile_complex_mask returned -- row-major, MSB first (see
+// PnxAtlas.complex_masks' own comment). No bounds check: `px`/`py` are the caller's to
+// keep inside `a->tile_px`, the same contract pnx_atlas_tile's index already carries.
+static inline bool pnx_atlas_mask_pixel(const uint8_t* mask, uint8_t tile_px, uint8_t px,
+										uint8_t py)
+{
+	const uint32_t i = (uint32_t)py * tile_px + px;
+	return (mask[i / 8] & (0x80 >> (i % 8))) != 0;
 }
 
 typedef struct
@@ -193,31 +253,36 @@ typedef struct
 } PnxMapAtlas;
 
 // One resident WorldTile. `cells` points into the pool slot, not into the blob: the blob
-// is never held whole.
+// is never held whole. `ext` is EXTENDED's own sparse table -- x, y (local to this
+// WorldTile) and the tag value, one triple per cell that set PNX_MAP_EXTENDED. Empty for
+// the overwhelming majority of WorldTiles, which is the same "sparse by construction, so
+// nobody pays who doesn't use it" tradeoff the old collision-override table made, now
+// spent on something that genuinely needs a per-cell exception list -- an arbitrary tag
+// has no tile-owned default to diverge FROM the way collision's mode byte did.
 typedef struct
 {
-	const uint8_t* cells;	  // cell_w * cell_h u16 entries
-	const uint8_t* overrides; // override_count * 3 bytes: x, y local to this WorldTile
-	uint16_t override_count;
+	const uint8_t* cells; // cell_w * cell_h u16 entries
+	const uint8_t* ext;	  // ext_count * 3 bytes: x, y local to this WorldTile, value
+	uint16_t ext_count;
 	uint8_t wx, wy;			// which WorldTile of the grid this slot holds
 	uint8_t cell_w, cell_h; // clipped at the map's edge, so no padding is stored
 	bool live;
 } PnxWorldTile;
 
-// Flags come from the TILESET, not from a per-cell plane. A 32x24 map used to carry 768
-// flag bytes restating what the tile already knew; at 30 maps that was 8.7% of the whole
-// content budget. Cells that genuinely differ -- a door drawn on an ordinary scenery
-// tile -- are listed as sparse overrides instead, inside the WorldTile they belong to.
-//
-// The flag table is the map's OWN, not the atlas's, and that is not duplication for its
-// own sake: collision is asked about cells whose atlas may not be resident -- the player
-// walking toward a wall the streamer has not reached -- so it cannot read flags out of an
-// atlas that might be gone. A few hundred bytes buys collision that never depends on what
-// the renderer happens to have loaded.
+// Collision/warp used to come from a map-owned flag plane (plus sparse per-WorldTile
+// overrides for the cells that genuinely differed from their tile's default) precisely
+// because a cell can be asked about -- the player walking toward a wall -- while its
+// atlas is still off the streamer's window. That "flags for a cell whose art is not
+// resident" case is now answered a different way: collision/warp are baked straight into
+// the cell's own u16 (PNX_MAP_ROTATE and friends, below), and the cell plane is exactly as
+// resident as it always was. So there is no flag plane here any more, sparse or otherwise
+// -- collision reads out of PnxAtlas.tile_flags on the OWNING atlas instead, which is a
+// once-per-atlas cost rather than a per-cell one. EXTENDED is the one thing that DOES
+// still need a per-cell exception list, and it lives on PnxWorldTile above rather than
+// here, for the same residency reason the old flag plane existed: a tag is asked about
+// exactly when its cell (and so its WorldTile) is already resident, never before.
 typedef struct
 {
-	const uint8_t* tile_flags; // tile_total bytes, indexed by map-global tile id
-
 	// Optional palette variant: tile_total bytes naming the palette slot to use instead of
 	// the atlas's own, so one atlas serves several recoloured zones. NULL means use the
 	// atlas's. 44 bytes for the cave tileset against ~5,600 for a second copy of it.
@@ -250,7 +315,7 @@ typedef struct
 	uint8_t bank_shift;
 
 	uint32_t resource;	 // the map's own resource: the resident preamble
-	uint16_t tile_count; // bound for tile_flags: the map's whole id space
+	uint16_t tile_count; // the map's whole tile id space, summed across every atlas slice
 	uint16_t slot_bytes;
 	uint8_t w, h;
 	uint8_t warp_count;
@@ -533,17 +598,38 @@ void pnx_decode_4bpp(const uint8_t* src, const PnxPalette* palette, uint8_t* dst
 					 uint16_t pixels);
 #endif
 
-// Map cells are u16, not u8. Ten bits of tile index (1024, up from 255), two flip bits, and
-// four reserved for a per-cell palette index into a future per-map palette table. Doubling
-// the map costs ~1.2KB across the example maps, against 128 bytes for every tile a mirrored
-// pair no longer needs its own copy of.
+// Map cells are u16, not u8. Ten bits of tile index (1024, up from 255), two flip bits, a
+// rotate bit, a warp bit, and a bit (EXTENDED) naming a per-cell tag in a sparse side
+// table. Doubling the map costs ~1.2KB across the example maps, against 128 bytes for
+// every tile a mirrored pair no longer needs its own copy of.
 //
 // The ten bits index the MAP's id space, not one atlas's, which is what lets a map draw
 // from several tilesets without spending a bit per cell on saying which.
-#define PNX_MAP_INDEX_MASK	  0x03FF
-#define PNX_MAP_FLIP_X		  0x0400
-#define PNX_MAP_FLIP_Y		  0x0800
-#define PNX_MAP_PALETTE_SHIFT 12
+//
+// ROTATE is a transpose, not an angle: rotate plus flip X/Y spans all eight symmetries of
+// a square with three independent bits rather than a redundant 2-bit angle encoding. A
+// 15x4 art tile in a 16x16 cell becomes 4x15 with ROTATE set. Render-side support (the
+// blitter turning a tile on its side) is not built yet -- the bit round-trips through the
+// pipeline and the map format, but nothing draws it rotated yet.
+//
+// WARP moved here from the old per-tile-id flag byte: whether a cell triggers a warp is
+// now a property of the placement, like it always should have been, not of the tile
+// (`fold_flag_into_entry`, tools/pnx_assets.py). pnx_map_warp_at does not consult this bit
+// at runtime -- it scans the small PnxWarp table by (x, y) -- so this is mainly an
+// authoring-time signal; a bit accessor is provided anyway for symmetry with flip/rotate.
+//
+// EXTENDED (bit 14) says a cell has an entry in its WorldTile's own sparse tag table
+// (PnxWorldTile.ext, pnx_map_extended) -- an arbitrary u8 the GAME defines the meaning of
+// (a door's state, a spawn id, whatever does not deserve its own bit). Authored per
+// legend char / .pnxmap tile-table entry ("extended = N"), same as warp; unlike warp, a
+// nonzero value cannot fold into the bit alone, so it rides in the table instead. Bit 15
+// (0x8000) is still free.
+#define PNX_MAP_INDEX_MASK 0x03FF
+#define PNX_MAP_FLIP_X	   0x0400
+#define PNX_MAP_FLIP_Y	   0x0800
+#define PNX_MAP_ROTATE	   0x1000
+#define PNX_MAP_WARP	   0x2000
+#define PNX_MAP_EXTENDED   0x4000
 
 // A cell that is not resident. Distinct from tile 0, which is a real tile.
 #define PNX_MAP_NO_CELL 0xFFFF
@@ -614,30 +700,26 @@ static inline const PnxAtlas* pnx_map_atlas(const PnxMap* m, uint16_t tile, uint
 	return (a && a->slot != PNX_MAP_NO_SLOT) ? &m->pool[a->slot] : NULL;
 }
 
+// PNX_ROTATE, ready to be composed with whatever pnx_map_flip returns -- kept a separate
+// accessor rather than folded into flip's return value so existing callers passing that
+// straight to pnx_blit_4bpp are untouched. Nothing draws a rotated tile yet (see
+// PNX_MAP_ROTATE's own comment); this just makes the bit reachable for when something does.
+static inline bool pnx_map_rotate(const PnxMap* m, int32_t x, int32_t y)
+{
+	const uint16_t e = pnx_map_entry(m, x, y);
+	return e != PNX_MAP_NO_CELL && (e & PNX_MAP_ROTATE) != 0;
+}
+
+// PNX_TILE_WARP if the cell carries the warp bit, else 0. Reads the cell's OWN bit
+// (PNX_MAP_WARP) directly now, rather than a tile-owned table with per-cell overrides --
+// collision/warp both moved out of that table (see PnxMap's own comment). A cell whose
+// WorldTile is not resident answers 0 rather than guessing, same as pnx_map_flip.
 static inline uint8_t pnx_map_flags(const PnxMap* m, int32_t x, int32_t y)
 {
-	const PnxWorldTile* wt = pnx_map_worldtile(m, x, y);
-	if (!wt)
-		return PNX_TILE_SOLID; // see pnx_map_solid
-
-	const uint8_t lx = (uint8_t)(x & (m->worldtile - 1));
-	const uint8_t ly = (uint8_t)(y & (m->worldtile - 1));
-	const uint32_t i = ((uint32_t)ly * wt->cell_w + lx) * 2u;
-	const uint16_t tile =
-		(uint16_t)(wt->cells[i] | ((uint16_t)wt->cells[i + 1] << 8)) & PNX_MAP_INDEX_MASK;
-	const uint8_t flags = tile < m->tile_count ? m->tile_flags[tile] : 0;
-
-	// Linear, because overrides are rare by construction: the pipeline picks each tile's
-	// most common flags as the default, so only genuine exceptions land here -- and the
-	// scan is over ONE WorldTile's exceptions, not the whole map's, which is what keeps it
-	// bounded as maps grow.
-	for (uint16_t k = 0; k < wt->override_count; k++)
-	{
-		const uint8_t* o = wt->overrides + (uint32_t)k * 3;
-		if (o[0] == lx && o[1] == ly)
-			return o[2];
-	}
-	return flags;
+	const uint16_t e = pnx_map_entry(m, x, y);
+	if (e == PNX_MAP_NO_CELL)
+		return 0;
+	return (e & PNX_MAP_WARP) ? PNX_TILE_WARP : 0;
 }
 
 // Out-of-bounds counts as solid, so a map needs no border wall to contain the player
@@ -647,11 +729,63 @@ static inline uint8_t pnx_map_flags(const PnxMap* m, int32_t x, int32_t y)
 // stops the player at the edge of what is loaded rather than walking them into a void. The
 // streamer's margin means this should never fire during ordinary play -- if it does, the
 // view is moving faster than PNX_MAP_STREAM_BUDGET can keep up with.
+//
+// Collision is a property of the tile now (PnxAtlas.tile_flags, PNX_COLLISION_*), not of
+// the map. SOLID is a plain per-cell block; SCALED and COMPLEX name shape data (an inset
+// rect, a 1bpp mask -- pnx_atlas_tile_scaled_rect/pnx_atlas_tile_complex_mask) that this
+// coarse whole-cell test does not evaluate, on purpose: it stays a whole-cell probe for
+// grid-style movement, and reading the real shape is what pnx_physics_collide_aabb and a
+// COMPLEX pixel test (pnx_physics_collide_point) are FOR. So both count as solid here,
+// which is the opposite of how the pipeline's own build-time reachability check treats
+// them (tools/pnx_assets.py: solid_cells_for) -- and deliberately so: a flood fill errs
+// toward not rejecting a reachable map, a live player errs toward not clipping through a
+// wall that is only partly open. A caller that wants the real shape uses those finer
+// primitives against the tile's own rect/mask, not this.
 static inline bool pnx_map_solid(const PnxMap* m, int32_t x, int32_t y)
 {
 	if (x < 0 || y < 0 || x >= m->w || y >= m->h)
 		return true;
-	return (pnx_map_flags(m, x, y) & PNX_TILE_SOLID) != 0;
+
+	const uint16_t tile = pnx_map_tile(m, x, y);
+	if (tile == PNX_MAP_NO_CELL)
+		return true;
+
+	uint16_t local;
+	const PnxAtlas* a = pnx_map_atlas(m, tile, &local);
+	// A resident WorldTile always pins the atlases it needs (see pnx_map_atlas's own
+	// comment), so this is defensive rather than a case that should ever be reached --
+	// "unknown" resolves to solid for the same reason a non-resident WorldTile does above.
+	if (!a)
+		return true;
+	return a->tile_flags[local] != PNX_COLLISION_NONE;
+}
+
+// The cell's EXTENDED tag, if PNX_MAP_EXTENDED is set on it. Returns false (leaving
+// `out_value` untouched) for a cell with no tag, a non-resident cell, or -- defensively,
+// should the format and the table ever disagree -- a set bit whose WorldTile table has no
+// matching entry. Linear over `wt->ext_count`, which is sparse by construction (most
+// WorldTiles tag no cells at all): the same tradeoff pnx_map_warp_at already makes for a
+// map's handful of warps.
+static inline bool pnx_map_extended(const PnxMap* m, int32_t x, int32_t y, uint8_t* out_value)
+{
+	const uint16_t e = pnx_map_entry(m, x, y);
+	if (e == PNX_MAP_NO_CELL || !(e & PNX_MAP_EXTENDED))
+		return false;
+
+	const PnxWorldTile* wt = pnx_map_worldtile(m, x, y);
+	const uint8_t lx	   = (uint8_t)(x & (m->worldtile - 1));
+	const uint8_t ly	   = (uint8_t)(y & (m->worldtile - 1));
+	for (uint16_t k = 0; k < wt->ext_count; k++)
+	{
+		const uint8_t* e2 = wt->ext + (uint32_t)k * 3;
+		if (e2[0] == lx && e2[1] == ly)
+		{
+			if (out_value)
+				*out_value = e2[2];
+			return true;
+		}
+	}
+	return false;
 }
 
 // Returns NULL when there is no warp on that tile.

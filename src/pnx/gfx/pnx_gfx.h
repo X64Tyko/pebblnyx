@@ -55,6 +55,14 @@ void pnx_gfx_clear(PnxTarget* t, uint8_t colour);
 #define PNX_FLIP_NONE 0
 #define PNX_FLIP_X	  1
 #define PNX_FLIP_Y	  2
+// Transpose -- mirrors PNX_MAP_ROTATE (tools/pnx_assets.py / pnx_assets.h): swap rows and
+// columns BEFORE flip_x/flip_y are applied. {rotate, flip_x, flip_y} together are the
+// three independent bits spanning all 8 symmetries of a square (PNX_MAP_ROTATE's own
+// comment has the enumeration) -- this bit is what makes that true at draw time too, not
+// just in the format. Only meaningful when w == h: a tile is always square, so this is
+// exactly the case pnx_tilemap.c ever passes it in. A caller drawing a non-square image
+// (pnx_sprite.c, always) simply never sets it.
+#define PNX_FLIP_ROTATE 4
 
 // Blits a 4bpp image at a screen position. `mirror` flips horizontally, which is how a
 // character faces left with no extra art -- the measured sprite sheets contain a walk
@@ -64,6 +72,12 @@ void pnx_gfx_clear(PnxTarget* t, uint8_t colour);
 // tools/pnx_assets.py) on a 1-bit one -- one format per build (PNX_DISPLAY_BW), not a
 // per-call choice, so the signature does not carry it. `palette` is read on a colour
 // build and ignored on a 1-bit one, kept only so both builds share one call shape.
+//
+// PNX_FLIP_ROTATE costs the row-copy fast path the plain X/Y flips get (see pnx_gfx.c's
+// own comment): a rotated destination row reads a source COLUMN, which is never
+// contiguous, so every pixel is addressed individually regardless of what else `flip`
+// carries. Still one blit, still no second buffer -- just the same per-pixel path
+// PNX_FLIP_X already uses, with a different source index.
 void pnx_blit_4bpp(PnxTarget* t, const uint8_t* src, const PnxPalette* palette, int32_t x,
 				   int32_t y, int16_t w, int16_t h, uint8_t flip);
 
