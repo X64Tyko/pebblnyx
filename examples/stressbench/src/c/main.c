@@ -213,6 +213,25 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 			bool mirror		   = false;
 			hero_position(a->frames, &a->map, &hero_wx, &hero_wy, &anim_frame, &mirror);
 
+#if PNX_USE_COLLISION
+			// AABB collision, swept for real every frame: the patrol is scripted and
+			// PATROL_MARGIN keeps it clear of every wall by construction, so this changes
+			// nothing rendered -- only hero_wx/wy (the scripted position) ever reaches the
+			// camera or the sprite draw below, the swept box is a throwaway local. It is
+			// here so PNX_USE_COLLISION's real per-frame cost is part of the "everything
+			// happening at once" load this app measures, not a config flag nobody calls.
+			if (a->frames > 0)
+			{
+				int32_t prev_wx = 0, prev_wy = 0;
+				uint8_t prev_frame = 0;
+				bool prev_mirror   = false;
+				hero_position(a->frames - 1, &a->map, &prev_wx, &prev_wy, &prev_frame,
+							  &prev_mirror);
+				PnxAABB box = pnx_aabb_from_feet(prev_wx, prev_wy, 12, 16);
+				pnx_collision_move(&a->map, &box, hero_wx - prev_wx, hero_wy - prev_wy);
+			}
+#endif
+
 			pnx_camera_center(&a->camera, hero_wx, hero_wy, pnx_tilemap_width(&a->map),
 							  pnx_tilemap_height(&a->map));
 			pnx_tilemap_stream(&a->map, &a->camera);

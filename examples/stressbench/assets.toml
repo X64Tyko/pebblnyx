@@ -45,11 +45,28 @@ tile = 16
 region = [0, 0, 6, 1]
 max_tiles = 6
 out = "tiles.bin"
-autopick = ["floor", "wall", "accent"]
+# Two more roles than before, so this app's atlas exercises every collision mode at
+# once (see the [[atlas.collision]] entries below) rather than only SOLID -- the point
+# of a "combined load" benchmark is that everything real ships with actually runs here.
+autopick = ["floor", "wall", "accent", "fence", "niche"]
 
 [[atlas.collision]]
 tile = "wall"
 type = "solid"
+
+# A fence: solid only in its bottom half, the textbook SCALED case (docs/DESIGN.md's own
+# example when the mode was designed).
+[[atlas.collision]]
+tile = "fence"
+type = "scaled"
+rect = [0, 8, 16, 8]
+
+# A niche: COMPLEX with no authored `mask`, so its collision is derived from the tile's
+# own opacity at build time (pack_collision_mask) -- the common case, exercised for real
+# rather than only in a unit test fixture.
+[[atlas.collision]]
+tile = "niche"
+type = "complex"
 
 [[sprite]]
 name = "hero"
@@ -77,6 +94,29 @@ tile = "wall"
 tile = "accent"
 flags = []
 
+[legend."F"]
+tile = "fence"
+flags = []
+
+[legend."N"]
+tile = "niche"
+flags = []
+
+# Same art as "~", drawn transposed -- exercises PNX_MAP_ROTATE at render time
+# (pnx_blit_4bpp's rotate path) alongside every other placement's ordinary blit.
+[legend."R"]
+tile = "accent"
+flags = []
+rotate = true
+
+# An arbitrary per-cell tag, meaning nothing to the engine -- game code would read it
+# through pnx_map_extended. Here only to get PNX_MAP_EXTENDED and the WorldTile's sparse
+# tag table into a real compiled map instead of only a unit-test fixture.
+[legend."E"]
+tile = "floor"
+flags = []
+extended = 7
+
 [[map]]
 name = "field"
 out = "map_field.bin"
@@ -86,10 +126,10 @@ start = [1, 1]
 # real tilemap load, not a static picture.
 rows = """
 ##########################
-#.......~................#
-#...............~........#
+#.......~....F.....N.....#
+#...............~....R...#
 #........................#
-#........~...............#
+#........~...E...........#
 #................~.......#
 #.~......................#
 #.........~..............#

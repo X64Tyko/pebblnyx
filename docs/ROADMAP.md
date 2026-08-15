@@ -294,10 +294,15 @@ for as long as the code lives. A metatile is art; a WorldTile is a piece of the 
   slot is exactly its atlas's size: the example's ship at 29,596 B beside water at 8,116 costs
   37 KB rather than the 59 KB two slots of the larger would. Only a map that really streams its
   atlases pays for slots sized for the biggest.
-- **Collision stopped depending on the atlas.** The flag table ships with the MAP, indexed by its
-  own tile ids. A streamed atlas can be gone when the player walks toward a wall, so reading flags
-  out of one was never going to hold. A few hundred bytes for collision that never depends on what
-  the renderer happens to have loaded.
+- **Collision stopped depending on the atlas** -- at the time. The flag table shipped with the
+  MAP, indexed by its own tile ids, precisely because a streamed atlas can be gone when the player
+  walks toward a wall. That reasoning still holds for the CELL plane (a WorldTile's own residency
+  never depended on which atlases happened to be pinned), which is exactly why it moved BACK to
+  the atlas later: a resident WorldTile always pins the atlases it needs before it is readable at
+  all, so "the atlas might be gone" turned out never to be true for a live cell. See [Tile-driven
+  collision](#m10--tile-driven-collision-rotate-and-physicsaabb-modules--done) below -- collision
+  is a property of the ART TILE again now, and the map-owned flag table this bullet describes is
+  gone.
 - **A scene no longer lists its map's tilesets.** The map owns them; a scene listing one loads a
   second resident copy, which is not a mismatch the runtime can see -- it just quietly costs twice
   the atlas. The pipeline refuses it and says which line to delete.
@@ -713,6 +718,79 @@ drawing its baked `bw_variant`, the audio timer feeding a looping sample, glyph 
 incremental save all running in the same frame. Backed by the full host suite: **726 + 367
 + 8 + 80,038 checks, 0 failures** (the original suite, the pipeline's own Python
 validation, `test_pack2bit_bw.c`, and `test_round.c`).
+
+## M10 — Tile-driven collision, rotate, and physics/AABB modules — **DONE**
+
+Started from a concrete complaint: hand-typing a pinball table's wall geometry as a
+`PnxSegment` array kept producing bugs -- a misplaced curve, the wrong granularity, geometry
+disconnected from the art it was supposed to trace. The fix generalises past pinball: a
+tile's own art now DRIVES its collision, declared once per art tile
+(`[[atlas.collision]]`) instead of hand-typed per table or restated per map cell.
+
+- **Three collision modes, one byte per tile.** SOLID blocks the whole tile. SCALED is an
+  inset rect -- a fence solid only in its bottom half. COMPLEX is a 1bpp mask, defaulting
+  to the tile's own opacity or authored explicitly as ASCII rows (`#`/`.`, the same
+  convention a map's `rows` already uses) when the derived shape is not the wanted one.
+  All three bake into `PnxAtlas.tile_flags`, a byte the C reader has loaded since M4d with
+  no consumer anywhere in the engine until now.
+- **ROTATE joined FLIP_X/FLIP_Y as a third cell bit**, not a rotation-angle field -- a
+  transpose, so `{rotate, flip_x, flip_y}` are three independent bits spanning exactly the
+  eight symmetries of a square, wired all the way into `pnx_blit_4bpp` (costs the row-copy
+  fast path the plain flips get, since a rotated destination row reads a source column).
+- **WARP moved from a per-tile-id flag to a per-cell one**, which is what it always should
+  have been -- a door and an ordinary floor tile can now share one art tile and differ only
+  in whether a given placement of it warps.
+- **EXTENDED reuses the mechanism collision's old per-cell override table vacated**, for a
+  different and more honest reason: an arbitrary per-cell u8 tag whose meaning is entirely
+  the game's business (a door's state, a spawn id), living in the same WorldTile-local
+  sparse `(x, y, value)` table the old collision overrides used, because that IS a genuine
+  per-cell exception list -- collision never actually needed one once it stopped varying
+  by placement.
+- **Two new opt-in modules read the shape data**: `pnx_physics` (circle-vs-segment,
+  circle-vs-box, gravity, flippers that pivot between two baked poses -- built for
+  `examples/pinball`) and `pnx_collision` (AABB sweep/resolve against `pnx_map_solid`, for
+  ordinary tile-grid movement). COMPLEX needed no third primitive: a pixel hit reduces to a
+  zero-length segment, which `pnx_physics_collide_segment`'s existing closest-point math
+  already resolves correctly as a degenerate case.
+- **The editor's Import tab can author all of it.** Click a packed tile to edit its role
+  and collision -- SCALED as a rect dragged over a zoomed still, COMPLEX as a real
+  paint-by-pixel grid at the tile's own resolution -- double-click to drop or restore a
+  raw sheet cell from the carve. `offset = [x, y]` (pixels, not `region`'s tile units)
+  handles a sheet whose art does not begin flush with its own corner.
+- **`examples/pinball`** is the format's first real consumer: a landscape, `BUTTONS_BOTTOM`
+  table with a scrolling camera, confirmed on the real `emery` emulator. Building it forced
+  a correction to a wrong claim about BACK (`pnx_platform_set_screen_lock`'s own comment
+  said an app could hold it; it cannot, on real hardware, at any duration -- see
+  `pnx_platform_pebble.c`'s `back_click`). Not yet done: the table's own walls still use
+  hand-typed `PnxSegment`s rather than the tile-driven collision that motivated this whole
+  milestone -- the format and the primitives exist, the table has not been re-authored onto
+  them yet.
+
+**Result.** Blob v10 → v12 across the two format changes (collision/warp/rotate into the
+cell word first, then baked SCALED/COMPLEX shape tables and the EXTENDED side table).
+Every example manifest migrated off the retired `[tile_flags]`/legend-flag scheme; two
+checked-in `.pnxmap` fixtures (`examples/worldtiles`) turned out to carry a genuine latent
+bug in the migration -- old-encoding flag bytes that the new bit meaning would have
+silently reinterpreted, walls becoming warp triggers and doors losing warp entirely --
+caught and fixed rather than shipped. 415 pipeline checks (up from 371) plus a new
+`tests/test_physics.c` (37 checks, every expected number hand-derived from the module's
+own formulas rather than eyeballed) and 7 new rotate-blitter checks in `test_gfx.c`. Full
+size numbers, measured old vs new on `examples/stressbench` with every mode actually
+placed and both new modules actually called (not merely declared), are in
+[`MEASUREMENTS.md`](MEASUREMENTS.md#tile-driven-collision-rotate-and-extended-tags):
+
+| | Before | After | Δ |
+|---|---|---|---|
+| `emery` app total (code) | 16,256 / 65,535 (24.8%) | 16,944 / 65,535 (25.9%) | **+688 (1.05%)** |
+| `stressbench` resources | 5,230 B | 5,274 B | +44 B |
+| `pnx/physics` (`examples/pinball`, real usage) | -- | 622 B | new |
+| `pnx/collision` (opt-in, real usage) | -- | 380 B | new |
+
+**Under 1.1% of the app ceiling for the format itself, and the two new modules cost what
+they cost only for a project that actually calls into them** -- neither is `#if`-gated
+into every build the way the collision/rotate/EXTENDED parsing itself now unconditionally
+is (that part of `pnx/assets`'s growth, +132 B, is paid by every project regardless of
+whether a single manifest declares a SCALED tile).
 
 ---
 

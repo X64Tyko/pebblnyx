@@ -60,7 +60,10 @@ def build(ctx):
     # time anyone tried it. A dict merge lets an override REPLACE this default by name
     # without clobbering an unrelated one (PNX_FORCE_SCREEN_LOCK from the editor's
     # Device panel, say) that happens to be set at the same time.
-    defines = {"PNX_USE_DIAGNOSTICS": "0"}
+    # PNX_USE_COLLISION on by default here too: this app's whole point is the cost of
+    # everything running at once, and AABB tile collision is now a real part of "everything"
+    # a game like this would ship with (see main.c's own hero-movement comment).
+    defines = {"PNX_USE_DIAGNOSTICS": "0", "PNX_USE_COLLISION": "1"}
     for d in os.environ.get('PNX_DEFINES', '').split():
         key, _, value = d.partition('=')
         if key:

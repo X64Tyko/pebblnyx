@@ -730,12 +730,26 @@ deduplication survive into the map:
 | 0-9 | tile index (1,024, up from 255) |
 | 10 | flip X |
 | 11 | flip Y |
-| 12-15 | reserved -- per-cell palette index |
+| 12 | rotate (transpose) |
+| 13 | warp |
+| 14 | extended (a per-cell tag in a WorldTile side table) |
+| 15 | free |
+
+Bits 12-15 were "reserved -- per-cell palette index" when this section was first written, and
+never wired that way -- `tile_palette[]` (a per-*tile*, not per-*cell*, remap) covered the
+recolouring case that would have wanted them first. What actually landed there, later, is
+unrelated to a palette: see [Tile-driven collision, rotate and EXTENDED
+tags](#tile-driven-collision-rotate-and-extended-tags) for the whole story and its own
+footprint numbers. Collision and warp both used to be a THIRD table alongside this one
+(a map-owned flag plane, one byte per map-global tile id, described lower in this section) --
+that table is gone; warp and rotate are cell bits now, and collision moved to being a
+property of the ART TILE instead of the map.
 
 The ten bits index the **map's** id space rather than one atlas's, which is what lets a map
 draw from several tilesets without spending a bit per cell on saying which — the map's atlas
-table partitions the range instead. Blob v8; the layout around the cells has moved on
-several times since these numbers were taken, but the cell itself has not.
+table partitions the range instead. Blob v8 when these numbers were first taken, **v12 now**
+-- the layout around the cells has moved on several times since, but the cell's own ten
+tile-index bits have not.
 
 Doubling the cells costs 3,223 bytes across the two example maps, up from ~2,071. That buys 128
 bytes back for every tile a mirrored pair no longer needs its own copy of, and the flip bits are
@@ -747,13 +761,93 @@ for sprite facing; that became a `uint8_t flip` with `PNX_FLIP_X == 1`, so every
 still means the same thing and no call site changed. **Flip Y is one index inversion** choosing
 the source row -- no second span writer, no per-pixel cost.
 
-The four reserved bits are not wired. Four bits is fifteen palettes against 37 merged, so
-per-cell palette needs a per-map palette table first.
+A per-cell palette remains unbuilt, and no longer has bits reserved for it specifically --
+`tile_palette[]`'s existing per-*tile* remap (see "Palette variants" below) already covers
+the case a per-cell one would have, at a fraction of the cost: one byte per art tile in a
+map's own atlas rather than one nibble per cell of the whole map. Fifteen distinct remaps
+(what four bits would give) against 37 merged palettes was never going to be enough headroom
+to be worth spending a cell bit on.
 
 **`PNX_BLOB_VERSION` must be bumped in `pnx_assets.h` and `pnx_assets.py` together.** Changing
 only the pipeline made the runtime guard refuse every blob, which is correct behaviour -- but the
 host test then continued past the failed load and segfaulted on a NULL palette table, which
 reads as a code bug and is not one.
+
+## Tile-driven collision, rotate and EXTENDED tags
+
+Collision moved from a hand-typed `PnxSegment`/flag-byte-by-id scheme to a property of the ART
+TILE: `[[atlas.collision]]` declares SOLID (the whole tile), SCALED (an inset rect) or COMPLEX (a
+1bpp mask, defaulting to the tile's own opacity or authored explicitly) once per tile, baked into
+`PnxAtlas.tile_flags` -- a byte that existed and was already loaded by the C reader since M4d but
+had no consumer anywhere in the engine before this. The cell's own u16 gained ROTATE (transpose,
+wired into `pnx_blit_4bpp`) and kept WARP, both genuinely per-*placement* now rather than
+per-tile-id; a new EXTENDED bit names an arbitrary per-cell tag in the same sparse WorldTile side
+table the old per-cell collision overrides used to occupy. Full design in `pnx_assets.h`'s own
+`PNX_MAP_ROTATE`/`PNX_COLLISION_*` comments; this section is the bill.
+
+**Measured old vs new on `examples/stressbench`**, the one example built specifically to answer
+"what does everything cost running at once" (see "Combined load" below) -- rebuilt for this with
+every one of the modes actually placed in its map (SOLID *and* SCALED *and* COMPLEX tiles, a
+rotated cell, an EXTENDED-tagged one) and `PNX_USE_COLLISION` on, sweeping the walking sprite's
+AABB against the map for real every frame rather than declaring the module and never calling it.
+Old = the commit immediately before this work (`f9eab21`); new = `HEAD`. `emery`, host `pebble
+build`'s own size report, both otherwise-identical builds:
+
+| Module | Before | After | Δ |
+|---|---|---|---|
+| `pnx/assets` | 3,709 | 3,841 | **+132** |
+| `pnx/gfx` | 960 | 1,038 | **+78** |
+| `pnx/collision` | -- | 380 | **+380 (new)** |
+| `pnx/platform` | 1,849 | 1,834 | **-15** |
+| `game` (stressbench's own code) | 3,784 | 3,884 | +100 |
+| everything else (`audio`, `core`, `tilemap`, `text`, `save`, `sprites`, libc) | 5,047 | 5,047 | 0 |
+| **module total** | **15,413** | **16,088** | **+675** |
+| **app total incl. headers/padding** | **16,256 / 65,535 (24.8%)** | **16,944 / 65,535 (25.9%)** | **+688 (1.05%)** |
+
+**`pnx/collision` is the whole cost of turning the module on**, not a per-call marginal --
+`pnx_collision_move`'s axis-separated sweep plus `pnx_aabb_overlap`, linked because game code
+actually calls it now. `pnx/assets` (+132 B) is the collision-mode/rotate/EXTENDED parsing and
+the new `pnx_atlas_tile_scaled_rect`/`pnx_atlas_tile_complex_mask`/`pnx_map_extended` accessors --
+paid by every project regardless of whether a single manifest declares a SCALED tile, since none
+of it is `#if`-gated (collision is now a normal part of loading an atlas, not an opt-in feature).
+`pnx/gfx` (+78 B) is `PNX_FLIP_ROTATE`'s per-pixel path in `pnx_blit_4bpp`. **`pnx/platform`
+actually got smaller** (-15 B): the BACK-button investigation this work's pinball example forced
+(see `pnx_platform_pebble.c`'s `back_click`) replaced a raw click handler that manually tracked
+`s_screen_locked` and called `pnx_platform_quit()` with a single-click handler the SDK's own
+default dismissal already covers -- a real simplification, not noise.
+
+**Resource bytes, same before/after pair, printed by the pipeline's own budget report:**
+
+| Resource | Before | After | Δ |
+|---|---|---|---|
+| atlas `tiles` | 792 B | 836 B | **+44** |
+| map `field` (resident preamble) | 52 B | 44 B | -8 |
+| bank `field_0` (WorldTile payloads) | 848 B | 856 B | +8 |
+| **total** | **5,230 B** | **5,274 B** | **+44** |
+
+The atlas's +44 B is exactly one SCALED rect entry (6 B) plus one COMPLEX mask entry (2 + 32 B
+for a 16x16 tile's `(16*16+7)/8` packed bits) plus their two u16 counts -- the sparse tail tables
+`finish_atlas` appends, present at all only because this atlas actually declares both modes. The
+map and bank numbers move in opposite directions by the same 8 bytes: the old map-owned flag
+table and its per-WorldTile override bytes are gone (every map gets smaller for free), and the
+one EXTENDED-tagged cell in this map's WorldTile adds its own sparse entry back (2-byte count +
+3-byte `x,y,value` triple) -- a wash here, but only because this map happens to use exactly one
+tag; a map using none would show the map/bank saving with nothing to offset it, and a map using
+many would show the reverse.
+
+**`pnx/physics`, measured directly rather than by comparison** (there is no "before" -- pinball
+is a new example): 622 B on `emery` in a real, shipped `.pbw`, with `examples/pinball/game.c`
+actually calling `pnx_physics_collide_segment`/`pnx_physics_collide_flipper` every tick against
+real table geometry, not merely declaring `PNX_USE_PHYSICS`. Like `pnx/collision` above, this is
+the cost of the whole module once anything in a project calls into it -- a game that never sets
+`PNX_USE_PHYSICS`/`PNX_USE_COLLISION` pays none of either.
+
+**In one line: the tile-driven collision format itself costs ~1% of the 64KB app ceiling and a
+handful of resource bytes per collision-carrying tile, and the two new opt-in modules cost
+roughly 380-620 B each, only when a project actually calls into them.** Consistent with M4d's own
+finding for WorldTile streaming -- a framework feature is cheap in the aggregate and free for a
+project that never touches it, because none of this is `#if`-gated except the two genuinely
+optional physics/collision modules.
 
 ## WorldTile streaming (M4d)
 
