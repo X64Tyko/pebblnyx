@@ -1329,7 +1329,12 @@ class Project:
         try:
             return pa.parse_flag_names(self.man.get("tile_flags", {}))
         except pa.BuildError:
-            return dict(pa.FLAG_NAMES)
+            # warp is the only built-in now -- collision moved off the legend entirely
+            # (see [[atlas.collision]]), and [tile_flags] itself is refused outright, so
+            # the only way parse_flag_names raises here is a manifest still declaring
+            # one from before this change. Same fallback shape as before: the editor
+            # still opens, Build says what is wrong.
+            return {"warp": pa.TILE_WARP}
 
     def map_atlases(self, m):
         """The atlases one map draws from, in the order that fixes its tile id space.
@@ -1476,8 +1481,10 @@ class Project:
             # the page can show them as the fixed pair they are, then whatever
             # [tile_flags] invented.
             "flags": self.flag_names(),
-            "flag_bits_free": [b for b in pa.FLAG_USER_BITS
-                               if b not in self.flag_names().values()],
+            # No free bits to offer: custom [tile_flags] is retired outright until the
+            # sparse per-cell EXTENDED table replaces it (see MAP_ROTATE's comment in
+            # pnx_assets.py) -- there is no byte left to claim a bit of any more.
+            "flag_bits_free": [],
             "name": self.project.get("name", "project"),
             "built": self.built,
             # Where this project actually lives. Worth surfacing because the editor can
@@ -2899,7 +2906,8 @@ class Project:
                 break
         return sorted(out, key=lambda s: s["name"])[:60]
 
-    def slice_grid(self, rel, tile, region, exclude=(), colorkey=None):
+    def slice_grid(self, rel, tile, region, exclude=(), colorkey=None, offset=(0, 0),
+                   max_tiles=255):
         """Every cell of a slice, rendered, so the author can pick what gets packed.
 
         The strip of *kept* tiles told you what the pipeline decided. It did not let you
@@ -2907,6 +2915,18 @@ class Project:
         tiles are worth keeping at all, which is a judgement about the art rather than
         arithmetic. So this returns the grid as sliced, marked up with what each cell
         would become, and the caller can drop any of it.
+
+        Each cell also carries `packed`: the index it becomes in the ACTUAL packed atlas,
+        or null for one the pipeline would never keep (empty, excluded, past `max_tiles`,
+        or an exact/mirror duplicate of an earlier cell -- pack_atlas dedups mirrors too,
+        which this grid's own simpler `state` classification below does not attempt to,
+        so `packed` is the more honest of the two answers). Resolved through a real
+        pa.pack_atlas call rather than a second dedup pass here, precisely so it cannot
+        disagree with what a carve would actually produce -- this is what makes a raw
+        cell click-through-able to the SAME tile index carve_tiles (and the manifest's
+        own [[atlas.collision]]) uses, which is why `max_tiles` matters here at all: a
+        cell past the real cap must resolve to no tile, not to an index carve_tiles never
+        produced.
         """
         from PIL import Image
         path = self._safe(rel)
@@ -2914,13 +2934,28 @@ class Project:
         px = im.load()
         W, H = im.size
         rx, ry, rw, rh = region
-        rw = max(1, min(rw, W // tile - rx))
-        rh = max(1, min(rh, H // tile - ry))
+        ox, oy = (int(v) for v in offset)
+        rw = max(1, min(rw, (W - ox) // tile - rx))
+        rh = max(1, min(rh, (H - oy) // tile - ry))
 
         # A whole large sheet is thousands of cells and as many PNGs. Capped, with the
         # cap reported, rather than quietly hanging the browser.
         LIMIT = 1024
         capped = rw * rh > LIMIT
+
+        packed_at = {}
+        try:
+            spec = {"name": "_slice_grid", "sheet": rel, "tile": int(tile),
+                    "region": [rx, ry, rw, rh], "max_tiles": int(max_tiles),
+                    "out": "_slice_grid.bin", "exclude": list(exclude),
+                    "offset": [ox, oy]}
+            if colorkey:
+                spec["colorkey"] = list(colorkey)
+            with contextlib.redirect_stdout(io.StringIO()):
+                packed = pa.pack_atlas(self.root, spec, self.orientation)
+            packed_at = {sheet_xy: i for i, sheet_xy in enumerate(packed["origin"])}
+        except pa.BuildError:
+            pass  # an invalid carve just means no cell resolves to a packed tile yet
 
         excluded = {int(e) for e in exclude}
         cells, seen = [], {}
@@ -2933,7 +2968,7 @@ class Project:
                 # Read through the key, so a cell that is nothing BUT background reads as
                 # empty here exactly as it will in the pipeline -- which is the whole
                 # reason to pick a key before committing to a carve.
-                buf = tuple(pa.to_gcolor8(px[tx * tile + a, ty * tile + b], colorkey)
+                buf = tuple(pa.to_gcolor8(px[ox + tx * tile + a, oy + ty * tile + b], colorkey)
                             for b in range(tile) for a in range(tile))
                 if not any(buf):
                     state = "empty"
@@ -2952,13 +2987,14 @@ class Project:
                             ip[a, b] = rgb + (255,)
                 cells.append({"i": idx, "x": tx, "y": ty, "state": state,
                               "excluded": idx in excluded,
+                              "packed": packed_at.get((tx, ty)),
                               "img": pv.data_uri(img.resize((tile * 2, tile * 2),
                                                             Image.NEAREST))})
         return {"cols": rw, "rows": rh, "cells": cells, "capped": capped,
                 "limit": LIMIT, "sheet_tiles": [W // tile, H // tile]}
 
     def analyse(self, rel, tile, region, max_tiles, colorkey, exclude=(),
-               ink_threshold=pa.DEFAULT_INK_THRESHOLD):
+               ink_threshold=pa.DEFAULT_INK_THRESHOLD, offset=(0, 0)):
         """Price a candidate carve before it is committed.
 
         This is the number that decides a project's content budget, and it is invisible
@@ -2977,9 +3013,10 @@ class Project:
         px = im.load()
         W, H = im.size
         rx, ry, rw, rh = region
+        ox, oy = (int(v) for v in offset)
 
-        rw = max(1, min(rw, W // tile - rx))
-        rh = max(1, min(rh, H // tile - ry))
+        rw = max(1, min(rw, (W - ox) // tile - rx))
+        rh = max(1, min(rh, (H - oy) // tile - ry))
 
         excluded = {int(e) for e in exclude}
         unique, seen, empty, repaired = [], set(), 0, 0
@@ -2989,7 +3026,7 @@ class Project:
                 # quoted here is the price the build charges.
                 if ((ty - ry) * rw + (tx - rx)) in excluded:
                     continue
-                buf = tuple(pa.to_gcolor8(px[tx * tile + i, ty * tile + j], colorkey)
+                buf = tuple(pa.to_gcolor8(px[ox + tx * tile + i, oy + ty * tile + j], colorkey)
                             for j in range(tile) for i in range(tile))
                 if not any(buf):
                     empty += 1
@@ -3124,10 +3161,10 @@ class Project:
     # Keys the Import tab owns. Anything else in an [[atlas]] block -- metatiles,
     # semantic, variants, and every comment around them -- belongs to whoever wrote it
     # and is never touched by an edit from here.
-    ATLAS_KEYS = ("sheet", "tile", "region", "max_tiles", "colorkey", "exclude")
+    ATLAS_KEYS = ("sheet", "tile", "region", "max_tiles", "colorkey", "exclude", "offset")
 
     def validate_atlas(self, rel, tile, region, max_tiles, exclude=(), colorkey=None,
-                       name=None):
+                       name=None, offset=(0, 0)):
         """Run a candidate carve through the REAL pipeline and report what it says.
 
         Not a re-implementation of the checks: it calls the same `pack_atlas` the build
@@ -3143,7 +3180,7 @@ class Project:
         spec = {"name": name or "candidate", "sheet": rel, "tile": int(tile),
                 "region": list(region), "max_tiles": int(max_tiles),
                 "out": f"{name or 'candidate'}.bin",
-                "exclude": list(exclude)}
+                "exclude": list(exclude), "offset": [int(v) for v in offset]}
         if colorkey:
             spec["colorkey"] = list(colorkey)
 
@@ -3190,6 +3227,7 @@ class Project:
             raise ValueError(f"no atlas named {name!r}")
         return {"name": name, "sheet": spec.get("sheet"), "tile": spec.get("tile", 16),
                 "region": spec.get("region", [0, 0, 16, 16]),
+                "offset": spec.get("offset", [0, 0]),
                 "max_tiles": spec.get("max_tiles", 64),
                 "colorkey": spec.get("colorkey"),
                 "autopick": list(spec.get("autopick", [])),
@@ -3199,6 +3237,105 @@ class Project:
                 "variants": list(spec.get("variants", [])),
                 "exclude": [int(e) for e in spec.get("exclude", [])
                             if not isinstance(e, (list, tuple))]}
+
+    @staticmethod
+    def _atlas_roles_live(spec, packed):
+        """Role -> tile index for one CANDIDATE carve, computed the same way build() does
+        it (autopick_tiles, then `semantic` overrides) -- but without a build having ever
+        run, which is what lets a tile be edited by name before Build has been pressed
+        once. Mirrors the exact snippet build() runs per atlas; kept in step with it by
+        hand since a live preview and the real pipeline are two different call sites for
+        the same decision.
+        """
+        r = {}
+        if spec.get("autopick"):
+            try:
+                r.update(pa.autopick_tiles(packed, spec["autopick"]))
+            except pa.BuildError:
+                pass  # too few solid tiles to autopick from yet -- semantic can still work
+        for role, idx in spec.get("semantic", {}).items():
+            if isinstance(idx, int) and 0 <= idx < len(packed["tiles"]):
+                r[role] = idx
+        return r
+
+    def carve_tiles(self, rel, tile, region, max_tiles, exclude=(), colorkey=None,
+                    offset=(0, 0), name=None):
+        """Every tile a candidate carve actually PACKS -- the metadata-editing
+        counterpart to slice_grid's raw sheet cells, which show what goes IN. This shows
+        what each tile that makes it in currently MEANS: its role, and its collision.
+
+        Reuses the real pack_atlas / autopick_tiles / parse_atlas_collision the build
+        itself calls, so a tile's role and collision here are never a second opinion --
+        editing through this can never show something Build would then disagree with.
+
+        When `name` is an atlas already in the manifest, its `autopick`/`semantic`/
+        `collision` are folded in so existing role names and collision entries survive
+        into the preview; a brand new carve (no such atlas yet) just shows bare tiles.
+        """
+        spec = {"name": name or "_carve_tiles", "sheet": rel, "tile": int(tile),
+                "region": list(region), "max_tiles": int(max_tiles),
+                "out": f"{name or '_carve_tiles'}.bin", "exclude": list(exclude),
+                "offset": [int(v) for v in offset]}
+        if colorkey:
+            spec["colorkey"] = list(colorkey)
+
+        existing = next((a for a in self.man.get("atlas", []) if a.get("name") == name),
+                        None) if name else None
+        if existing:
+            for key in ("autopick", "semantic", "collision"):
+                if key in existing:
+                    spec[key] = existing[key]
+
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                packed = pa.pack_atlas(self.root, spec, self.orientation)
+        except pa.BuildError as e:
+            return {"error": str(e)}
+
+        roles = self._atlas_roles_live(spec, packed)
+        by_index = {}
+        for role, idx in roles.items():
+            by_index.setdefault(idx, role)
+
+        try:
+            collision = pa.parse_atlas_collision(spec, packed, roles)
+        except pa.BuildError as e:
+            return {"error": str(e)}
+
+        from PIL import Image
+        T = packed["tile_px"]
+        tiles = []
+        for i, buf in enumerate(packed["tiles"]):
+            img = Image.new("RGBA", (T, T), (0, 0, 0, 0))
+            ip = img.load()
+            for j in range(T):
+                for k in range(T):
+                    rgb = pv.gcolor_rgb(buf[j * T + k])
+                    if rgb:
+                        ip[k, j] = rgb + (255,)
+
+            mode, extra = collision.get(i, (pa.COLLISION_NONE, None))
+            cinfo = {"mode": mode}
+            if mode == pa.COLLISION_SCALED:
+                cinfo["rect"] = list(extra)
+            elif mode == pa.COLLISION_COMPLEX:
+                mask_bytes = extra if extra is not None else pa.pack_collision_mask(buf, T)
+                cinfo["mask"] = pa.unpack_collision_mask(mask_bytes, T)
+                cinfo["authored"] = extra is not None
+            # The art's own opacity, always -- even when an authored mask is in effect
+            # above -- so "reset to art" in the editor has something to reset TO without
+            # a second round trip (there is no local copy of "what the tile's own opacity
+            # says" once an override replaces it in `mask`).
+            cinfo["auto_mask"] = pa.unpack_collision_mask(pa.pack_collision_mask(buf, T), T)
+
+            tiles.append({
+                "index": i, "role": by_index.get(i),
+                "origin": list(packed["origin"][i]),
+                "img": pv.data_uri(img.resize((T * 4, T * 4), Image.NEAREST)),
+                "collision": cinfo,
+            })
+
+        return {"tile_px": T, "tiles": tiles}
 
     # --------------------------------------------------------------------- legend
     #
@@ -3671,6 +3808,170 @@ class Project:
                     if lines[i].lstrip().startswith("[")), len(lines))
         return lines, start, end
 
+    def _atlas_full_block(self, name):
+        """Like _atlas_block, but extended past every [[atlas.collision]] sub-block that
+        follows it -- which _atlas_block stops short of ON PURPOSE (update_atlas and
+        set_atlas_extras only ever rewrite the keys before the first one, so simply never
+        reaching that far is what leaves collision entries alone). Collision editing needs
+        the opposite: the full extent, so a save can find an existing entry anywhere
+        inside it, or know where the block truly ends to append a new one.
+
+        TOML itself is why this is correct rather than a guess: `[[atlas.collision]]`
+        nests under the MOST RECENTLY OPENED `[[atlas]]` table regardless of what comes
+        between, so by construction it can only validly sit here, before the next
+        `[[atlas]]` (or any other top-level table).
+        """
+        lines, start, _ = self._atlas_block(name)
+        end = start + 1
+        while end < len(lines):
+            if lines[end].lstrip().startswith("[[atlas.collision]]"):
+                end += 1
+                continue
+            if lines[end].lstrip().startswith("["):
+                break
+            end += 1
+        return lines, start, end
+
+    def _resolve_atlas_tile(self, spec, packed, roles, tile):
+        """A `tile` value (role name or raw index) -> its packed index, the same
+        resolution parse_atlas_collision already does -- reused via a throwaway single
+        entry rather than duplicated, so there is one place that decides what a `tile`
+        field means.
+        """
+        resolved = pa.parse_atlas_collision(
+            {**spec, "collision": [{"tile": tile, "type": "solid"}]}, packed, roles)
+        return next(iter(resolved))
+
+    def _atlas_collision_entries(self, name):
+        """[(start, end, tile_value)] for every [[atlas.collision]] sub-block belonging
+        to `name`, `tile_value` parsed as written (int or quoted string) -- the raw
+        material save_atlas_collision/remove_atlas_collision search for a match in.
+        """
+        lines, astart, aend = self._atlas_full_block(name)
+        out = []
+        i = astart + 1
+        while i < aend:
+            if lines[i].strip() == "[[atlas.collision]]":
+                estart = i
+                eend = next((j for j in range(i + 1, aend)
+                            if lines[j].lstrip().startswith("[")), aend)
+                tile_value = None
+                for j in range(estart + 1, eend):
+                    m = re.match(r'\s*tile\s*=\s*(.+?)\s*$', lines[j])
+                    if m:
+                        raw = m.group(1)
+                        sm = re.match(r'^"(.*)"$', raw)
+                        tile_value = sm.group(1) if sm else int(raw)
+                        break
+                out.append((estart, eend, tile_value))
+                i = eend
+            else:
+                i += 1
+        return out
+
+    def _atlas_collision_lines(self, tile, kind, rect=None, mask_rows=None):
+        body = ["[[atlas.collision]]",
+               f'tile = "{tile}"' if isinstance(tile, str) else f"tile = {int(tile)}",
+               f'type = "{kind}"']
+        if rect is not None:
+            body.append(f"rect = [{rect[0]}, {rect[1]}, {rect[2]}, {rect[3]}]")
+        if mask_rows is not None:
+            body.append('mask = """')
+            body.extend(mask_rows)
+            body.append('"""')
+        return body
+
+    def save_atlas_collision(self, atlas, tile, mode, rect=None, mask_rows=None):
+        """Create or rewrite one tile's [[atlas.collision]] entry.
+
+        `tile` is written exactly as given -- a role name or a raw index -- matching the
+        one convention [[atlas.collision]] has always used (parse_atlas_collision), so a
+        tile named through the picker keeps naming it symbolically and survives a recarve
+        the same way a legend entry does.
+
+        Validated by re-running parse_atlas_collision against the atlas as it is packed
+        RIGHT NOW, the same "prove it through the real pipeline before it is written"
+        contract validate_atlas already keeps for the carve itself.
+        """
+        spec = next((a for a in self.man.get("atlas", []) if a.get("name") == atlas), None)
+        if not spec:
+            raise ValueError(f"no atlas named {atlas!r}")
+        kind = {v: k for k, v in pa.COLLISION_NAMES.items()}.get(mode)
+        if kind is None:
+            raise ValueError(f"collision mode {mode!r} is not one of "
+                             f"{sorted(pa.COLLISION_NAMES.values())}")
+
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                packed = pa.pack_atlas(self.root, spec, self.orientation)
+        except pa.BuildError as e:
+            raise ValueError(str(e)) from None
+        roles = self._atlas_roles_live(spec, packed)
+
+        candidate = dict(spec)
+        entries = [e for e in spec.get("collision", [])
+                  if self._resolve_atlas_tile(spec, packed, roles, e.get("tile")) !=
+                  self._resolve_atlas_tile(spec, packed, roles, tile)]
+        new_entry = {"tile": tile, "type": kind}
+        if rect is not None:
+            new_entry["rect"] = list(rect)
+        if mask_rows is not None:
+            new_entry["mask"] = "\n".join(mask_rows)
+        candidate["collision"] = entries + [new_entry]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                pa.parse_atlas_collision(candidate, packed, roles)
+        except pa.BuildError as e:
+            raise ValueError(str(e)) from None
+
+        target = self._resolve_atlas_tile(spec, packed, roles, tile)
+        lines, astart, aend = self._atlas_full_block(atlas)
+        new_lines = self._atlas_collision_lines(tile, kind, rect, mask_rows)
+
+        for estart, eend, existing_tile in self._atlas_collision_entries(atlas):
+            if self._resolve_atlas_tile(spec, packed, roles, existing_tile) == target:
+                lines[estart:eend] = new_lines + ([""] if eend < len(lines)
+                                                  and lines[eend].strip() else [])
+                with open(self.path, "w") as f:
+                    f.write("\n".join(lines))
+                self.reload()
+                return
+
+        # No existing entry for this tile: append at the end of the atlas's full block
+        # (past any collision entries already there), ahead of the blank line that
+        # separates it from whatever comes next.
+        at = aend
+        while at > astart and lines[at - 1].strip() == "":
+            at -= 1
+        lines[at:at] = [""] + new_lines
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def remove_atlas_collision(self, atlas, tile):
+        """Delete one tile's [[atlas.collision]] entry -- back to COLLISION_NONE."""
+        spec = next((a for a in self.man.get("atlas", []) if a.get("name") == atlas), None)
+        if not spec:
+            raise ValueError(f"no atlas named {atlas!r}")
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                packed = pa.pack_atlas(self.root, spec, self.orientation)
+        except pa.BuildError as e:
+            raise ValueError(str(e)) from None
+        roles = self._atlas_roles_live(spec, packed)
+        target = self._resolve_atlas_tile(spec, packed, roles, tile)
+
+        lines, astart, aend = self._atlas_full_block(atlas)
+        for estart, eend, existing_tile in self._atlas_collision_entries(atlas):
+            if self._resolve_atlas_tile(spec, packed, roles, existing_tile) == target:
+                gap = 1 if eend < len(lines) and lines[eend].strip() == "" else 0
+                lines[estart:eend + gap] = []
+                with open(self.path, "w") as f:
+                    f.write("\n".join(lines))
+                self.reload()
+                return
+        raise ValueError(f"tile {tile!r} of {atlas!r} has no [[atlas.collision]] entry")
+
     def atlas_users(self, name):
         """Everything that would break if this atlas went away, in words.
 
@@ -3744,7 +4045,7 @@ class Project:
         self.reload()
 
     def update_atlas(self, name, rel, tile, region, max_tiles, exclude=(),
-                     colorkey=None):
+                     colorkey=None, offset=(0, 0)):
         """Rewrite one atlas's settings in place, keeping everything else in its block.
 
         Only the keys the Import tab owns are replaced; a `metatiles` line, a
@@ -3761,6 +4062,9 @@ class Project:
         if colorkey:
             r, g, b = (int(c) for c in colorkey)
             want["colorkey"] = f"colorkey = [{r}, {g}, {b}]"
+        ox, oy = (int(v) for v in offset)
+        if ox or oy:
+            want["offset"] = f"offset = [{ox}, {oy}]"
 
         block = lines[start:end]
         seen = set()
@@ -3780,8 +4084,9 @@ class Project:
                 out.append(want[key])
                 seen.add(key)
                 continue
-            # A key we manage that is now unset -- a cleared colour key -- goes away.
-            if key == "colorkey":
+            # A key we manage that is now unset -- a cleared colour key, an offset back to
+            # [0, 0] -- goes away rather than being written out as a no-op line.
+            if key in ("colorkey", "offset"):
                 continue
             out.append(line)
 
@@ -3869,7 +4174,7 @@ class Project:
         self.reload()
 
     def add_atlas(self, name, rel, tile, region, max_tiles, exclude=(),
-                  colorkey=None):
+                  colorkey=None, offset=(0, 0)):
         """Append an [[atlas]] block. Appending keeps every existing comment intact."""
         if any(a["name"] == name for a in self.man.get("atlas", [])):
             raise ValueError(f"an atlas named {name!r} already exists")
@@ -3879,9 +4184,17 @@ class Project:
         # The manifest is the build's input, so nothing that would fail the build goes
         # into it from here. Checked server-side as well as in the page: the page can be
         # bypassed, the manifest cannot be un-broken by anything but hand-editing.
-        check = self.validate_atlas(rel, tile, region, max_tiles, exclude, colorkey, name)
+        check = self.validate_atlas(rel, tile, region, max_tiles, exclude, colorkey, name,
+                                    offset)
         if not check["ok"]:
             raise ValueError(check["error"])
+
+        ox, oy = (int(v) for v in offset)
+        offset_line = ""
+        if ox or oy:
+            offset_line = (f"# Where the tile GRID starts, in PIXELS -- separate from "
+                           f"`region`'s tile units, for a sheet whose art does not begin "
+                           f"flush with the sheet's own corner.\noffset = [{ox}, {oy}]\n")
 
         block = f'''
 
@@ -3891,7 +4204,7 @@ sheet = "{rel}"
 tile = {tile}
 # In TILE units, not pixels.
 region = [{region[0]}, {region[1]}, {region[2]}, {region[3]}]
-max_tiles = {max_tiles}
+{offset_line}max_tiles = {max_tiles}
 out = "{name}.bin"
 {self._colorkey_block(colorkey)}{self._exclude_block(exclude)}
 metatiles = "auto"
@@ -3899,6 +4212,13 @@ metatiles = "auto"
 # imported; replace with an explicit [atlas.semantic] table once you know which tiles
 # you want, and no map or game code changes.
 autopick = ["floor", "wall", "accent"]
+
+# Collision is a property of the tile, not of where a map paints it -- see
+# [[atlas.collision]] in any built example. "wall" solid by default so a freshly
+# imported atlas is usable the moment it lands, same as the roles above.
+[[atlas.collision]]
+tile = "wall"
+type = "solid"
 '''
         with open(self.path, "a") as f:
             f.write(block)
@@ -3907,21 +4227,29 @@ autopick = ["floor", "wall", "accent"]
     def legend_chars(self, atlas=None):
         """Pick sensible default characters for a blank map's floor and walls.
 
-        Derived from the legend's flags rather than assuming '.' and '#', so a project
-        with its own legend gets a blank map it can actually paint on.
+        Derived from the legend rather than assuming '.' and '#', so a project with its
+        own legend gets a blank map it can actually paint on. "Solid" is a property of
+        the TILE now ([[atlas.collision]]), not of the legend character that paints it
+        -- so this looks up which tile names/indices that atlas declares solid FIRST,
+        then finds a legend character whose `tile` paints one of them, rather than
+        reading "solid" off the character's own flags the way it used to.
         """
         specs = self.man.get("atlas", [])
         default = specs[0]["name"] if specs else None
+        target = atlas or default
+        spec = next((s for s in specs if s["name"] == target), None)
+        solid_tiles = {c["tile"] for c in (spec.get("collision", []) if spec else [])
+                       if c.get("type") == "solid"}
+
         floor = wall = None
         for ch, e in self.man.get("legend", {}).items():
             # A character resolving against ANOTHER tileset cannot go in this map's blank
             # room: the build would refuse it, and the new map would open unpaintable.
             if atlas and (e.get("atlas") or default) != atlas:
                 continue
-            flags = e.get("flags", [])
-            if "solid" in flags and wall is None:
+            if e.get("tile") in solid_tiles and wall is None:
                 wall = ch
-            elif not flags and floor is None:
+            elif not e.get("flags") and e.get("tile") not in solid_tiles and floor is None:
                 floor = ch
         return floor, wall
 
@@ -3949,9 +4277,11 @@ autopick = ["floor", "wall", "accent"]
 
         # Two entries, floor and wall, named by ROLE rather than index: every atlas the
         # importer creates autopicks both, and a role survives the sheet being re-carved
-        # where a number would silently start pointing at different art.
+        # where a number would silently start pointing at different art. Neither carries
+        # a collision flag any more -- collision is a property of the TILE now
+        # ([[atlas.collision]], written by add_atlas for "wall"), not of a map cell.
         tiles = [{"atlas": atlas, "index": "floor", "flip": "", "flags": 0},
-                 {"atlas": atlas, "index": "wall", "flip": "", "flags": pa.FLAG_SOLID}]
+                 {"atlas": atlas, "index": "wall", "flip": "", "flags": 0}]
         cells = []
         for y in range(h):
             for x in range(w):
@@ -5792,6 +6122,13 @@ select.sw{font:11px ui-monospace,monospace}
   box-shadow:0 0 0 9999px rgba(0,0,0,.55);pointer-events:none;display:none}
 .zoom{display:flex;align-items:center;gap:.4rem;font-size:.78rem;color:var(--dim)}
 .zoom input{width:7rem}
+/* The COMPLEX mask painter: one cell per source pixel, zoomed enough to click precisely
+   (8px tile -> 24px cell) without the grid outrunning the panel on a 32px tile. */
+.maskgrid{display:grid;gap:1px;background:var(--line);border:1px solid var(--line);
+  width:max-content;user-select:none}
+.maskgrid i{display:block;width:16px;height:16px;background:var(--surface);
+  cursor:pointer}
+.maskgrid i.ink{background:var(--fg)}
 /* `.fields label` stacks its children in a column and outspecifies a bare `.keypick`,
    so this row of controls needs the same specificity to stay a row. */
 .fields label.keypick{flex-direction:row;align-items:center;gap:.4rem}
@@ -6136,6 +6473,13 @@ button:disabled{opacity:.45;cursor:not-allowed}
         <label>y<input id="ry" type="number" value="0" min="0"></label>
         <label>w<input id="rw" type="number" value="16" min="1"></label>
         <label>h<input id="rh" type="number" value="16" min="1"></label>
+        <!-- Where the tile GRID starts, in PIXELS -- separate from Region, which counts
+             whole tiles. A sheet whose art does not begin flush with its own corner (a
+             margin, a shared border strip another importer left behind) has no
+             tile-aligned pixel to call (0,0) without this. -->
+        <label title="pixels, not tiles -- where the grid starts before Region counts whole tiles from it"
+               >Offset x<input id="ox" type="number" value="0" min="0"></label>
+        <label>y<input id="oy" type="number" value="0" min="0"></label>
         <label>Max tiles<input id="maxt" type="number" value="64" min="1"></label>
         <!-- The roles the pipeline invents from the art. It was hardcoded to
              floor/wall/accent, which is why a freshly imported atlas offered three
@@ -6184,7 +6528,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
         <button id="addatlas" class="primary">Add atlas</button>
       </div>
       <div id="stats" class="stats"></div>
-      <div class="plate"><h3>Slice — click a tile to drop it</h3>
+      <div class="plate"><h3>Slice — click a tile to edit it, double-click to drop it</h3>
         <div class="row" style="margin-bottom:.5rem">
           <button id="slkeepall">Keep all</button>
           <button id="sldropdup">Drop duplicates</button>
@@ -6207,6 +6551,64 @@ button:disabled{opacity:.45;cursor:not-allowed}
         <small id="cropnote">—</small>
       </div>
       <div class="plate"><h3>Tiles kept</h3><img id="strip" alt=""></div>
+
+      <!-- The per-tile editor. What a click in the Slice grid above opens: a raw sheet
+           cell only means something once it is PACKED, so editing has to happen against
+           the packed tile it becomes (carve_tiles), not the sheet cell itself. Role and
+           collision are both properties of that packed tile, which is why one panel
+           edits both rather than sending you to two places for "what this tile is" and
+           "what it does". -->
+      <div class="plate" id="tileeditor" style="display:none">
+        <h3>Tile <span id="tenote" class="dim"></span>
+          <button id="teclose" style="float:right" title="close">✕</button></h3>
+        <div class="mini">
+          <img id="teimg" alt=""
+               style="width:64px;height:64px;image-rendering:pixelated;
+                      border:1px solid var(--line);border-radius:3px">
+          <label class="mini">Role<input id="terole" placeholder="(none)"
+                                         autocomplete="off" style="width:8rem"></label>
+          <label class="mini">Collision<select id="temode">
+            <option value="0">none</option>
+            <option value="1">solid</option>
+            <option value="2">scaled</option>
+            <option value="3">complex</option>
+          </select></label>
+        </div>
+        <!-- SCALED: an inset rect, dragged over a zoomed still of the tile rather than
+             typed as four numbers -- a fence's solid half is a shape, not an arithmetic
+             problem. -->
+        <div id="tescaled" style="display:none">
+          <small class="dim">Drag on the tile to draw the solid rect.</small>
+          <div id="terectwrap" style="position:relative;display:inline-block;
+                                      cursor:crosshair;margin-top:.4rem">
+            <img id="terectimg" alt="" draggable="false"
+                 style="image-rendering:pixelated;display:block;
+                        border:1px solid var(--line)">
+            <div id="terectbox" style="position:absolute;pointer-events:none;
+                                       display:none;border:2px solid var(--accent);
+                                       background:color-mix(in srgb, var(--accent) 25%,
+                                       transparent)"></div>
+          </div>
+          <div class="mini"><span id="terectnote" class="dim"></span></div>
+        </div>
+        <!-- COMPLEX: a 1bpp mask, painted pixel by pixel at the tile's own resolution --
+             defaults to the art's own opacity (pack_collision_mask) until repainted, and
+             "Reset to art" throws an authored override away to go back to that. -->
+        <div id="tecomplex" style="display:none">
+          <div class="row" style="margin-bottom:.4rem;margin-top:.4rem">
+            <small class="dim">Click, or click-drag, to paint the mask.</small>
+            <button id="temaskreset" title="discard any authored mask; use the art's own opacity">
+              Reset to art</button>
+          </div>
+          <div id="temaskgrid" class="maskgrid"></div>
+        </div>
+        <div class="row" style="margin-top:.7rem">
+          <button id="tesave" class="primary">Save tile</button>
+          <button id="teclearcol">Clear collision</button>
+        </div>
+        <div class="mini"><span id="telog" class="dim"></span></div>
+      </div>
+
       <!-- What pack_unit_2bpp (tools/pnx_assets.py) actually bakes into the ~bw resource
            flint/diorite/aplite build from -- same source art, no second import, no
            re-authoring, just a different pixel format chosen at build time. The threshold
@@ -9449,21 +9851,38 @@ async function loadSheets(){
 // Cells the author has dropped, as indices into the region. Reset when the region
 // changes, because the indices mean something different the moment it does.
 let IMPEX=new Set(), impRegion='';
+// The packed-tile view alongside the raw grid: what carve_tiles last returned, so a
+// click on a raw cell can open its editor from a value already in hand rather than a
+// round trip per click. Refreshed in lockstep with the slice grid.
+let CARVE=null;
+
+function impOffset(){ return [+$('#ox').value, +$('#oy').value] }
 
 function impRegionKey(){
   return [$('#sheet').value,$('#tile').value,$('#rx').value,$('#ry').value,
-          $('#rw').value,$('#rh').value].join('/');
+          $('#rw').value,$('#rh').value,$('#ox').value,$('#oy').value].join('/');
 }
 
 async function drawSlice(){
   const key=impRegionKey();
-  if(key!==impRegion){ IMPEX=new Set(); impRegion=key }
-  const body={sheet:$('#sheet').value,tile:+$('#tile').value,
-    region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
-    exclude:[...IMPEX], colorkey:KEY};
-  if(!body.sheet) return;
-  const g=await (await fetch('/api/slice',{method:'POST',
-    headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
+  if(key!==impRegion){ IMPEX=new Set(); impRegion=key; closeTileEditor() }
+  const region=[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value];
+  const base={sheet:$('#sheet').value,tile:+$('#tile').value,region,
+    exclude:[...IMPEX], colorkey:KEY, offset:impOffset(), max_tiles:+$('#maxt').value};
+  if(!base.sheet) return;
+
+  // In parallel: the raw grid (what's IN) and the packed tiles (what each kept one
+  // MEANS). Two different index spaces -- slice_grid's cells carry `packed`, an index
+  // into carve_tiles' own array, resolved through a real pack_atlas (SAME max_tiles
+  // both places) so it can never disagree about which tile a cell became, or claim one
+  // past the cap that carve_tiles never produced.
+  const [g,c]=await Promise.all([
+    fetch('/api/slice',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify(base)}).then(r=>r.json()),
+    fetch('/api/atlas/tiles',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({...base,name:$('#aname').value.trim()||null})}).then(r=>r.json()),
+  ]);
+  CARVE=c.error?null:c;
   if(g.error){ $('#slnote').textContent=g.error; return }
 
   const el=$('#slice');
@@ -9473,20 +9892,39 @@ async function drawSlice(){
   const z=+$('#slzoom').value, cell=16*z;
   el.style.gridTemplateColumns=`repeat(${g.cols}, ${cell}px)`;
   el.style.maxWidth='100%';
-  el.innerHTML=g.cells.map(c=>
-    `<button data-i="${c.i}" class="${IMPEX.has(c.i)?'off':c.state}"
-      title="cell ${c.i} at ${c.x},${c.y} — ${IMPEX.has(c.i)?'dropped':c.state}"
-      ><img src="${c.img}" alt=""></button>`).join('');
-  for(const b of el.querySelectorAll('button'))
+  el.innerHTML=g.cells.map(c=>{
+    const editable=c.packed!=null&&CARVE;
+    return `<button data-i="${c.i}" data-packed="${c.packed==null?'':c.packed}"
+      class="${IMPEX.has(c.i)?'off':c.state}"
+      title="cell ${c.i} at ${c.x},${c.y} — ${IMPEX.has(c.i)?'dropped':c.state}`
+      +`${editable?` — tile ${c.packed} of the packed atlas; click to edit`:''}"
+      ><img src="${c.img}" alt=""></button>`;
+  }).join('');
+  for(const b of el.querySelectorAll('button')){
+    // Single click edits the tile this cell packs into; double click drops/restores the
+    // cell itself. Two different actions on two different index spaces (a packed tile
+    // vs. a raw sheet cell), on one grid, so "what this cell IS" and "what it MEANS" stay
+    // one click apart instead of two screens apart.
     b.onclick=()=>{
+      const p=b.dataset.packed;
+      if(p==='') { say('This cell packs no tile yet — empty, excluded, or a duplicate.'); return }
+      openTileEditor(+p);
+    };
+    b.ondblclick=()=>{
       const i=+b.dataset.i;
       IMPEX.has(i)?IMPEX.delete(i):IMPEX.add(i);
       drawSlice(); analyse();
     };
+  }
   const kept=g.cells.filter(c=>c.state==='unique'&&!IMPEX.has(c.i)).length;
   $('#slnote').textContent=`${kept} kept of ${g.cells.length} cells`
     +(IMPEX.size?` · ${IMPEX.size} dropped`:'')
     +(g.capped?` · showing the first ${g.limit}`:'');
+
+  // The open editor, if any, is showing a snapshot from before this carve changed --
+  // refresh it from the same response rather than let it drift from what Save would
+  // actually write against.
+  if(TE.index!=null) reopenTileEditor();
 }
 
 $('#slkeepall').onclick=()=>{ IMPEX=new Set(); drawSlice(); analyse() };
@@ -9495,7 +9933,7 @@ $('#sldropdup').onclick=async()=>{
     headers:{'content-type':'application/json'},
     body:JSON.stringify({sheet:$('#sheet').value,tile:+$('#tile').value,
       region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
-      exclude:[],colorkey:KEY})})).json();
+      exclude:[],colorkey:KEY,offset:impOffset()})})).json();
   // Duplicates already cost nothing -- dedup collapses them -- so this is about a
   // shorter grid to read, not about bytes.
   for(const c of g.cells) if(c.state==='dup') IMPEX.add(c.i);
@@ -9506,7 +9944,7 @@ $('#sldropempty').onclick=async()=>{
     headers:{'content-type':'application/json'},
     body:JSON.stringify({sheet:$('#sheet').value,tile:+$('#tile').value,
       region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
-      exclude:[],colorkey:KEY})})).json();
+      exclude:[],colorkey:KEY,offset:impOffset()})})).json();
   for(const c of g.cells) if(c.state==='empty') IMPEX.add(c.i);
   drawSlice(); analyse();
 };
@@ -9525,7 +9963,7 @@ function analyse(){
     const body={sheet:$('#sheet').value,tile:+$('#tile').value,
       region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
       max_tiles:+$('#maxt').value,exclude:[...IMPEX],colorkey:KEY,
-      ink_threshold:+$('#bwthresh').value};
+      ink_threshold:+$('#bwthresh').value,offset:impOffset()};
     if(!body.sheet) return;
     const r=await (await fetch('/api/analyse',{method:'POST',
       headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
@@ -9554,7 +9992,7 @@ function analyse(){
     drawCrop(r.sheet_tiles);
   },180);
 }
-for(const id of ['sheet','tile','rx','ry','rw','rh','maxt'])
+for(const id of ['sheet','tile','rx','ry','rw','rh','ox','oy','maxt'])
   $('#'+id).addEventListener('input',()=>{ analyse(); drawSlice() });
 $('#bwthresh').addEventListener('input',()=>{
   $('#bwthreshv').textContent=$('#bwthresh').value;
@@ -9665,6 +10103,201 @@ function drawCrop(sheetTiles){
     : `${rw}×${rh} of ${sx}×${sy} tiles — ${(100*rw*rh/(sx*sy)).toFixed(0)}% of the sheet`;
 }
 
+// -------------------------------------------------------------- the tile editor
+//
+// What a click in the Slice grid opens: role and collision for ONE packed tile, both
+// edited in one panel because they are both "what this tile is", not two screens for
+// two questions. Everything here writes through the same real-pipeline-validated
+// endpoints save_atlas_collision/save_role already are for other callers -- this is a
+// new client, not a new authority.
+
+const TE={index:null,tile:null,mode:0,rect:null,mask:null};
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+
+function openTileEditor(idx){
+  if(!CARVE||!CARVE.tiles[idx]) return;
+  TE.index=idx;
+  renderTileEditor();
+  $('#tileeditor').style.display='';
+  $('#tileeditor').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
+// Called after every drawSlice, so an editor left open through a region/exclude change
+// shows the tile it now actually is rather than a snapshot of what it was.
+function reopenTileEditor(){
+  if(TE.index==null||!CARVE||!CARVE.tiles[TE.index]){ closeTileEditor(); return }
+  renderTileEditor();
+}
+
+function closeTileEditor(){
+  TE.index=null;
+  $('#tileeditor').style.display='none';
+}
+$('#teclose').onclick=closeTileEditor;
+
+function renderTileEditor(){
+  const t=CARVE.tiles[TE.index];
+  TE.tile=t;
+  TE.mode=t.collision.mode;
+  TE.rect=t.collision.rect?t.collision.rect.slice():[0,0,CARVE.tile_px,CARVE.tile_px];
+  TE.mask=t.collision.mask?t.collision.mask.slice():t.collision.auto_mask.slice();
+
+  $('#tenote').textContent=
+    `${t.role?('"'+t.role+'"'):'tile '+t.index} — sheet ${t.origin[0]},${t.origin[1]}`;
+  $('#teimg').src=t.img;
+  $('#terole').value=t.role||'';
+  $('#temode').value=String(TE.mode);
+  $('#telog').textContent='';
+  updateModeSections();
+}
+
+$('#temode').addEventListener('change',()=>{
+  TE.mode=+$('#temode').value;
+  if(TE.mode===2&&!TE.rect) TE.rect=[0,0,CARVE.tile_px,CARVE.tile_px];
+  updateModeSections();
+});
+
+function updateModeSections(){
+  $('#tescaled').style.display=TE.mode===2?'':'none';
+  $('#tecomplex').style.display=TE.mode===3?'':'none';
+  if(TE.mode===2) drawRectEditor();
+  if(TE.mode===3) drawMaskGrid();
+}
+
+// --- SCALED: drag a rect over a zoomed still of the tile.
+
+function drawRectEditor(){
+  const T=CARVE.tile_px, zoom=Math.max(4,Math.floor(128/T));
+  const img=$('#terectimg');
+  img.src=TE.tile.img;
+  img.style.width=(T*zoom)+'px';
+  img.style.height=(T*zoom)+'px';
+  updateRectBox();
+}
+
+function updateRectBox(){
+  const T=CARVE.tile_px, img=$('#terectimg'), box=$('#terectbox');
+  const zoom=img.clientWidth/T;
+  const [x,y,w,h]=TE.rect;
+  box.style.left=(x*zoom)+'px'; box.style.top=(y*zoom)+'px';
+  box.style.width=(w*zoom)+'px'; box.style.height=(h*zoom)+'px';
+  box.style.display='';
+  $('#terectnote').textContent=`${w}×${h} at ${x},${y} (of ${T}×${T})`;
+}
+
+let rectDrag=null;
+$('#terectwrap').addEventListener('mousedown',ev=>{
+  if(TE.mode!==2||!TE.tile) return;
+  const T=CARVE.tile_px, rect=$('#terectimg').getBoundingClientRect();
+  const zoom=rect.width/T;
+  rectDrag={sx:clamp(Math.floor((ev.clientX-rect.left)/zoom),0,T-1),
+            sy:clamp(Math.floor((ev.clientY-rect.top)/zoom),0,T-1)};
+  ev.preventDefault();
+});
+window.addEventListener('mousemove',ev=>{
+  if(!rectDrag||TE.mode!==2) return;
+  const T=CARVE.tile_px, rect=$('#terectimg').getBoundingClientRect();
+  const zoom=rect.width/T;
+  const cx=clamp(Math.floor((ev.clientX-rect.left)/zoom),0,T-1);
+  const cy=clamp(Math.floor((ev.clientY-rect.top)/zoom),0,T-1);
+  const x0=Math.min(rectDrag.sx,cx), x1=Math.max(rectDrag.sx,cx);
+  const y0=Math.min(rectDrag.sy,cy), y1=Math.max(rectDrag.sy,cy);
+  TE.rect=[x0,y0,x1-x0+1,y1-y0+1];
+  updateRectBox();
+});
+window.addEventListener('mouseup',()=>{ rectDrag=null; maskPaint=null });
+
+// --- COMPLEX: paint the mask a pixel at a time, at the tile's own resolution.
+
+function drawMaskGrid(){
+  const T=CARVE.tile_px, el=$('#temaskgrid');
+  el.style.gridTemplateColumns=`repeat(${T}, 16px)`;
+  el.innerHTML='';
+  for(let y=0;y<T;y++)
+    for(let x=0;x<T;x++){
+      const i=document.createElement('i');
+      if(TE.mask[y][x]==='#') i.className='ink';
+      i.dataset.x=x; i.dataset.y=y;
+      el.appendChild(i);
+    }
+}
+
+let maskPaint=null;
+function maskSetCell(cell,ink){
+  const x=+cell.dataset.x, y=+cell.dataset.y;
+  const row=TE.mask[y].split(''); row[x]=ink?'#':'.'; TE.mask[y]=row.join('');
+  cell.classList.toggle('ink',ink);
+}
+$('#temaskgrid').addEventListener('mousedown',ev=>{
+  const cell=ev.target.closest('i'); if(!cell) return;
+  maskPaint=!cell.classList.contains('ink');
+  maskSetCell(cell,maskPaint);
+  ev.preventDefault();
+});
+$('#temaskgrid').addEventListener('mouseover',ev=>{
+  if(maskPaint===null) return;
+  const cell=ev.target.closest('i'); if(!cell) return;
+  maskSetCell(cell,maskPaint);
+});
+$('#temaskreset').onclick=()=>{
+  if(!TE.tile) return;
+  TE.mask=TE.tile.collision.auto_mask.slice();
+  drawMaskGrid();
+};
+
+// --- Save/clear. Both write through the same real-pipeline-validated endpoints
+// save_atlas_collision/save_role already give every other caller.
+
+async function teSave(){
+  if(!TE.tile) return;
+  const atlas=$('#aname').value.trim();
+  if(!atlas||!atlasNames().includes(atlas)){
+    $('#telog').textContent='Add this atlas first (below) -- a tile has nothing to '
+      +'save its role or collision INTO until it exists in the manifest.';
+    return;
+  }
+  const t=TE.tile;
+  const wantRole=$('#terole').value.trim();
+  if(wantRole!==(t.role||'')){
+    if(t.role){
+      const r=await post('/api/role/remove',{atlas,role:t.role});
+      if(!r.ok){ $('#telog').textContent=r.error; return }
+    }
+    if(wantRole){
+      const r=await post('/api/role',{atlas,role:wantRole,index:t.index});
+      if(!r.ok){ $('#telog').textContent=r.error; return }
+    }
+  }
+
+  // The tile is named by role once it has one -- symbolic, survives a recarve -- and by
+  // raw index only until it does, same convention [[atlas.collision]] always used.
+  const tileRef=wantRole||t.index;
+  if(TE.mode===0){
+    if(t.collision.mode!==0){
+      const r=await post('/api/atlas/collision/remove',{atlas,tile:tileRef});
+      if(!r.ok){ $('#telog').textContent=r.error; return }
+    }
+  } else {
+    const body={atlas,tile:tileRef,mode:TE.mode};
+    if(TE.mode===2) body.rect=TE.rect;
+    if(TE.mode===3) body.mask=TE.mask;
+    const r=await post('/api/atlas/collision',body);
+    if(!r.ok){ $('#telog').textContent=r.error; return }
+  }
+
+  $('#telog').textContent='Saved.';
+  await reload();
+  drawSlice(); analyse();
+}
+$('#tesave').onclick=teSave;
+
+$('#teclearcol').onclick=async()=>{
+  TE.mode=0;
+  $('#temode').value='0';
+  updateModeSections();
+  await teSave();
+};
+
 // An atlas that already exists is edited, not duplicated. The button says which, because
 // a button that silently does one of two things is worse than either.
 function atlasNames(){ return S.data.atlas_names || [] }
@@ -9672,7 +10305,8 @@ function atlasNames(){ return S.data.atlas_names || [] }
 function importBody(){
   return {name:$('#aname').value.trim(), sheet:$('#sheet').value, tile:+$('#tile').value,
           colorkey:KEY, max_tiles:+$('#maxt').value, exclude:[...IMPEX],
-          region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value]};
+          region:[+$('#rx').value,+$('#ry').value,+$('#rw').value,+$('#rh').value],
+          offset:impOffset()};
 }
 
 function atlasMode(){
@@ -9695,6 +10329,7 @@ $('#aload').onclick=async()=>{
   const set=(id,v)=>{ $('#'+id).value=v };
   set('sheet',s.sheet); set('tile',s.tile); set('maxt',s.max_tiles);
   set('rx',s.region[0]); set('ry',s.region[1]); set('rw',s.region[2]); set('rh',s.region[3]);
+  const off=s.offset||[0,0]; set('ox',off[0]); set('oy',off[1]);
   set('apick',(s.autopick||[]).join(', '));
   // `metatiles` arrives as written: "auto", a bool, or a fraction that is this atlas's
   // own threshold. The select carries the three named choices; a fraction is left as
@@ -11446,17 +12081,26 @@ def make_handler(session):
                         d["sheet"], int(d["tile"]), d["region"],
                         int(d["max_tiles"]), tuple(key) if key else None,
                         d.get("exclude", []),
-                        int(d.get("ink_threshold", pa.DEFAULT_INK_THRESHOLD)))))
+                        int(d.get("ink_threshold", pa.DEFAULT_INK_THRESHOLD)),
+                        d.get("offset", (0, 0)))))
                 elif self.path == "/api/slice":
                     d = json.loads(raw)
                     self._send(200, json.dumps(session.proj.slice_grid(
                         d["sheet"], int(d["tile"]), d["region"],
-                        d.get("exclude", []), d.get("colorkey"))))
+                        d.get("exclude", []), d.get("colorkey"), d.get("offset", (0, 0)),
+                        int(d.get("max_tiles", 255)))))
+                elif self.path == "/api/atlas/tiles":
+                    d = json.loads(raw)
+                    self._send(200, json.dumps(session.proj.carve_tiles(
+                        d["sheet"], int(d["tile"]), d["region"], int(d["max_tiles"]),
+                        d.get("exclude", []), d.get("colorkey"), d.get("offset", (0, 0)),
+                        d.get("name"))))
                 elif self.path == "/api/atlas/validate":
                     d = json.loads(raw)
                     self._send(200, json.dumps(session.proj.validate_atlas(
                         d["sheet"], int(d["tile"]), d["region"], int(d["max_tiles"]),
-                        d.get("exclude", []), d.get("colorkey"), d.get("name"))))
+                        d.get("exclude", []), d.get("colorkey"), d.get("name"),
+                        d.get("offset", (0, 0)))))
                 elif self.path == "/api/atlas/spec":
                     d = json.loads(raw)
                     self._send(200, json.dumps(session.proj.atlas_spec(d["name"])))
@@ -11464,7 +12108,8 @@ def make_handler(session):
                     d = json.loads(raw)
                     session.proj.update_atlas(d["name"], d["sheet"], int(d["tile"]),
                                               d["region"], int(d["max_tiles"]),
-                                              d.get("exclude", []), d.get("colorkey"))
+                                              d.get("exclude", []), d.get("colorkey"),
+                                              d.get("offset", (0, 0)))
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/atlas/extras":
                     d = json.loads(raw)
@@ -11483,7 +12128,18 @@ def make_handler(session):
                     d = json.loads(raw)
                     session.proj.add_atlas(d["name"], d["sheet"], int(d["tile"]),
                                            d["region"], int(d["max_tiles"]),
-                                           d.get("exclude", []), d.get("colorkey"))
+                                           d.get("exclude", []), d.get("colorkey"),
+                                           d.get("offset", (0, 0)))
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/atlas/collision":
+                    d = json.loads(raw)
+                    session.proj.save_atlas_collision(
+                        d["atlas"], d["tile"], int(d["mode"]), d.get("rect"),
+                        d.get("mask"))
+                    self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/atlas/collision/remove":
+                    d = json.loads(raw)
+                    session.proj.remove_atlas_collision(d["atlas"], d["tile"])
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/font/remove":
                     d = json.loads(raw)
