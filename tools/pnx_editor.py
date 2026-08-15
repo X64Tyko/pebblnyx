@@ -947,18 +947,31 @@ class Emulator:
             return False
         return True
 
-    def button(self, platform, name, action="click"):
+    def button(self, platform, buttons, action="push"):
+        """`push` sets the FULL set of buttons currently held -- not additive, a real
+        Pebble reports one bitmask -- so a caller tracking held state client-side (a
+        keydown/keyup set, a mousedown/mouseup pair) always resends the complete set
+        rather than one name at a time. `release` takes no buttons; it means "nothing is
+        held any more", the same state a real hand lifted off every button reaches.
+        """
         pebble = Toolchain.pebble_path()
+        if action not in ("push", "release"):
+            return False
+        if action == "push" and (not buttons
+                                 or any(b not in ("up", "select", "down", "back")
+                                        for b in buttons)):
+            return False
         # Checked here rather than left to `pebble emu-button` itself: with nothing
         # alive for `platform` the command can still exit 0 (it spawns a fresh QEMU
         # rather than refusing), which would silently boot an emulator no button on
         # this panel ever asked for.
-        if not pebble or name not in ("up", "select", "down", "back") \
-                or self.info(platform) is None:
+        if not pebble or self.info(platform) is None:
             return False
+        cmd = [pebble, "emu-button", action] + (list(buttons) if action == "push" else []) \
+            + ["--emulator", platform]
         try:
-            r = subprocess.run([pebble, "emu-button", action, name, "--emulator", platform],
-                               env=self._pebble_env(), capture_output=True, text=True, timeout=10)
+            r = subprocess.run(cmd, env=self._pebble_env(), capture_output=True,
+                               text=True, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             return False
         return r.returncode == 0
@@ -5721,6 +5734,18 @@ button:disabled{opacity:.45;cursor:not-allowed}
    monitor -- and pixelated per .plate img above so the scaling stays crisp, not blurred. */
 #emuscreen{width:288px;background:var(--ink);border:1px solid var(--line);
   border-radius:3px;min-height:120px}
+/* BACK alone on the left, UP/SELECT/DOWN stacked on the right -- see the HTML comment
+   above this block for why that layout is fixed rather than orientation-aware.
+   tabindex on the row, not a button, so a click anywhere in the bezel (the screen
+   image included) focuses it for the arrow-key/Enter/Backspace listener without
+   fighting a button's own focus ring. */
+.emubezel{display:flex;align-items:center;gap:.9rem;margin-top:.5rem;outline:none}
+.emubezel:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:6px}
+.emucluster{display:flex;flex-direction:column;gap:.5rem}
+.emubtn{width:2.5rem;height:2.5rem;border-radius:50%;border:1px solid var(--line);
+  background:var(--surface);color:var(--fg);cursor:pointer;
+  font:600 .6rem/1 ui-monospace,Menlo,monospace;user-select:none;padding:0}
+.emubtn:active,.emubtn.held{background:var(--accent);color:#fff;border-color:var(--accent)}
 </style></head><body>
 <!-- Activity rail, editor area, status bar: the shape VS Code and Rider settled on, and
      for the reason they settled on it. Six top tabs was already crowded and every new
@@ -6509,18 +6534,28 @@ button:disabled{opacity:.45;cursor:not-allowed}
         <small id="emunote">—</small>
       </div>
 
+      <!-- BACK alone on the left, UP/SELECT/DOWN stacked on the right -- the physical
+           layout every Pebble has, CloudPebble's emulator included. Fixed regardless of
+           this project's orientation: the screendump is the raw device framebuffer, and
+           the buttons are hardware that never moves -- pnx_input remaps what pressing
+           one MEANS to the game, not where it sits on the case. -->
       <div class="plate wide" id="emuscreenwrap" style="display:none">
         <h3>Screen</h3>
-        <img id="emuscreen" alt="emulator screen">
-        <div class="row" style="margin-top:.6rem">
-          <button id="emuback">Back</button>
-          <button id="emuup">Up</button>
-          <button id="emuselect">Select</button>
-          <button id="emudown">Down</button>
+        <div class="emubezel" tabindex="0">
+          <button id="emuback" class="emubtn emuback" data-btn="back" title="Back -- Backspace">BACK</button>
+          <img id="emuscreen" alt="emulator screen">
+          <div class="emucluster">
+            <button id="emuup" class="emubtn" data-btn="up" title="Up -- ↑">UP</button>
+            <button id="emuselect" class="emubtn" data-btn="select" title="Select -- Enter or →">SEL</button>
+            <button id="emudown" class="emubtn" data-btn="down" title="Down -- ↓">DOWN</button>
+          </div>
         </div>
-        <small>The watch's own UP/SELECT/DOWN/BACK -- <code>pnx_input</code> remaps what
-          each MEANS to the game by this project's orientation, the same way holding
-          real hardware sideways would, so "Up" is not always a game's logical up.</small>
+        <small>Press and hold, on screen or with ↑/↓/Enter/Backspace while this
+          panel has focus -- a real hold, not a canned click, so <code>pnx_input_held_ms</code>
+          sees the same thing a real hand would. No touchscreen input: <code>pebble-tool</code>'s
+          QEMU bridge has no touch message in its wire protocol (checked against
+          <code>libpebble2</code>'s own protocol union) -- only buttons, so <code>emery</code>
+          and <code>gabbro</code> can be run here but not tapped.</small>
       </div>
 
       <div class="plate wide"><h3>Output</h3><pre id="emulog">—</pre></div>
@@ -9195,6 +9230,7 @@ $('#tabfonts').onclick=()=>showTab('fonts');
 $('#tabsdk').onclick=()=>showTab('sdk');
 $('#tabpixel').onclick=()=>showTab('pixel');
 $('#tabcode').onclick=()=>showTab('code');
+$('#tabdevice').onclick=()=>showTab('device');
 
 async function loadSheets(){
   sheets=await (await fetch('/api/sheets')).json();
@@ -10008,7 +10044,10 @@ function emuPlatform(){
   return sel.value;
 }
 
+let emuTabActive=false;
+
 function emuEnter(){
+  emuTabActive=true;
   emuPlatform();
   emuStatus();
   if(!emuPoll) emuPoll=setInterval(emuStatus,1500);
@@ -10016,10 +10055,14 @@ function emuEnter(){
 
 // Leaving the tab, not stopping the emulator -- pebble-tool keeps it running (that is
 // the whole point of the state file), this just stops paying for screenshots and status
-// polls of a screen nobody is looking at.
+// polls of a screen nobody is looking at. Also releases anything still held: a button
+// pressed and then abandoned by switching tabs should not stay stuck down on a watch
+// nobody is looking at either.
 function emuLeave(){
+  emuTabActive=false;
   if(emuPoll){ clearInterval(emuPoll); emuPoll=null }
   if(emuFramePoll){ clearInterval(emuFramePoll); emuFramePoll=null }
+  if(emuHeld.size) emuRelease();
 }
 
 async function emuStatus(){
@@ -10073,17 +10116,80 @@ $('#emustop').onclick=async()=>{
   emuStatus();
 };
 
-function emuButton(name){
-  return async()=>{
-    await fetch('/api/emulator/button',{method:'POST',
-      headers:{'content-type':'application/json'},
-      body:JSON.stringify({platform:emuPlatform(),button:name,action:'click'})});
-  };
+// Held state, not one-shot clicks: a real QemuButton packet is a BITMASK of everything
+// currently down (pebble_tool/sdk/... via libpebble2's protocol), so every change here
+// resends the complete set rather than one name at a time -- see Emulator.button's own
+// docstring in pnx_editor.py. One source for both the on-screen buttons and the
+// keyboard below, so "click and hold" and "press and hold a key" are the same code path
+// doing the same thing to the same watch.
+let emuHeld=new Set();
+
+function emuPush(){
+  document.querySelectorAll('.emubtn').forEach(b=>b.classList.toggle('held',emuHeld.has(b.dataset.btn)));
+  return fetch('/api/emulator/button',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({platform:emuPlatform(),action:'push',buttons:[...emuHeld]})});
 }
-$('#emuup').onclick=emuButton('up');
-$('#emuselect').onclick=emuButton('select');
-$('#emudown').onclick=emuButton('down');
-$('#emuback').onclick=emuButton('back');
+function emuRelease(){
+  emuHeld.clear();
+  document.querySelectorAll('.emubtn').forEach(b=>b.classList.remove('held'));
+  return fetch('/api/emulator/button',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({platform:emuPlatform(),action:'release'})});
+}
+function emuDown(name){
+  if(emuHeld.has(name)) return;
+  emuHeld.add(name);
+  emuPush();
+}
+function emuUp(name){
+  if(!emuHeld.has(name)) return;
+  emuHeld.delete(name);
+  emuHeld.size?emuPush():emuRelease();
+}
+
+// mousedown/mouseup on each button, PLUS a document-level mouseup/mouseleave-of-window
+// safety net -- a mouse released after dragging off the button (or off the whole page)
+// never fires that button's own mouseup, and without this its button would stay "held"
+// on a watch nobody is touching until the next click anywhere lifts it.
+for(const b of document.querySelectorAll('.emubtn')){
+  b.onmousedown=e=>{ e.preventDefault(); emuDown(b.dataset.btn) };
+  b.onmouseup=()=>emuUp(b.dataset.btn);
+  b.onmouseleave=()=>emuUp(b.dataset.btn);
+}
+document.addEventListener('mouseup',()=>{ if(emuHeld.size) emuRelease() });
+
+// Arrow keys / Enter / Backspace, while the BEZEL ITSELF has focus -- not just the
+// Device tab, or an arrow key pressed to change the platform dropdown next to it would
+// get hijacked into a button press instead of moving the selection. Click the screen or
+// tab to it (tabindex on .emubezel) to focus it; the same layout CloudPebble's own
+// emulator used keys for. e.repeat is skipped on the way down rather than re-sent: the
+// OS's own key-repeat would otherwise resend an identical push every ~30ms, which the
+// watch cannot tell apart from a very fast double-press.
+const EMU_KEYS={ArrowUp:'up',ArrowDown:'down',ArrowRight:'select',Enter:'select',
+                ArrowLeft:'back',Backspace:'back'};
+function emuBezelFocused(){
+  const a=document.activeElement;
+  return !!(emuTabActive&&a&&a.closest&&a.closest('.emubezel'));
+}
+$('#emuscreen').onclick=()=>document.querySelector('.emubezel').focus();
+window.addEventListener('keydown',e=>{
+  const btn=EMU_KEYS[e.key]; if(!btn||e.repeat) return;
+  if(!emuBezelFocused()) return;
+  e.preventDefault();
+  emuDown(btn);
+});
+// NOT gated on focus: a hold started while focused must still release if focus moved
+// away before the key came back up, or the button would look stuck down forever on a
+// watch nobody is touching any more. Gated on emuHeld instead -- only acts on a key
+// this panel itself put a button down for, so an unrelated Enter/arrow elsewhere on the
+// page is never swallowed.
+window.addEventListener('keyup',e=>{
+  const btn=EMU_KEYS[e.key];
+  if(!btn||!emuHeld.has(btn)) return;
+  e.preventDefault();
+  emuUp(btn);
+});
 
 // ------------------------------------------------------------------ sprite editor
 //
@@ -11305,8 +11411,8 @@ def make_handler(session):
                     if platform not in Project.PLATFORMS:
                         self._send(400, json.dumps({"ok": False, "error": "unknown platform"}))
                     else:
-                        ok = EMULATOR.button(platform, d.get("button", ""),
-                                             d.get("action", "click"))
+                        ok = EMULATOR.button(platform, d.get("buttons", []),
+                                             d.get("action", "push"))
                         self._send(200, json.dumps({"ok": ok}))
                 elif self.path == "/api/update/check":
                     self._send(200, json.dumps(UPDATER.check(force=True)))
