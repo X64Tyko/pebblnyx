@@ -5,12 +5,19 @@
 #include <string.h>
 
 // Where each cluster position lands, per orientation. A table rather than arithmetic
-// because there are three cases and they are not a formula -- the middle button is always
+// because there are four cases and they are not a formula -- the middle button is always
 // SELECT, and only the ends swap. See the header for why buttons_bottom reverses.
+//
+// buttons_left reads the same row as buttons_bottom, which is not a copy-paste: the
+// button nearest the origin is whichever one ends up nearest the screen's physical
+// top-left corner, and a half-turn from buttons_right puts the same corner there that a
+// further quarter-turn from buttons_top does. Worked from rotate_point in
+// tools/pnx_assets.py, not from a hunch -- see that module's orientation section.
 static const uint8_t s_cluster[PNX_ORIENT_COUNT][PNX_CLUSTER_SIZE] = {
 	{ PNX_BUTTON_UP, PNX_BUTTON_SELECT, PNX_BUTTON_DOWN }, // buttons_right
 	{ PNX_BUTTON_UP, PNX_BUTTON_SELECT, PNX_BUTTON_DOWN }, // buttons_top
 	{ PNX_BUTTON_DOWN, PNX_BUTTON_SELECT, PNX_BUTTON_UP }, // buttons_bottom
+	{ PNX_BUTTON_DOWN, PNX_BUTTON_SELECT, PNX_BUTTON_UP }, // buttons_left
 };
 
 static uint8_t s_orientation;

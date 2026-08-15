@@ -30,6 +30,7 @@ import os
 import platform
 import re
 import shutil
+import socket
 import socketserver
 import ssl
 import subprocess
@@ -766,6 +767,211 @@ class Toolchain:
         threading.Thread(target=work, daemon=True).start()
 
 
+# ---------------------------------------------------------------------- emulator
+#
+# E3 in docs/EDITOR.md ("emulator panel") was built as a plan and then marked
+# SUPERSEDED: it assumed a QEMU target for the platform this framework built for, and at
+# the time nothing shipped one. M9 made every platform in Project.PLATFORMS a real
+# `pebble build` target, which reopens the question per platform -- an author's
+# installed SDK either ships a QEMU image for it or it does not, and that is a property
+# of their disk, not of this codebase (EDITOR.md's own "not currently possible" note was
+# checked against one SDK snapshot, and this one's `sdk-core/pebble/*/qemu/` shows all
+# seven now). So there is no hardcoded list here: every platform is offered, and
+# `pebble install --emulator` either works or reports why not, the same way a build
+# failure already does everywhere else in this editor.
+#
+# Runs entirely through the `pebble` CLI -- not libpebble2 directly, and not a
+# hand-rolled VNC/RFB client. The one exception is the live frame, which talks to
+# QEMU's own monitor socket with `screendump`: that is the mechanism pebble-tool's OWN
+# `screenshot`/GIF commands use for a headless capture, so this is a second caller of an
+# already-real mechanism instead of a second protocol implementation.
+class Emulator:
+    """Builds, installs into and controls a QEMU emulator via `pebble`.
+
+    One instance for the whole process, like TOOLCHAIN -- pebble-tool's own emulator
+    state (see INFO_PATH below) is a single machine-wide file, so per-project
+    bookkeeping here would just be a second, potentially-stale opinion about whose
+    emulator is actually running.
+    """
+
+    # pebble_tool.sdk.emulator.get_emulator_info_path(): tempfile.gettempdir()/pb-emulator.json.
+    # Read-only here -- `pebble install --emulator` and `pebble kill` own writing it. See
+    # docs/EDITOR.md's "recorded in a state file, so several tools can attach to one
+    # running emulator" -- this editor is simply one more of those tools.
+    INFO_PATH = os.path.join(tempfile.gettempdir(), "pb-emulator.json")
+
+    def __init__(self):
+        self.log = []
+        self.busy = False
+        self._lock = threading.Lock()
+
+    @classmethod
+    def _all_info(cls):
+        try:
+            with open(cls.INFO_PATH) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    @staticmethod
+    def _pid_alive(pid):
+        # Mirrors pebble-tool's own check (pebble_tool/sdk/emulator.py's
+        # _is_pid_running), which documents itself as unreliable on Windows (PBL-21228)
+        # -- there is no more portable answer available without a dependency this editor
+        # does not otherwise need. Diverges from upstream in one way: an unexpected
+        # errno there is re-raised; here it is just "not confirmed alive", because a
+        # wrong "not running" is a stale-looking panel and a crash in a status poll is
+        # worse.
+        if not pid:
+            return False
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
+    def info(self, platform):
+        """pebble-tool's live record for `platform`, if a process from it is still alive."""
+        for version_info in self._all_info().get(platform, {}).values():
+            if self._pid_alive(version_info.get("qemu", {}).get("pid")):
+                return version_info
+        return None
+
+    def status(self, platform):
+        return {"running": self.info(platform) is not None,
+                "busy": self.busy, "log": "".join(self.log[-400:])}
+
+    # ------------------------------------------------------------- lifecycle
+
+    def _run(self, cmd, cwd=None):
+        self.log.append(f"\n$ {' '.join(cmd)}\n")
+        try:
+            p = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True, bufsize=1)
+        except FileNotFoundError:
+            self.log.append(f"{cmd[0]} not found -- install the Pebble SDK in Settings first\n")
+            return False
+        for line in p.stdout:
+            self.log.append(line)
+            del self.log[:-400]
+        return p.wait() == 0
+
+    def start(self, project, platform):
+        """Bakes the project's CURRENT orientation, compiles it, and boots `platform`.
+
+        Runs on a worker thread: an ARM compile plus a cold QEMU boot is tens of
+        seconds, and the panel polls status() rather than blocking the request on it.
+
+        Baking first is what makes this "respect the orientation when testing" rather
+        than install whatever the last build happened to leave behind:
+        `project.build()` runs the real pipeline against `project.orientation` every
+        time -- the exact call the ordinary Build button makes -- so there is no
+        separate "emulator build" path that could fall out of sync with the project's
+        actual orientation setting.
+        """
+        pebble = Toolchain.pebble_path()
+        if not pebble:
+            return False, "pebble-tool is not installed -- see Settings"
+        with self._lock:
+            if self.busy:
+                return False, "an emulator build is already running"
+            self.busy = True
+
+        def work():
+            try:
+                self.log.append(f"\n=== {platform}: baking resources for "
+                                f"{pa.ORIENT_NAMES[project.orientation]} ===\n")
+                result = project.build()
+                self.log.append(result["output"])
+                if not result["ok"]:
+                    self.log.append("\nasset build failed -- see above\n")
+                    return
+                if not self._run([pebble, "build"], cwd=project.root):
+                    self.log.append("\n`pebble build` failed -- see above\n")
+                    return
+                self._run([pebble, "install", "--emulator", platform], cwd=project.root)
+            finally:
+                self.busy = False
+
+        threading.Thread(target=work, daemon=True).start()
+        return True, None
+
+    def stop(self):
+        """`pebble kill` stops every running emulator, not just one platform's --
+        pebble-tool has no narrower command, and the fixed VNC/websockify ports it would
+        allocate under `--vnc` (docs/EDITOR.md) mean only one is usefully in front at a
+        time anyway.
+        """
+        pebble = Toolchain.pebble_path()
+        if not pebble:
+            return False
+        try:
+            subprocess.run([pebble, "kill"], capture_output=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return True
+
+    def button(self, platform, name, action="click"):
+        pebble = Toolchain.pebble_path()
+        # Checked here rather than left to `pebble emu-button` itself: with nothing
+        # alive for `platform` the command can still exit 0 (it spawns a fresh QEMU
+        # rather than refusing), which would silently boot an emulator no button on
+        # this panel ever asked for.
+        if not pebble or name not in ("up", "select", "down", "back") \
+                or self.info(platform) is None:
+            return False
+        try:
+            r = subprocess.run([pebble, "emu-button", action, name, "--emulator", platform],
+                               capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return r.returncode == 0
+
+    # ------------------------------------------------------------ live frame
+
+    def frame(self, platform):
+        """One PNG frame off the running emulator's screen, or None.
+
+        `screendump` over the QEMU monitor's plain-text protocol -- not VNC. Polled by
+        the panel on an interval rather than pushed, which trades video smoothness for
+        needing no persistent connection and no client-side decoder beyond an <img> tag.
+        """
+        info = self.info(platform)
+        port = info and info.get("qemu", {}).get("monitor")
+        if not port or pa.Image is None:
+            return None
+        ppm = os.path.join(tempfile.gettempdir(), f"pnx-emu-{platform}.ppm")
+        try:
+            with socket.create_connection(("127.0.0.1", int(port)), timeout=1.0) as s:
+                s.settimeout(1.0)
+                with contextlib.suppress(OSError):
+                    s.recv(4096)                    # the monitor's own banner
+                s.sendall(f"screendump {ppm}\n".encode())
+                with contextlib.suppress(OSError):
+                    s.recv(4096)
+        except OSError:
+            return None
+
+        deadline = time.time() + 1.5
+        while time.time() < deadline:
+            if os.path.exists(ppm) and os.path.getsize(ppm) > 0:
+                break
+            time.sleep(0.02)
+        else:
+            return None
+
+        try:
+            with pa.Image.open(ppm) as img:
+                buf = io.BytesIO()
+                img.convert("RGB").save(buf, format="PNG")
+                return buf.getvalue()
+        except OSError:
+            return None
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(ppm)
+
+
 class Project:
     """Everything the editor knows, reloaded from disk on demand."""
 
@@ -818,6 +1024,8 @@ class Project:
             return img.rotate(90, expand=True)         # baked clockwise, so undo it
         if self.orientation == pa.ORIENT_BUTTONS_BOTTOM:
             return img.rotate(-90, expand=True)
+        if self.orientation == pa.ORIENT_BUTTONS_LEFT:
+            return img.rotate(180, expand=True)        # a half-turn undoes itself either way
         return img
 
     def atlases(self):
@@ -1090,6 +1298,10 @@ class Project:
             if self.built else 0,
             "app": self.app_size(),
             "save": self.save_size(),
+            # The catalog behind the overhead check (below) and the emulator panel --
+            # sent once here rather than hardcoded twice in the page, so a platform the
+            # SDK adds or drops only has to change in one place.
+            "platforms": self.PLATFORMS,
         }
 
     def code_symbols(self):
@@ -1232,15 +1444,60 @@ class Project:
     # an SDK build that the editor cannot yet run itself. Unknown is therefore a real
     # answer here, and is reported as one rather than as a zero.
 
-    # App RAM per platform, read from the SDK's own table (see docs/ROADMAP.md, M9).
-    # Everything a Pebble app owns lives in this one slot: code, rodata, statics AND the
-    # heap, which is why "how much is left" is the number worth showing rather than the
-    # static size alone.
-    APP_RAM = {"emery": 131072, "gabbro": 131072, "flint": 65536, "basalt": 65536,
-               "chalk": 65536, "diorite": 65536, "aplite": 24576}
+    # The seven shipping targets, read from the SDK's own table
+    # (sdk-core/pebble/common/tools/pebble_sdk_platform.py -- see docs/ROADMAP.md, M9), not
+    # recalled. One table so the app-RAM slot, the resource cap and the emulator panel
+    # (E3) never drift apart from each other or from what ROADMAP.md reports.
+    #
+    # `ram` is everything a Pebble app owns in one slot -- code, rodata, statics AND the
+    # heap -- which is why "how much is left" is the number worth showing, not the static
+    # size alone. `resources` is the appstore cap a submitted .pbw's resource pack must
+    # fit under, NOT the larger on-device sideload ceiling; `aplite` is the one platform
+    # where the two caps differ.
+    #
+    # No `qemu` flag: whether pebble-tool ships an emulator image for a platform is a
+    # property of the SDK installed on THIS disk, not of this codebase -- EDITOR.md's own
+    # "not currently possible" note was checked against one SDK snapshot and had gone
+    # stale by the time it was re-checked (see Emulator, above). So the emulator panel
+    # offers all seven and lets `pebble install --emulator` say so if one is missing,
+    # the same way every other build failure here is reported.
+    PLATFORMS = {
+        "emery":   {"w": 200, "h": 228, "bw": False, "round": False,
+                    "ram": 131072, "resources": 262144, "speaker": True},
+        "gabbro":  {"w": 260, "h": 260, "bw": False, "round": True,
+                    "ram": 131072, "resources": 262144, "speaker": False},
+        "flint":   {"w": 144, "h": 168, "bw": True,  "round": False,
+                    "ram": 65536,  "resources": 262144, "speaker": True},
+        "basalt":  {"w": 144, "h": 168, "bw": False, "round": False,
+                    "ram": 65536,  "resources": 262144, "speaker": False},
+        "chalk":   {"w": 180, "h": 180, "bw": False, "round": True,
+                    "ram": 65536,  "resources": 262144, "speaker": False},
+        "diorite": {"w": 144, "h": 168, "bw": True,  "round": False,
+                    "ram": 65536,  "resources": 262144, "speaker": False},
+        "aplite":  {"w": 144, "h": 168, "bw": True,  "round": False,
+                    "ram": 24576,  "resources": 131072, "speaker": False},
+    }
 
-    def _elf_path(self):
-        """The most recently linked ELF under build/, whichever platform it is for."""
+    def _platform_resource_path(self, out, platform):
+        """Which FILE `platform` actually ships for a resource declared as `out`.
+
+        Mirrors the SDK's own `~` tag resolution for the one tag this pipeline ever
+        emits: a 1-bit platform prefers `NAME~bw.EXT` over `NAME.EXT` when the tagged
+        file exists (atlases and sprites only -- fonts, samples, music, palettes,
+        dialog and scenes never get one, so this is a no-op for them and the base file
+        is returned). Every other platform never sees the tagged file at all.
+        """
+        if out and platform and self.PLATFORMS.get(platform, {}).get("bw"):
+            bw = pa.bw_variant_path(out)
+            if os.path.exists(os.path.join(self.res, bw)):
+                return bw
+        return out
+
+    def _elf_path(self, platform=None):
+        """The linked ELF for `platform`, or the most recently linked one of any."""
+        if platform:
+            p = os.path.join(self.root, "build", platform, "pebble-app.elf")
+            return p if os.path.exists(p) else None
         found = []
         for base, _dirs, files in os.walk(os.path.join(self.root, "build")):
             for f in files:
@@ -1270,17 +1527,23 @@ class Project:
                     newest = max(newest, os.path.getmtime(os.path.join(base, f)))
         return newest
 
-    def app_size(self):
+    def app_size(self, platform=None):
         """Static bytes from the last SDK build, against the uint16 ceiling.
 
-        Cached on the ELF's mtime: this shells out to `nm` and `readelf`, and the panel
-        that shows it repaints on every keystroke of a map edit.
+        `platform` picks that platform's own ELF (`build/<platform>/pebble-app.elf`);
+        left out, this is the most recently linked ELF of any platform, same as before
+        the overhead check existed. Cached on the ELF's mtime: this shells out to `nm`
+        and `readelf`, and the panel that shows it repaints on every keystroke of a map
+        edit.
         """
-        elf = self._elf_path()
+        elf = self._elf_path(platform)
         if not elf:
             return {"known": False,
-                    "why": "no build yet — run a Pebble build to measure the app",
-                    "limit": sr.VIRTUAL_SIZE_LIMIT}
+                    "why": (f"no build yet for {platform} — run a Pebble build to measure it"
+                            if platform else
+                            "no build yet — run a Pebble build to measure the app"),
+                    "limit": sr.VIRTUAL_SIZE_LIMIT,
+                    "slot": self.PLATFORMS.get(platform, {}).get("ram") if platform else None}
 
         stamp = os.path.getmtime(elf)
         if self._app_cache and self._app_cache[0] == (elf, stamp):
@@ -1311,8 +1574,10 @@ class Project:
         # but it can turn a module off in pnx_config.h.
         modules = sorted(((name, m["total"]) for name, m in report["modules"].items()),
                          key=lambda kv: -kv[1])
-        platform = os.path.basename(os.path.dirname(elf))
-        slot = self.APP_RAM.get(platform)
+        # `platform` is the one asked for, if any -- otherwise whichever the newest ELF
+        # on disk turned out to belong to.
+        platform = platform or os.path.basename(os.path.dirname(elf))
+        slot = self.PLATFORMS.get(platform, {}).get("ram")
         out = {
             "known": True,
             "used": used,
@@ -1345,20 +1610,29 @@ class Project:
         """
         return {"known": False, "why": "save lands with M5"}
 
-    def estimate(self, overrides=None):
+    def estimate(self, overrides=None, platform=None):
         """Current resource cost, per category, without running the pipeline.
 
         `overrides` lets the editor price a map it has not saved yet -- {name: rows} --
         so the number moves while a map is being painted rather than after.
+
+        `platform`, if given, prices what THAT platform actually ships rather than the
+        project's default build: `~bw`-tagged atlas and sprite blobs stand in for their
+        base file on a 1-bit target (`_platform_resource_path`), and the cap becomes
+        that platform's own appstore ceiling (`PLATFORMS`) rather than the project-wide
+        `budget_bytes`, which predates M9 and was really always "the emery cap".
         """
         overrides = overrides or {}
-        budget = int(self.project.get("budget_bytes", 262144))
+        budget = (self.PLATFORMS[platform]["resources"] if platform
+                  else int(self.project.get("budget_bytes", 262144)))
         entries, exact = [], True
 
         # Built blobs, by the manifest key that produced them.
         def blob_size(out):
-            p = os.path.join(self.res, out) if out else None
-            return os.path.getsize(p) if p and os.path.exists(p) else None
+            if not out:
+                return None
+            p = os.path.join(self.res, self._platform_resource_path(out, platform))
+            return os.path.getsize(p) if os.path.exists(p) else None
 
         for kind, key, outfn in (
                 ("atlas", "atlas", lambda s: s.get("out")),
@@ -1410,7 +1684,7 @@ class Project:
                 # The app binary rides along, because the two ceilings are spent against
                 # by the same edits and reading only one of them is how a project
                 # discovers the other at link time.
-                "app": self.app_size(), "save": self.save_size()}
+                "platform": platform, "app": self.app_size(platform), "save": self.save_size()}
 
     # ---------------------------------------------------------------------- code
     #
@@ -1999,7 +2273,9 @@ class Project:
 
     @property
     def landscape(self):
-        return self.orientation != pa.ORIENT_BUTTONS_RIGHT
+        # buttons_left is portrait turned upside down, not sideways -- `!= RIGHT` would
+        # have swapped SCREEN_W/H for it and shown every preview at the wrong aspect.
+        return self.orientation in pa.LANDSCAPE_ORIENTS
 
     @property
     def SCREEN_W(self):
@@ -4955,6 +5231,12 @@ body{margin:0;height:100vh;display:grid;grid-template-columns:auto 1fr;overflow:
 #updbody{max-height:16rem;overflow:auto;white-space:pre-wrap;font-size:.78rem;
   background:var(--ink);padding:.6rem .8rem;border-radius:4px;margin:.7rem 0 0}
 
+/* Sits directly above the budget strip it re-prices, so the two never read as unrelated. */
+#platformrow{display:flex;align-items:center;flex-wrap:wrap;gap:.6rem;padding:.4rem .9rem;
+  border-bottom:1px solid var(--line);font-size:.82rem}
+#platformrow .mini{margin:0}
+#platformrow small{color:var(--dim)}
+
 #rail{display:flex;flex-direction:column;gap:2px;width:62px;padding:.4rem .3rem;
   background:var(--surface);border-right:1px solid var(--line)}
 .act{display:flex;flex-direction:column;align-items:center;gap:.15rem;padding:.5rem .2rem;
@@ -5399,6 +5681,10 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .plate h3{margin:0 0 .5rem;font:600 .66rem/1 ui-monospace,Menlo,monospace;
   letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
 .plate img{image-rendering:pixelated;display:block;max-width:100%}
+/* Scaled up from the watch's real pixel count -- 1x would be a postage stamp on any
+   monitor -- and pixelated per .plate img above so the scaling stays crisp, not blurred. */
+#emuscreen{width:288px;background:var(--ink);border:1px solid var(--line);
+  border-radius:3px;min-height:120px}
 </style></head><body>
 <!-- Activity rail, editor area, status bar: the shape VS Code and Rider settled on, and
      for the reason they settled on it. Six top tabs was already crowded and every new
@@ -5422,6 +5708,9 @@ button:disabled{opacity:.45;cursor:not-allowed}
   <button id="tabfonts" class="act" data-t="fonts"><i>A</i><em>Fonts</em></button>
   <button id="tabimport" class="act" data-t="import"><i>⇥</i><em>Import</em></button>
   <button id="tabcode" class="act" data-t="code"><i>&lt;/&gt;</i><em>Code</em></button>
+  <!-- E3 in docs/EDITOR.md, rebuilt now that pebble-tool ships a QEMU image for every
+       platform this framework builds for rather than none of them. -->
+  <button id="tabdevice" class="act" data-t="device"><i>▶</i><em>Device</em></button>
   <div style="flex:1"></div>
   <button id="tabsdk" class="act" data-t="sdk"><i>⚙</i><em>Settings</em></button>
 </div>
@@ -5458,6 +5747,18 @@ button:disabled{opacity:.45;cursor:not-allowed}
     <span id="updbannertext"></span>
     <button id="updbannergo">Update…</button>
     <button id="updbannerhide" title="not now">✕</button>
+  </div>
+
+  <!-- Which of the seven the numbers below describe. "This project's build" is the old,
+       only behaviour: whatever's on disk, unlabelled. Naming an actual platform re-prices
+       resources against ITS cap and, once it has been built, reads RAM/app size off ITS
+       ELF -- a `~bw` project can look smaller on `aplite` than on `emery` without ever
+       running `pebble build` again for the resource half of that. -->
+  <div id="platformrow">
+    <label class="mini">Check overhead for
+      <select id="checkplatform"><option value="">this project's build</option></select>
+    </label>
+    <small id="platformnote">—</small>
   </div>
 
   <div id="budgetbar">
@@ -5544,12 +5845,14 @@ button:disabled{opacity:.45;cursor:not-allowed}
     <!-- Orientation is a project-wide content decision, not a view setting: it changes
          what the pipeline BAKES. Named for where the button cluster ends up, because
          that is what the choice is really about -- under one thumb it is a menu, along
-         the top edge it is shoulder triggers, along the bottom it is flippers. -->
+         the top edge it is shoulder triggers, along the bottom it is flippers, and along
+         the left edge it is the same menu grip mirrored for the other hand. -->
     <section><h2>Orientation</h2>
       <select id="orient">
         <option value="portrait">Portrait — cluster right, one thumb</option>
         <option value="buttons_top">Landscape — cluster top, triggers</option>
         <option value="buttons_bottom">Landscape — cluster bottom, flippers</option>
+        <option value="buttons_left">Portrait, upside down — cluster left</option>
       </select>
       <small id="orientnote">—</small></section>
     <!-- The budgets used to live here, in the Maps sidebar, where four of the five tabs
@@ -6146,6 +6449,47 @@ button:disabled{opacity:.45;cursor:not-allowed}
       <div class="plate wide"><h3>Output</h3><pre id="sdklog">—</pre></div>
     </div>
   </div>
+
+  <!-- The emulator panel E3 planned and marked SUPERSEDED (docs/EDITOR.md): it assumed
+       a QEMU target for the platform this framework built for, and none existed. M9
+       made every platform a real `pebble build` target, and the SDK installed here
+       ships a QEMU image for all seven of them, not the four EDITOR.md found when it
+       was written -- so this is offered for any platform and `pebble` says so if one
+       is actually missing, the same way any other build failure is reported. The
+       screen is QEMU's own monitor `screendump`, polled -- not VNC, not noVNC. -->
+  <div id="device" style="display:none;flex:1;overflow:auto;padding:1.5rem">
+    <div class="sdkwrap">
+      <div class="plate wide"><h3>Emulator</h3>
+        <p class="prose">Builds this project for one platform and installs it into
+          <code>pebble</code>'s own emulator, baked for whichever orientation this
+          project is currently set to (see Settings) -- the same asset build the Build
+          button runs, so what you see here is what the resource budget is measured
+          against, not a separate copy of it.</p>
+        <div class="row">
+          <select id="emuplatform"></select>
+          <button id="emustart" class="primary">Build &amp; run</button>
+          <button id="emustop">Stop</button>
+        </div>
+        <small id="emunote">—</small>
+      </div>
+
+      <div class="plate wide" id="emuscreenwrap" style="display:none">
+        <h3>Screen</h3>
+        <img id="emuscreen" alt="emulator screen">
+        <div class="row" style="margin-top:.6rem">
+          <button id="emuback">Back</button>
+          <button id="emuup">Up</button>
+          <button id="emuselect">Select</button>
+          <button id="emudown">Down</button>
+        </div>
+        <small>The watch's own UP/SELECT/DOWN/BACK -- <code>pnx_input</code> remaps what
+          each MEANS to the game by this project's orientation, the same way holding
+          real hardware sideways would, so "Up" is not always a game's logical up.</small>
+      </div>
+
+      <div class="plate wide"><h3>Output</h3><pre id="emulog">—</pre></div>
+    </div>
+  </div>
 </main>
 
   <!-- Output. One shared panel rather than a box inside each activity: a build result
@@ -6262,7 +6606,7 @@ async function load(){
   for(const id of authoring) $('#'+id).disabled=false;
 
   $('#mapsel').innerHTML=S.data.maps.map((m,i)=>`<option value="${i}">${m.name}</option>`).join('');
-  drawPalettes(); budget(); statusbar(); orientation(); atlasMode();
+  drawPalettes(); platformSelector(); budget(); statusbar(); orientation(); atlasMode();
   // Once, a moment after the editor is usable: an update check is never
   // worth delaying the first paint for.
   setTimeout(()=>updCheck(), 1500);
@@ -6873,6 +7217,40 @@ function orientation(){
   if(plate) plate.innerHTML=`On the watch — ${w}&times;${h}`;
 }
 
+// Options come from the server (state().platforms), not a list typed into the page, so
+// the seven never drift from PLATFORMS in pnx_editor.py. Built once: state() sends the
+// same catalog on every reload, and rebuilding the dropdown's options would drop
+// whatever an author had picked mid-session.
+function platformSelector(){
+  const sel=$('#checkplatform');
+  if(sel.options.length<=1){
+    for(const name of Object.keys(S.data.platforms)){
+      const p=S.data.platforms[name], o=document.createElement('option');
+      o.value=name;
+      o.textContent=`${name} — ${p.w}×${p.h}${p.round?' round':''}, `
+                   +(p.bw?'1-bit':'colour');
+      sel.appendChild(o);
+    }
+  }
+  sel.value=S.checkPlatform||'';
+  platformNote();
+}
+
+// This is a VIEW into what is already built, not the project's own screen -- so it reads
+// S.data.platforms rather than S.data.screen/orientation, which describe the project's
+// actual default build and do not change when this selector does.
+function platformNote(){
+  const name=S.checkPlatform, note=$('#platformnote');
+  if(!name){
+    note.textContent='Prices what is on disk for the project’s own default build.';
+    return;
+  }
+  const p=S.data.platforms[name];
+  note.textContent=`${p.w}×${p.h}${p.round?' round':''} · `
+    +`${p.bw?'1-bit (ships its ‘~bw’ blobs where built)':'colour'} · `
+    +`${KB(p.resources)} resources · ${KB(p.ram)} RAM`;
+}
+
 function budget(now){
   clearTimeout(estTimer);
   const go=async()=>{
@@ -6884,7 +7262,7 @@ function budget(now){
     try{
       e=await (await fetch('/api/estimate',{method:'POST',
         headers:{'content-type':'application/json'},
-        body:JSON.stringify({maps})})).json();
+        body:JSON.stringify({maps,platform:S.checkPlatform||undefined})})).json();
     }catch(_){ return }
     if(e.error) return;
     estLast=e;
@@ -6922,7 +7300,7 @@ function paintBudget(e){
   // --- resources. The only one of the four that moves as you paint, which is why the
   //     estimate is recomputed from unsaved rows rather than read off disk.
   paintCell('res', `${B(e.total)} / ${B(e.budget)} B`, e.pct,
-    `${e.pct.toFixed(1)}% of the appstore cap`
+    `${e.pct.toFixed(1)}% of ${e.platform?e.platform+"'s":'the'} appstore cap`
     + (e.exact?'':' · <b>some assets not built yet</b>'),
     e.over?'over':(e.warn?'warn':''));
 
@@ -7389,6 +7767,14 @@ $('#orient').onchange=async()=>{
   const i=Math.max(0,S.data.maps.findIndex(m=>m.name===keep));
   $('#mapsel').value=i; selectMap(i);
 };
+
+// A VIEW setting, unlike orientation: picking a platform here re-prices what is already
+// on disk against a different target, it never touches the manifest or the pipeline.
+$('#checkplatform').onchange=()=>{
+  S.checkPlatform=$('#checkplatform').value;
+  platformNote();
+  budget(true);
+};
 $('#build').onclick=async()=>{
   const log=$('#log'); log.className=''; log.textContent='Building…';
   const r=await (await fetch('/api/build',{method:'POST'})).json();
@@ -7405,7 +7791,8 @@ let sheets=[];
 function showTab(which){
   const imp=which==='import', fnt=which==='fonts', maps=which==='maps',
         sdk=which==='sdk', pix=which==='pixel', cod=which==='code',
-        scn=which==='scenes', dlg=which==='dialog', mus=which==='music';
+        scn=which==='scenes', dlg=which==='dialog', mus=which==='music',
+        dev=which==='device';
   $('#import').style.display=imp?'block':'none';
   $('#fonts').style.display=fnt?'block':'none';
   $('#sdk').style.display=sdk?'block':'none';
@@ -7414,6 +7801,7 @@ function showTab(which){
   $('#scenes').style.display=scn?'block':'none';
   $('#dialog').style.display=dlg?'block':'none';
   $('#music').style.display=mus?'block':'none';
+  $('#device').style.display=dev?'block':'none';
   if(mus) drawMusic();
   if(scn) drawScenes();
   if(dlg) drawDialog();
@@ -7421,6 +7809,7 @@ function showTab(which){
   if(sdk){ sdkStatus(); updCheck(); drawProject() }
   if(pix&&!PX.data){ pxPalette(); pxInit(+$('#pxw').value,+$('#pxh').value,1); pxLoadList() }
   if(cod&&!$('#codelist').children.length) codeTree();
+  if(dev) emuEnter(); else emuLeave();
   $('#stage').style.display=maps?'flex':'none';
   // The map sidebar and its toolbar controls belong to Maps. Showing them elsewhere
   // implies they apply there.
@@ -7438,7 +7827,7 @@ function showTab(which){
     b.classList.toggle('on', b.dataset.t===which);
   $('#ctxtitle').textContent={maps:'Maps',import:'Import',fonts:'Fonts',
     pixel:'Sprites',code:'Code',sdk:'Settings',scenes:'Scenes',
-    dialog:'Dialog',music:'Music'}[which]||'';
+    dialog:'Dialog',music:'Music',device:'Device'}[which]||'';
 }
 
 // ------------------------------------------------------- declaring a sprite
@@ -9562,6 +9951,104 @@ $('#sdkinstall').onclick=async()=>{
 
 $('#sdkrefresh').onclick=()=>sdkStatus(true);
 
+// --------------------------------------------------------------------- emulator
+//
+// Mirrors the SDK panel's own shape (status object with `busy`/`log`, poll only while
+// something is running) rather than inventing a second one -- see sdkStatus above.
+// Two intervals, not one: emuPoll asks "is anything running yet" every 1.5s the whole
+// time this tab is open, and emuFramePoll -- only alive once emuPoll's answer is yes --
+// pulls the screen faster, since that is the one a person is actually watching.
+let emuPoll=null, emuFramePoll=null;
+
+function emuPlatform(){
+  const sel=$('#emuplatform');
+  if(sel.options.length===0){
+    for(const name of Object.keys(S.data.platforms||{})){
+      const o=document.createElement('option'); o.value=name; o.textContent=name;
+      sel.appendChild(o);
+    }
+    sel.value=S.emuPlatform||sel.options[0].value;
+  }
+  return sel.value;
+}
+
+function emuEnter(){
+  emuPlatform();
+  emuStatus();
+  if(!emuPoll) emuPoll=setInterval(emuStatus,1500);
+}
+
+// Leaving the tab, not stopping the emulator -- pebble-tool keeps it running (that is
+// the whole point of the state file), this just stops paying for screenshots and status
+// polls of a screen nobody is looking at.
+function emuLeave(){
+  if(emuPoll){ clearInterval(emuPoll); emuPoll=null }
+  if(emuFramePoll){ clearInterval(emuFramePoll); emuFramePoll=null }
+}
+
+async function emuStatus(){
+  const platform=emuPlatform();
+  let s;
+  try{ s=await (await fetch('/api/emulator/status?platform='+platform)).json() }
+  catch(_){ return }
+  if(s.error) return;
+
+  $('#emustart').disabled=s.busy;
+  $('#emustart').textContent=s.busy?'Building…':(s.running?'Rebuild & reinstall':'Build & run');
+  $('#emustop').disabled=!s.running&&!s.busy;
+  $('#emuscreenwrap').style.display=s.running?'':'none';
+  $('#emunote').textContent=s.busy
+    ?`Building and installing for ${platform}… an ARM compile plus a cold boot, so `
+     +'this can take a while the first time.'
+    :(s.running?`${platform} is running.`
+      :`${platform} is not running. Build & run compiles this project for it and `
+       +'installs into pebble-tool’s own emulator.');
+  if(s.log&&s.log.trim()) $('#emulog').textContent=s.log;
+
+  if(s.running&&!emuFramePoll){
+    emuFrame();
+    emuFramePoll=setInterval(emuFrame,800);
+  }else if(!s.running&&emuFramePoll){
+    clearInterval(emuFramePoll); emuFramePoll=null;
+  }
+}
+
+// Cache-busted by the timestamp, not by a fetch+blob-URL dance: the browser already
+// knows how to load an <img> and quietly keep the last one on a failed request, which is
+// exactly what a screendump that has not landed yet (see Emulator.frame's 1.5s wait,
+// pnx_editor.py) should look like -- not a flash to a broken-image icon.
+function emuFrame(){
+  $('#emuscreen').src='/api/emulator/frame?platform='+emuPlatform()+'&t='+Date.now();
+}
+
+$('#emuplatform').onchange=()=>{ S.emuPlatform=$('#emuplatform').value; emuStatus() };
+
+$('#emustart').onclick=async()=>{
+  $('#emustart').disabled=true;
+  const r=await (await fetch('/api/emulator/start',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({platform:emuPlatform()})})).json();
+  if(!r.ok) $('#emunote').textContent=r.error||'could not start';
+  emuStatus();
+};
+
+$('#emustop').onclick=async()=>{
+  await fetch('/api/emulator/stop',{method:'POST'});
+  emuStatus();
+};
+
+function emuButton(name){
+  return async()=>{
+    await fetch('/api/emulator/button',{method:'POST',
+      headers:{'content-type':'application/json'},
+      body:JSON.stringify({platform:emuPlatform(),button:name,action:'click'})});
+  };
+}
+$('#emuup').onclick=emuButton('up');
+$('#emuselect').onclick=emuButton('select');
+$('#emudown').onclick=emuButton('down');
+$('#emuback').onclick=emuButton('back');
+
 // ------------------------------------------------------------------ sprite editor
 //
 // Pixels are held as ARGB2222 bytes -- the device's own encoding -- not as CSS colours.
@@ -10269,6 +10756,7 @@ load();
 
 
 TOOLCHAIN = Toolchain()
+EMULATOR = Emulator()
 
 
 class Session:
@@ -10446,6 +10934,26 @@ def make_handler(session):
                 from urllib.parse import urlparse, parse_qs
                 q = parse_qs(urlparse(self.path).query)
                 self._send(200, json.dumps(browse((q.get("path") or [None])[0])))
+            elif self.path.startswith("/api/emulator/status"):
+                from urllib.parse import urlparse, parse_qs
+                q = parse_qs(urlparse(self.path).query)
+                platform = (q.get("platform") or [None])[0]
+                if platform not in Project.PLATFORMS:
+                    self._send(400, json.dumps({"error": "unknown platform"}))
+                else:
+                    self._send(200, json.dumps(EMULATOR.status(platform)))
+            elif self.path.startswith("/api/emulator/frame"):
+                from urllib.parse import urlparse, parse_qs
+                q = parse_qs(urlparse(self.path).query)
+                platform = (q.get("platform") or [None])[0]
+                png = platform in Project.PLATFORMS and EMULATOR.frame(platform)
+                if png:
+                    self._send(200, png, "image/png")
+                else:
+                    # 204, not 404: the route exists, there is simply no frame yet --
+                    # the panel polls this constantly while an emulator boots, and a 404
+                    # would read as "this feature does not exist" in the browser console.
+                    self._send(204, b"", "image/png")
             elif self.path == "/api/alive":
                 # The heartbeat. Cheap on purpose: it runs every few seconds forever.
                 self._send(200, "{}")
@@ -10743,6 +11251,27 @@ def make_handler(session):
                 elif self.path == "/api/orientation":
                     session.proj.set_orientation(json.loads(raw)["orientation"])
                     self._send(200, json.dumps({"ok": True}))
+                elif self.path == "/api/emulator/start":
+                    d = json.loads(raw)
+                    platform = d.get("platform")
+                    if not session.proj:
+                        self._send(400, json.dumps({"ok": False, "error": "no project open"}))
+                    elif platform not in Project.PLATFORMS:
+                        self._send(400, json.dumps({"ok": False, "error": "unknown platform"}))
+                    else:
+                        ok, error = EMULATOR.start(session.proj, platform)
+                        self._send(200, json.dumps({"ok": ok, "error": error}))
+                elif self.path == "/api/emulator/stop":
+                    self._send(200, json.dumps({"ok": EMULATOR.stop()}))
+                elif self.path == "/api/emulator/button":
+                    d = json.loads(raw)
+                    platform = d.get("platform")
+                    if platform not in Project.PLATFORMS:
+                        self._send(400, json.dumps({"ok": False, "error": "unknown platform"}))
+                    else:
+                        ok = EMULATOR.button(platform, d.get("button", ""),
+                                             d.get("action", "click"))
+                        self._send(200, json.dumps({"ok": ok}))
                 elif self.path == "/api/update/check":
                     self._send(200, json.dumps(UPDATER.check(force=True)))
                 elif self.path == "/api/update/download":
@@ -10790,8 +11319,14 @@ def make_handler(session):
                     self._send(200, json.dumps({"ok": True}))
                 elif self.path == "/api/estimate":
                     d = json.loads(raw) if raw.strip() else {}
+                    # An unrecognised platform is a client bug, not a project problem --
+                    # fall back to the default (no-platform) estimate rather than 500ing
+                    # the whole budget strip over it.
+                    platform = d.get("platform")
+                    if platform not in session.proj.PLATFORMS:
+                        platform = None
                     self._send(200, json.dumps(
-                        session.proj.estimate(d.get("maps"))))
+                        session.proj.estimate(d.get("maps"), platform)))
                 elif self.path == "/api/code/read":
                     d = json.loads(raw)
                     self._send(200, json.dumps(session.proj.code_read(d["path"])))

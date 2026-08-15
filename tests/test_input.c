@@ -94,7 +94,7 @@ void test_input(void)
 
 	// --- the cluster, per orientation
 	//
-	// SELECT is the middle in all three. The ENDS are the claim: turning the watch the
+	// SELECT is the middle in all four. The ENDS are the claim: turning the watch the
 	// other way puts the physically-DOWN button under the player's left hand.
 	static const struct
 	{
@@ -104,6 +104,7 @@ void test_input(void)
 		{ PNX_ORIENT_BUTTONS_RIGHT, PNX_BUTTON_UP, PNX_BUTTON_DOWN },
 		{ PNX_ORIENT_BUTTONS_TOP, PNX_BUTTON_UP, PNX_BUTTON_DOWN },
 		{ PNX_ORIENT_BUTTONS_BOTTOM, PNX_BUTTON_DOWN, PNX_BUTTON_UP },
+		{ PNX_ORIENT_BUTTONS_LEFT, PNX_BUTTON_DOWN, PNX_BUTTON_UP },
 	};
 
 	for (unsigned i = 0; i < sizeof(clusters) / sizeof(clusters[0]); i++)

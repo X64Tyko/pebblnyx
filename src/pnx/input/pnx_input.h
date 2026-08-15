@@ -19,11 +19,13 @@
 //   portrait          down the right edge     0 = UP    1 = SELECT  2 = DOWN
 //   buttons_top       across the top edge     0 = UP    1 = SELECT  2 = DOWN
 //   buttons_bottom    across the bottom edge  0 = DOWN  1 = SELECT  2 = UP
+//   buttons_left      down the left edge      0 = DOWN  1 = SELECT  2 = UP
 //
-// buttons_bottom reverses because the watch turned the other way: the end of the cluster
-// nearest the player's left hand is the one physically labelled DOWN. A game that reads
-// positions rather than buttons needs no branch for any of this, and a game that genuinely
-// wants "the physical UP button" still asks for it by name.
+// buttons_bottom and buttons_left reverse because the watch turned so that the corner
+// nearest the screen's origin is the one the cluster's DOWN end -- not its UP end -- ends
+// up closest to; a game that reads positions rather than buttons needs no branch for any
+// of this, and a game that genuinely wants "the physical UP button" still asks for it by
+// name.
 //
 // BACK is deliberately not in the cluster. It sits alone on the opposite edge, it means
 // the same thing however the watch is held, and on a landscape game it is usually

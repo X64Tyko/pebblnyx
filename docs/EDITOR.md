@@ -4,14 +4,19 @@ A visual tool for building levels, managing assets, and packaging a build.
 
 ---
 
-**There is no embedded emulator, and there will not be one.** The sections below on the
-QEMU/noVNC stack and the E3 "emulator panel" stage describe the plan as it stood before
-that was checked against the actual SDK -- see "The embedded emulator is not currently
-possible" near the end. They are kept because the mechanism is still correct for a
-platform that DOES have a QEMU target, and because option 1 there (rendering the host
-platform seam's framebuffer into the editor, which is what actually exists today) is a
-direct descendant of the same architecture. A reader wanting the current picture should
-read that section first and treat E3 as superseded rather than pending.
+**E3, the emulator panel, is built -- not the way this section originally planned it.**
+The plan was noVNC embedded over pebble-tool's own websockify bridge, ruled out below
+("The embedded emulator, revisited") because the SDK snapshot checked at the time had no
+QEMU image for the platform this framework built for. Two things changed
+since: M9 made every platform a real `pebble build` target, and the SDK installed for
+this project now ships a QEMU image for all seven, not the four found before. What
+shipped is simpler than the noVNC plan besides: `Emulator` in `tools/pnx_editor.py` shells
+out to `pebble build` / `pebble install --emulator` / `pebble emu-button`, and reads the
+screen by polling QEMU's own monitor `screendump` -- the same call pebble-tool's own
+`screenshot` command uses for a headless capture -- rather than embedding a VNC client.
+No websockify, no noVNC, no video: a still image refreshed a few times a second. The
+noVNC/websockify sections below describe pebble-tool's OWN mechanism accurately and are
+kept for that reason, not because the editor uses them.
 
 ## Why it belongs in the plan
 
@@ -25,11 +30,14 @@ It also pays for itself immediately on this project. Several things already done
 are exactly what the editor automates: rendering tile previews to a PNG to pick ids,
 tracing why a warp did not fire, checking the resource budget after each change.
 
-## The stack question, for a platform that has an emulator
+## The stack question, and pebble-tool's own emulator mechanism
 
-`emery` does not -- see "The embedded emulator is not currently possible" below. This
-section is the mechanism recorded for whichever platform eventually does, or for anyone
-building an editor against `aplite`/`basalt`/`chalk`/`diorite`, which QEMU does cover.
+This section describes the noVNC/websockify plan and is accurate about what
+`pebble-tool` itself offers -- it is just not what `tools/pnx_editor.py` ended up using
+for the screen (see the status note at the top of this document). Kept because the port
+table below is real and because `EMULATOR.frame`'s `screendump`-over-the-monitor-socket
+approach is a direct, simpler descendant of the same "several tools attach to one state
+file" architecture.
 
 The Pebble emulator is **QEMU with a VNC display**, and `pebble-tool` ships
 **websockify** — a WebSocket-to-TCP bridge whose entire purpose is putting VNC in a
@@ -45,13 +53,12 @@ browser. From `pebble_tool/sdk/emulator.py`, a running emulator exposes:
 All of it recorded in a state file, so several tools can attach to one running emulator
 rather than fighting over it.
 
-**So the editor should be a local web app.** Not a preference — it is the only stack
-where the emulator screen embeds for free, via noVNC over the websockify bridge that is
-already installed. Every alternative means writing a VNC client.
-
-That also lines up with what already exists: the asset pipeline is Python, `pebble` is
-Python, websockify is Python. The editor is a Python server plus a browser UI, reusing
-the pipeline as a library rather than reimplementing it.
+**A local web app was the right call anyway, just not for the VNC-embeds-for-free
+reason.** `screendump` needs no browser-side protocol client at all -- an `<img>` tag
+polling a server route is enough -- so the noVNC argument for this stack never actually
+got exercised. What did: the asset pipeline is Python, `pebble` is Python, so a Python
+server plus a browser UI reuses the pipeline as a library rather than reimplementing it,
+which is the same reason every other tab in this editor is built this way.
 
 ## Architecture
 
@@ -59,19 +66,19 @@ the pipeline as a library rather than reimplementing it.
 browser UI
   ├─ manifest editor      tilesets, sprites, maps, dialog, audio
   ├─ map canvas           paint tiles, place entities, wire warps
-  ├─ emulator panel       noVNC  ->  websockify  ->  QEMU VNC
+  ├─ device panel         platform picker, polled screen, buttons
   └─ build panel          validate, budget, package
         │
    local Python server
   ├─ pipeline (imported, not shelled out)
-  ├─ pebble build / install --emulator
-  └─ emulator lifecycle + log stream
+  ├─ pebble build / install --emulator / emu-button / kill  (shelled out)
+  └─ QEMU monitor socket   screendump, polled on request
 ```
 
-The emulator panel in that diagram is the E3 plan and was never built -- see the status
-note at the top of this document. Everything else in it shipped: manifest editor, map
-canvas and build panel are E1/E2/E4/E5's inspector, painting and packaging tabs; add
-sprite and code tabs from E12.
+Everything in that diagram shipped: manifest editor, map canvas and build panel are
+E1/E2/E4/E5's inspector, painting and packaging tabs; sprite and code tabs from E12; the
+device panel is `Emulator` and the `device` tab, both in `tools/pnx_editor.py`, and E3
+in `docs/ROADMAP.md`.
 
 **The editor is a GUI over the manifest.** That framing keeps it small: the manifest is
 already the single source of truth, the pipeline already validates and packs, and the
@@ -92,12 +99,14 @@ currently done by hand, and it is worth building even if nothing after it happen
 source and destination. Validation runs live — the reachability flood fill highlights
 unreachable doors *as you draw*, rather than at build time.
 
-**E3 — Emulator panel. SUPERSEDED, not built.** The plan was noVNC embedded plus build →
-install → run → logs. It assumed a QEMU target for the platform this framework builds
-for, which does not exist -- see "The embedded emulator is not currently possible" below.
-What replaces it, partially: `tools/host_harness.c` plus `tools/preview.py` dump the host
-platform seam's framebuffer as a PNG contact sheet, which is real game logic and real
-pixels but not real hardware timing. No in-editor panel does this yet.
+**E3 — Emulator panel. DONE, not the way this was originally planned.** Build → install
+→ run → buttons, against `pebble`'s own QEMU emulator rather than the noVNC embed the
+plan called for -- see the status note at the top of this document for why, and
+`Emulator` in `tools/pnx_editor.py` for the mechanism. No log streaming yet: the panel
+shows each step's own output as it runs, not the app's ongoing `pebble logs`.
+`tools/host_harness.c` plus `tools/preview.py`'s PNG contact sheet -- real game logic,
+real pixels, no hardware timing -- remain the faster, no-SDK-required check for "does
+this map work" that this panel was never meant to replace.
 
 **E4 — Asset import.** Drop a sheet in; slice it, pick a colour key, preview
 quantisation to the 64-colour palette, preview dedup savings, choose frames. Currently
@@ -406,36 +415,44 @@ behaviour in measured ways.
 
 ## Open questions
 
-The other two questions this section used to carry -- sharing one emulator instance with
-the CLI, and how much a QEMU run could actually be trusted for anything measured -- are
-moot now that there is no embedded emulator to ask them about; see below.
-
 - **Does the editor own the manifest file, or edit it in place?** RESOLVED: in place.
   `assets.toml` stays the file an author reads and diffs; the editor writes into it
   rather than owning a parallel representation, which is also what made E16's audit able
   to find manifests the editor itself had made unbuildable -- there was only one file to
   be wrong.
 
-## The embedded emulator is not currently possible
+- **Sharing one emulator instance with the CLI.** RESOLVED, by construction rather than
+  by writing anything: `Emulator` only ever reads pebble-tool's own state file
+  (`get_emulator_info_path()`, a single machine-wide JSON) and shells out to `pebble`
+  itself for every mutation. An emulator started from a terminal with `pebble install
+  --emulator basalt` shows up in the panel as running; `pebble kill` from either place
+  stops what the other started. There was never a second copy of this state to keep in
+  sync.
 
-Checked against the installed SDK: `sdk-core/pebble/` ships QEMU images for **aplite,
-basalt, chalk and diorite** only. There is none for **emery** (Pebble Time 2), nor for
-gabbro or flint. The three new platforms have real firmware on real hardware and no
-emulated target.
+- **How much a QEMU run can actually be trusted for anything measured.** Still open, and
+  more honestly than before: nothing in this pass actually booted one, since no
+  `qemu-pebble` binary was available where `Emulator` was built and tested. Every
+  API-level claim above (state file schema, `emu-button` semantics, `screendump` over
+  the monitor socket) is read from pebble-tool's own source and exercised against a real
+  `pebble` install where possible -- the boot itself is not.
 
-So "test without pushing to device" cannot be delivered by embedding the Pebble emulator,
-because the emulator does not cover the platform this framework targets. Three options
-exist, in increasing order of effort:
+## The embedded emulator, revisited
 
-1. **Run the game logic on the host platform seam** and draw its framebuffer into the
-   editor. This already works -- `pnx_platform_host.c` renders to a flat buffer and the
-   host tests assert on its pixels. It is not an emulator: no firmware, no 26.8fps
-   ceiling, no flash timing. But for checking that a map is walkable and a warp fires, it
-   is both sufficient and far faster than a device round trip.
-2. **Build for basalt as a proxy.** Wrong screen (144x168 vs 200x228) and wrong colour
-   depth handling, so it would flatter or distort results. Not worth it.
-3. **Wait for or build an emery QEMU target.** PebbleOS is open source and the board is
-   `obelix`, so it is possible in principle and a large project in practice.
+Checked here, while building the panel, against `sdk-core/pebble/*/qemu/
+qemu_micro_flash.bin` on the SDK this project has installed: every one of the seven
+platforms in `PLATFORMS` (`tools/pnx_editor.py`) has one, not the four (**aplite,
+basalt, chalk, diorite**) an earlier SDK snapshot had when this section first concluded
+"not currently possible" -- `emery`, `gabbro` and `flint` have since gained real
+emulator images too. Which is
+exactly why `Emulator` never hardcodes a supported-platform list: that list is a fact
+about whichever SDK is installed on the machine running the editor, not about this
+codebase, and it has already changed once since this document last checked.
 
-Option 1 is the one worth building, and it is mostly already built. Recorded here so the
-roadmap stops promising an emulator it cannot deliver.
+So "test without pushing to device" IS deliverable by embedding the Pebble emulator now,
+for whichever platforms an author's own SDK covers -- see the status note at the top of
+this document for what actually shipped. The host-platform-seam option this section used
+to recommend instead (`pnx_platform_host.c`'s flat buffer, no firmware, no 26.8fps
+ceiling, no flash timing) is not obsoleted by that: it is still the faster, no-SDK-needed
+answer to "is this map walkable, does this warp fire", and the emulator panel is for the
+question the host seam cannot answer at all -- what does this actually look and feel
+like running.

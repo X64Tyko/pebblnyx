@@ -70,10 +70,10 @@ jobs:
       #
       # Into a scratch directory, so the landscape blobs cannot be left behind for the
       # host tests to read as if they were the portrait ones.
-      - name: Examples build in landscape too
+      - name: Examples build turned every way
         run: |
           for m in examples/*/assets.toml; do
-            for o in buttons_top buttons_bottom; do
+            for o in buttons_top buttons_bottom buttons_left; do
               echo "--- $m ($o)"
               d="$(mktemp -d)"
               python tools/pnx_assets.py "$m" --orientation "$o" \

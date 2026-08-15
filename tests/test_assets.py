@@ -337,15 +337,16 @@ def check_colorkey():
 
 
 def check_orientation():
-    """One manifest, three orientations, compared against each other."""
+    """One manifest, four orientations, compared against each other."""
     with tempfile.TemporaryDirectory() as root:
         make_sheet(os.path.join(root, "sheet.png"))
 
         builds = {name: build_at(root, name, sprite=SPRITE_TALL)
-                  for name in ("portrait", "buttons_top", "buttons_bottom")}
+                  for name in ("portrait", "buttons_top", "buttons_bottom", "buttons_left")}
         want = {"portrait": pnx_assets.ORIENT_BUTTONS_RIGHT,
                 "buttons_top": pnx_assets.ORIENT_BUTTONS_TOP,
-                "buttons_bottom": pnx_assets.ORIENT_BUTTONS_BOTTOM}
+                "buttons_bottom": pnx_assets.ORIENT_BUTTONS_BOTTOM,
+                "buttons_left": pnx_assets.ORIENT_BUTTONS_LEFT}
 
         # --- every blob is stamped, including the ones with no geometry. A song stamped
         #     0 in a landscape build would make "orientation-free" and "stale portrait"
@@ -357,18 +358,27 @@ def check_orientation():
                 check(f"{f} stamped {name}", read_blob(out, f)[7] == want[name])
 
         flat = builds["portrait"]
-        for name in ("buttons_top", "buttons_bottom"):
+        for name in ("buttons_top", "buttons_bottom", "buttons_left"):
             out, orient = builds[name], want[name]
+            # buttons_left is a half-turn, not a quarter one: width and height stay put.
+            # Only the two landscape orientations swap them.
+            swaps = orient in pnx_assets.LANDSCAPE_ORIENTS
 
-            # --- dimensions swap, in the blob header and in the generated header
+            # --- dimensions swap in the two landscape orientations, and hold in the one
+            #     that instead turns everything upside down
             fm, rm = read_blob(flat, "a.bin"), read_blob(out, "a.bin")
-            check(f"{name}: map w/h swap", (rm[3], rm[4]) == (fm[4], fm[3]))
+            check(f"{name}: map w/h {'swap' if swaps else 'hold'}",
+                  (rm[3], rm[4]) == ((fm[4], fm[3]) if swaps else (fm[3], fm[4])))
 
             fd, rd = defines(flat), defines(out)
-            check(f"{name}: header map dims swap",
-                  (rd["MAP_A_W"], rd["MAP_A_H"]) == (fd["MAP_A_H"], fd["MAP_A_W"]))
-            check(f"{name}: header sprite dims swap",
-                  (rd["GUY_W"], rd["GUY_H"]) == (fd["GUY_H"], fd["GUY_W"]))
+            check(f"{name}: header map dims {'swap' if swaps else 'hold'}",
+                  (rd["MAP_A_W"], rd["MAP_A_H"])
+                  == ((fd["MAP_A_H"], fd["MAP_A_W"]) if swaps
+                      else (fd["MAP_A_W"], fd["MAP_A_H"])))
+            check(f"{name}: header sprite dims {'swap' if swaps else 'hold'}",
+                  (rd["GUY_W"], rd["GUY_H"])
+                  == ((fd["GUY_H"], fd["GUY_W"]) if swaps
+                      else (fd["GUY_W"], fd["GUY_H"])))
             check(f"{name}: orientation reaches the header",
                   rd["PNX_ORIENTATION"] == orient)
 

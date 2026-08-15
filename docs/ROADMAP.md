@@ -1,7 +1,7 @@
 # Roadmap
 
-Current state: **M0-M4d complete**, editor through E17 (E1-E5 and E7-E17 done; E3 was
-superseded, E6 not started). [v0.1.0-beta.1](https://github.com/X64Tyko/pebblnyx/releases/tag/v0.1.0-beta.1)
+Current state: **M0-M4d complete**, editor through E17 (E1-E5 and E7-E17 done; E6 not
+started). [v0.1.0-beta.1](https://github.com/X64Tyko/pebblnyx/releases/tag/v0.1.0-beta.1)
 shipped installers for Linux, Windows and both macOS architectures at editor E15; E16 and
 E17 have landed since. **M5 (save) and M6 (app framework) are built and host-tested**,
 landed together because M6's lifecycle is what save-on-blur actually hangs off of. M5's
@@ -207,6 +207,7 @@ Rotating the display changes what the physical buttons are FOR, which makes whol
 | Right edge (portrait) | one thumb | menus, an RPG |
 | **Top edge** | both index fingers | **shoulder triggers** -- a shooter |
 | **Bottom edge** | both thumbs | **flippers** -- pinball |
+| **Left edge** (portrait, upside down) | the other thumb | a mirrored menu -- left-handed play |
 
 Only possible because the device is played off the wrist in two hands
 ([`PLATFORM.md`](PLATFORM.md)): a wrist-mounted watch in landscape is unreadable, a handheld one is a
@@ -220,10 +221,14 @@ never measured, with a 45,600-byte offscreen buffer as the fallback. Pre-rotatio
 question instead of answering it, and works on a round display for free.
 
 **Result.** `orientation` in `[project]`: `portrait` (`buttons_right`), `buttons_top`,
-`buttons_bottom`, named for where the cluster ends up rather than which way something turned --
-`landscape_left` only starts an argument about whether the device or the image rotated. A
-`--orientation` override builds one manifest either way, so "the same content compiles to either
-orientation" is tested rather than asserted.
+`buttons_bottom`, and `buttons_left`, named for where the cluster ends up rather than which way
+something turned -- `landscape_left` only starts an argument about whether the device or the image
+rotated. `buttons_left` shipped after the other three, once an editor pass asked for every discrete
+rotation rather than the two that happen to be landscape; it reuses every mechanism below unchanged
+except that a half-turn, unlike a quarter one, leaves width and height alone -- `rotate_dims` and the
+map-rotation flip-bit swap both check for the two landscape cases by name rather than "not portrait"
+for exactly that reason. A `--orientation` override builds one manifest either way, so "the same
+content compiles to any orientation" is tested rather than asserted.
 
 - **Cost to the engine: one field, not the zero this promised.** Glyphs turn with everything else,
   and a turned glyph blits like any other rectangle -- but the next one is no longer to its right.
@@ -239,7 +244,10 @@ orientation" is tested rather than asserted.
   legitimate sample. Checked in `load_blob_4`, the one door every blob comes through.
 - **`pnx_input` addresses the cluster by position as the player reads it**, because the buttons do
   not rotate. `buttons_top` and `buttons_bottom` are not mirrors -- turned the other way, the
-  physically-DOWN button falls under the left hand -- so one menu reads correctly in all three.
+  physically-DOWN button falls under the left hand -- so one menu reads correctly in all four.
+  `buttons_left` turns out to read the same table row as `buttons_bottom`: the button nearest the
+  screen's origin is whichever one lands nearest its physical top-left corner, and a half-turn from
+  portrait puts the same corner there that a further quarter-turn from `buttons_top` does.
 - **Screen lock**: BACK stops dismissing the app while still reaching the game as an event, and the
   backlight is held, because going dark mid-turn off the wrist reads as a crash.
 
@@ -719,7 +727,7 @@ any runtime code. Staged so each piece is independently useful:
 |---|---|---|---|
 | **E1** | Inspector: tilesets with ids, rendered maps, budget, validation errors | M2 | **DONE** |
 | **E2** | Map editor: paint tiles, place entities, wire warps, live reachability | E1 | **DONE** |
-| **E3** | Emulator panel: noVNC + build/install/run/logs | E1 | **SUPERSEDED** -- no QEMU target exists for this platform, see `EDITOR.md` |
+| **E3** | Emulator panel: build/install/run, on-screen buttons, a polled screen | E1 | **DONE** -- not the noVNC plan, see `EDITOR.md` |
 | **E4** | Asset import: sheet slicing, colour key, quantisation and dedup preview | E1 | **DONE** |
 | **E5** | Package button: validate, build, enforce budget, emit `.pbw` | E1 | **DONE** |
 | **E6** | Music editor: tracker view over the sequencer model | M4 | not started |

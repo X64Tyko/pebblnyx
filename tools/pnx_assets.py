@@ -231,16 +231,24 @@ def worldtile_window(tile_px, worldtile):
 #
 # Portrait puts it under one thumb (a menu, an RPG). On the top edge it falls under both
 # index fingers and reads as shoulder triggers (a shooter); on the bottom edge, under both
-# thumbs, as flippers (pinball). See docs/PLATFORM.md -- this is only possible because the
-# device is played off the wrist in two hands.
+# thumbs, as flippers (pinball). On the left edge it is portrait's mirror -- a half-turn,
+# not a quarter one, so it is the one case that does not swap width and height. See
+# docs/PLATFORM.md -- this is only possible because the device is played off the wrist in
+# two hands.
 ORIENT_BUTTONS_RIGHT = 0     # portrait: the display's native orientation
 ORIENT_BUTTONS_TOP = 1       # image rotated clockwise into the framebuffer
 ORIENT_BUTTONS_BOTTOM = 2    # image rotated anticlockwise into the framebuffer
+ORIENT_BUTTONS_LEFT = 3      # image rotated 180 degrees; dimensions unchanged
+
+# The two that swap width and height -- everything that carves or packs a grid checks
+# this rather than "orient != RIGHT", because buttons_left does not belong in that set.
+LANDSCAPE_ORIENTS = (ORIENT_BUTTONS_TOP, ORIENT_BUTTONS_BOTTOM)
 
 ORIENTATIONS = {
     "buttons_right": ORIENT_BUTTONS_RIGHT,
     "buttons_top": ORIENT_BUTTONS_TOP,
     "buttons_bottom": ORIENT_BUTTONS_BOTTOM,
+    "buttons_left": ORIENT_BUTTONS_LEFT,
     # `portrait` is what everyone will type for the default, and it is unambiguous
     # because there is only one of it. The landscape spellings deliberately have no
     # alias: "landscape" alone does not say which way up, and guessing is how content
@@ -250,7 +258,8 @@ ORIENTATIONS = {
 
 ORIENT_NAMES = {ORIENT_BUTTONS_RIGHT: "buttons_right",
                 ORIENT_BUTTONS_TOP: "buttons_top",
-                ORIENT_BUTTONS_BOTTOM: "buttons_bottom"}
+                ORIENT_BUTTONS_BOTTOM: "buttons_bottom",
+                ORIENT_BUTTONS_LEFT: "buttons_left"}
 
 # Which way the pen walks between glyphs, stamped into the font blob. Pre-rotation costs
 # exactly one piece of engine code, here: a glyph bitmap turned on its side still blits
@@ -264,11 +273,12 @@ ORIENT_NAMES = {ORIENT_BUTTONS_RIGHT: "buttons_right",
 ADVANCE_X_POS = 0     # left to right: portrait, and every Latin face
 ADVANCE_Y_POS = 1     # top to bottom
 ADVANCE_Y_NEG = 2     # bottom to top
-ADVANCE_X_NEG = 3     # right to left; the format carries it, nothing emits it yet
+ADVANCE_X_NEG = 3     # right to left: buttons_left, portrait turned upside down
 
 ORIENT_ADVANCE = {ORIENT_BUTTONS_RIGHT: ADVANCE_X_POS,
                   ORIENT_BUTTONS_TOP: ADVANCE_Y_POS,
-                  ORIENT_BUTTONS_BOTTOM: ADVANCE_Y_NEG}
+                  ORIENT_BUTTONS_BOTTOM: ADVANCE_Y_NEG,
+                  ORIENT_BUTTONS_LEFT: ADVANCE_X_NEG}
 
 
 def parse_orientation(value, where):
@@ -290,17 +300,20 @@ def rotate_point(x, y, w, h, orient):
     display's own axes. Holding the device so the button cluster (physically the right
     edge) sits along the TOP means the physical +x axis now points up in the author's
     view, which is fx = h-1-ay, fy = ax. Along the BOTTOM is the same rotation the other
-    way.
+    way. LEFT is a half-turn rather than a quarter one -- both axes invert and neither
+    swaps: fx = w-1-ax, fy = h-1-ay.
     """
     if orient == ORIENT_BUTTONS_TOP:
         return h - 1 - y, x
     if orient == ORIENT_BUTTONS_BOTTOM:
         return y, w - 1 - x
+    if orient == ORIENT_BUTTONS_LEFT:
+        return w - 1 - x, h - 1 - y
     return x, y
 
 
 def rotate_dims(w, h, orient):
-    return (h, w) if orient != ORIENT_BUTTONS_RIGHT else (w, h)
+    return (h, w) if orient in LANDSCAPE_ORIENTS else (w, h)
 
 
 def rotate_grid(buf, w, h, orient, stride=1):
@@ -1774,9 +1787,10 @@ def rotate_maps(maps, orient):
     nowhere in the manifest.
 
     A tilemap rotates like any other grid -- and because each tile's art was rotated as it
-    was carved, rotating the grid is the whole job. The dimensions swap, so a 32x24 map
-    becomes 24x32 and the runtime, which only ever reads w and h from the blob, is none
-    the wiser.
+    was carved, rotating the grid is the whole job. A landscape orientation swaps the
+    dimensions, so a 32x24 map becomes 24x32; buttons_left does not, since a half-turn
+    leaves width and height alone. Either way the runtime, which only ever reads w and h
+    from the blob, is none the wiser.
     """
     if orient == ORIENT_BUTTONS_RIGHT:
         return
@@ -1790,9 +1804,12 @@ def rotate_maps(maps, orient):
         m["tiles"], nw, nh = rotate_grid(m["tiles"], w, h, orient, stride=2)
         # Moving the cell is not the whole job for a FLIPPED cell. Each tile's art was
         # rotated as it was carved, so the axes turned with it: a quarter turn makes the
-        # author's horizontal mirror the framebuffer's vertical one. Both landscape
-        # orientations are a quarter turn, so both swap the pair.
-        m["tiles"] = swap_flip_bits(m["tiles"])
+        # author's horizontal mirror the framebuffer's vertical one, so both landscape
+        # orientations swap the pair. A half-turn (buttons_left) does not -- a horizontal
+        # mirror composed with a point reflection is still a horizontal mirror -- so this
+        # would silently cross a map's flip bits for that orientation if it ran unguarded.
+        if orient in LANDSCAPE_ORIENTS:
+            m["tiles"] = swap_flip_bits(m["tiles"])
         m["flags"], _, _ = rotate_grid(m["flags"], w, h, orient)
         m["start"] = rotate_point(*m["start"], w, h, orient)
         m["reachable"] = {rotate_point(x, y, w, h, orient) for x, y in m["reachable"]}

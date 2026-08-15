@@ -1,8 +1,8 @@
 // Orientation: where the button cluster sits when the device is held to play.
 //
-// Its own header because three unrelated modules need the same three values -- assets
-// stamps it into every blob, text turns it into a pen direction, input turns it into
-// what UP means -- and none of them should have to include the others to say it.
+// Its own header because three unrelated modules need the same values -- assets stamps
+// it into every blob, text turns it into a pen direction, input turns it into what UP
+// means -- and none of them should have to include the others to say it.
 //
 // **The framebuffer never rotates.** Content is rotated at BUILD time: the pipeline emits
 // atlases, sprites, maps and glyphs already turned, so the engine's ordinary portrait
@@ -39,11 +39,21 @@ typedef enum
 	// rotated anticlockwise.
 	PNX_ORIENT_BUTTONS_BOTTOM,
 
+	// Cluster along the left edge -- the watch turned a half-turn from buttons_right, face
+	// still toward the player. The mirror of the native hold: a menu under the OTHER
+	// thumb, for a left-handed grip, or a shooter's shoulder-trigger pair the other way
+	// round. Content is rotated 180 degrees; unlike the two above, width and height do not
+	// swap.
+	PNX_ORIENT_BUTTONS_LEFT,
+
 	PNX_ORIENT_COUNT
 } PnxOrientation;
 
 // Only possible at all because these games are played OFF the wrist, in two hands -- a
 // watch strapped to an arm cannot be turned sideways and still read. See docs/PLATFORM.md.
+//
+// buttons_left is NOT landscape: it is portrait turned upside down, not sideways, so
+// width and height stay the display's own -- see rotate_dims in tools/pnx_assets.py.
 static inline bool pnx_orient_is_landscape(uint8_t o)
 {
 	return o == PNX_ORIENT_BUTTONS_TOP || o == PNX_ORIENT_BUTTONS_BOTTOM;
