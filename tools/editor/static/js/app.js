@@ -47,12 +47,12 @@ async function reload(){
 async function load(){
   S.data=await (await fetch('/api/state')).json();
 
-  // Launched with no project -- from a dock, say. Go straight to Settings, which is
-  // where opening and creating live, rather than showing three empty authoring tabs.
+  // Launched with no project -- from a dock, say. Go straight to Project, which is
+  // where opening and creating actually live, rather than showing empty authoring tabs.
   const authoring=['tabmaps','tabimport','tabfonts','tabpixel','tabcode'];
   if(S.data.no_project){
     for(const id of authoring) $('#'+id).disabled=true;
-    showTab('sdk');
+    showTab('project');
     return;
   }
   for(const id of authoring) $('#'+id).disabled=false;
@@ -385,7 +385,7 @@ function tileInfo(){
   foot.className='mini';
   const del=document.createElement('button');
   del.textContent='Remove';
-  del.title='delete this legend character';
+  del.title='remove this legend character';
   const own=scopeOf(ch)==='map';
   del.onclick=async()=>{
     // Removed from the table it lives in. A project character deleted while another map
@@ -1192,16 +1192,16 @@ $('#delmap').onclick=async()=>{
   const name=S.map.name;
   const u=await post('/api/map/users',{name});
   if(u.users&&u.users.length){
-    say(`Cannot delete "${name}" — ${u.users.join('; ')}.`);
+    say(`Cannot remove "${name}" — ${u.users.join('; ')}.`);
     return;
   }
-  if(!confirm(`Delete map "${name}"?\n\n`
+  if(!confirm(`Remove map "${name}"?\n\n`
               +`Nothing points at it. Its rows and its own legend go with it.`)) return;
   const r=await post('/api/map/remove',{name});
   if(!r.ok){ say(r.error); return }
   await load();
   $('#mapsel').value=0; selectMap(0);
-  say(`Deleted "${name}". Press Build.`,false);
+  say(`Removed "${name}". Press Build.`,false);
 };
 
 // Changing this changes what the pipeline BAKES -- every atlas, sprite, map and glyph
@@ -1244,10 +1244,11 @@ function showTab(which){
   const imp=which==='import', fnt=which==='fonts', maps=which==='maps',
         sdk=which==='sdk', pix=which==='pixel', cod=which==='code',
         scn=which==='scenes', dlg=which==='dialog', mus=which==='music',
-        dev=which==='device';
+        dev=which==='device', proj=which==='project';
   $('#import').style.display=imp?'block':'none';
   $('#fonts').style.display=fnt?'block':'none';
   $('#sdk').style.display=sdk?'block':'none';
+  $('#project').style.display=proj?'block':'none';
   $('#pixel').style.display=pix?'block':'none';
   $('#code').style.display=cod?'block':'none';
   $('#scenes').style.display=scn?'block':'none';
@@ -1258,6 +1259,11 @@ function showTab(which){
   if(scn) drawScenes();
   if(dlg) drawDialog();
   if(fnt) drawFontList();
+  // sdkStatus() renders both halves of what used to be one Settings section -- the
+  // project summary/recent list now on the Project tab, and the actual SDK/engine
+  // status still on Settings -- in one pass, so both tabs call it rather than the
+  // function being split along the same line the tabs were.
+  if(proj) sdkStatus();
   if(sdk){ sdkStatus(); updCheck(); drawProject() }
   if(pix&&!PX.data){ pxPalette(); pxInit(+$('#pxw').value,+$('#pxh').value,1); pxLoadList() }
   if(cod&&!$('#codelist').children.length) codeTree();
@@ -1279,7 +1285,7 @@ function showTab(which){
     b.classList.toggle('on', b.dataset.t===which);
   $('#ctxtitle').textContent={maps:'Maps',import:'Import',fonts:'Fonts',
     pixel:'Sprites',code:'Code',sdk:'Settings',scenes:'Scenes',
-    dialog:'Dialog',music:'Music',device:'Device'}[which]||'';
+    dialog:'Dialog',music:'Music',device:'Device',project:'Project'}[which]||'';
 }
 
 // ------------------------------------------------------- declaring a sprite
@@ -2602,6 +2608,8 @@ $('#outtoggle').onclick=()=>{
   const hid=$('#outpanel').classList.toggle('hidden');
   $('#outtoggle').textContent=hid?'Show':'Hide';
 };
+$('#tabproject').onclick=()=>showTab('project');
+$('#stproject').onclick=()=>showTab('project');
 $('#tabmaps').onclick=()=>showTab('maps');
 $('#tabscenes').onclick=()=>showTab('scenes');
 $('#tabdialog').onclick=()=>showTab('dialog');

@@ -69,6 +69,12 @@ header b{font:600 .72rem/1 ui-monospace,Menlo,monospace;letter-spacing:.1em;
 #statusbar{display:flex;align-items:center;gap:1.1rem;padding:0 .8rem;height:24px;
   background:var(--accent);color:#fff;font:11px ui-monospace,Menlo,monospace}
 #statusbar span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* #stproject is a <button> (it switches to the Project tab) styled back down to plain
+   status-bar text, with just a hover/focus underline as the only sign it's clickable --
+   the same restraint VS Code's own status bar items use. */
+#statusbar button{all:unset;cursor:pointer;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;max-width:16rem}
+#statusbar button:hover,#statusbar button:focus-visible{text-decoration:underline}
 button{font:inherit;padding:.35rem .8rem;border:1px solid var(--line);border-radius:5px;
   background:var(--surface);color:var(--fg);cursor:pointer}
 button:hover{border-color:var(--accent);color:var(--accent)}
@@ -512,6 +518,14 @@ button:disabled{opacity:.45;cursor:not-allowed}
 #pickernote{display:block;margin-top:.5rem}
 .plate h3{margin:0 0 .5rem;font:600 .66rem/1 ui-monospace,Menlo,monospace;
   letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+/* A category label spanning several .plate/section blocks -- one step up from .plate h3:
+   brighter, a hair bigger, underlined, so a long single-column tab (Settings, Sprites)
+   reads as a few named groups instead of an arbitrary sequence of boxes. Not a plate
+   itself, just a divider between clusters of them. */
+.category{margin:1.5rem 0 .5rem;font:600 .72rem/1 ui-monospace,Menlo,monospace;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--fg);
+  padding-bottom:.4rem;border-bottom:1px solid var(--line)}
+.category:first-child{margin-top:0}
 .plate img{image-rendering:pixelated;display:block;max-width:100%}
 /* Scaled up from the watch's real pixel count -- 1x would be a postage stamp on any
    monitor -- and pixelated per .plate img above so the scaling stays crisp, not blurred. */

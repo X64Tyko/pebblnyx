@@ -7,6 +7,11 @@
      capability added a seventh; a rail scales down the side and leaves the whole width
      to the thing being worked on. -->
 <div id="rail">
+  <!-- First, above everything else: which project is a decision every other tab here
+       depends on, the way a File menu's own first items (Open, Open Recent) sit above
+       whatever else the menu bar offers. It's also where a launch with nothing open
+       lands (see load()) -- a real landing tab rather than Settings borrowing the job. -->
+  <button id="tabproject" class="act" data-t="project"><i>⌂</i><em>Project</em></button>
   <button id="tabmaps" class="act on" data-t="maps"><i>▦</i><em>Maps</em></button>
   <!-- Scenes sits directly under Maps because it is the other half of the same job: a map
        that no scene loads is content the game cannot reach, which is the dead end the
@@ -115,14 +120,14 @@
         <input id="nmname" placeholder="name" size="8">
         <input id="nmw" type="number" value="24" min="3" max="255" title="width">
         <input id="nmh" type="number" value="16" min="3" max="255" title="height">
-        <button id="newmap">＋ Map</button>
+        <button id="newmap">+ Map</button>
       </div>
-      <!-- Renaming and deleting the map being looked at. Both refuse while a warp or a
+      <!-- Renaming and removing the map being looked at. Both refuse while a warp or a
            scene still points at it, so the pair below is safe to press. -->
       <div class="mini">
         <button id="renmap" title="rename this map, carrying warps and scenes with it"
                 >Rename…</button>
-        <button id="delmap" title="delete this map">Delete…</button>
+        <button id="delmap" title="remove this map">Remove…</button>
         <button id="cvtmap" title="move this map into its own .pnxmap file"
                 >Convert…</button>
       </div>
@@ -230,7 +235,7 @@
                  hand-edit the TOML the editor exists to keep you out of. -->
             <button id="aload" style="display:none" title="load this atlas's settings">
               ↺ load</button>
-            <button id="adel" style="display:none" title="delete this atlas">
+            <button id="adel" style="display:none" title="remove this atlas">
               🗑 remove</button>
           </div>
           <!-- The colour key. Picked off the sheet with the eyedropper rather than typed,
@@ -582,6 +587,12 @@
   <div id="pixel" style="display:none;flex:1;overflow:auto;padding:1.25rem">
     <div class="fontgrid">
       <div class="fontctl">
+        <!-- Three jobs share this column -- bringing in reference art, painting pixels,
+             and saving/registering the result -- and used to read as one undifferentiated
+             stack of controls. Grouped under named phases the way Aseprite/Piskel draw a
+             hard line between "import" and "the painting toolbox", rather than mixing
+             the two. -->
+        <div class="category">Import</div>
         <!-- Frames picked off a sheet. The declare form below can only describe a
              vertical stack, which is the layout this engine's own examples happen to use
              and not the one most sheets ship in — a run of poses across a row, several
@@ -616,6 +627,7 @@
           <small id="shlog">Click frames in the order the animation plays.</small>
         </section>
 
+        <div class="category">Paint</div>
         <section><h2>Canvas</h2>
           <div class="fields col">
             <label>Width<input id="pxw" type="number" value="16" min="1" max="128"></label>
@@ -647,6 +659,7 @@
           <small id="pxcur">—</small>
         </section>
 
+        <div class="category">Save &amp; declare</div>
         <section><h2>File</h2>
           <div class="fields col">
             <label>Open<select id="pxopen"><option value="">—</option></select></label>
@@ -749,42 +762,13 @@
   <!-- Settings: configuration rather than authoring. The toolchain lives here because it
        is a once-ever setup step -- as a peer to Maps and Fonts it carried the same visual
        weight as the things you use every minute. -->
-  <div id="sdk" style="display:none;flex:1;overflow:auto;padding:1.5rem">
+  <!-- Which project is open, and switching to a different one -- the app's own front
+       door. Landed on directly when nothing is open (see load()), and reachable from
+       anywhere via the rail's first button or the status bar's project name, rather
+       than living a click inside Settings the way it used to: this is the thing every
+       other tab depends on, not a preference. -->
+  <div id="project" style="display:none;flex:1;overflow:auto;padding:1.5rem">
     <div class="sdkwrap">
-      <!-- [project]. Readable everywhere and settable nowhere, which meant the appstore
-           budget the whole status bar measures against could not be changed from the
-           thing doing the measuring. -->
-      <div class="plate wide"><h3>Project</h3>
-        <div class="fields col">
-          <label>Name<input id="prname" size="18"></label>
-          <label>Budget bytes<input id="prbudget" type="number" min="1024"
-            max="1048576" step="1024"
-            title="the appstore cap is 262144; the device ceiling is 1048576"></label>
-          <label>Resources<input id="prres" size="18"></label>
-          <label>Header<input id="prhdr" size="24"></label>
-        </div>
-        <button id="prsave" class="primary">Save project</button>
-        <small id="prlog">The appstore rejects bundles over 262,144 B. The device's own
-          ceiling is 1,048,576 B — shipping is the constraint that binds. Changing
-          Resources or Header relocates build output; the blobs already written stay
-          where they are.</small>
-      </div>
-      <!-- Updates. The editor is a file someone downloaded once; without this, a fix
-           reaches them only if they think to check a releases page they may never have
-           seen. Three steps with the user between each, deliberately: this binary carries
-           the engine their project compiles against, so an upgrade is a decision. -->
-      <div class="plate wide"><h3>Version</h3>
-        <div id="updinfo">—</div>
-        <div class="row" style="margin-top:.7rem">
-          <button id="updcheck">Check for updates</button>
-          <button id="upddl" class="primary" style="display:none">Download</button>
-          <button id="updapply" class="primary" style="display:none">Install &amp; Restart</button>
-          <button id="updnotes" style="display:none">Release notes</button>
-        </div>
-        <div id="updbar" class="meter" style="display:none;margin-top:.6rem">
-          <i id="updfill"></i></div>
-        <pre id="updbody" style="display:none"></pre>
-      </div>
       <div class="plate wide"><h3>Project</h3>
         <div id="projinfo">—</div>
         <div class="row" style="margin-top:.7rem">
@@ -821,7 +805,53 @@
         </div>
         <small id="pickernote"></small>
       </div>
+    </div>
+  </div>
 
+  <div id="sdk" style="display:none;flex:1;overflow:auto;padding:1.5rem">
+    <div class="sdkwrap">
+      <!-- [project]. Readable everywhere and settable nowhere, which meant the appstore
+           budget the whole status bar measures against could not be changed from the
+           thing doing the measuring. Titled "Project settings" rather than bare
+           "Project" -- that name now belongs to the tab for opening/switching one --
+           because this really is a setting: properties of the project already open, not
+           a way to change which one that is. -->
+      <div class="category">Project</div>
+      <div class="plate wide"><h3>Project settings</h3>
+        <div class="fields col">
+          <label>Name<input id="prname" size="18"></label>
+          <label>Budget bytes<input id="prbudget" type="number" min="1024"
+            max="1048576" step="1024"
+            title="the appstore cap is 262144; the device ceiling is 1048576"></label>
+          <label>Resources<input id="prres" size="18"></label>
+          <label>Header<input id="prhdr" size="24"></label>
+        </div>
+        <button id="prsave" class="primary">Save project</button>
+        <small id="prlog">The appstore rejects bundles over 262,144 B. The device's own
+          ceiling is 1,048,576 B — shipping is the constraint that binds. Changing
+          Resources or Header relocates build output; the blobs already written stay
+          where they are.</small>
+      </div>
+
+      <!-- Updates. The editor is a file someone downloaded once; without this, a fix
+           reaches them only if they think to check a releases page they may never have
+           seen. Three steps with the user between each, deliberately: this binary carries
+           the engine their project compiles against, so an upgrade is a decision. -->
+      <div class="category">Editor</div>
+      <div class="plate wide"><h3>Version</h3>
+        <div id="updinfo">—</div>
+        <div class="row" style="margin-top:.7rem">
+          <button id="updcheck">Check for updates</button>
+          <button id="upddl" class="primary" style="display:none">Download</button>
+          <button id="updapply" class="primary" style="display:none">Install &amp; Restart</button>
+          <button id="updnotes" style="display:none">Release notes</button>
+        </div>
+        <div id="updbar" class="meter" style="display:none;margin-top:.6rem">
+          <i id="updfill"></i></div>
+        <pre id="updbody" style="display:none"></pre>
+      </div>
+
+      <div class="category">SDK &amp; engine</div>
       <div class="plate wide"><h3>Engine</h3>
         <div id="engstate"></div>
         <p class="prose" id="engprose"></p>
@@ -934,7 +964,10 @@
   </section>
 
   <footer id="statusbar">
-    <span id="stproject">—</span>
+    <!-- The current project's name, clickable to the Project tab -- the same move VS
+         Code's own status bar makes with its workspace name, so switching projects has
+         a second, always-visible door besides the rail button. -->
+    <button id="stproject" title="switch project">—</button>
     <span id="stengine"></span>
     <span id="stbudget"></span>
     <div style="flex:1"></div>
