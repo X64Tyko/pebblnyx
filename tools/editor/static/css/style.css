@@ -1,0 +1,531 @@
+:root{--ink:#eceff4;--surface:#fff;--line:#d3dae4;--fg:#10141b;--dim:#5c6878;
+  --accent:#1f6dbf;--soft:#e3edf9;--ok:#2c7a4b;--bad:#b4351c}
+@media(prefers-color-scheme:dark){:root{--ink:#0d1017;--surface:#161a23;--line:#262c38;
+  --fg:#dde3ec;--dim:#7b8798;--accent:#55aaff;--soft:#16283d;--ok:#5fd28d;--bad:#ff7a5c}}
+*{box-sizing:border-box}
+/* Shell: rail | work, with the work column stacking toolbar / content / output /
+   status. Grid rather than nested flex so the output panel can be collapsed by changing
+   one row rather than by chasing flex-basis through three ancestors. */
+body{margin:0;height:100vh;display:grid;grid-template-columns:auto 1fr;overflow:hidden;
+  background:var(--ink);
+  color:var(--fg);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif}
+/* Rows: toolbar, budget strip, the work itself, output, status. The 1fr has to name the
+   work row explicitly -- adding a child without updating this handed the spare height to
+   whatever landed in the 1fr slot. */
+/* Column flex, NOT a grid with a positional row template.
+   The template named the flexible row by position, so it depended on how many children
+   happened to exist -- and one of them (the update banner) is display:none most of the
+   time, which removes it as a grid item and shifts every row after it. That handed the
+   1fr to the output panel and squeezed the editor into a hundred pixels. Flex asks the
+   child which one grows, so hiding a sibling cannot move it. */
+#work{display:flex;flex-direction:column;min-width:0;min-height:0}
+#work>header,#updbanner,#budgetbar,#outpanel,#statusbar{flex:0 0 auto}
+#work>main{flex:1 1 auto}
+/* The update banner. Accent-coloured rather than warning-coloured: a new version is good
+   news, not a problem, and colouring it like a failure trains people to dismiss it. */
+#updbanner{display:flex;align-items:center;gap:.6rem;padding:.35rem .9rem;
+  background:color-mix(in srgb,var(--accent) 18%,var(--bg));
+  border-bottom:1px solid var(--line);font-size:.82rem}
+#updbanner button{padding:.15rem .55rem;font-size:.78rem}
+#updbannerhide{background:none;border:none;color:var(--dim);cursor:pointer}
+#updbody{max-height:16rem;overflow:auto;white-space:pre-wrap;font-size:.78rem;
+  background:var(--ink);padding:.6rem .8rem;border-radius:4px;margin:.7rem 0 0}
+
+/* Sits directly above the budget strip it re-prices, so the two never read as unrelated. */
+#platformrow{display:flex;align-items:center;flex-wrap:wrap;gap:.6rem;padding:.4rem .9rem;
+  border-bottom:1px solid var(--line);font-size:.82rem}
+#platformrow .mini{margin:0}
+#platformrow small{color:var(--dim)}
+
+#rail{display:flex;flex-direction:column;gap:2px;width:62px;padding:.4rem .3rem;
+  background:var(--surface);border-right:1px solid var(--line)}
+.act{display:flex;flex-direction:column;align-items:center;gap:.15rem;padding:.5rem .2rem;
+  border:0;border-radius:6px;background:none;color:var(--dim);cursor:pointer;
+  border-left:2px solid transparent}
+.act i{font-style:normal;font-size:1.05rem;line-height:1}
+.act em{font-style:normal;font-size:.58rem;letter-spacing:.04em}
+.act:hover{background:var(--soft);color:var(--fg)}
+/* The active activity is marked by a bar as well as a colour, so it survives being
+   looked at by someone who cannot separate the two. */
+.act.on{color:var(--accent);background:var(--soft);border-left-color:var(--accent)}
+.act:disabled{opacity:.35;cursor:not-allowed;background:none}
+
+header{display:flex;align-items:center;gap:.7rem;padding:.45rem .8rem;
+  border-bottom:1px solid var(--line);background:var(--surface);min-height:2.4rem}
+header b{font:600 .72rem/1 ui-monospace,Menlo,monospace;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--dim)}
+#ctxbar{display:flex;align-items:center;gap:.5rem}
+
+#outpanel{display:grid;grid-template-rows:auto 1fr;border-top:1px solid var(--line);
+  background:var(--surface);max-height:34vh}
+#outpanel.hidden{grid-template-rows:auto 0}
+#outpanel.hidden #log{display:none}
+.outbar{display:flex;align-items:center;gap:.6rem;padding:.3rem .8rem}
+.outbar b{font:600 .62rem/1 ui-monospace,Menlo,monospace;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--dim)}
+.outbar span{font-size:.7rem;color:var(--dim)}
+.outbar button{padding:.15rem .5rem;font-size:.72rem}
+
+#statusbar{display:flex;align-items:center;gap:1.1rem;padding:0 .8rem;height:24px;
+  background:var(--accent);color:#fff;font:11px ui-monospace,Menlo,monospace}
+#statusbar span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+button{font:inherit;padding:.35rem .8rem;border:1px solid var(--line);border-radius:5px;
+  background:var(--surface);color:var(--fg);cursor:pointer}
+button:hover{border-color:var(--accent);color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+select{font:inherit;padding:.3rem .5rem;background:var(--surface);color:var(--fg);
+  border:1px solid var(--line);border-radius:5px}
+main{display:flex;min-height:0;min-width:0;overflow:hidden}
+aside{width:270px;flex:none;border-right:1px solid var(--line);background:var(--surface);
+  overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:1.25rem}
+section h2{margin:0 0 .5rem;font:600 .68rem/1 ui-monospace,Menlo,monospace;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+#stage{flex:1;overflow:auto;padding:1.5rem;display:flex;align-items:flex-start;
+  justify-content:center}
+canvas{image-rendering:pixelated;cursor:crosshair;border:1px solid var(--line);
+  border-radius:3px}
+.tiles{display:flex;flex-wrap:wrap;gap:4px}
+.tile{border:2px solid transparent;border-radius:4px;padding:1px;cursor:pointer;
+  background:none;line-height:0;position:relative}
+.tile img{width:32px;height:32px;image-rendering:pixelated;display:block}
+.tile.sel{border-color:var(--accent)}
+.tile b{display:block;font:9px ui-monospace,monospace;color:var(--dim);text-align:center}
+/* The flags a character carries, on the swatch itself. Behaviour you have to hover to
+   see is behaviour nobody checks, and "which of these is solid" is the question a
+   tile palette is asked most often. */
+.tile .fmark{position:absolute;top:0;right:0;font-style:normal;font-size:9px;
+  line-height:1;padding:1px 2px;border-radius:0 3px 0 3px;
+  background:var(--accent);color:#fff}
+/* Which tileset a run of characters came from. Only shown when a map draws from more
+   than one, because otherwise it is a heading over the whole world. */
+.palgroup{width:100%;font:600 .6rem/1.6 ui-monospace,Menlo,monospace;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--dim);margin-top:.35rem}
+.dim{color:var(--dim)}
+
+/* Overlays. The tile picker shows hundreds of tiles at once, which is more than any
+   sidebar can hold and the whole reason it is not one. */
+.overlay{position:fixed;inset:0;z-index:50;background:#0009;
+  display:flex;align-items:center;justify-content:center;padding:2rem}
+.overlay .sheet{background:var(--surface);border:1px solid var(--line);border-radius:8px;
+  width:min(920px,100%);max-height:100%;display:flex;flex-direction:column;
+  box-shadow:0 12px 40px #0006}
+.overlay .sheet.narrow{width:min(460px,100%)}
+.overlay .sheet>header{display:flex;align-items:center;gap:.6rem;padding:.6rem .9rem;
+  border-bottom:1px solid var(--line)}
+.overlay .sheet>footer{padding:.5rem .9rem;border-top:1px solid var(--line);
+  font-size:.78rem}
+#pickbody,#setbody{overflow:auto;padding:.9rem;min-height:0}
+/* A picked tile is bigger than a palette swatch: at 32px you cannot tell two variants of
+   the same wall apart, which is exactly the choice being made here. */
+#pickbody .tile img{width:40px;height:40px}
+#pickbody .used{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
+.setrow{display:flex;align-items:center;gap:.5rem;padding:.35rem 0;
+  border-bottom:1px solid var(--line)}
+.setrow b{font-weight:600}
+.setrow .grow{flex:1}
+.setrow button{padding:.1rem .45rem;line-height:1.4}
+.pal{display:flex;gap:2px;flex-wrap:wrap;margin-bottom:6px}
+.sw{width:18px;height:18px;border-radius:2px;outline:1px solid var(--line)}
+.sw.clear{background:repeating-conic-gradient(from 0deg,#8886 0 25%,transparent 0 50%)
+  0 0/6px 6px}
+.row{display:flex;gap:.4rem;align-items:center}
+.meter{height:5px;background:var(--line);border-radius:3px;overflow:hidden}
+.meter i{display:block;height:100%;background:var(--accent)}
+.meter.unknown i{background:repeating-linear-gradient(90deg,var(--line) 0 6px,
+  transparent 6px 12px);width:100%}
+
+/* The global budget strip. Four equal cells so no ceiling looks more important than
+   another, and a full-width band so it is impossible to work without it in view. */
+#budgetbar{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;
+  background:var(--line);border-bottom:1px solid var(--line);flex:0 0 auto}
+.bcell{background:var(--bg);padding:.45rem .9rem .5rem;display:flex;
+  flex-direction:column;gap:.25rem;min-width:0}
+.bhead{display:flex;justify-content:space-between;align-items:baseline;gap:.5rem}
+.bhead span{font-size:.72rem;letter-spacing:.04em;text-transform:uppercase;
+  color:var(--dim)}
+.bhead b{font-size:.86rem;font-variant-numeric:tabular-nums}
+.bcell small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:.72rem}
+/* Over budget is not a shade of the same colour: the cell changes ground, because this
+   has to be noticeable from across a room and while looking at something else. */
+.bcell.over{background:color-mix(in srgb,var(--bad) 22%,var(--bg))}
+.bcell.over .bhead b{color:var(--bad);font-weight:700}
+.bcell.warnb .bhead b{color:#d08b2c}
+.bcell.stale .bhead b{opacity:.55}
+small{color:var(--dim);font-size:.78rem}
+#log{margin:0;overflow:auto;white-space:pre-wrap;font:11px/1.5 ui-monospace,
+  Menlo,monospace;background:var(--ink);padding:.5rem .8rem;color:var(--dim)}
+#log.bad{color:var(--bad)}
+#log.ok{color:var(--ok)}
+kbd{font:11px ui-monospace,monospace;background:var(--soft);color:var(--accent);
+  padding:.05em .35em;border-radius:3px}
+.mini{display:flex;flex-wrap:wrap;gap:.3rem;align-items:center;margin-top:.5rem}
+/* One scene per card, because a scene is a set of independent choices and a flat list of
+   checkboxes gives no sign where one ends and the next begins. */
+.scenecard{border:1px solid var(--line);border-radius:6px;padding:.6rem .8rem;
+  margin:.6rem 0;max-width:60ch}
+/* ------------------------------------------------------------------ the synth panel
+   Modelled on a hardware synth, because that is what it is: a signal path you read left
+   to right -- oscillators, filter, amplifier, modulation, effects -- with each stage a
+   module you can find without reading. A wall of numbered boxes hides the one thing the
+   instrument is actually about, which is what feeds what.
+
+   Silkscreen typography does the labelling: 10px, uppercase, widely tracked, dim. That is
+   the panel vernacular and it costs nothing but discipline.
+
+   ONE accent, not five. Each module carries a thin coloured rule to mark its stage the way
+   a Roland front panel does, but every interactive element uses the shell's own accent --
+   a different hue per control would be a rainbow, and the colour would stop meaning
+   "you can turn this". */
+.synth{display:flex;gap:.55rem;flex-wrap:wrap;align-items:stretch;margin:.5rem 0}
+#music>section{margin-bottom:1.4rem}
+#music .musicgrid{margin-bottom:.6rem}
+/* flex:0 0 auto, NOT the flex default. A module sizes to the controls it holds and wraps
+   to the next line when the rack runs out of room; letting it shrink instead squeezed
+   whichever module happened to be last until its text ran out through the border. A knob
+   is a fixed-size object, so the module around it is too. */
+.mod{background:var(--surface);border:1px solid var(--line);border-radius:7px;
+  padding:.5rem .6rem .6rem;flex:0 0 auto;position:relative;overflow:hidden}
+.mod::before{content:"";position:absolute;inset:0 0 auto 0;height:2px;
+  background:var(--mod-hue,var(--dim));opacity:.75}
+.mod>h4{margin:.15rem 0 .5rem;font-size:10px;font-weight:600;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--dim)}
+.mod .row{display:flex;gap:.5rem;align-items:flex-start}
+
+/* The knob. Drag vertically, wheel, or focus and use the arrow keys; double-click to type
+   an exact value. A knob alone would be imprecise and a number box alone would not feel
+   like an instrument, so it is both -- the arc for the gesture, the readout for the value.
+   This is the one place the design spends its boldness. */
+.knob{width:52px;text-align:center;user-select:none}
+.knob .dial{width:38px;height:38px;margin:0 auto;border-radius:50%;position:relative;
+  cursor:ns-resize;background:
+    conic-gradient(from 215deg,var(--accent) calc(var(--p,0) * 290deg),#00000000 0),
+    radial-gradient(circle at 50% 38%,#39424f,#20262f 70%);
+  box-shadow:inset 0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.4)}
+.knob .dial::after{content:"";position:absolute;left:50%;top:5px;width:2px;height:11px;
+  margin-left:-1px;background:var(--fg);border-radius:1px;transform-origin:50% 14px;
+  transform:rotate(calc(-145deg + var(--p,0) * 290deg))}
+.knob .dial:focus{outline:none;box-shadow:inset 0 0 0 1px var(--accent),0 0 0 2px var(--soft)}
+.knob b{display:block;font-size:10px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--dim);font-weight:600;margin-top:.2rem}
+.knob i{display:block;font-style:normal;font-size:11px;
+  font-family:ui-monospace,Menlo,Consolas,monospace}
+.knob input{width:46px;font-size:11px;text-align:center;
+  font-family:ui-monospace,Menlo,Consolas,monospace}
+
+/* A switch that reads as a switch: the options are all visible and the chosen one is lit,
+   the way a waveform selector is on a panel. A dropdown hides the alternatives, which is
+   the wrong shape for four choices you pick between constantly. */
+.pick{display:flex;gap:2px;background:#00000033;border:1px solid var(--line);
+  border-radius:5px;padding:2px}
+.pick button{border:0;background:transparent;color:var(--dim);border-radius:3px;
+  padding:.2rem .35rem;font-size:11px;line-height:1;cursor:pointer}
+.pick button.on{background:var(--accent);color:#0b1016}
+.pick.wide button{padding:.25rem .5rem}
+.wglyph{display:block;width:22px;height:12px}
+
+/* The envelope, drawn from the values themselves. Not decoration: attack, decay, sustain
+   and release are a SHAPE, and four numbers do not read as one. */
+.envbox{background:#00000033;border:1px solid var(--line);border-radius:5px;padding:2px}
+
+/* The tracker and the instrument panel side by side: a pattern is read while an
+   instrument is tweaked, and putting them on separate screens would mean editing a sound
+   you cannot hear in context. */
+.musicgrid{display:flex;gap:1.2rem;flex-wrap:wrap;align-items:flex-start}
+
+/* The tracker. Conventions borrowed from the form because they are load-bearing, not
+   nostalgic: a fixed-width grid so columns line up at a glance, every fourth row marked
+   because music is read in beats, and NOTE and INSTRUMENT as separate fields because they
+   are separate decisions. `---` is an empty step and `===` is a release, which is what a
+   tracker has always drawn and what the manifest's '.' and '-' mean. */
+.tracker{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
+  border:1px solid var(--line);border-radius:6px;background:var(--surface);
+  padding:.35rem;display:inline-block}
+.thead,.trow{display:flex;gap:.3rem;align-items:center}
+.thead{border-bottom:1px solid var(--line);padding-bottom:.25rem;margin-bottom:.2rem}
+.thead>span{width:5.4rem;font-size:10px;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--dim);text-align:center}
+.thead>b,.trow>b{width:1.9rem;text-align:right;color:var(--dim);font-weight:400;
+  font-size:11px}
+.trow.beat{background:rgba(255,255,255,.045)}
+.trow.here{background:var(--soft)}
+.tstep{width:5.4rem;display:flex;gap:2px;justify-content:center}
+.tnote,.tinst{font-family:inherit;font-size:inherit;padding:1px 2px;background:transparent;
+  border:1px solid transparent;color:var(--dim);text-align:center}
+.tnote{width:3.1rem;letter-spacing:.04em}
+.tinst{width:1.7rem}
+.tnote.on,.tinst.on{color:var(--fg)}
+.tnote.off{color:var(--bad)}
+.tnote:focus,.tinst:focus{border-color:var(--accent);background:rgba(255,255,255,.08);
+  outline:none;color:var(--fg)}
+
+/* The sample list, with each one measured against the 1.5 s cap the pipeline enforces.
+   The bar is the point: the limit is the reason samples are short, and a number alone does
+   not say how close you are to it. */
+.smprow{display:flex;gap:.6rem;align-items:center;margin:.3rem 0;max-width:44rem}
+.smprow>b{width:7rem;flex:0 0 auto}
+.smpbar{flex:0 0 120px;height:6px;background:#00000044;border-radius:3px;overflow:hidden}
+.smpbar>i{display:block;height:100%;background:var(--accent)}
+.smpbar>i.over{background:var(--bad)}
+.mini input{font:inherit;width:4rem;padding:.25rem .4rem;background:var(--surface);
+  color:var(--fg);border:1px solid var(--line);border-radius:4px}
+.mini input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.mini button{padding:.25rem .6rem}
+.warp{display:flex;align-items:center;gap:.35rem;font:11px ui-monospace,Menlo,monospace;
+  color:var(--dim);padding:.2rem 0;border-bottom:1px solid var(--line)}
+.warp b{color:var(--fg);font-weight:600}
+.warp button{padding:0 .35rem;line-height:1.3;margin-left:auto}
+/* Three independently-scrolling panes -- settings, the sheet, the kept tiles + tile
+   editor -- rather than one centered column stacking all of it. A `max-width:900px`
+   centered column was the previous shape here, and on anything wider than that it just
+   wasted the rest of the window while forcing carve settings, the sheet, the slice grid
+   and the tile editor to take turns being the one thing on screen. `min-height:0` on
+   both the grid and its columns is load-bearing: a grid/flex item defaults to
+   `min-height:auto`, which lets a tall child (the slice grid, a big sheet) push the
+   column past the viewport instead of scrolling inside it. */
+.atlasgrid{display:grid;grid-template-columns:280px 1fr 340px;gap:1rem;height:100%;
+  min-height:0}
+.atlasgrid>section{min-height:0}
+.atlas-tiles{display:flex;flex-direction:column}
+.atlas-tiles #tileeditor{margin-top:.7rem}
+/* Under ~1100px the three columns no longer fit side by side without each one going
+   too narrow to use -- falls back to the old stacked-column behaviour rather than
+   squeezing three panes into no room. */
+@media (max-width: 1100px){
+  .atlasgrid{display:flex;flex-direction:column;height:auto}
+}
+.fields{display:flex;flex-wrap:wrap;gap:.6rem;align-items:flex-end}
+/* The settings pane is 280px wide -- too narrow for .fields' normal wrap-in-a-row
+   layout to read as anything but ragged. Stacked full-width instead. */
+.atlas-fields{flex-direction:column;align-items:stretch}
+.atlas-fields input,.atlas-fields select{width:100%}
+.fields label{display:flex;flex-direction:column;gap:.2rem;
+  font:600 .66rem/1 ui-monospace,Menlo,monospace;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--dim)}
+.fields input{font:inherit;width:5.5rem;padding:.3rem .45rem;background:var(--surface);
+  color:var(--fg);border:1px solid var(--line);border-radius:5px}
+.fields input:focus-visible,select:focus-visible{outline:2px solid var(--accent);
+  outline-offset:1px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:1px;
+  background:var(--line);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.stats div{background:var(--surface);padding:.6rem .75rem}
+.stats b{display:block;font:600 1.15rem/1.1 ui-monospace,Menlo,monospace;
+  font-variant-numeric:tabular-nums}
+.stats span{font-size:.66rem;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--dim)}
+.stats div.warn b{color:var(--bad)}
+.plate{background:var(--surface);border:1px solid var(--line);border-radius:6px;
+  padding:.85rem;overflow:auto}
+/* Fonts tab. Controls left, device canvas right and sticky, so the preview stays in
+   view while a slider is dragged -- the one interaction this tab exists for. */
+.fontgrid{display:grid;grid-template-columns:minmax(260px,320px) 1fr;gap:1.25rem;
+  align-items:start}
+.fontctl section{margin-bottom:1rem}
+.fontview{display:grid;gap:1rem}
+.fields.col{display:grid;grid-template-columns:1fr;gap:.5rem}
+.fields.col label{display:grid;grid-template-columns:5.5rem 1fr;align-items:center;
+  gap:.5rem;font-size:.78rem;color:var(--dim)}
+.fields.col label.check{grid-template-columns:auto 1fr;justify-content:start}
+.fields.col input,.fields.col select,.fields.col textarea{width:100%}
+.fields.col input[type=range]{padding:0}
+.fields.col input[type=checkbox]{width:auto}
+.pair{display:flex;gap:.3rem}
+.pair input{width:100%}
+/* A colour chip beside the select rather than a coloured <option>: Chrome paints the
+   selected option's background into the closed control, which renders white ink on a
+   white swatch as an empty box. The chip shows the colour, the select stays legible. */
+.swrow{display:flex;align-items:center;gap:.35rem;min-width:0}
+.swrow i{width:1rem;height:1rem;flex:none;border:1px solid var(--line);border-radius:3px;
+  background:#000}
+.swrow select{flex:1;min-width:0}
+select.sw{font:11px ui-monospace,monospace}
+#ftext,#fdlg{width:100%;font:inherit;padding:.4rem .5rem;background:var(--surface);
+  color:var(--fg);border:1px solid var(--line);border-radius:5px;resize:vertical}
+#fdlg{margin-bottom:.4rem}
+.plate.wide img{display:block;max-width:100%;image-rendering:pixelated}
+/* Checkerboard behind the device canvas, so a preview whose background is genuinely
+   transparent is distinguishable from one that is white. */
+#fscenewrap{display:inline-block;padding:6px;border-radius:4px;
+  background:repeating-conic-gradient(var(--soft) 0% 25%,transparent 0% 50%) 50%/12px 12px}
+#fscene{display:block;image-rendering:pixelated}
+#fsheet{background:#0d1017;padding:6px;border-radius:4px}
+#fchars{display:block;margin-top:.4rem;word-break:break-all;
+  font:11px ui-monospace,monospace}
+#fdeclared{display:grid;gap:.35rem;font:11px ui-monospace,Menlo,monospace}
+#fdeclared div{display:flex;justify-content:space-between;gap:.5rem;
+  padding:.3rem .45rem;background:var(--soft);border-radius:4px}
+/* The slice grid. Cells carry their own state colour so what a tile will BECOME is
+   visible without reading a legend: kept, a duplicate that costs nothing, empty, or
+   dropped by hand. */
+/* The crop box. Positioned in PERCENTAGES of the sheet image, so it stays correct
+   whatever size the thumbnail is rendered at -- the region is in tile units and the
+   sheet's size in tiles is known, which makes the arithmetic scale-free. */
+#sheetwrap{position:relative;display:inline-block;line-height:0}
+#sheetwrap img{display:block;image-rendering:pixelated;max-width:100%}
+#cropbox{position:absolute;border:2px solid var(--accent);
+  box-shadow:0 0 0 9999px rgba(0,0,0,.55);pointer-events:none;display:none}
+.zoom{display:flex;align-items:center;gap:.4rem;font-size:.78rem;color:var(--dim)}
+.zoom input{width:7rem}
+/* The COMPLEX mask painter: one cell per source pixel, zoomed enough to click precisely
+   (8px tile -> 24px cell) without the grid outrunning the panel on a 32px tile. */
+.maskgrid{display:grid;gap:1px;background:var(--line);border:1px solid var(--line);
+  width:max-content;user-select:none}
+.maskgrid i{display:block;width:16px;height:16px;background:var(--surface);
+  cursor:pointer}
+.maskgrid i.ink{background:var(--fg)}
+/* `.fields label` stacks its children in a column and outspecifies a bare `.keypick`,
+   so this row of controls needs the same specificity to stay a row. */
+.fields label.keypick{flex-direction:row;align-items:center;gap:.4rem}
+/* Checkerboarded when there is no key, because "no colour" and "black" must not look the
+   same -- black is a perfectly ordinary key to choose. */
+#keyswatch{width:1.1rem;height:1.1rem;border-radius:3px;border:1px solid var(--line);
+  display:inline-block}
+#keyswatch.none{background:repeating-conic-gradient(var(--line) 0 25%,transparent 0 50%)
+  50%/8px 8px}
+#keyval{font:11px ui-monospace,Menlo,monospace;color:var(--dim);min-width:6.5rem}
+#sheetwrap.picking{cursor:crosshair}
+#sheetwrap.picking img{outline:2px dashed var(--accent);outline-offset:2px}
+/* Capped and independently scrollable, in the atlas-tiles pane alongside "Tiles kept"
+   and the tile editor -- a big carve should never make you scroll PAST the grid to
+   reach the editor a click on it just opened. */
+#slice{display:grid;gap:2px;overflow:auto;max-height:38vh}
+#slice button{padding:0;border:2px solid transparent;border-radius:3px;background:none;
+  line-height:0;cursor:pointer;position:relative}
+#slice img{display:block;image-rendering:pixelated;width:100%;height:auto}
+#slice .unique{border-color:var(--ok)}
+#slice .dup{border-color:var(--line);opacity:.75}
+#slice .empty{border-color:transparent;opacity:.25}
+#slice .off{border-color:var(--bad);opacity:.3;filter:grayscale(1)}
+#slice button:hover{border-color:var(--accent)}
+#slnote{font-size:.72rem;color:var(--dim)}
+
+/* The import target. A dashed well rather than a bare button because it is also a drop
+   zone, and a button does not look like somewhere you can let go of a file. */
+.drop{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;
+  border:1px dashed var(--line);border-radius:6px;padding:.5rem .6rem;margin-bottom:.5rem;
+  transition:border-color .12s,background .12s}
+.drop.over{border-color:var(--accent);background:rgba(255,255,255,.05)}
+.drop.over *{pointer-events:none}
+
+/* Sprites. The palette is the device's 64 colours laid out as an 8x8 block, so picking
+   one is a glance rather than a scroll through hex codes. */
+.pal{display:grid;grid-template-columns:repeat(8,1fr);gap:2px}
+.pal i{display:block;aspect-ratio:1;border-radius:2px;cursor:pointer;
+  border:2px solid transparent}
+.pal i.on{border-color:var(--fg)}
+.pal i.tr{background-image:repeating-conic-gradient(#888 0% 25%,#ccc 0% 50%);
+  background-size:8px 8px}
+#pxwrap,#px1wrap{display:inline-block;padding:6px;border-radius:4px;
+  background:repeating-conic-gradient(var(--soft) 0% 25%,transparent 0% 50%) 50%/12px 12px}
+#pxcv,#pxcv1{display:block;image-rendering:pixelated;cursor:crosshair}
+#pxcv1{cursor:default}
+
+/* Code. A full-height two-pane layout rather than a card, because an editor that only
+   fills part of the window is an editor nobody writes in. */
+.codegrid{display:grid;grid-template-columns:minmax(200px,270px) 1fr;height:100%}
+.codetree{border-right:1px solid var(--line);overflow:auto;padding:.6rem;
+  background:var(--surface)}
+#codelist{display:grid;gap:1px}
+#codelist button{text-align:left;font:11px ui-monospace,Menlo,monospace;
+  padding:.28rem .45rem;width:100%;border-color:transparent;background:none}
+#codelist button:hover{background:var(--soft)}
+#codelist button.on{background:var(--soft);color:var(--accent)}
+#codelist button.ro{color:var(--dim)}
+.cdir{font:600 11px ui-monospace,Menlo,monospace;color:var(--fg);cursor:pointer;
+  padding:.18rem .4rem;user-select:none;white-space:nowrap}
+.cdir:hover{background:var(--soft)}
+.cdir.ro{color:var(--dim);font-weight:500}
+.cdir small{opacity:.6;font-weight:400}
+#codelist .grp{font:600 .62rem/1 ui-monospace,Menlo,monospace;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--dim);padding:.6rem .45rem .25rem}
+.codemain{display:flex;flex-direction:column;min-width:0}
+.codebar{display:flex;align-items:center;gap:.6rem;padding:.5rem .8rem;
+  border-bottom:1px solid var(--line);background:var(--surface)}
+.codebar b{font:12px ui-monospace,Menlo,monospace}
+.codebar span{font-size:.72rem;color:var(--dim)}
+.codeedit{flex:1;min-height:0;position:relative}
+/* The overlay only lines up if BOTH layers share every metric that affects wrapping and
+   glyph position: font, size, line-height, padding, tab-size, white-space. Any drift
+   here shows up as highlighting sliding away from the text further down the file. */
+#codescroll{position:absolute;inset:0;overflow:auto}
+#codehl,#codetext{margin:0;border:0;padding:.8rem 1rem;tab-size:2;
+  font:12px/1.55 ui-monospace,Menlo,Consolas,monospace;
+  white-space:pre;word-wrap:normal;overflow-wrap:normal}
+#codehl{position:absolute;inset:0;pointer-events:none;color:var(--fg);
+  background:var(--ink);min-height:100%;min-width:100%}
+#codehl code{font:inherit}
+#codetext{position:relative;display:block;width:100%;min-height:100%;outline:0;
+  resize:none;background:transparent;color:transparent;caret-color:var(--fg);
+  overflow:hidden}
+#codetext::selection{background:rgba(85,170,255,.32);color:transparent}
+#codetext[readonly]{caret-color:transparent}
+#codehl[data-ro="1"]{color:var(--dim)}
+.tk-c{color:#6b7a8d;font-style:italic}   /* comment */
+.tk-s{color:#7fc98a}                     /* string / char */
+.tk-p{color:#c084d8}                     /* preprocessor */
+.tk-k{color:#55aaff}                     /* keyword */
+.tk-t{color:#5ecfd0}                     /* type */
+.tk-n{color:#d8a657}                     /* number */
+.tk-x{color:#e0af68}                     /* a pnx / generated symbol */
+.tk-bad{color:var(--bad);text-decoration:underline wavy var(--bad)}
+@media(prefers-color-scheme:light){
+  .tk-c{color:#7a8899} .tk-s{color:#2f7d43} .tk-p{color:#8b3fa8}
+  .tk-k{color:#1f6dbf} .tk-t{color:#0f7b7d} .tk-n{color:#a35d00} .tk-x{color:#8a5a00}
+}
+#codediag{max-height:26%;overflow:auto;border-top:1px solid var(--line);
+  background:var(--surface);font:11px/1.5 ui-monospace,Menlo,monospace}
+#codediag:empty{display:none}
+#codediag div{display:flex;gap:.6rem;padding:.28rem .8rem;cursor:pointer}
+#codediag div:hover{background:var(--soft)}
+#codediag b{color:var(--bad);font-weight:600}
+#codediag b.cc{color:var(--bad)}
+#codediag b.warn{color:#d08b2c}
+#codediag b.edit{color:var(--dim)}
+#codediag .note span{color:var(--dim)}
+#codediag i{color:var(--dim);font-style:normal;min-width:3.5rem}
+
+/* Toolchain tab. Prose gets a readable measure rather than the full window width -- it
+   is the one place in this editor a person has to actually read something. */
+.sdkwrap{display:grid;gap:1rem;max-width:52rem}
+.prose{margin:0 0 .7rem;font-size:.85rem;line-height:1.55;color:var(--dim);max-width:60ch}
+.prose b{color:var(--fg)}
+.terms{display:grid;gap:.3rem;margin:.5rem 0 .8rem}
+.terms a{display:block;padding:.45rem .6rem;background:var(--soft);border-radius:5px;
+  color:var(--accent);text-decoration:none;font:12px ui-monospace,Menlo,monospace}
+.terms a:hover{text-decoration:underline}
+label.accept{display:flex;align-items:center;gap:.5rem;font-size:.85rem;
+  margin-bottom:.7rem;cursor:pointer}
+label.accept input{width:auto}
+.row{display:flex;gap:.5rem;flex-wrap:wrap}
+button:disabled{opacity:.45;cursor:not-allowed}
+#sdklog{margin:0;max-height:340px;overflow:auto;white-space:pre-wrap;
+  font:11px/1.5 ui-monospace,Menlo,monospace;color:var(--dim)}
+#sdkstatus,#projinfo{display:grid;gap:.35rem;font:12px ui-monospace,Menlo,monospace}
+#sdkstatus .k,#projinfo .k{color:var(--dim);display:inline-block;min-width:9rem}
+#sdkstatus .yes{color:var(--ok)} #sdkstatus .no{color:var(--bad)}
+#projinfo .p{word-break:break-all}
+#recent,#pickerlist{display:grid;gap:.25rem;margin-top:.35rem}
+#pickerlist{max-height:260px;overflow:auto}
+#recent button,#pickerlist button{text-align:left;font:11px ui-monospace,Menlo,monospace;
+  padding:.35rem .5rem;width:100%}
+#pickerlist .isproj{color:var(--ok)}
+#pickernote{display:block;margin-top:.5rem}
+.plate h3{margin:0 0 .5rem;font:600 .66rem/1 ui-monospace,Menlo,monospace;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+.plate img{image-rendering:pixelated;display:block;max-width:100%}
+/* Scaled up from the watch's real pixel count -- 1x would be a postage stamp on any
+   monitor -- and pixelated per .plate img above so the scaling stays crisp, not blurred. */
+#emuscreen{width:288px;background:var(--ink);border:1px solid var(--line);
+  border-radius:3px;min-height:120px}
+/* BACK alone on the left, UP/SELECT/DOWN stacked on the right -- see the HTML comment
+   above this block for why that layout is fixed rather than orientation-aware.
+   tabindex on the row, not a button, so a click anywhere in the bezel (the screen
+   image included) focuses it for the arrow-key/Enter/Backspace listener without
+   fighting a button's own focus ring. */
+.emubezel{display:flex;align-items:center;gap:.9rem;margin-top:.5rem;outline:none}
+.emubezel:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:6px}
+.emucluster{display:flex;flex-direction:column;gap:.5rem}
+.emubtn{width:2.5rem;height:2.5rem;border-radius:50%;border:1px solid var(--line);
+  background:var(--surface);color:var(--fg);cursor:pointer;
+  font:600 .6rem/1 ui-monospace,Menlo,monospace;user-select:none;padding:0}
+.emubtn:active,.emubtn.held{background:var(--accent);color:#fff;border-color:var(--accent)}

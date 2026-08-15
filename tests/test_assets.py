@@ -3361,63 +3361,67 @@ def main():
                       f"expected 21 and not 21")
                 failures += 1
 
-    # --- the editor's inline page
+    # --- the editor's frontend
     #
-    # PAGE is an r-string, so a doubled backslash reaches the browser literally: '\\n'
-    # becomes a backslash and an n rather than a newline, and '\\'' terminates a
-    # JavaScript string early. That shipped once and took a blank tab and a console trace
-    # to find, because Python is perfectly happy with it. Cheap to make impossible.
-    checks += 1
-    import pnx_editor                                       # noqa: E402
-    page = pnx_editor.PAGE
+    # Used to be one PAGE r-string in tools/pnx_editor.py (HTML, CSS and ~4500 lines of
+    # JS all inline in one Python string); split into real files under
+    # tools/editor/static/ -- see that package's docstring. `html` and the per-file
+    # entries in `js_files` stand in for the old `page` variable, scoped to what each
+    # check actually cares about.
+    editor_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "..", "tools", "editor", "static")
+    with open(os.path.join(editor_dir, "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    # In load order, as they're actually <script>-tagged: classic (non-module) scripts,
+    # so every one of them shares ONE global scope with all the others -- the split is
+    # files, not module boundaries. A name declared twice across this list is exactly as
+    # broken as declaring it twice in one file used to be.
+    js_files = ["app.js", "atlas.js"]
+    js_by_file = {}
+    for name in js_files:
+        with open(os.path.join(editor_dir, "js", name), encoding="utf-8") as f:
+            js_by_file[name] = f.read()
+    js = "\n".join(js_by_file.values())
 
-    # Only the escapes that are UNAMBIGUOUSLY wrong here. Two others look tempting and
-    # are not: a bare `\\` is legitimate in a regex character class (/[\\/]/ matches a
-    # backslash), and `'\\'` is the correct way to write a one-backslash string. Both
-    # appear in the tokeniser and both are right, so checking them would only teach
-    # people to ignore this test.
-    stray = []
-    for i, line in enumerate(page.split("\n"), 1):
-        for seq in (r"\\n", r"\\t", r"\\r"):
-            if seq in line:
-                stray.append((i, seq, line.strip()[:64]))
-    if stray:
-        print(f"  FAIL editor page: {len(stray)} escape(s) doubled in an r-string; "
-              f"these reach the browser literally")
-        for i, seq, l in stray[:3]:
-            print(f"         line {i}: {seq!r} in  {l}")
-        failures += 1
+    # retired: PAGE was an r-string, so a doubled backslash ('\\n') reached the browser
+    # literally instead of becoming a newline -- a bug Python's own syntax was happy
+    # with, only possible because the JS lived inside a Python string literal. Now that
+    # tools/editor/static/js/*.js are real .js files, there is no Python layer left to
+    # do that doubling; the failure mode this caught cannot occur any more. Kept as a
+    # record of what used to need checking here, per _check_editor_flags_RETIRED's
+    # convention, rather than deleted outright.
 
-    # Two top-level functions with the same name: the later one silently wins, and the
-    # caller of the earlier one starts doing something else entirely. That happened --
-    # the code editor's `analyse()` shadowed the importer's and blanked its stats panel
-    # with no error anywhere.
+    # Two top-level functions with the same name -- in one file, or (now that the script
+    # is split) across two of them sharing the page's scope: the later one silently
+    # wins, and the caller of the earlier one starts doing something else entirely.
+    # That happened -- the code editor's `analyse()` shadowed the importer's and
+    # blanked its stats panel with no error anywhere.
     checks += 1
-    names = re.findall(r"^function\s+([A-Za-z_$][\w$]*)\s*\(", page, re.M)
+    names = re.findall(r"^function\s+([A-Za-z_$][\w$]*)\s*\(", js, re.M)
     dupes = sorted({n for n in names if names.count(n) > 1})
     if dupes:
-        print(f"  FAIL editor page: duplicate function name(s): {', '.join(dupes)}")
+        print(f"  FAIL editor js: duplicate function name(s): {', '.join(dupes)}")
         failures += 1
 
     # Same for top-level const/let bindings, which would be a hard SyntaxError.
     checks += 1
-    binds = re.findall(r"^(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=", page, re.M)
+    binds = re.findall(r"^(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=", js, re.M)
     dupes = sorted({n for n in binds if binds.count(n) > 1})
     if dupes:
-        print(f"  FAIL editor page: duplicate top-level binding(s): {', '.join(dupes)}")
+        print(f"  FAIL editor js: duplicate top-level binding(s): {', '.join(dupes)}")
         failures += 1
 
-    # The page is one big inline document; a mismatched tag is invisible until something
-    # silently fails to render. Comments are stripped first, because the commentary
-    # explaining the markup naturally names the tags it is about.
+    # The shell markup is one big document; a mismatched tag is invisible until
+    # something silently fails to render. Comments are stripped first, because the
+    # commentary explaining the markup naturally names the tags it is about.
     checks += 1
-    markup = re.sub(r"<!--.*?-->", "", page, flags=re.S)
+    markup = re.sub(r"<!--.*?-->", "", html, flags=re.S)
     for tag in ("div", "section", "aside", "button", "select", "textarea", "pre",
                 "header", "footer", "nav", "main", "label"):
         opens = len(re.findall(rf"<{tag}[\s>]", markup))
         closes = len(re.findall(rf"</{tag}>", markup))
         if opens != closes:
-            print(f"  FAIL editor page: <{tag}> opened {opens} times, closed {closes}")
+            print(f"  FAIL editor html: <{tag}> opened {opens} times, closed {closes}")
             failures += 1
             break
 

@@ -1,0 +1,980 @@
+<!doctype html><html><head><meta charset="utf-8">
+<title>pebblnyx editor</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head><body>
+<!-- Activity rail, editor area, status bar: the shape VS Code and Rider settled on, and
+     for the reason they settled on it. Six top tabs was already crowded and every new
+     capability added a seventh; a rail scales down the side and leaves the whole width
+     to the thing being worked on. -->
+<div id="rail">
+  <button id="tabmaps" class="act on" data-t="maps"><i>▦</i><em>Maps</em></button>
+  <!-- Scenes sits directly under Maps because it is the other half of the same job: a map
+       that no scene loads is content the game cannot reach, which is the dead end the
+       pipeline's own checks exist to catch everywhere else. -->
+  <button id="tabscenes" class="act" data-t="scenes"><i>◳</i><em>Scenes</em></button>
+  <button id="tabpixel" class="act" data-t="pixel"><i>✎</i><em>Sprites</em></button>
+  <!-- Dialog sits with the content tabs rather than under Fonts, even though `charset =
+       "auto"` derives a font's glyph set from it: what a character says is content, and
+       which typeface says it is not. -->
+  <button id="tabdialog" class="act" data-t="dialog"><i>❝</i><em>Dialog</em></button>
+  <!-- Music. A tracker over the sequencer's own model: patterns of rows, an order list,
+       and a table of instruments. Last of the content types to get an editor, and the one
+       that needed it most -- a song is the only asset here nobody can write by hand. -->
+  <button id="tabmusic" class="act" data-t="music"><i>♪</i><em>Music</em></button>
+  <button id="tabfonts" class="act" data-t="fonts"><i>A</i><em>Fonts</em></button>
+  <button id="tabimport" class="act" data-t="import"><i>⇥</i><em>Import</em></button>
+  <button id="tabcode" class="act" data-t="code"><i>&lt;/&gt;</i><em>Code</em></button>
+  <!-- E3 in docs/EDITOR.md, rebuilt now that pebble-tool ships a QEMU image for every
+       platform this framework builds for rather than none of them. -->
+  <button id="tabdevice" class="act" data-t="device"><i>▶</i><em>Device</em></button>
+  <div style="flex:1"></div>
+  <button id="tabsdk" class="act" data-t="sdk"><i>⚙</i><em>Settings</em></button>
+</div>
+
+<div id="work">
+  <!-- Contextual toolbar. Only what the current activity needs: a map selector belongs
+       to Maps and is noise everywhere else. -->
+  <header>
+    <b id="ctxtitle">Maps</b>
+    <span id="ctxbar">
+      <select id="mapsel"></select>
+      <!-- A map draws from a LIST of tilesets, not one. The button opens the picker
+           rather than a select carrying the choice, because choosing tilesets and
+           choosing tiles out of them is one job done in one place. -->
+      <button id="tilesets" title="tilesets this map is drawn with">Tilesets…</button>
+      <button id="pick" title="every tile of every tileset this map uses">Tiles…</button>
+      <span id="tool"></span>
+    </span>
+    <div style="flex:1"></div>
+    <span id="dirty"></span>
+    <button id="save">Save map</button>
+    <button id="build" class="primary">Build</button>
+  </header>
+
+  <!-- The budgets, on every page, above whatever is being worked on.
+       Four ceilings, spent against by different work and discovered at different times.
+       Resources fail at the appstore, the binary fails at the linker with a struct.error
+       naming nothing, RAM fails as a malloc returning NULL mid-scene, and persist fails
+       on a watch in front of a player. None of those tell you WHICH edit did it, and by
+       then the edit is hours old -- so the numbers live here rather than behind a tab. -->
+  <!-- One line, only when there is something to say. An update banner that is always
+       present is a banner nobody reads. -->
+  <div id="updbanner" style="display:none">
+    <span id="updbannertext"></span>
+    <button id="updbannergo">Update…</button>
+    <button id="updbannerhide" title="not now">✕</button>
+  </div>
+
+  <!-- Which of the seven the numbers below describe. "This project's build" is the old,
+       only behaviour: whatever's on disk, unlabelled. Naming an actual platform re-prices
+       resources against ITS cap and, once it has been built, reads RAM/app size off ITS
+       ELF -- a `~bw` project can look smaller on `aplite` than on `emery` without ever
+       running `pebble build` again for the resource half of that. -->
+  <div id="platformrow">
+    <label class="mini">Check overhead for
+      <select id="checkplatform"><option value="">this project's build</option></select>
+    </label>
+    <small id="platformnote">—</small>
+  </div>
+
+  <div id="budgetbar">
+    <div class="bcell" id="bc-res">
+      <div class="bhead"><span>Resources</span><b id="bv-res">—</b></div>
+      <div class="meter"><i id="bm-res"></i></div>
+      <small id="bn-res">—</small>
+    </div>
+    <div class="bcell" id="bc-app">
+      <div class="bhead"><span>App binary</span><b id="bv-app">—</b></div>
+      <div class="meter"><i id="bm-app"></i></div>
+      <small id="bn-app">—</small>
+    </div>
+    <div class="bcell" id="bc-ram">
+      <div class="bhead"><span>RAM</span><b id="bv-ram">—</b></div>
+      <div class="meter"><i id="bm-ram"></i></div>
+      <small id="bn-ram">—</small>
+    </div>
+    <div class="bcell" id="bc-save">
+      <div class="bhead"><span>Save</span><b id="bv-save">—</b></div>
+      <div class="meter"><i id="bm-save"></i></div>
+      <small id="bn-save">—</small>
+    </div>
+  </div>
+<main>
+  <aside id="side">
+    <section><h2>Paint</h2><div class="tiles" id="legend"></div>
+      <small id="painthint">Click to paint. <kbd>W</kbd> sets a warp, <kbd>S</kbd> the
+      start.</small>
+    </section>
+    <!-- What the selected character IS: which tile of which tileset, mirrored how, and
+         what the game will read off it. Flags used to be reachable only by hand-editing
+         the manifest, which meant the one property of a tile that changes how the game
+         plays was the one property the editor could not set. -->
+    <section><h2>Tile</h2><div id="tileinfo"><small class="dim">—</small></div></section>
+    <section><h2>Map</h2><div id="mapinfo"><small>—</small></div>
+      <div class="mini">
+        <input id="nmname" placeholder="name" size="8">
+        <input id="nmw" type="number" value="24" min="3" max="255" title="width">
+        <input id="nmh" type="number" value="16" min="3" max="255" title="height">
+        <button id="newmap">＋ Map</button>
+      </div>
+      <!-- Renaming and deleting the map being looked at. Both refuse while a warp or a
+           scene still points at it, so the pair below is safe to press. -->
+      <div class="mini">
+        <button id="renmap" title="rename this map, carrying warps and scenes with it"
+                >Rename…</button>
+        <button id="delmap" title="delete this map">Delete…</button>
+        <button id="cvtmap" title="move this map into its own .pnxmap file"
+                >Convert…</button>
+      </div>
+      <!-- The M4b palette variant and the M4d streaming controls. Reachable only by hand
+           until now, so the streaming work M4d measured could not be tuned from the tool
+           that reports its cost. "auto" is the pipeline's own choice and the default. -->
+      <div class="fields col" style="margin-top:.5rem">
+        <label>Palette<select id="mppal"></select></label>
+        <label>WorldTile<select id="mpwt">
+          <option value="auto">auto</option>
+          <option value="4">4</option><option value="8">8</option>
+          <option value="16">16</option><option value="32">32</option>
+        </select></label>
+        <label>Atlas slots<input id="mpslots" type="number" min="1" max="255"
+          placeholder="auto" title="how many of the map's tilesets stay resident"></label>
+        <label>Bank bytes<input id="mpbank" type="number" min="512" step="512"
+          placeholder="default" title="how large a WorldTile bank resource may get"></label>
+        <label class="check"><input id="mpres" type="checkbox"> hold whole
+          <span class="dim" title="a slot per WorldTile: nothing is ever evicted, which is
+            what a map cost before WorldTiles existed">(resident)</span></label>
+      </div>
+      <small id="mplog" class="dim">—</small>
+    </section>
+    <!-- What the watch actually shows of this map. Drag the blue grip to move it. -->
+    <section><h2>Camera</h2>
+      <label class="mini"><input id="camon" type="checkbox" checked> show device frame</label>
+      <small id="caminfo">—</small>
+    </section>
+    <section><h2>Transitions</h2><div id="warps"></div>
+      <div class="mini">
+        <span id="warpfrom">pick a tile</span>
+      </div>
+      <small>Press <kbd>W</kbd>, click a tile, then choose where it leads.</small>
+    </section>
+    <section><h2>Palettes</h2><div id="pals"></div></section>
+    <!-- Orientation is a project-wide content decision, not a view setting: it changes
+         what the pipeline BAKES. Named for where the button cluster ends up, because
+         that is what the choice is really about -- under one thumb it is a menu, along
+         the top edge it is shoulder triggers, along the bottom it is flippers, and along
+         the left edge it is the same menu grip mirrored for the other hand. -->
+    <section><h2>Orientation</h2>
+      <select id="orient">
+        <option value="portrait">Portrait — cluster right, one thumb</option>
+        <option value="buttons_top">Landscape — cluster top, triggers</option>
+        <option value="buttons_bottom">Landscape — cluster bottom, flippers</option>
+        <option value="buttons_left">Portrait, upside down — cluster left</option>
+      </select>
+      <small id="orientnote">—</small></section>
+    <!-- The budgets used to live here, in the Maps sidebar, where four of the five tabs
+         could not see them. They are now the strip above every page. -->
+  </aside>
+  <div id="stage"><canvas id="cv"></canvas></div>
+  <!-- Three panes instead of one long scroll: settings (touched once per atlas), the
+       sheet (the thing being carved), and the kept tiles with their editor docked to
+       them. Each pane scrolls on its own, so opening a tile's editor on the right never
+       pushes the sheet on the left out of view -- the whole point being that a carve, the
+       grid it produced and the tile you're currently editing are three things you look
+       at TOGETHER, not three tabs you flip between. See .atlasgrid in style.css. -->
+  <div id="import" style="display:none;flex:1;overflow:hidden;padding:1rem">
+    <div class="atlasgrid">
+
+      <section class="plate atlas-settings">
+        <h3>Atlas</h3>
+        <div class="fields atlas-fields">
+          <!-- The same import as the Sprites tab, because this tab is *called* Import and
+               could only ever offer files that were already in the project. -->
+          <div id="atdrop" class="drop">
+            <input id="atfile" type="file" accept="image/png" multiple hidden>
+            <button id="atpick">Import PNG…</button>
+            <span class="dim">or drop one here</span>
+            <small id="atimplog" class="dim"></small>
+          </div>
+          <label>Sheet<select id="sheet"></select></label>
+          <!-- The roles the pipeline invents from the art. It was hardcoded to
+               floor/wall/accent, which is why a freshly imported atlas offered three
+               paintable tiles out of however many it packed. Everything past these is
+               named per tile in the tile picker, which needs a packed atlas to point at. -->
+          <label title="roles picked from the art at build time, comma separated"
+                 >Autopick<input id="apick" placeholder="floor, wall, accent"
+                                 autocomplete="off"></label>
+          <!-- Metatiles compose each tile from four deduplicated quadrants: a real saving
+               on a full sheet, a loss on a small carve, which is why "auto" weighs it per
+               atlas rather than picking once for the project. A metatiled atlas cannot be
+               drawn mirrored, so forcing it off is what makes flipped tiles available. -->
+          <label title="compose tiles from four deduplicated 8x8 quadrants"
+                 >Metatiles<select id="ameta">
+            <option value="auto">auto</option>
+            <option value="true">always</option>
+            <option value="false">never</option>
+          </select></label>
+          <!-- Palette swaps: the same art recoloured costs a 16-byte palette instead of
+               another copy of every tile. The pipeline checks they really are recolours. -->
+          <label title="comma-separated PNGs, same layout as the base sheet"
+                 >Variants<input id="avars" placeholder="art/dungeon_ice.png"
+                                 autocomplete="off"></label>
+          <!-- Typing the name of an atlas that already exists turns this into an edit.
+               Before, Add was the only door: a carve you got wrong was in the manifest
+               for good, and fixing it meant hand-editing TOML. -->
+          <label>Name<input id="aname" placeholder="cave_env" list="atlasnames"
+                            autocomplete="off"></label>
+          <datalist id="atlasnames"></datalist>
+          <div class="row">
+            <!-- Removal lives next to load, because both only apply to an atlas that
+                 already exists. Until this, the only way to undo an import was to
+                 hand-edit the TOML the editor exists to keep you out of. -->
+            <button id="aload" style="display:none" title="load this atlas's settings">
+              ↺ load</button>
+            <button id="adel" style="display:none" title="delete this atlas">
+              🗑 remove</button>
+          </div>
+          <!-- The colour key. Picked off the sheet with the eyedropper rather than typed,
+               because the value that matters is the one actually in the art -- a
+               background that looks like magenta is often not 255,0,255. -->
+          <label class="keypick">Transparent
+            <button id="keypick" title="click, then click the sheet">⌖ pick</button>
+            <i id="keyswatch" class="none"></i>
+            <span id="keyval">none</span>
+            <button id="keynone" title="no colour key">clear</button>
+          </label>
+          <button id="addatlas" class="primary">Add atlas</button>
+        </div>
+        <div id="stats" class="stats"></div>
+      </section>
+
+      <!-- The region, drawn ON the sheet. Four numbers in tile units are hard to hold in
+           your head against a picture; a box over the art is not -- and the numbers that
+           draw the box sit right above the picture they draw it on, not in a form
+           scrolled out of sight. -->
+      <section class="plate atlas-sheet">
+        <h3>Sheet — the box is what gets carved</h3>
+        <div class="fields atlas-carve-fields">
+          <label>Tile px<input id="tile" type="number" value="16" min="4" step="4"></label>
+          <label>Region x<input id="rx" type="number" value="0" min="0"></label>
+          <label>y<input id="ry" type="number" value="0" min="0"></label>
+          <label>w<input id="rw" type="number" value="16" min="1"></label>
+          <label>h<input id="rh" type="number" value="16" min="1"></label>
+          <!-- Where the tile GRID starts, in PIXELS -- separate from Region, which counts
+               whole tiles. A sheet whose art does not begin flush with its own corner (a
+               margin, a shared border strip another importer left behind) has no
+               tile-aligned pixel to call (0,0) without this. -->
+          <label title="pixels, not tiles -- where the grid starts before Region counts whole tiles from it"
+                 >Offset x<input id="ox" type="number" value="0" min="0"></label>
+          <label>y<input id="oy" type="number" value="0" min="0"></label>
+          <label>Max tiles<input id="maxt" type="number" value="64" min="1"></label>
+        </div>
+        <div id="sheetwrap"><img id="sheetimg" alt=""><i id="cropbox"></i></div>
+        <small id="cropnote">—</small>
+      </section>
+
+      <!-- The tiles a carve keeps, and -- once one is picked -- the tile editor, docked
+           to the bottom of this same pane. Sheet and slice grid stay visible in the
+           other two panes the whole time a tile is open. -->
+      <section class="plate atlas-tiles">
+        <h3>Slice — click a tile to edit it, double-click to drop it</h3>
+        <div class="row" style="margin-bottom:.5rem">
+          <button id="slkeepall">Keep all</button>
+          <button id="sldropdup">Drop duplicates</button>
+          <button id="sldropempty">Drop empties</button>
+          <!-- Tiles are 16 pixels square. Judging whether two of them are really the
+               same, or whether a carve cut through something, cannot be done at that
+               size on a modern display. -->
+          <label class="zoom">zoom
+            <input id="slzoom" type="range" min="1" max="8" step="1" value="3">
+            <b id="slzoomv">3×</b>
+          </label>
+          <span id="slnote"></span>
+        </div>
+        <div id="slice"></div>
+
+        <!-- What pack_unit_2bpp (tools/pnx_assets.py) actually bakes into the ~bw
+             resource flint/diorite/aplite build from -- same source art, no second
+             import, no re-authoring, just a different pixel format chosen at build time.
+             A checkbox on the one strip instead of a whole second plate below it: the
+             point of this pane was to stop needing to scroll past things to compare
+             them. -->
+        <h3 style="display:flex;align-items:center;gap:.6rem">Tiles kept
+          <label class="mini" style="margin:0;font-weight:normal">
+            <input id="stripbw" type="checkbox"> 1-bit preview</label>
+        </h3>
+        <img id="strip" alt="">
+        <div id="bwstripwrap" style="display:none">
+          <label class="mini">ink threshold
+            <input id="bwthresh" type="range" min="1" max="29" step="1" value="15">
+            <b id="bwthreshv">15</b> / 30
+          </label>
+          <img id="bwstrip" alt="" style="background:#fff">
+        </div>
+
+        <!-- The per-tile editor. What a click in the Slice grid above opens: a raw sheet
+             cell only means something once it is PACKED, so editing has to happen
+             against the packed tile it becomes (carve_tiles), not the sheet cell itself.
+             Role and collision are both properties of that packed tile, which is why one
+             panel edits both rather than sending you to two places for "what this tile
+             is" and "what it does". -->
+        <div class="plate" id="tileeditor" style="display:none">
+          <h3>Tile <span id="tenote" class="dim"></span>
+            <button id="teclose" style="float:right" title="close">✕</button></h3>
+          <div class="mini">
+            <img id="teimg" alt=""
+                 style="width:64px;height:64px;image-rendering:pixelated;
+                        border:1px solid var(--line);border-radius:3px">
+            <label class="mini">Role<input id="terole" placeholder="(none)"
+                                           autocomplete="off" style="width:8rem"></label>
+            <label class="mini">Collision<select id="temode">
+              <option value="0">none</option>
+              <option value="1">solid</option>
+              <option value="2">scaled</option>
+              <option value="3">complex</option>
+            </select></label>
+          </div>
+          <!-- SCALED: an inset rect, dragged over a zoomed still of the tile rather than
+               typed as four numbers -- a fence's solid half is a shape, not an
+               arithmetic problem. -->
+          <div id="tescaled" style="display:none">
+            <small class="dim">Drag on the tile to draw the solid rect.</small>
+            <div id="terectwrap" style="position:relative;display:inline-block;
+                                        cursor:crosshair;margin-top:.4rem">
+              <img id="terectimg" alt="" draggable="false"
+                   style="image-rendering:pixelated;display:block;
+                          border:1px solid var(--line)">
+              <div id="terectbox" style="position:absolute;pointer-events:none;
+                                         display:none;border:2px solid var(--accent);
+                                         background:color-mix(in srgb, var(--accent) 25%,
+                                         transparent)"></div>
+            </div>
+            <div class="mini"><span id="terectnote" class="dim"></span></div>
+          </div>
+          <!-- COMPLEX: a 1bpp mask, painted pixel by pixel at the tile's own resolution
+               -- defaults to the art's own opacity (pack_collision_mask) until
+               repainted, and "Reset to art" throws an authored override away to go back
+               to that. -->
+          <div id="tecomplex" style="display:none">
+            <div class="row" style="margin-bottom:.4rem;margin-top:.4rem">
+              <small class="dim">Click, or click-drag, to paint the mask.</small>
+              <button id="temaskreset" title="discard any authored mask; use the art's own opacity">
+                Reset to art</button>
+            </div>
+            <div id="temaskgrid" class="maskgrid"></div>
+          </div>
+          <div class="row" style="margin-top:.7rem">
+            <button id="tesave" class="primary">Save tile</button>
+            <button id="teclearcol">Clear collision</button>
+          </div>
+          <div class="mini"><span id="telog" class="dim"></span></div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <!-- Fonts. The layout puts the device-sized canvas next to the controls rather than
+       below them, because the whole point is watching the text change as you drag the
+       threshold -- a preview you have to scroll to is a preview you stop looking at. -->
+  <!-- Music. The pattern grid is the sequencer's data model shown directly: a cell is
+       NOTE:INSTRUMENT, '.' holds and '-' releases, which is the manifest's own spelling.
+       Keeping it means a song half-edited by hand and half in the tool is still one song. -->
+  <div id="music" style="display:none;flex:1;overflow:auto;padding:1.25rem">
+    <section>
+      <div class="mini">
+        <b>Song</b><select id="msong"></select>
+        <label class="mini">tempo <input id="mtempo" type="number" min="20" max="400"
+          style="width:5rem"></label>
+        <button id="msongnew">New song…</button>
+        <button id="msongdel">Remove song</button>
+        <span id="mcost" class="dim"></span>
+      </div>
+      <div class="mini">
+        <b>Order</b><input id="morder" size="40" placeholder="0, 1, 2, 1">
+        <span class="dim">which patterns play, in sequence</span>
+      </div>
+      <!-- No save button anywhere in this tab. Everything else in the editor writes the
+           manifest as you change it -- the legend, scenes, dialog, map properties -- and
+           one tab with its own save model is a thing to remember rather than a thing to
+           learn. -->
+    </section>
+
+    <div class="musicgrid">
+      <section>
+        <h2>Pattern <select id="mpat"></select></h2>
+        <div class="mini">
+          <label class="mini">octave <select id="moct">
+            <option>1</option><option>2</option><option>3</option>
+            <option selected>4</option><option>5</option><option>6</option>
+          </select></label>
+          <button id="mpatadd" title="append an empty pattern">+ Pattern</button>
+          <button id="mpatclone" title="copy this pattern to a new one">Clone</button>
+        </div>
+        <div id="mrows" class="tracker"></div>
+        <div class="mini"><span id="mpatlog" class="dim"></span></div>
+        <small class="dim" style="display:block;max-width:34ch;margin:.5rem 0 1.2rem">
+          Type on the piano row to enter notes — <kbd>z</kbd>…<kbd>m</kbd> naturals,
+          <kbd>s</kbd><kbd>d</kbd><kbd>g</kbd> sharps, <kbd>q</kbd> up an octave.
+          <kbd>-</kbd> releases, <kbd>del</kbd> clears.
+        </small>
+      </section>
+
+      <section style="flex:1;min-width:24rem">
+        <h2>Instrument <select id="minst"></select>
+          <button id="minstadd" title="append an instrument">+</button>
+          <button id="minstdel" title="remove the last instrument">−</button>
+        </h2>
+        <div id="minstbody"></div>
+        <div class="mini"><span id="minstlog" class="dim"></span></div>
+      </section>
+    </div>
+
+    <section>
+      <h2>Samples</h2>
+      <p class="dim" style="max-width:60ch">Short effects only. One second of PCM is
+        16,000 bytes against a few hundred for a whole song, so the pipeline caps a sample
+        at 1.5&nbsp;s — anything sustained belongs in a pattern.</p>
+      <div id="msamples"></div>
+      <div class="mini">
+        <input id="msname" placeholder="name" size="10">
+        <select id="mswav"></select>
+        <button id="msadd">Add sample</button>
+      </div>
+      <div id="mslog" class="mini"></div>
+    </section>
+  </div>
+
+  <!-- Dialog. One blob for every conversation, because a resource read costs ~29us per
+       CALL regardless of size -- so the cost shown per entry is text, not overhead. -->
+  <div id="dialog" style="display:none;flex:1;overflow:auto;padding:1.25rem">
+    <section>
+      <h2>Dialog</h2>
+      <p class="dim" style="max-width:60ch">
+        One page per line. A page is one screenful — the engine does not scroll them.
+        Fonts with <code>charset = "auto"</code> rasterise exactly the characters used
+        here, so adding a word can add a glyph.
+      </p>
+      <div id="dialoglist"></div>
+      <div class="mini" style="margin-top:.8rem">
+        <button id="dlgnew">New conversation…</button>
+      </div>
+      <div id="dialoglog" class="mini"></div>
+    </section>
+  </div>
+
+  <!-- Scenes. The framework's only load point, and the unit the scene arena is sized
+       from -- so each row carries its own resident cost rather than leaving that to a
+       build. Everything listed here is held for the whole scene. -->
+  <div id="scenes" style="display:none;flex:1;overflow:auto;padding:1.25rem">
+    <section>
+      <h2>Scenes</h2>
+      <p class="dim" style="max-width:60ch">
+        A scene is the only thing the game can load. It names one map and whatever has to
+        be resident while that map is on screen. A map with no scene cannot be reached.
+      </p>
+      <div id="scenelist"></div>
+      <div class="mini" style="margin-top:.8rem">
+        <button id="scnew">New scene…</button>
+      </div>
+      <div id="scenelog" class="mini"></div>
+    </section>
+  </div>
+
+  <div id="fonts" style="display:none;flex:1;overflow:auto;padding:1.25rem">
+    <div class="fontgrid">
+      <div class="fontctl">
+        <section><h2>Typeface</h2>
+          <div class="fields col">
+            <label>Source<select id="fsrc"></select></label>
+            <label>Size px<input id="fsize" type="number" value="12" min="4" max="64"></label>
+            <label>Depth<select id="fdepth">
+              <option value="1">1bpp — crisp</option>
+              <option value="2">2bpp — antialiased</option>
+            </select></label>
+            <label>Threshold <b id="fthreshv">128</b>
+              <input id="fthresh" type="range" min="1" max="254" value="128"></label>
+            <label>Tracking<input id="ftrack" type="number" value="0" min="-8" max="8"></label>
+            <label>Charset<select id="fcharset">
+              <option value="auto">auto — from dialog</option>
+              <option value="ascii">ascii — all 95</option>
+            </select></label>
+            <label>Extra<input id="fextra" placeholder="0123456789/%"></label>
+          </div>
+          <small id="fnote">Threshold decides which greyscale samples become ink.
+            At small sizes it makes or breaks legibility — drag it and watch.</small>
+        </section>
+
+        <section><h2>Preview over</h2>
+          <div class="fields col">
+            <label>Background<select id="fbg">
+              <option value="solid">flat colour</option>
+              <option value="map">a real map</option>
+            </select></label>
+            <label id="fmapwrap">Map<select id="fmap"></select></label>
+            <label id="fscrollwrap">Scroll
+              <span class="pair"><input id="fsx" type="number" value="0" min="0" step="8">
+              <input id="fsy" type="number" value="0" min="0" step="8"></span></label>
+            <label>Clear<span class="swrow"><i id="fbgcsw"></i>
+              <select id="fbgc" class="sw"></select></span></label>
+            <label class="check"><input id="fbox" type="checkbox" checked> Text box</label>
+            <label id="fboxcwrap">Box fill<span class="swrow"><i id="fboxcsw"></i>
+              <select id="fboxc" class="sw"></select></span></label>
+            <label>Ink<span class="swrow"><i id="finksw"></i>
+              <select id="fink" class="sw"></select></span></label>
+            <label>Align<select id="falign">
+              <option value="left">left</option><option value="center">centre</option>
+              <option value="right">right</option>
+            </select></label>
+            <label>Zoom<select id="fscale">
+              <option value="1">1:1 — actual size</option>
+              <option value="2" selected>2x</option>
+              <option value="3">3x</option>
+              <option value="4">4x</option>
+            </select></label>
+          </div>
+        </section>
+
+        <section><h2>Text</h2>
+          <select id="fdlg"></select>
+          <textarea id="ftext" rows="3">The mines run deep, and the lamps went out weeks ago.</textarea>
+        </section>
+
+        <section><h2>Add to manifest</h2>
+          <div class="fields col">
+            <label>Name<input id="fname" placeholder="hud"></label>
+            <label>Licence<input id="flic" placeholder="SIL OFL 1.1"></label>
+          </div>
+          <small>Rasterised glyphs are redistribution even though the outlines stay
+            behind, so the licence is required rather than suggested. A system typeface
+            is copied into <code>art/fonts/</code> so the build works elsewhere.</small>
+          <button id="faddbtn" class="primary">Add font</button>
+        </section>
+
+        <!-- `add_font` had no counterpart, so a face imported to try it out could only be
+             taken out by hand. The TTF it was rasterised from is deliberately left on
+             disk. -->
+        <section><h2>Declared fonts</h2>
+          <div class="fields col">
+            <label>Font<select id="fdelsel"></select></label>
+          </div>
+          <button id="fdelbtn">Remove font</button>
+          <small id="fdellog">The TTF stays in <code>art/fonts/</code>.</small>
+        </section>
+      </div>
+
+      <div class="fontview">
+        <div class="plate wide"><h3 id="fscenetitle">On the watch — 200&times;228</h3>
+          <div id="fscenewrap"><img id="fscene" alt=""></div>
+          <small id="fscenenote">—</small>
+        </div>
+        <div id="fstats" class="stats"></div>
+        <div class="plate wide"><h3>Glyphs</h3><img id="fsheet" alt="">
+          <small id="fchars"></small></div>
+        <div class="plate wide"><h3>Declared</h3><div id="fdeclared"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sprites: a pixel editor that paints in ARGB2222.
+       Not trying to be Aseprite. It exists so that trying an idea does not require
+       installing something else first, and so the colours on screen are the device's
+       actual 64 rather than an approximation quantised later. -->
+  <div id="pixel" style="display:none;flex:1;overflow:auto;padding:1.25rem">
+    <div class="fontgrid">
+      <div class="fontctl">
+        <!-- Frames picked off a sheet. The declare form below can only describe a
+             vertical stack, which is the layout this engine's own examples happen to use
+             and not the one most sheets ship in — a run of poses across a row, several
+             rows to a character. Anything else meant writing the rectangles by hand. -->
+        <section><h2>From sheet</h2>
+          <!-- Bringing the file in. Every sheet list here is filled by walking the
+               project's art/ folder, and until this there was no way to put anything in
+               it from the editor -- importing a sprite sheet meant finding the project
+               directory in a file manager, which for the packaged editor is a folder the
+               user has never seen. -->
+          <div id="shdrop" class="drop">
+            <input id="shfile" type="file" accept="image/png" multiple hidden>
+            <button id="shpick">Import PNG…</button>
+            <span class="dim">or drop one here</span>
+          </div>
+          <small id="shimplog" class="dim"></small>
+          <div class="fields col">
+            <label>Sheet<select id="shsheet"></select></label>
+            <label>Frame w<input id="shfw" type="number" value="16" min="1" max="255"></label>
+            <label>Frame h<input id="shfh" type="number" value="24" min="1" max="255"></label>
+            <label>Origin x<input id="shox" type="number" value="0" min="0"
+              title="where the grid starts, for sheets with a border"></label>
+            <label>Origin y<input id="shoy" type="number" value="0" min="0"></label>
+            <label>Gap x<input id="shgx" type="number" value="0" min="0"
+              title="spacing between frames, for sheets drawn on a grid with gutters"></label>
+            <label>Gap y<input id="shgy" type="number" value="0" min="0"></label>
+          </div>
+          <div class="row" style="margin-top:.4rem">
+            <button id="shslice" class="primary">Slice</button>
+            <button id="shclear">Clear picks</button>
+          </div>
+          <small id="shlog">Click frames in the order the animation plays.</small>
+        </section>
+
+        <section><h2>Canvas</h2>
+          <div class="fields col">
+            <label>Width<input id="pxw" type="number" value="16" min="1" max="128"></label>
+            <label>Height<input id="pxh" type="number" value="24" min="1" max="128"></label>
+            <label>Frames<input id="pxframes" type="number" value="1" min="1" max="32"
+              title="stacked vertically, which is the layout the sprite importer expects"></label>
+            <label>Zoom<input id="pxzoom" type="range" min="2" max="24" value="12"></label>
+            <label class="check"><input id="pxgrid" type="checkbox" checked> Grid</label>
+          </div>
+          <small>A sheet is frames stacked vertically — the layout
+            <code>[[sprite]] frames</code> already expects.</small>
+        </section>
+
+        <section><h2>Tool</h2>
+          <div class="row">
+            <button id="toolpen" class="primary">Pencil</button>
+            <button id="toolfill">Fill</button>
+            <button id="toolpick">Pick</button>
+            <button id="toolerase">Erase</button>
+          </div>
+          <div class="row" style="margin-top:.4rem">
+            <button id="pxundo">Undo</button>
+            <button id="pxclear">Clear</button>
+          </div>
+        </section>
+
+        <section><h2>Colour</h2>
+          <div id="pxpal" class="pal"></div>
+          <small id="pxcur">—</small>
+        </section>
+
+        <section><h2>File</h2>
+          <div class="fields col">
+            <label>Open<select id="pxopen"><option value="">—</option></select></label>
+            <label>Save as<input id="pxname" placeholder="art/hero.png"></label>
+          </div>
+          <button id="pxsave" class="primary">Save PNG</button>
+          <small id="pxnote">Saved into the project, then importable as a sprite.</small>
+        </section>
+
+
+        <!-- The declaration half. Painting a PNG left the sprite undeclared, so nothing
+             could load it — the same dead end a map without a scene has. Frames come from
+             the picks above when there are any, and from the canvas size otherwise. -->
+        <section><h2>Declare</h2>
+          <div class="fields col">
+            <label>Sprite<select id="spsel"><option value="">— new —</option></select></label>
+            <label>Name<input id="spname" placeholder="hero" size="10"></label>
+            <label>Sheet<select id="spsheet"></select></label>
+            <label>Frame w<input id="spfw" type="number" value="16" min="1" max="255"></label>
+            <label>Frame h<input id="spfh" type="number" value="24" min="1" max="255"></label>
+            <label>Frames<input id="spn" type="number" value="1" min="1" max="64"
+              title="stacked vertically down the sheet"></label>
+            <label>Anim<input id="spanim" placeholder="stand,step_a,step_b" size="12"
+              title="one name per frame, in order — these become C identifiers"></label>
+            <!-- A 1-bit screen has no colour to tell a recolour by, so a sprite with
+                 variants does not preserve variant SELECTION on one at all -- there is
+                 exactly one 1-bit rendering, baked from whichever source this names (the
+                 base, if left on "— base —"). tools/pnx_assets.py's pack_sprite. -->
+            <label>BW variant<select id="spbw"
+              title="which source becomes this sprite's one 1-bit rendering"
+              ><option value="">— base —</option></select></label>
+          </div>
+          <div class="row" style="margin-top:.4rem">
+            <button id="spsave" class="primary">Save sprite</button>
+            <button id="spdel">Remove</button>
+          </div>
+          <small id="splog">—</small>
+
+          <!-- The declared sprite's OWN frames. Opening art used to mean going to the
+               sheet slicer and re-deriving, by hand, the frame geometry the manifest
+               already states -- and for a sprite whose frames are scattered rather than
+               stacked there was no slicer setting that could reproduce them at all.
+               These rects come from the declaration, so every layout opens alike. -->
+          <div id="spframes" class="cells" style="margin-top:.5rem"></div>
+          <small id="spframelog" class="dim">Pick a sprite to open its frames.</small>
+        </section>
+      </div>
+
+      <div class="fontview">
+        <!-- The sliced sheet. Clicking a cell picks it as the next frame; clicking a
+             picked one drops it and renumbers the rest, because the order IS the anim
+             index and a gap in it would be a frame nobody can name. -->
+        <div class="plate wide" id="shplate" style="display:none">
+          <h3>Sheet frames <small id="shcount" class="dim"></small></h3>
+          <div id="shgrid" class="tiles"></div>
+          <small class="dim">Click to pick in order · double-click a picked frame to
+            edit it on the canvas</small>
+        </div>
+        <div class="plate wide"><h3 id="pxtitle">Canvas</h3>
+          <div id="pxwrap"><canvas id="pxcv"></canvas></div>
+        </div>
+        <div class="plate wide"><h3>Actual size</h3>
+          <div id="px1wrap"><canvas id="pxcv1"></canvas></div>
+          <small>What the watch shows. If it does not read here, it will not read there.</small>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Code: a stub IDE. A file tree and an editor, sized so the tab exists and has the
+       right shape. When M8's Alloy scripting lands, .js joins the same tree through the
+       same endpoints -- which is why this is a file tree over the project rather than
+       anything C-specific. -->
+  <div id="code" style="display:none;flex:1;overflow:hidden;padding:0">
+    <div class="codegrid">
+      <aside class="codetree"><div id="codelist"></div></aside>
+      <div class="codemain">
+        <div class="codebar">
+          <b id="codepath">no file open</b>
+          <span id="codenote"></span>
+          <span style="flex:1"></span>
+          <span id="codedirty"></span>
+          <button id="codesave" class="primary" disabled>Save</button>
+        </div>
+        <div class="codeedit">
+          <!-- The classic overlay: a highlighted <pre> behind a transparent-text
+               <textarea>. Keeps real editing behaviour -- caret, selection, undo, IME --
+               which a contenteditable reimplementation would have to rebuild badly. -->
+          <div id="codescroll">
+            <pre id="codehl" aria-hidden="true"><code></code></pre>
+            <textarea id="codetext" spellcheck="false" wrap="off"
+              placeholder="Pick a file on the left."></textarea>
+          </div>
+        </div>
+        <div id="codediag"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings: configuration rather than authoring. The toolchain lives here because it
+       is a once-ever setup step -- as a peer to Maps and Fonts it carried the same visual
+       weight as the things you use every minute. -->
+  <div id="sdk" style="display:none;flex:1;overflow:auto;padding:1.5rem">
+    <div class="sdkwrap">
+      <!-- [project]. Readable everywhere and settable nowhere, which meant the appstore
+           budget the whole status bar measures against could not be changed from the
+           thing doing the measuring. -->
+      <div class="plate wide"><h3>Project</h3>
+        <div class="fields col">
+          <label>Name<input id="prname" size="18"></label>
+          <label>Budget bytes<input id="prbudget" type="number" min="1024"
+            max="1048576" step="1024"
+            title="the appstore cap is 262144; the device ceiling is 1048576"></label>
+          <label>Resources<input id="prres" size="18"></label>
+          <label>Header<input id="prhdr" size="24"></label>
+        </div>
+        <button id="prsave" class="primary">Save project</button>
+        <small id="prlog">The appstore rejects bundles over 262,144 B. The device's own
+          ceiling is 1,048,576 B — shipping is the constraint that binds. Changing
+          Resources or Header relocates build output; the blobs already written stay
+          where they are.</small>
+      </div>
+      <!-- Updates. The editor is a file someone downloaded once; without this, a fix
+           reaches them only if they think to check a releases page they may never have
+           seen. Three steps with the user between each, deliberately: this binary carries
+           the engine their project compiles against, so an upgrade is a decision. -->
+      <div class="plate wide"><h3>Version</h3>
+        <div id="updinfo">—</div>
+        <div class="row" style="margin-top:.7rem">
+          <button id="updcheck">Check for updates</button>
+          <button id="upddl" class="primary" style="display:none">Download</button>
+          <button id="updapply" class="primary" style="display:none">Install &amp; Restart</button>
+          <button id="updnotes" style="display:none">Release notes</button>
+        </div>
+        <div id="updbar" class="meter" style="display:none;margin-top:.6rem">
+          <i id="updfill"></i></div>
+        <pre id="updbody" style="display:none"></pre>
+      </div>
+      <div class="plate wide"><h3>Project</h3>
+        <div id="projinfo">—</div>
+        <div class="row" style="margin-top:.7rem">
+          <button id="projopen">Open a folder…</button>
+          <button id="projnew">New project…</button>
+          <button id="projadopt" style="display:none">Add a .pknproj</button>
+        </div>
+        <div id="recentwrap" style="margin-top:.7rem">
+          <small>Recent</small><div id="recent"></div>
+        </div>
+      </div>
+
+      <!-- Folder picker. Server-side listing rather than a native dialog, because a
+           frozen app cannot count on one being available and a browser tab never has
+           one. Shown only while picking. -->
+      <div id="picker" class="plate wide" style="display:none">
+        <h3 id="pickertitle">Open a project</h3>
+        <div class="row" style="margin-bottom:.5rem">
+          <input id="pickerpath" style="flex:1;min-width:14rem" placeholder="path">
+          <button id="pickerup">Up</button>
+          <button id="pickergo">Go</button>
+        </div>
+        <div id="pickerlist"></div>
+        <div id="newfields" style="display:none;margin-top:.7rem">
+          <div class="fields col">
+            <label>Name<input id="newname" placeholder="My Game"></label>
+            <label>Folder<input id="newfolder" placeholder="my-game"></label>
+            <label>Author<input id="newauthor" placeholder=""></label>
+          </div>
+        </div>
+        <div class="row" style="margin-top:.7rem">
+          <button id="pickerok" class="primary">Open this folder</button>
+          <button id="pickercancel">Cancel</button>
+        </div>
+        <small id="pickernote"></small>
+      </div>
+
+      <div class="plate wide"><h3>Engine</h3>
+        <div id="engstate"></div>
+        <p class="prose" id="engprose"></p>
+        <label class="check accept"><input id="engown" type="checkbox">
+          I am a developer, I know what I am doing, and I accept responsibility for
+          modifying engine code</label>
+        <div class="row">
+          <button id="engresync" style="display:none">Discard changes and re-track</button>
+        </div>
+      </div>
+
+      <div id="sdkstate" class="plate wide"><h3>Toolchain status</h3>
+        <div id="sdkstatus">—</div></div>
+
+      <div class="plate wide"><h3>The Pebble SDK</h3>
+        <p class="prose">Authoring, previewing, validating and budgeting all work with
+        nothing installed. Producing a <code>.pbw</code> needs the Pebble SDK — about
+        767&nbsp;MB, and it carries its own ARM toolchain, so it is one install rather
+        than two.</p>
+        <p class="prose"><b>The editor does not ship the SDK and does not download it
+        directly.</b> Pebble licenses it to <em>you</em>, and the terms are explicit that
+        the licence is non-transferable and that the SDK may not be redistributed. So this
+        button drives Pebble&rsquo;s own <code>pebble</code> tool: the files go from
+        Pebble to your machine, exactly as if you had run it yourself.</p>
+
+        <div id="sdkterms" class="terms"></div>
+        <label class="check accept"><input id="sdkaccept" type="checkbox">
+          I have read and accept these terms</label>
+        <div class="row">
+          <button id="sdkinstall" class="primary" disabled>Install the SDK</button>
+          <button id="sdkrefresh">Check for updates</button>
+        </div>
+      </div>
+
+      <div class="plate wide"><h3>Output</h3><pre id="sdklog">—</pre></div>
+    </div>
+  </div>
+
+  <!-- The emulator panel E3 planned and marked SUPERSEDED (docs/EDITOR.md): it assumed
+       a QEMU target for the platform this framework built for, and none existed. M9
+       made every platform a real `pebble build` target, and the SDK installed here
+       ships a QEMU image for all seven of them, not the four EDITOR.md found when it
+       was written -- so this is offered for any platform and `pebble` says so if one
+       is actually missing, the same way any other build failure is reported. The
+       screen is QEMU's own monitor `screendump`, polled -- not VNC, not noVNC. -->
+  <div id="device" style="display:none;flex:1;overflow:auto;padding:1.5rem">
+    <div class="sdkwrap">
+      <div class="plate wide"><h3>Emulator</h3>
+        <p class="prose">Builds this project for one platform and installs it into
+          <code>pebble</code>'s own emulator, baked for whichever orientation this
+          project is currently set to (see Settings) -- the same asset build the Build
+          button runs, so what you see here is what the resource budget is measured
+          against, not a separate copy of it.</p>
+        <div class="row">
+          <select id="emuplatform"></select>
+          <button id="emustart" class="primary">Build &amp; run</button>
+          <button id="emustop">Stop</button>
+        </div>
+        <label class="check" style="margin-top:.5rem">
+          <input id="emulock" type="checkbox">
+          Force backlight + BACK-lock on (PNX_FORCE_SCREEN_LOCK)</label>
+        <small>A build knob, not a project setting -- <code>pnx_config.h</code>'s own
+          screen-lock, engaged from startup instead of waiting for game code to call
+          it. Off the wrist there is no ambient light and no wrist to glance at, so a
+          real timeout just looks like a hang; this is saved into the manifest (so it
+          survives a reload) but only ever reaches a build through THIS panel's own
+          <code>pebble build</code> call, never a shipped one. Takes effect on the next
+          Build &amp; run / Rebuild.</small>
+        <small id="emunote">—</small>
+      </div>
+
+      <!-- BACK alone on the left, UP/SELECT/DOWN stacked on the right -- the physical
+           layout every Pebble has, CloudPebble's emulator included. Fixed regardless of
+           this project's orientation: the screendump is the raw device framebuffer, and
+           the buttons are hardware that never moves -- pnx_input remaps what pressing
+           one MEANS to the game, not where it sits on the case. -->
+      <div class="plate wide" id="emuscreenwrap" style="display:none">
+        <h3>Screen</h3>
+        <div class="emubezel" tabindex="0">
+          <button id="emuback" class="emubtn emuback" data-btn="back" title="Back -- Backspace">BACK</button>
+          <img id="emuscreen" alt="emulator screen">
+          <div class="emucluster">
+            <button id="emuup" class="emubtn" data-btn="up" title="Up -- ↑">UP</button>
+            <button id="emuselect" class="emubtn" data-btn="select" title="Select -- Enter or →">SEL</button>
+            <button id="emudown" class="emubtn" data-btn="down" title="Down -- ↓">DOWN</button>
+          </div>
+        </div>
+        <small>Press and hold, on screen or with ↑/↓/Enter/Backspace while this
+          panel has focus -- a real hold, not a canned click, so <code>pnx_input_held_ms</code>
+          sees the same thing a real hand would. No touchscreen input: <code>pebble-tool</code>'s
+          QEMU bridge has no touch message in its wire protocol (checked against
+          <code>libpebble2</code>'s own protocol union) -- only buttons, so <code>emery</code>
+          and <code>gabbro</code> can be run here but not tapped.</small>
+      </div>
+
+      <div class="plate wide"><h3>Output</h3><pre id="emulog">—</pre></div>
+    </div>
+  </div>
+</main>
+
+  <!-- Output. One shared panel rather than a box inside each activity: a build result
+       is not a property of the tab you happened to be on when you pressed Build. -->
+  <section id="outpanel">
+    <div class="outbar">
+      <b>Output</b><span id="outhint"></span>
+      <div style="flex:1"></div>
+      <button id="outtoggle">Hide</button>
+    </div>
+    <pre id="log">Ready.</pre>
+  </section>
+
+  <footer id="statusbar">
+    <span id="stproject">—</span>
+    <span id="stengine"></span>
+    <span id="stbudget"></span>
+    <div style="flex:1"></div>
+    <span id="stsdk"></span>
+  </footer>
+</div>
+
+<!-- The tile picker.
+     Painting used to be limited to the legend, and the legend to whatever `autopick`
+     named -- three tiles of an atlas that may hold two hundred. This is where the other
+     hundred and ninety-seven become reachable: every tile of every tileset the map uses,
+     and clicking one binds it to a legend character on the spot. Bigger than a sidebar
+     can hold, hence the overlay. -->
+<div id="pickwrap" class="overlay" style="display:none">
+  <div class="sheet">
+    <header>
+      <b>Tiles</b>
+      <span id="pickhint" class="dim"></span>
+      <div style="flex:1"></div>
+      <label class="mini"><input id="pickflipx" type="checkbox"> flip X</label>
+      <label class="mini"><input id="pickflipy" type="checkbox"> flip Y</label>
+      <button id="pickclose">Close</button>
+    </header>
+    <div id="pickbody"></div>
+  </div>
+</div>
+
+<!-- Which tilesets this map draws from, and in what order -- the order is not cosmetic,
+     it fixes the map's tile id space. -->
+<div id="setwrap" class="overlay" style="display:none">
+  <div class="sheet narrow">
+    <header>
+      <b>Tilesets</b>
+      <div style="flex:1"></div>
+      <button id="setclose">Close</button>
+    </header>
+    <div id="setbody"></div>
+    <footer class="dim" id="setnote"></footer>
+  </div>
+</div>
+<script src="/static/js/app.js"></script>
+<script src="/static/js/atlas.js"></script>
+</body></html>
