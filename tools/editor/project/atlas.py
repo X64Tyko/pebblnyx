@@ -207,11 +207,16 @@ class AtlasMixin:
         proposes a split by luminance [and] the editor lets you flip individual entries
         against a live 1-bit preview" -- the slider half of that sentence. Per-entry
         flipping is not built; every colour in the carve answers to the one threshold.
+
+        `unique` is resolved through a real pa.pack_atlas call, the same way slice_grid's
+        `packed` is (see that docstring), rather than a second, cheaper dedup pass here --
+        pack_atlas is mirror- AND rotation-aware, and a hand-rolled exact-match-only loop
+        priced a carve as bigger than the build it was pricing actually turns out to be,
+        which is a quote nobody can act on.
         """
         from PIL import Image
         path = os.path.join(self.root, rel)
         im = Image.open(path).convert("RGBA")
-        px = im.load()
         W, H = im.size
         rx, ry, rw, rh = region
         ox, oy = (int(v) for v in offset)
@@ -219,26 +224,20 @@ class AtlasMixin:
         rw = max(1, min(rw, (W - ox) // tile - rx))
         rh = max(1, min(rh, (H - oy) // tile - ry))
 
-        excluded = {int(e) for e in exclude}
-        unique, seen, empty, repaired = [], set(), 0, 0
-        for ty in range(ry, ry + rh):
-            for tx in range(rx, rx + rw):
-                # Same order and the same exclusion rule pack_atlas uses, so the price
-                # quoted here is the price the build charges.
-                if ((ty - ry) * rw + (tx - rx)) in excluded:
-                    continue
-                buf = tuple(pa.to_gcolor8(px[ox + tx * tile + i, oy + ty * tile + j], colorkey)
-                            for j in range(tile) for i in range(tile))
-                if not any(buf):
-                    empty += 1
-                    continue
-                if buf in seen or len(unique) >= max_tiles:
-                    continue
-                seen.add(buf)
-                fixed, merged = pa.reduce_colours(buf)
-                if merged:
-                    repaired += 1
-                unique.append(fixed)
+        spec = {"name": "_analyse", "sheet": rel, "tile": int(tile),
+                "region": [rx, ry, rw, rh], "max_tiles": int(max_tiles),
+                "out": "_analyse.bin", "exclude": list(exclude), "offset": [ox, oy]}
+        if colorkey:
+            spec["colorkey"] = list(colorkey)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                packed = pa.pack_atlas(self.root, spec, self.orientation)
+            unique, empty, repaired = packed["tiles"], packed["empty"], packed["repaired"]
+        except pa.BuildError:
+            # An in-progress region (too small, all excluded, past the sheet) prices as
+            # empty rather than failing the endpoint -- the page is still being typed
+            # into, and a 500 mid-keystroke is worse than a price of zero.
+            unique, empty, repaired = [], 0, 0
 
         sets = [frozenset(c for c in t if c) for t in unique]
         pals = pa.merge_palettes(sets)[0] if sets else []

@@ -38,7 +38,8 @@ class MapsMixin:
         return {ch: {"tile": e["tile"], "flags": e.get("flags", []),
                      "atlas": e.get("atlas"),
                      "flip": ([e["flip"]] if isinstance(e.get("flip"), str)
-                              else list(e.get("flip", [])))}
+                              else list(e.get("flip", []))),
+                     "rotate": bool(e.get("rotate", False))}
                 for ch, e in raw.items()}
 
     def map_doc(self, m):
@@ -85,17 +86,20 @@ class MapsMixin:
                     if key not in seen:
                         seen[key] = len(tiles)
                         tiles.append({"atlas": default, "index": 0, "flip": "",
+                                      "rotate": False,
                                       "flags": 0, "ch": ch, "missing": True})
                     cells.append(seen[key])
                     continue
                 flip = e.get("flip", [])
                 flip = [flip] if isinstance(flip, str) else list(flip)
+                rotate = bool(e.get("rotate", False))
                 key = (ch,)
                 if key not in seen:
                     seen[key] = len(tiles)
                     tiles.append({"atlas": e.get("atlas") or default,
                                   "index": e["tile"],
                                   "flip": "".join(sorted(flip)),
+                                  "rotate": rotate,
                                   "flags": self._flag_byte(e.get("flags", [])),
                                   "flag_names": list(e.get("flags", [])),
                                   "ch": ch})
@@ -219,7 +223,8 @@ class MapsMixin:
                 return lines, i, end
         return None
 
-    def _legend_lines(self, ch, tile, atlas=None, flags=(), flip=(), map_name=None):
+    def _legend_lines(self, ch, tile, atlas=None, flags=(), flip=(), rotate=False,
+                      map_name=None):
         head = "map.legend" if map_name else "legend"
         body = [f"[{head}.{self._toml_key(ch)}]"]
         # An int is a raw index into the atlas, a string is a role it defines. Both are
@@ -231,9 +236,12 @@ class MapsMixin:
         body.append("flags = [" + ", ".join(f'"{f}"' for f in flags) + "]")
         if flip:
             body.append("flip = [" + ", ".join(f'"{a}"' for a in flip) + "]")
+        if rotate:
+            body.append("rotate = true")
         return body
 
-    def save_legend(self, ch, tile, atlas=None, flags=(), flip=(), map_name=None):
+    def save_legend(self, ch, tile, atlas=None, flags=(), flip=(), rotate=False,
+                    map_name=None):
         """Create or rewrite one legend character, validating it the way the build will.
 
         Checked here rather than only in the page, because a legend entry that does not
@@ -266,14 +274,14 @@ class MapsMixin:
         names = [a.get("name") for a in self.man.get("atlas", [])]
         if atlas and atlas not in names:
             raise ValueError(f"no atlas named {atlas!r}")
-        if flip:
+        if flip or rotate:
             which = atlas or (names[0] if names else None)
             built = next((a for a in self.atlases() if a["name"] == which), None)
             if built and built["metatiled"]:
                 raise ValueError(
-                    f"atlas {which!r} is metatiled, and the runtime does not flip a "
-                    f"composed tile -- it would draw unmirrored. Set `metatiles = false` "
-                    f"on that atlas to paint it flipped.")
+                    f"atlas {which!r} is metatiled, and the runtime does not flip or "
+                    f"rotate a composed tile -- it would draw unmirrored and unrotated. "
+                    f"Set `metatiles = false` on that atlas to paint it that way.")
 
         if isinstance(tile, int):
             which = atlas or (names[0] if names else None)
@@ -302,7 +310,7 @@ class MapsMixin:
             while end - gap > start and lines[end - gap - 1].strip() == "":
                 gap += 1
             lines[start:end] = (
-                self._legend_lines(ch, tile, atlas, flags, flip, map_name) + [""] * gap)
+                self._legend_lines(ch, tile, atlas, flags, flip, rotate, map_name) + [""] * gap)
             with open(self.path, "w") as f:
                 f.write("\n".join(lines))
         elif map_name:
@@ -311,7 +319,7 @@ class MapsMixin:
             # rest of the map's own keys inside `[map.legend]` and the build would fail
             # complaining that the map has no rows.
             lines, mstart, mend = self._map_block(map_name)
-            new = self._legend_lines(ch, tile, atlas, flags, flip, map_name)
+            new = self._legend_lines(ch, tile, atlas, flags, flip, rotate, map_name)
             at = mend
             while at > mstart and lines[at - 1].strip() == "":
                 at -= 1
@@ -325,7 +333,7 @@ class MapsMixin:
             lines = open(self.path).read().split("\n")
             last = max((i for i, l in enumerate(lines)
                         if l.strip().startswith("[legend.")), default=None)
-            new = self._legend_lines(ch, tile, atlas, flags, flip)
+            new = self._legend_lines(ch, tile, atlas, flags, flip, rotate)
             if last is None:
                 lines = lines + [""] + new
             else:

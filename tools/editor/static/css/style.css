@@ -295,16 +295,28 @@ kbd{font:11px ui-monospace,monospace;background:var(--soft);color:var(--accent);
    both the grid and its columns is load-bearing: a grid/flex item defaults to
    `min-height:auto`, which lets a tall child (the slice grid, a big sheet) push the
    column past the viewport instead of scrolling inside it. */
-.atlasgrid{display:grid;grid-template-columns:280px 1fr 340px;gap:1rem;height:100%;
-  min-height:0}
+.atlasgrid{display:grid;
+  grid-template-columns:var(--atlas-w1,280px) 10px 1fr 10px var(--atlas-w2,340px);
+  height:100%;min-height:0}
 .atlasgrid>section{min-height:0}
 .atlas-tiles{display:flex;flex-direction:column}
 .atlas-tiles #tileeditor{margin-top:.7rem}
+/* The gutters that replaced the old fixed 1rem gap. Full-height and 10px wide so
+   they're an easy grab target, with just a 2px line drawn down the middle so they don't
+   read as a fourth pane. Widths live in --atlas-w1/2 on :root, dragged in atlas.js and
+   persisted to localStorage, clamped there to the same 180-640px this depends on being
+   sane for. */
+.gutter{position:relative;cursor:col-resize;min-height:0}
+.gutter::after{content:"";position:absolute;top:0;bottom:0;left:50%;width:2px;
+  margin-left:-1px;background:var(--line);border-radius:1px}
+.gutter:hover::after,.gutter.dragging::after{background:var(--accent)}
 /* Under ~1100px the three columns no longer fit side by side without each one going
    too narrow to use -- falls back to the old stacked-column behaviour rather than
-   squeezing three panes into no room. */
+   squeezing three panes into no room. The gutters have nothing to resize once the
+   columns are gone. */
 @media (max-width: 1100px){
-  .atlasgrid{display:flex;flex-direction:column;height:auto}
+  .atlasgrid{display:flex;flex-direction:column;height:auto;gap:1rem}
+  .gutter{display:none}
 }
 .fields{display:flex;flex-wrap:wrap;gap:.6rem;align-items:flex-end}
 /* The settings pane is 280px wide -- too narrow for .fields' normal wrap-in-a-row
@@ -421,6 +433,10 @@ select.sw{font:11px ui-monospace,monospace}
 #slice .empty{border-color:transparent;opacity:.25}
 #slice .off{border-color:var(--bad);opacity:.3;filter:grayscale(1)}
 #slice button:hover{border-color:var(--accent)}
+/* The cell that packed into whichever tile is open in the editor below -- an outline
+   layered on top of the state border rather than replacing it, so "unique" and
+   "selected" both stay visible on the one cell that is ever both at once. */
+#slice .sel{outline:2px solid var(--accent);outline-offset:1px}
 #slnote{font-size:.72rem;color:var(--dim)}
 
 /* The import target. A dashed well rather than a bare button because it is also a drop

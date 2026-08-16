@@ -497,11 +497,13 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
     1560KB, past even the 1MB device ceiling. Region selection plus dedup brings it into
     range; compression alone would not, because resources are stored already packed.
 
-    Tiles are rotated as they are carved, BEFORE dedup, so that everything below this
-    line -- the mirror keys, the flip bits a map entry carries, the metatile quadrants --
-    describes the framebuffer's frame rather than the author's. Rotating afterwards would
-    leave a flip_x pair recorded for what is now a vertical mirror, which nothing would
-    notice until a tile picker started emitting those bits.
+    Tiles are rotated (`orient`, the whole-sheet device-orientation turn, not the
+    per-tile transpose dedup below) as they are carved, BEFORE dedup, so that everything
+    below this line -- the mirror/rotation keys, the flip and MAP_ROTATE bits a map entry
+    carries, the metatile quadrants -- describes the framebuffer's frame rather than the
+    author's. Doing it afterwards would leave a flip_x pair recorded for what is now a
+    vertical mirror, which nothing would notice until a tile picker started emitting
+    those bits.
     """
     name = spec["name"]
     im = load_sheet(root, spec["sheet"])
@@ -559,10 +561,26 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
     def flip_y(b):
         return b"".join(bytes(b[(T - 1 - j) * T:(T - j) * T]) for j in range(T))
 
-    # Mirror-aware dedup. A tile that is the horizontal, vertical or 180-degree mirror of
-    # one already kept does not need its own copy -- the map entry carries two flip bits
-    # and the blitter reads the source backwards. Symmetric art is common enough that this
-    # is the cheapest tile saving available: two bits against 128 bytes at 4bpp 16x16.
+    # Swap rows and columns -- the same transpose PNX_MAP_ROTATE names (pnx_gfx.c's
+    # pnx_blit_4bpp, PNX_FLIP_ROTATE) and pnx_assets.h's MAP_ROTATE comment enumerates.
+    # Only ever applied to a square tile, same as the blitter.
+    def transpose(b):
+        return bytes(b[c * T + r] for r in range(T) for c in range(T))
+
+    # Mirror- AND rotation-aware dedup. A tile that is a mirror OR a transpose of one
+    # already kept does not need its own copy -- the map entry carries the flip bits plus
+    # MAP_ROTATE, and the blitter reads the source transposed and/or backwards. Together
+    # {rotate, flip_x, flip_y} span all 8 symmetries of a square (see MAP_ROTATE's own
+    # comment above), so this is the full saving available, not just the mirror half of it.
+    #
+    # IMPORTANT: once rotate is involved, flip_x/flip_y do not compose onto the transposed
+    # buffer the naive way. pnx_gfx.c's rotate path computes the destination's source
+    # column from the destination ROW (gated by FLIP_X) and its source row from the
+    # destination COLUMN (gated by FLIP_Y) -- which, worked through, means engine bit
+    # FLIP_X after a transpose is this module's flip_y, and engine bit FLIP_Y after a
+    # transpose is this module's flip_x. Getting this backwards would dedup a tile against
+    # an orientation the watch never actually draws, which is a silent art bug, not a
+    # crash -- so the swap below is deliberate, not a typo.
     unique, seen, empty, mirrored = [], {}, 0, 0
     origin = []          # sheet position each unique tile was first seen at
     for ty in range(ry, ry + rh):
@@ -588,11 +606,17 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
             unique.append(key)
             origin.append((tx, ty))
             # The true orientation is registered first so it always wins a later exact
-            # match; mirrors only claim keys nothing else has taken.
+            # match; mirrors and rotations only claim keys nothing else has taken.
             seen[key] = (idx, 0)
+            tkey = transpose(key)
             for variant, bits in ((flip_x(key), 1),
                                   (flip_y(key), 2),
-                                  (flip_x(flip_y(key)), 3)):
+                                  (flip_x(flip_y(key)), 3),
+                                  (tkey, 4),
+                                  # Swapped deliberately -- see the comment above transpose().
+                                  (flip_y(tkey), 5),
+                                  (flip_x(tkey), 6),
+                                  (flip_x(flip_y(tkey)), 7)):
                 if variant not in seen:
                     seen[variant] = (idx, bits)
 
@@ -657,8 +681,8 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
         print(f"    palette variant {v['name']}: {len(v['map'])} colours remapped")
     if mirrored:
         saved = mirrored * (T * T // 2)
-        print(f"    {mirrored} tile(s) matched a mirror of another and were dropped "
-              f"({saved} bytes saved)")
+        print(f"    {mirrored} tile(s) matched a mirror or rotation of another and were "
+              f"dropped ({saved} bytes saved)")
     if repaired:
         print(f"    NOTE {repaired} tile(s) exceeded {PALETTE_USABLE} colours and were "
               f"reduced -- edit the art to avoid this")
@@ -674,7 +698,11 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
             # by the build; the editor uses it to resolve a raw sheet cell back to the
             # packed index it became, which is what makes a carved tile editable by name
             # rather than only by number.
-            "origin": origin}
+            "origin": origin,
+            # Empty and mirror/rotation counts, not just printed: the editor's `analyse()`
+            # prices a carve by calling this function directly (rather than re-implementing
+            # dedup a second time) and needs both numbers for its own stats.
+            "empty": empty, "mirrored": mirrored}
 
 
 def build_metatiles(tiles, pal_of, T, quiet=False):

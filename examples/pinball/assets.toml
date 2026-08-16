@@ -16,3 +16,72 @@ orientation = "buttons_left"
 # see ../README.md). This just makes the editor's Device panel/emulator launch agree
 # with what the app already does on its own, rather than fighting it during testing.
 force_screen_lock = true
+
+
+[[atlas]]
+name = "board"
+sheet = "Reference/Game Boy _ GBC - Pokemon Pinball - Tables & Special Stages - Blue Table.png"
+tile = 16
+# In TILE units, not pixels.
+region = [0, 1, 12, 18]
+# Where the tile GRID starts, in PIXELS -- separate from `region`'s tile units, for a sheet whose art does not begin flush with the sheet's own corner.
+offset = [8, 8]
+max_tiles = 640
+out = "board.bin"
+
+metatiles = "auto"
+# Roles the legend can name. Autopicked so the atlas is usable the moment it is
+# imported; replace with an explicit [atlas.semantic] table once you know which tiles
+# you want, and no map or game code changes.
+autopick = ["floor", "wall", "accent"]
+
+# Collision is a property of the tile, not of where a map paints it -- see
+# [[atlas.collision]] in any built example. "wall" solid by default so a freshly
+# imported atlas is usable the moment it lands, same as the roles above.
+[[atlas.collision]]
+tile = "wall"
+type = "solid"
+
+[[atlas.collision]]
+tile = 29
+type = "complex"
+mask = """
+############....
+#############...
+##############..
+################
+################
+################
+################
+################
+.###############
+..##############
+..##############
+...#############
+....############
+.....###########
+......##########
+#......#########
+"""
+
+[[atlas.collision]]
+tile = 30
+type = "complex"
+mask = """
+##..........####
+##..#.......####
+##..#........###
+###..........###
+####..........##
+#####..........#
+#####..........#
+######..........
+######..........
+########........
+#########.......
+#########.......
+##########......
+##########......
+###########.#...
+###########.....
+"""

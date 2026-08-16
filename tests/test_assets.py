@@ -367,6 +367,114 @@ def check_colorkey():
     ''')
 
 
+def check_atlas_rotation_dedup():
+    """pack_atlas drops a tile that is a 90/270-degree rotation or diagonal flip of one
+    already kept, not just the 4 plain mirrors -- and does so using the EXACT bit
+    semantics pnx_gfx.c's pnx_blit_4bpp applies for PNX_FLIP_ROTATE, not a naive
+    transpose-then-flip.
+
+    Getting the bit correspondence backwards would dedup a tile against an orientation
+    the watch never actually draws on that MAP_ROTATE bit -- wrong art on the device, not
+    a crash, so this reconstructs the engine's own pixel math (transcribed from
+    pnx_gfx.c's rotate branch) rather than reusing pack_atlas's own private transpose/
+    flip_x/flip_y helpers, and checks the two agree independently.
+    """
+    T = 16
+
+    def engine_blit(src, bits):
+        """The buffer pnx_blit_4bpp sources from for this bits value (PNX_FLIP_X=1,
+        PNX_FLIP_Y=2, PNX_FLIP_ROTATE=4), transcribed index-for-index from its rotate
+        branch in src/pnx/gfx/pnx_gfx.c."""
+        rotate, fx, fy = bool(bits & 4), bool(bits & 1), bool(bits & 2)
+        out = bytearray(T * T)
+        for j in range(T):        # destination row
+            for i in range(T):    # destination col
+                if rotate:
+                    sx_col = (T - 1 - j) if fx else j
+                    sy_row = (T - 1 - i) if fy else i
+                else:
+                    sx_col = (T - 1 - i) if fx else i
+                    sy_row = (T - 1 - j) if fy else j
+                out[j * T + i] = src[sy_row * T + sx_col]
+        return bytes(out)
+
+    with tempfile.TemporaryDirectory() as root:
+        # An asymmetric base tile -- no two of its 8 symmetries are pixel-identical -- so
+        # a dedup that confused one orientation for another shows up as extra kept tiles,
+        # not silently passes. Values are indices into a 15-entry, pairwise GColor8-distinct
+        # palette (never all-zero, so no tile reads as empty).
+        levels = [(r, g, b) for r in range(4) for g in range(4) for b in range(4)
+                  if (r, g, b) != (0, 0, 0)][:15]
+        pal = {v: tuple(L * 85 for L in levels[v - 1]) for v in range(1, 16)}
+        base = bytes(((i * 7 + j * 13 + 1) % 15 + 1) for j in range(T) for i in range(T))
+
+        variants = [base] + [engine_blit(base, bits) for bits in range(1, 8)]
+        check("test fixture is fully asymmetric under all 8 symmetries",
+              len(set(variants)) == 8)
+
+        sheet = os.path.join(root, "sheet.png")
+        img = Image.new("RGBA", (T * 8, T), (0, 0, 0, 255))
+        px = img.load()
+        for n, v in enumerate(variants):
+            for j in range(T):
+                for i in range(T):
+                    px[n * T + i, j] = pal[v[j * T + i]] + (255,)
+        img.save(sheet)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            atlas = pnx_assets.pack_atlas(
+                root, {"name": "r", "sheet": "sheet.png", "tile": T,
+                       "region": [0, 0, 8, 1], "max_tiles": 16, "out": "r.bin"},
+                pnx_assets.ORIENT_BUTTONS_RIGHT)
+
+        check("all 8 symmetries of one tile collapse to 1 unique tile",
+              len(atlas["tiles"]) == 1)
+        check("pack_atlas counted 7 mirror/rotation matches",
+              atlas["mirrored"] == 7)
+
+    # And the false-positive side: two tiles that are NOT related by any of the 8
+    # symmetries must both survive. A dedup broad enough to catch real rotations but also
+    # loose enough to catch unrelated art would just be a different bug wearing the fix's
+    # clothes.
+    with tempfile.TemporaryDirectory() as root:
+        sheet = os.path.join(root, "sheet.png")
+        make_sheet(sheet, tiles_across=2)   # 4 tiles, none a symmetry of another
+        with contextlib.redirect_stdout(io.StringIO()):
+            atlas = pnx_assets.pack_atlas(
+                root, {"name": "r", "sheet": "sheet.png", "tile": 16,
+                       "region": [0, 0, 2, 2], "max_tiles": 16, "out": "r.bin"},
+                pnx_assets.ORIENT_BUTTONS_RIGHT)
+        check("unrelated tiles are not merged by the rotation dedup",
+              len(atlas["tiles"]) == 4 and atlas["mirrored"] == 0)
+
+
+def check_editor_analyse_dedup():
+    """The Import tab's live price (Project.analyse) must agree with what pack_atlas will
+    actually build -- a mirror the pipeline collapses away for free must not be priced as
+    a second tile just because analyse() used to run its own, cheaper, exact-match-only
+    dedup that could not see mirrors or rotations at all.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        sheet = os.path.join(root, "sheet.png")
+        T = 16
+        img = Image.new("RGBA", (T * 2, T * 2), (0, 0, 0, 255))
+        px = img.load()
+        for j in range(T):
+            for i in range(T):
+                v = 40 + (i * 3 + j * 5) % 180
+                px[i, j] = (v, v, v, 255)                     # tile (0,0)
+                px[T + (T - 1 - i), j] = (v, v, v, 255)       # tile (1,0): its own mirror
+        make_sheet(sheet)   # fills (0,1)/(1,1) with the default fixture's distinct tiles
+        img2 = Image.open(sheet).convert("RGBA")
+        img2.paste(img.crop((0, 0, T * 2, T)), (0, 0))
+        img2.save(sheet)
+
+        proj = editor_project(root)
+        r = proj.analyse("sheet.png", 16, [0, 0, 2, 1], 16, None)
+        check("a mirrored tile prices as the one tile pack_atlas will actually keep",
+              r["unique"] == 1)
+
+
 def check_orientation():
     """One manifest, four orientations, compared against each other."""
     with tempfile.TemporaryDirectory() as root:
@@ -2811,6 +2919,8 @@ def main():
     # it has been comparing against is the one the rest of these tests describe.
     check_orientation()
     check_colorkey()
+    check_atlas_rotation_dedup()
+    check_editor_analyse_dedup()
 
     # --- map geometry
     expect_fail("ragged rows", "ragged", **maps('''

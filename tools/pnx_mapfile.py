@@ -273,7 +273,8 @@ def from_rows(rows, legend, flag_names, default_atlas):
             if key not in seen:
                 seen[key] = len(tiles)
                 tiles.append({"atlas": key[2], "index": tile, "flags": flags,
-                              "flip": ("x" if flip & 1 else "") + ("y" if flip & 2 else "")})
+                              "flip": ("x" if flip & 1 else "") + ("y" if flip & 2 else ""),
+                              "rotate": bool(flip & 4)})
             cells.append(seen[key])
     return {"w": w, "h": h, "tiles": tiles, "cells": cells}
 

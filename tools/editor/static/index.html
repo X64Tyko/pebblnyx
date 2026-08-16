@@ -258,6 +258,10 @@
         <div id="stats" class="stats"></div>
       </section>
 
+      <!-- Drag to resize the pane on either side. Widths persist (see the bottom of
+           atlas.js) so a layout you set up for the tile editor stays put next reload. -->
+      <div class="gutter" id="gutter1" title="drag to resize"></div>
+
       <!-- The region, drawn ON the sheet. Four numbers in tile units are hard to hold in
            your head against a picture; a box over the art is not -- and the numbers that
            draw the box sit right above the picture they draw it on, not in a form
@@ -282,6 +286,8 @@
         <div id="sheetwrap"><img id="sheetimg" alt=""><i id="cropbox"></i></div>
         <small id="cropnote">—</small>
       </section>
+
+      <div class="gutter" id="gutter2" title="drag to resize"></div>
 
       <!-- The tiles a carve keeps, and -- once one is picked -- the tile editor, docked
            to the bottom of this same pane. Sheet and slice grid stay visible in the
@@ -1072,6 +1078,7 @@
       <div style="flex:1"></div>
       <label class="mini"><input id="pickflipx" type="checkbox"> flip X</label>
       <label class="mini"><input id="pickflipy" type="checkbox"> flip Y</label>
+      <label class="mini"><input id="pickrotate" type="checkbox"> rotate</label>
       <button id="pickclose">Close</button>
     </header>
     <div id="pickbody"></div>

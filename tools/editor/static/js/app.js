@@ -113,7 +113,7 @@ function resolve(ch){
   const idx=byIndex?e.tile:a.roles[String(e.tile).toLowerCase()];
   if(idx===undefined||idx<0||idx>=a.tiles.length) return null;
   return {uri:a.tiles[idx], index:idx, atlas:a.name, role:byIndex?null:e.tile,
-          flags:e.flags||[], flip:e.flip||[]};
+          flags:e.flags||[], flip:e.flip||[], rotate:!!e.rotate};
 }
 
 // Why a character does not resolve, in the words that say what to do about it. "missing"
@@ -130,13 +130,25 @@ function whyMissing(ch){
   return `${ch} names role "${e.tile}", which ${a.name} does not define`;
 }
 
-// CSS transforms, so a mirrored tile costs no second image: the same data URI is drawn
-// turned. The pipeline stores the flip as two bits in the cell for exactly the same
-// reason, which is what makes this an honest preview rather than a lookalike.
-function flipCss(flip){
-  if(!flip||!flip.length) return '';
-  const sx=flip.includes('x')?-1:1, sy=flip.includes('y')?-1:1;
-  return `transform:scale(${sx},${sy})`;
+// CSS transforms, so a mirrored or rotated tile costs no second image: the same data URI
+// is drawn turned. The pipeline stores flip and MAP_ROTATE as bits on the cell for
+// exactly the same reason, which is what makes this an honest preview rather than a
+// lookalike -- draw() below applies the identical transform to the map canvas.
+//
+// Once rotate is on, flip_x/flip_y do NOT mean "mirror this axis of the swapped image" --
+// pnx_gfx.c's rotate path reads the FLIP_X bit from the destination ROW and FLIP_Y from
+// the destination COLUMN, which after a transpose swaps which checkbox controls which
+// visual axis. See pack_atlas's transpose() comment in tools/pnx_assets.py for the full
+// derivation; matrix(0,1,1,0,0,0) is CSS's plain axis swap, applied (rightmost function
+// in the list runs first) BEFORE the scale, same order the engine uses.
+function flipCss(flip,rotate){
+  if(!flip||!flip.length){
+    if(!rotate) return '';
+    return 'transform:matrix(0,1,1,0,0,0)';
+  }
+  const fx=flip.includes('x'), fy=flip.includes('y');
+  const sx=(rotate?fy:fx)?-1:1, sy=(rotate?fx:fy)?-1:1;
+  return `transform:scale(${sx},${sy})${rotate?' matrix(0,1,1,0,0,0)':''}`;
 }
 
 function drawLegend(){
@@ -183,7 +195,7 @@ function drawLegend(){
         +(r.flip.length?` flipped ${r.flip.join('')}`:'')
         +(r.flags.length?` [${r.flags.join(' ')}]`:'')
         +(t.ch!==undefined?(scopeOf(t.ch)==='map'?' — this map only':' — project-wide'):'');
-      b.innerHTML=`<img src="${r.uri}" alt="${label}" style="${flipCss(r.flip)}">`
+      b.innerHTML=`<img src="${r.uri}" alt="${label}" style="${flipCss(r.flip,r.rotate)}">`
         +`<b>${label}</b>`
         +(r.flags.length?`<i class="fmark">${flagMark(r.flags)}</i>`:'');
       b.onclick=()=>{ selectTile(i) };
@@ -227,7 +239,7 @@ function resolveTile(t){
   if(idx===undefined||idx<0||idx>=a.tiles.length) return null;
   const flip=[...((t.flip)||'')];
   return {uri:a.tiles[idx], index:idx, atlas:a.name, role:byIndex?null:t.index,
-          flags:t.flag_names||[], flip};
+          flags:t.flag_names||[], flip, rotate:!!t.rotate};
 }
 
 function whyTileMissing(t,i){
@@ -268,7 +280,7 @@ function tileInfoSource(){
   const head=document.createElement('div');
   head.className='mini';
   head.innerHTML=`<img src="${r.uri}" style="width:32px;height:32px;`
-    +`image-rendering:pixelated;${flipCss(r.flip)}">`
+    +`image-rendering:pixelated;${flipCss(r.flip,r.rotate)}">`
     +`<small><b>#${S.ti}</b> → ${r.role?'role "'+r.role+'"':'tile '+r.index}`
     +`<br><span class="dim">${r.atlas}</span></small>`;
   box.appendChild(head);
@@ -310,6 +322,14 @@ function tileInfoSource(){
       };
       flip.appendChild(l);
     }
+    const rl=document.createElement('label');
+    rl.className='mini';
+    rl.innerHTML=`<input type="checkbox" ${t.rotate?'checked':''}> rotate`;
+    rl.querySelector('input').onchange=ev=>{
+      t.rotate=ev.target.checked;
+      S.dirty=true; mark(); drawLegend(); draw();
+    };
+    flip.appendChild(rl);
     box.appendChild(flip);
   }
 
@@ -336,7 +356,7 @@ function tileInfo(){
   const head=document.createElement('div');
   head.className='mini';
   head.innerHTML=`<img src="${r.uri}" style="width:32px;height:32px;`
-    +`image-rendering:pixelated;${flipCss(r.flip)}">`
+    +`image-rendering:pixelated;${flipCss(r.flip,r.rotate)}">`
     +`<small><b>${ch}</b> → ${r.role?'role "'+r.role+'"':'tile '+r.index}`
     +`<br><span class="dim">${r.atlas}</span></small>`;
   box.appendChild(head);
@@ -378,6 +398,13 @@ function tileInfo(){
       };
       flip.appendChild(l);
     }
+    const rl=document.createElement('label');
+    rl.className='mini';
+    rl.innerHTML=`<input type="checkbox" ${r.rotate?'checked':''}> rotate`;
+    rl.querySelector('input').onchange=ev=>{
+      writeLegend(ch,{rotate:ev.target.checked});
+    };
+    flip.appendChild(rl);
     box.appendChild(flip);
   }
 
@@ -436,7 +463,7 @@ async function writeLegend(ch,changes){
   // Rewritten in the table it already lives in. Sending no scope would move a map's own
   // character into the project table, which silently changes every other map.
   const body={char:ch, tile:e.tile, atlas:e.atlas||(r?r.atlas:null),
-              flags:e.flags||[], flip:e.flip||[],
+              flags:e.flags||[], flip:e.flip||[], rotate:!!e.rotate,
               map:scopeOf(ch)==='map'?S.map.name:null, ...changes};
   const res=await post('/api/legend',body);
   if(!res.ok){ say(res.error); tileInfo(); return }
@@ -465,14 +492,14 @@ function freeChar(){
   return [...PICK_CHARS].find(c=>!taken.has(c))||null;
 }
 
-// The legend character already bound to this exact tile, flips included. Two characters
-// for one tile is legal and sometimes wanted -- the same slab as scenery and as a door --
-// but the picker should reuse rather than mint a duplicate nobody asked for.
-function charFor(name,index,flip){
+// The legend character already bound to this exact tile, flips AND rotate included. Two
+// characters for one tile is legal and sometimes wanted -- the same slab as scenery and
+// as a door -- but the picker should reuse rather than mint a duplicate nobody asked for.
+function charFor(name,index,flip,rotate){
   const key=[...flip].sort().join('');
   return Object.keys(LEG()).find(ch=>{
     const r=resolve(ch);
-    return r&&r.atlas===name&&r.index===index
+    return r&&r.atlas===name&&r.index===index&&!!r.rotate===!!rotate
       &&[...r.flip].sort().join('')===key;
   })||null;
 }
@@ -481,35 +508,39 @@ function pickFlip(){
   return ['x','y'].filter(a=>$('#pickflip'+a).checked);
 }
 
+function pickRotate(){
+  return $('#pickrotate').checked;
+}
+
 function drawTilePicker(){
   const body=$('#pickbody'); body.innerHTML='';
   const list=mapAtlases();
-  const flip=pickFlip();
+  const flip=pickFlip(), rotate=pickRotate();
   if(!list.length){ body.innerHTML='<small>No atlas built yet — press Build.</small>'; return }
 
   for(const a of list){
     const h=document.createElement('div');
     h.className='palgroup';
     h.textContent=`${a.name} — ${a.tiles.length} tiles`
-      +(a.metatiled?' (metatiled: cannot be flipped)':'');
+      +(a.metatiled?' (metatiled: cannot be flipped or rotated)':'');
     body.appendChild(h);
 
     const strip=document.createElement('div');
     strip.className='tiles';
-    // A metatiled atlas cannot be drawn mirrored -- the runtime skips the flip for
-    // composed tiles rather than mirroring the quadrant order -- so its tiles are shown
-    // upright whatever the checkboxes say, instead of previewing a build that fails.
-    const use=a.metatiled?[]:flip;
+    // A metatiled atlas cannot be drawn mirrored or rotated -- the runtime skips both for
+    // composed tiles rather than mirroring/turning the quadrant order -- so its tiles are
+    // shown upright whatever the checkboxes say, instead of previewing a build that fails.
+    const use=a.metatiled?[]:flip, useRotate=a.metatiled?false:rotate;
     a.tiles.forEach((uri,i)=>{
-      const bound=charFor(a.name,i,use);
+      const bound=charFor(a.name,i,use,useRotate);
       const b=document.createElement('button');
       b.className='tile'+(bound&&bound===S.ch?' sel':'')+(bound?' used':'');
       const role=Object.keys(a.roles||{}).find(r=>a.roles[r]===i);
       b.title=`tile ${i} of ${a.name}`+(role?` — role "${role}"`:'')
         +(bound?` — painted as ${bound}`:' — click to give it a character');
-      b.innerHTML=`<img src="${uri}" style="${flipCss(use)}">`
+      b.innerHTML=`<img src="${uri}" style="${flipCss(use,useRotate)}">`
         +`<b>${bound||(role?role.slice(0,4):i)}</b>`;
-      b.onclick=()=>bindTile(a.name,i,use,bound);
+      b.onclick=()=>bindTile(a.name,i,use,useRotate,bound);
       // Right-click names the tile. A role is what game code calls it -- painting only
       // needs the index, but a door the game has to FIND needs a name, and that used to
       // mean hand-writing an [atlas.semantic] table.
@@ -520,8 +551,10 @@ function drawTilePicker(){
   }
 
   const free=freeChar();
+  const turned=[flip.length?'mirrored '+flip.join(''):'',rotate?'rotated':'']
+    .filter(Boolean).join(', ');
   $('#pickhint').innerHTML=free
-    ? `click a tile to paint with it${flip.length?' (mirrored '+flip.join('')+')':''}`
+    ? `click a tile to paint with it${turned?' ('+turned+')':''}`
       +` · <b>right-click</b> to name it for game code`
     : 'this map has used all 92 legend characters — free one up in the sidebar, or move '
       +'a character that only this map paints out of the project legend';
@@ -562,7 +595,7 @@ async function nameTile(atlasName,index,current){
 // minting is the point: it is what makes a tile with no role paintable, and it writes the
 // manifest rather than holding the binding in the page, so what you painted is what
 // builds.
-async function bindTile(name,index,flip,bound){
+async function bindTile(name,index,flip,rotate,bound){
   if(bound){
     // Already in this map's table: select it rather than adding a second entry for the
     // same tile, which would paint identically and read as a duplicate in the palette.
@@ -582,7 +615,8 @@ async function bindTile(name,index,flip,bound){
   // character that resolves by default would resolve against a different tileset if the
   // map's atlas list is ever reordered, and mean a different tile.
   const r=await post('/api/legend',
-    {char:ch, tile:index, atlas:name, flags:[], flip:flip, map:S.map.name});
+    {char:ch, tile:index, atlas:name, flags:[], flip:flip, rotate:rotate,
+     map:S.map.name});
   if(!r.ok){ say(r.error); return }
   await reload();
   // The new character arrives in the map's tile table via reload(); select it there.
@@ -872,6 +906,7 @@ $('#pick').onclick=()=>{ if(!haveMap())return; drawTilePicker();
 $('#pickclose').onclick=()=>{ $('#pickwrap').style.display='none' };
 $('#pickflipx').onchange=drawTilePicker;
 $('#pickflipy').onchange=drawTilePicker;
+$('#pickrotate').onchange=drawTilePicker;
 // Clicking the backdrop closes; clicking the sheet must not. Overlays that swallow a
 // misplaced click are the ones people stop trusting.
 for(const id of ['#pickwrap','#setwrap'])
@@ -928,16 +963,23 @@ function draw(){
   for(let y=0;y<m.h;y++)for(let x=0;x<m.w;x++){
     const ti=m.cells[y*m.w+x], im=S.img[ti];
     if(!im||!im.complete) continue;
-    // A flipped tile has to be drawn flipped HERE too. The watch mirrors it from two bits
-    // in the cell, so an editor that drew it upright would be showing a map that does not
-    // exist -- and mirrored tiles are placed precisely because the mirroring is what you
-    // are looking at.
-    const flip=[...(((m.tiles[ti]||{}).flip)||'')];
-    if(!flip.length){ g.drawImage(im,x*T,y*T,T,T); continue }
-    const sx=flip.includes('x')?-1:1, sy=flip.includes('y')?-1:1;
+    // A flipped or rotated tile has to be drawn that way HERE too. The watch mirrors and
+    // transposes it from bits in the cell, so an editor that drew it upright would be
+    // showing a map that does not exist -- and a turned tile is placed precisely because
+    // the turn is what you are looking at.
+    const tt=m.tiles[ti]||{}, flip=[...(tt.flip||'')], rotate=!!tt.rotate;
+    if(!flip.length&&!rotate){ g.drawImage(im,x*T,y*T,T,T); continue }
+    const fx=flip.includes('x'), fy=flip.includes('y');
+    // Once rotate is on, FLIP_X mirrors what is now the vertical axis and FLIP_Y the
+    // horizontal -- see flipCss's own comment (and pack_atlas's transpose() in
+    // tools/pnx_assets.py) for why the axes swap once the tile is transposed.
+    const sx=(rotate?fy:fx)?-1:1, sy=(rotate?fx:fy)?-1:1;
     g.save();
     g.translate(x*T+(sx<0?T:0), y*T+(sy<0?T:0));
     g.scale(sx,sy);
+    // Transpose LAST, so it is the first thing applied to the drawn image -- matching
+    // pnx_gfx.c's rotate branch, which swaps rows/columns BEFORE flip_x/flip_y.
+    if(rotate) g.transform(0,1,1,0,0,0);
     g.drawImage(im,0,0,T,T);
     g.restore();
   }

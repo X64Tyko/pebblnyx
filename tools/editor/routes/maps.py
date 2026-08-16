@@ -28,7 +28,7 @@ def handle_post_api_legend(self, session, raw):
     d = json.loads(raw)
     session.proj.save_legend(d["char"], d["tile"], d.get("atlas"),
                              d.get("flags", []), d.get("flip", []),
-                             d.get("map"))
+                             d.get("rotate", False), d.get("map"))
     self._send(200, json.dumps({"ok": True}))
 
 def handle_post_api_legend_remove(self, session, raw):

@@ -61,8 +61,13 @@ async function drawSlice(){
   el.style.maxWidth='100%';
   el.innerHTML=g.cells.map(c=>{
     const editable=c.packed!=null&&CARVE;
+    // A cell whose packed index is the tile currently open in the editor below -- so the
+    // sheet position a mirror/rotation/duplicate collapsed FROM stays visible while you
+    // work on what it collapsed INTO, instead of only ever seeing the one cell that
+    // happened to be first.
+    const sel=TE.index!=null&&c.packed===TE.index;
     return `<button data-i="${c.i}" data-packed="${c.packed==null?'':c.packed}"
-      class="${IMPEX.has(c.i)?'off':c.state}"
+      class="${IMPEX.has(c.i)?'off':c.state}${sel?' sel':''}"
       title="cell ${c.i} at ${c.x},${c.y} — ${IMPEX.has(c.i)?'dropped':c.state}`
       +`${editable?` — tile ${c.packed} of the packed atlas; click to edit`:''}"
       ><img src="${c.img}" alt=""></button>`;
@@ -83,7 +88,10 @@ async function drawSlice(){
       drawSlice(); analyse();
     };
   }
-  const kept=g.cells.filter(c=>c.state==='unique'&&!IMPEX.has(c.i)).length;
+  // `packed`, not `state==='unique'`: state is exact-match only, so a cell that pack_atlas
+  // collapsed away as a mirror or rotation of another kept cell used to still count as
+  // "kept" here -- the honest count is whichever cells actually became a packed tile.
+  const kept=g.cells.filter(c=>c.packed!=null).length;
   $('#slnote').textContent=`${kept} kept of ${g.cells.length} cells`
     +(IMPEX.size?` · ${IMPEX.size} dropped`:'')
     +(g.capped?` · showing the first ${g.limit}`:'');
@@ -281,10 +289,21 @@ function drawCrop(sheetTiles){
 const TE={index:null,tile:null,mode:0,rect:null,mask:null};
 const clamp=(v,a,b)=>v<a?a:v>b?b:v;
 
+// Toggles the Slice grid's selection highlight without a full drawSlice() -- that
+// re-fetches both /api/slice and /api/atlas/tiles, which a click that only changes
+// WHICH tile is open (not the carve itself) has no reason to pay for.
+function markSliceSelection(){
+  for(const b of $('#slice').querySelectorAll('button')){
+    const p=b.dataset.packed;
+    b.classList.toggle('sel', TE.index!=null&&p!==''&&+p===TE.index);
+  }
+}
+
 function openTileEditor(idx){
   if(!CARVE||!CARVE.tiles[idx]) return;
   TE.index=idx;
   renderTileEditor();
+  markSliceSelection();
   $('#tileeditor').style.display='';
   $('#tileeditor').scrollIntoView({behavior:'smooth',block:'nearest'});
 }
@@ -299,6 +318,7 @@ function reopenTileEditor(){
 function closeTileEditor(){
   TE.index=null;
   $('#tileeditor').style.display='none';
+  markSliceSelection();
 }
 $('#teclose').onclick=closeTileEditor;
 
@@ -604,6 +624,46 @@ $('#addatlas').onclick=async()=>{
 // The "Tiles kept" strip's 1-bit/colour toggle. drawSlice() (above) keeps both #strip
 // and #bwstrip populated regardless of which one is showing, so this is pure display --
 // nothing to recompute, just which <img> is visible.
+// The two sidebars (settings, tiles) are user-resizable, so a session spent mostly in
+// the tile editor can shrink the settings pane it isn't touching and give that room to
+// the sheet or the editor instead. Widths live as CSS vars on :root -- .atlasgrid reads
+// them, see style.css -- and persist across reloads under one localStorage key.
+const ATLAS_COL_MIN=180, ATLAS_COL_MAX=640;
+(function(){
+  const root=document.documentElement.style;
+  let saved=null;
+  try{ saved=JSON.parse(localStorage.getItem('atlasCols')) }catch(e){}
+  if(Array.isArray(saved)&&saved.length===2){
+    root.setProperty('--atlas-w1',saved[0]+'px');
+    root.setProperty('--atlas-w2',saved[1]+'px');
+  }
+})();
+
+function wireAtlasGutter(gutterId, cssVar, pane, growsRight){
+  const gutter=$('#'+gutterId);
+  let drag=null;
+  gutter.addEventListener('mousedown',ev=>{
+    drag={startX:ev.clientX,startW:pane.getBoundingClientRect().width};
+    gutter.classList.add('dragging');
+    ev.preventDefault();
+  });
+  window.addEventListener('mousemove',ev=>{
+    if(!drag) return;
+    const dx=(ev.clientX-drag.startX)*(growsRight?1:-1);
+    const w=clamp(Math.round(drag.startW+dx),ATLAS_COL_MIN,ATLAS_COL_MAX);
+    document.documentElement.style.setProperty(cssVar,w+'px');
+  });
+  window.addEventListener('mouseup',()=>{
+    if(!drag) return;
+    drag=null; gutter.classList.remove('dragging');
+    localStorage.setItem('atlasCols',JSON.stringify([
+      Math.round($('.atlas-settings').getBoundingClientRect().width),
+      Math.round($('.atlas-tiles').getBoundingClientRect().width)]));
+  });
+}
+wireAtlasGutter('gutter1','--atlas-w1',$('.atlas-settings'),true);
+wireAtlasGutter('gutter2','--atlas-w2',$('.atlas-tiles'),false);
+
 $('#stripbw').addEventListener('change', () => {
   const bw = $('#stripbw').checked;
   $('#strip').style.display = bw ? 'none' : '';
