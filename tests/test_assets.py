@@ -2837,6 +2837,38 @@ def check_editor_atlas_offset():
         check("the manifest still builds throughout", builds(proj.path, root, "out_off"))
 
 
+def check_editor_atlas_origin():
+    """origin_map -- the Maps tab tile picker's "where did this tile come from" lookup.
+
+    Dedup reorders tiles into first-seen-during-scan order, which is exactly what makes
+    a packed atlas hard to read against the source art: this is the backend for showing
+    a packed tile's sheet position back to the author, so a live pack_atlas call has to
+    agree with the coordinates this returns, not just with the tile count.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))   # 2x2 tiles, 16px, no offset
+        proj = editor_project(root)
+
+        r = proj.origin_map("tiles")
+        check("origin_map reports the sheet's real pixel size",
+              r["sheet_size"] == [32, 32])
+        check("origin_map reports the atlas's tile size",
+              r["tile_px"] == 16)
+        check("origin_map returns one origin per packed tile",
+              len(r["origin"]) == 4)
+        # make_sheet lays its 2x2 tiles out at (0,0) then row-major every 16px -- the same
+        # order pack_atlas's carve loop scans in, so origin should match exactly.
+        check("origins are the tiles' real top-left pixel positions, row-major",
+              r["origin"] == [[0, 0], [16, 0], [0, 16], [16, 16]])
+        check("a thumbnail comes back too", r["thumb"].startswith("data:image/"))
+
+        try:
+            proj.origin_map("nosuchatlas")
+            check("an unknown atlas name is refused", False)
+        except ValueError as e:
+            check("an unknown atlas name is refused", "no atlas named" in str(e))
+
+
 def check_editor_atlas_tiles_and_collision():
     """carve_tiles (the packed-tile-aware view) and save/remove_atlas_collision -- the
     backend the Import tab's per-tile editor (role + collision) is built on.
@@ -3551,6 +3583,7 @@ def main():
     check_editor_atlas_extras()
     check_editor_atlas_offset()
     check_editor_atlas_tiles_and_collision()
+    check_editor_atlas_origin()
     check_editor_fonts_and_project()
     # check_editor_flags() -- retired, see _check_editor_flags_RETIRED's own comment
     check_editor_roles()

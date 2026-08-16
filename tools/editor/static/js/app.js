@@ -512,8 +512,35 @@ function pickRotate(){
   return $('#pickrotate').checked;
 }
 
+// Where a packed tile came from in its own sheet -- the answer to "which of these 151
+// near-identical green blobs is the one I'm looking for", which the picker otherwise has
+// no way to say: it draws from the compiled blob, which carries pixels and nothing about
+// where they were carved from. Fetched once per atlas and cached for the picker's open
+// lifetime, not folded into mapAtlases()/reload(), which fire on nearly every edit and
+// would each pay a full sheet re-read for a box nobody is currently hovering.
+let ORIGIN_CACHE={};
+async function showOrigin(atlasName,index){
+  // Cached as the in-flight PROMISE, not its resolved value -- so two hovers landing
+  // before the first fetch returns share one request instead of firing a second.
+  if(!ORIGIN_CACHE[atlasName])
+    ORIGIN_CACHE[atlasName]=post('/api/atlas/origin',{name:atlasName});
+  const o=await ORIGIN_CACHE[atlasName];
+  const wrap=$('#pickorigin');
+  if(o.error||!o.origin||!o.origin[index]){ wrap.style.display='none'; return }
+  const [px,py]=o.origin[index], [W,H]=o.sheet_size, T=o.tile_px;
+  $('#originimg').src=o.thumb;
+  const box=$('#originbox');
+  box.style.left  =(100*px/W)+'%';
+  box.style.top   =(100*py/H)+'%';
+  box.style.width =(100*T/W)+'%';
+  box.style.height=(100*T/H)+'%';
+  $('#originnote').textContent=`${atlasName} — sheet position ${px},${py}px`;
+  wrap.style.display='flex';
+}
+
 function drawTilePicker(){
   const body=$('#pickbody'); body.innerHTML='';
+  $('#pickorigin').style.display='none';
   const list=mapAtlases();
   const flip=pickFlip(), rotate=pickRotate();
   if(!list.length){ body.innerHTML='<small>No atlas built yet — press Build.</small>'; return }
@@ -545,6 +572,7 @@ function drawTilePicker(){
       // needs the index, but a door the game has to FIND needs a name, and that used to
       // mean hand-writing an [atlas.semantic] table.
       b.oncontextmenu=ev=>{ ev.preventDefault(); nameTile(a.name,i,role) };
+      b.onmouseenter=()=>showOrigin(a.name,i);
       strip.appendChild(b);
     });
     body.appendChild(strip);
@@ -901,7 +929,9 @@ $('#camon').onchange=e=>{
 $('#tilesets').onclick=()=>{ if(!haveMap())return; drawSets();
   $('#setwrap').style.display='flex' };
 $('#setclose').onclick=()=>{ $('#setwrap').style.display='none' };
-$('#pick').onclick=()=>{ if(!haveMap())return; drawTilePicker();
+$('#pick').onclick=()=>{ if(!haveMap())return;
+  ORIGIN_CACHE={};   // stale after a rebuild -- reset once per open, not per redraw
+  drawTilePicker();
   $('#pickwrap').style.display='flex' };
 $('#pickclose').onclick=()=>{ $('#pickwrap').style.display='none' };
 $('#pickflipx').onchange=drawTilePicker;

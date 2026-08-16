@@ -1082,6 +1082,14 @@
       <button id="pickclose">Close</button>
     </header>
     <div id="pickbody"></div>
+    <!-- Dedup reorders tiles into first-seen-during-scan order, which throws away the
+         spatial layout that made the original art readable -- hover a tile to see where
+         it actually sat in the sheet it was carved from. See origin_map() in
+         tools/editor/project/atlas.py. -->
+    <footer id="pickorigin" style="display:none">
+      <div class="originwrap"><img id="originimg" alt=""><i id="originbox"></i></div>
+      <small id="originnote" class="dim"></small>
+    </footer>
   </div>
 </div>
 

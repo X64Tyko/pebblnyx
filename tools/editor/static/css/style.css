@@ -126,6 +126,14 @@ canvas{image-rendering:pixelated;cursor:crosshair;border:1px solid var(--line);
    the same wall apart, which is exactly the choice being made here. */
 #pickbody .tile img{width:40px;height:40px}
 #pickbody .used{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
+/* The origin preview: same percentage-positioned box over a shrunk sheet image that
+   #cropbox/#sheetwrap use on the Import tab, so hovering a packed tile answers "where did
+   this come from" without leaving the picker. */
+#pickorigin{display:flex;align-items:center;gap:.6rem}
+.originwrap{position:relative;display:inline-block;line-height:0;max-width:220px;
+  flex:none}
+.originwrap img{display:block;max-width:220px;image-rendering:pixelated;border-radius:4px}
+#originbox{position:absolute;border:2px solid var(--accent);pointer-events:none}
 .setrow{display:flex;align-items:center;gap:.5rem;padding:.35rem 0;
   border-bottom:1px solid var(--line)}
 .setrow b{font-weight:600}

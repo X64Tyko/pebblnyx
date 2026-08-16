@@ -47,6 +47,10 @@ def handle_post_api_atlas_tiles(self, session, raw):
         d.get("exclude", []), d.get("colorkey"), d.get("offset", (0, 0)),
         d.get("name"))))
 
+def handle_post_api_atlas_origin(self, session, raw):
+    d = json.loads(raw)
+    self._send(200, json.dumps(session.proj.origin_map(d["name"])))
+
 def handle_post_api_atlas_validate(self, session, raw):
     d = json.loads(raw)
     self._send(200, json.dumps(session.proj.validate_atlas(

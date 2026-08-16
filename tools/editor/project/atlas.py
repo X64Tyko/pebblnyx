@@ -532,6 +532,49 @@ class AtlasMixin:
 
         return {"tile_px": T, "tiles": tiles}
 
+    def origin_map(self, name):
+        """Where each of an atlas's packed tiles sits in its own source sheet, plus a
+        thumbnail of the whole sheet to draw them against.
+
+        Dedup is what makes a packed atlas hard to read: mirror- and rotation-aware
+        collapsing (see pack_atlas) reorders everything into first-seen-during-scan
+        order, which throws away the spatial layout that made the original art legible.
+        The Maps tab's tile picker has no origin of its own to show -- it reads tiles
+        from the COMPILED blob, which carries pixels and nothing about where they came
+        from -- so this exists to answer "where did this tile come from" on demand,
+        fetched once when the picker opens rather than folded into atlases() (which
+        reloads on nearly every edit and would pay a full sheet re-read each time for
+        no reason most of those reloads care about).
+
+        A live pack_atlas call against the atlas's OWN manifest spec, the same one
+        carve_tiles uses, so an origin here can never disagree with what carve_tiles or
+        the build itself produced.
+        """
+        spec = next((a for a in self.man.get("atlas", []) if a.get("name") == name), None)
+        if not spec:
+            raise ValueError(f"no atlas named {name!r}")
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                packed = pa.pack_atlas(self.root, spec, self.orientation)
+        except pa.BuildError as e:
+            return {"error": str(e)}
+
+        from PIL import Image
+        im = pa.load_sheet(self.root, spec["sheet"])
+        W, H = im.size
+        T = packed["tile_px"]
+        ox, oy = (int(v) for v in spec.get("offset", (0, 0)))
+        # Pixel top-left of each packed tile in the FULL, unscaled sheet -- the client
+        # scales this itself against the thumbnail's actual rendered size, so a resize
+        # here later cannot silently desync the boxes from the picture under them.
+        origin_px = [[ox + tx * T, oy + ty * T] for tx, ty in packed["origin"]]
+
+        MAXW = 480
+        scale = min(1.0, MAXW / W)
+        thumb = im.resize((max(1, round(W * scale)), max(1, round(H * scale))), Image.NEAREST)
+        return {"thumb": pv.data_uri(thumb), "sheet_size": [W, H], "tile_px": T,
+                "origin": origin_px}
+
     def save_role(self, atlas, role, index):
         """Name one tile of an atlas, writing [atlas.semantic] under its block.
 
