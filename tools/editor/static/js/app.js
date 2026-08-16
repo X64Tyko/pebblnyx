@@ -909,7 +909,7 @@ function noMaps(){
   $('#caminfo').textContent='—';
   $('#painthint').innerHTML = S.data.atlases.length
     ? 'This project has no maps. Name one below and press <b>＋ Map</b>.'
-    : 'This project has no tilesets yet. Import a sheet on the <b>Import</b> tab, press '
+    : 'This project has no tilesets yet. Import a sheet on the <b>Atlas</b> tab, press '
       +'<b>Build</b>, then come back and add a map.';
   for(const id of ['#tilesets','#pick','#save']) $(id).disabled=true;
   $('#tool').textContent='';
@@ -1390,7 +1390,7 @@ function showTab(which){
   $('#side').style.display=maps?'':'none';
   $('#ctxbar').style.display=maps?'':'none';
   $('#save').style.display=maps?'':'none';
-  if(imp&&!sheets.length) loadSheets();
+  if(imp){ if(!sheets.length) loadSheets(); atlasMode() }
   if(fnt&&!fontSources.length) loadFonts();
   // The strip spans every tab, so it re-reads on arrival: importing an atlas or adding a
   // font spends the same budget a map edit does, and a number that only refreshed while
@@ -1399,7 +1399,7 @@ function showTab(which){
 
   for(const b of document.querySelectorAll('.act'))
     b.classList.toggle('on', b.dataset.t===which);
-  $('#ctxtitle').textContent={maps:'Maps',import:'Import',fonts:'Fonts',
+  $('#ctxtitle').textContent={maps:'Maps',import:'Atlas',fonts:'Fonts',
     pixel:'Sprites',code:'Code',sdk:'Settings',scenes:'Scenes',
     dialog:'Dialog',music:'Music',device:'Device',project:'Project'}[which]||'';
 }

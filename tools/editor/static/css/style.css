@@ -127,7 +127,7 @@ canvas{image-rendering:pixelated;cursor:crosshair;border:1px solid var(--line);
 #pickbody .tile img{width:40px;height:40px}
 #pickbody .used{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
 /* The origin preview: same percentage-positioned box over a shrunk sheet image that
-   #cropbox/#sheetwrap use on the Import tab, so hovering a packed tile answers "where did
+   #cropbox/#sheetwrap use on the Atlas tab, so hovering a packed tile answers "where did
    this come from" without leaving the picker. */
 #pickorigin{display:flex;align-items:center;gap:.6rem}
 .originwrap{position:relative;display:inline-block;line-height:0;max-width:220px;
@@ -326,6 +326,10 @@ kbd{font:11px ui-monospace,monospace;background:var(--soft);color:var(--accent);
   .atlasgrid{display:flex;flex-direction:column;height:auto;gap:1rem}
   .gutter{display:none}
 }
+/* Existing-atlas chips above the import form. Small enough that a dozen atlases still
+   read as a list, not a wall -- the settings pane is only 280px wide. */
+#atlaslist button{padding:.2rem .55rem;font-size:.72rem;border-radius:20px}
+#atlaslist button.sel{border-color:var(--accent);color:var(--accent);background:var(--soft)}
 .fields{display:flex;flex-wrap:wrap;gap:.6rem;align-items:flex-end}
 /* The settings pane is 280px wide -- too narrow for .fields' normal wrap-in-a-row
    layout to read as anything but ragged. Stacked full-width instead. */

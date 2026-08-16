@@ -449,7 +449,7 @@ def check_atlas_rotation_dedup():
 
 
 def check_editor_analyse_dedup():
-    """The Import tab's live price (Project.analyse) must agree with what pack_atlas will
+    """The Atlas tab's live price (Project.analyse) must agree with what pack_atlas will
     actually build -- a mirror the pipeline collapses away for free must not be priced as
     a second tile just because analyse() used to run its own, cheaper, exact-match-only
     dedup that could not see mirrors or rotations at all.
@@ -2805,7 +2805,7 @@ def check_editor_update():
 
 
 def check_editor_atlas_offset():
-    """`offset` threads through the Import tab's own endpoints the same way it does
+    """`offset` threads through the Atlas tab's own endpoints the same way it does
     through pack_atlas directly -- add/update round-trip it, and slice_grid resolves a
     packed index against the OFFSET carve, not an unshifted one.
     """
@@ -2871,7 +2871,7 @@ def check_editor_atlas_origin():
 
 def check_editor_atlas_tiles_and_collision():
     """carve_tiles (the packed-tile-aware view) and save/remove_atlas_collision -- the
-    backend the Import tab's per-tile editor (role + collision) is built on.
+    backend the Atlas tab's per-tile editor (role + collision) is built on.
     """
     with tempfile.TemporaryDirectory() as root:
         make_sheet(os.path.join(root, "sheet.png"))

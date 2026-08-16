@@ -27,7 +27,7 @@
        that needed it most -- a song is the only asset here nobody can write by hand. -->
   <button id="tabmusic" class="act" data-t="music"><i>♪</i><em>Music</em></button>
   <button id="tabfonts" class="act" data-t="fonts"><i>A</i><em>Fonts</em></button>
-  <button id="tabimport" class="act" data-t="import"><i>⇥</i><em>Import</em></button>
+  <button id="tabimport" class="act" data-t="import"><i>⇥</i><em>Atlas</em></button>
   <button id="tabcode" class="act" data-t="code"><i>&lt;/&gt;</i><em>Code</em></button>
   <!-- E3 in docs/EDITOR.md, rebuilt now that pebble-tool ships a QEMU image for every
        platform this framework builds for rather than none of them. -->
@@ -197,9 +197,15 @@
 
       <section class="plate atlas-settings">
         <h3>Atlas</h3>
+        <!-- Existing atlases, always visible -- the alternative was a text field near the
+             bottom of this form that only turned into an editor once you typed an atlas's
+             name exactly right, with nothing on the page saying that was how you'd edit
+             one. Clicking a chip here sets #aname and loads it in one step: see
+             selectAtlasChip() in atlas.js. -->
+        <div id="atlaslist" class="row" style="flex-wrap:wrap;margin-bottom:.6rem"></div>
         <div class="fields atlas-fields">
-          <!-- The same import as the Sprites tab, because this tab is *called* Import and
-               could only ever offer files that were already in the project. -->
+          <!-- The same import as the Sprites tab: dropping/picking a PNG here is how new
+               art enters an atlas, same as it does a sprite sheet. -->
           <div id="atdrop" class="drop">
             <input id="atfile" type="file" accept="image/png" multiple hidden>
             <button id="atpick">Import PNG…</button>

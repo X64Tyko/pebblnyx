@@ -416,7 +416,7 @@ class AtlasMixin:
                 "unique": unique, "palettes": len(atlas.get("variants", [])) or None}
 
     def atlas_spec(self, name):
-        """An existing atlas's settings, for loading back into the Import tab."""
+        """An existing atlas's settings, for loading back into the Atlas tab."""
         spec = next((a for a in self.man.get("atlas", []) if a.get("name") == name), None)
         if not spec:
             raise ValueError(f"no atlas named {name!r}")
@@ -600,7 +600,7 @@ class AtlasMixin:
         # documented behaviour ("a manifest can start auto and be pinned down later"), so
         # naming a tile the autopick already claimed is a pin, not a clash. This used to
         # be refused, which left an autopicked name unreachable from the editor entirely:
-        # the only way out was hand-editing `autopick`, and the Import tab could not even
+        # the only way out was hand-editing `autopick`, and the Atlas tab could not even
         # clear it. The caller is told, because the pin does move the tile every map that
         # draws through this role will use.
         pinned = role in spec.get("autopick", [])
@@ -963,7 +963,7 @@ class AtlasMixin:
                      colorkey=None, offset=(0, 0)):
         """Rewrite one atlas's settings in place, keeping everything else in its block.
 
-        Only the keys the Import tab owns are replaced; a `metatiles` line, a
+        Only the keys the Atlas tab owns are replaced; a `metatiles` line, a
         `[atlas.semantic]` table or a paragraph explaining the carve survives untouched.
         """
         lines, start, end = self._atlas_block(name)

@@ -1,4 +1,4 @@
-// The Import tab: sheet -> region/offset/carve settings -> slice grid -> tile editor,
+// The Atlas tab: sheet -> region/offset/carve settings -> slice grid -> tile editor,
 // plus the colour-key eyedropper the sheet view uses. Loaded after app.js (which still
 // defines the state object `S`, `$`/`post`/`say`, `sheets`, and generic cross-tab
 // helpers like `wireImport`/`loadSheets`'s caller) and before main.js.
@@ -512,12 +512,30 @@ function atlasMode(){
   $('#aload').style.display=exists?'':'none';
   $('#adel').style.display=exists?'':'none';
   $('#atlasnames').innerHTML=atlasNames().map(n=>`<option value="${n}">`).join('');
+  drawAtlasChips(name);
   return exists;
 }
 $('#aname').addEventListener('input',atlasMode);
 
-$('#aload').onclick=async()=>{
-  const name=$('#aname').value.trim();
+// Every atlas the manifest already has, as one-click buttons above the import form --
+// see the comment on #atlaslist in index.html for why this exists at all. `current` is
+// whatever #aname holds right now, so the matching chip stays highlighted as you type
+// too, not only after a click.
+function drawAtlasChips(current){
+  const el=$('#atlaslist'), names=atlasNames();
+  if(!names.length){ el.innerHTML=''; return }
+  el.innerHTML=names.map(n=>`<button type="button" class="${n===current?'sel':''}"
+    title="load ${n}">${n}</button>`).join('');
+  [...el.children].forEach((b,i)=>{ b.onclick=()=>selectAtlasChip(names[i]) });
+}
+
+function selectAtlasChip(name){
+  $('#aname').value=name;
+  atlasMode();
+  loadAtlas(name);
+}
+
+async function loadAtlas(name){
   const s=await (await fetch('/api/atlas/spec',{method:'POST',
     headers:{'content-type':'application/json'},
     body:JSON.stringify({name})})).json();
@@ -539,7 +557,8 @@ $('#aload').onclick=async()=>{
   $('#log').className=''; $('#log').textContent=
     `Loaded "${name}" — change anything and press Update atlas.`;
   analyse(); drawSlice();
-};
+}
+$('#aload').onclick=()=>loadAtlas($('#aname').value.trim());
 
 // Removal asks the server what still uses the atlas BEFORE confirming, so the dialog says
 // "the ship map draws with it" rather than offering a delete that will simply be refused.
