@@ -436,6 +436,30 @@ select.sw{font:11px ui-monospace,monospace}
   background:repeating-conic-gradient(var(--soft) 0% 25%,transparent 0% 50%) 50%/12px 12px}
 #pxcv,#pxcv1,#pxanim{display:block;image-rendering:pixelated;cursor:crosshair}
 #pxcv1,#pxanim{cursor:default}
+/* The tool grid: .act (rail) reused rather than a second icon+label pattern, laid out
+   3-wide instead of the rail's single column. */
+.pxtools{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;
+  background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:.3rem}
+.pxtools .act{border-radius:4px}
+/* The current-colour indicator, above the palette grid the way Aseprite's own
+   foreground swatch sits above its palette -- same checkerboard-for-transparent
+   pattern #keyswatch (the atlas colour-key picker) already established, just bigger. */
+#pxcurswatch{width:1.8rem;height:1.8rem;border-radius:4px;border:1px solid var(--line);
+  display:inline-block;flex:none}
+#pxcurswatch.none{background:repeating-conic-gradient(var(--line) 0 25%,transparent 0 50%)
+  50%/9px 9px}
+/* The frame filmstrip: thumbnails sized to a fixed height rather than a fixed box, so a
+   16x24 pose and a 32x32 one both read clearly instead of one being stretched to fit a
+   square. */
+#pxfilm{display:flex;gap:4px;flex-wrap:wrap;margin-top:.5rem;padding:.4rem;
+  background:var(--ink);border-radius:4px;min-height:3.2rem;align-items:flex-start}
+.pxthumb{display:flex;flex-direction:column;align-items:center;gap:2px;padding:2px;
+  border:2px solid transparent;border-radius:4px;background:none;cursor:pointer}
+.pxthumb canvas{display:block;height:2.4rem;width:auto;image-rendering:pixelated;
+  background:repeating-conic-gradient(var(--soft) 0% 25%,transparent 0% 50%) 50%/8px 8px}
+.pxthumb span{font-size:.6rem;color:var(--dim)}
+.pxthumb.on{border-color:var(--accent)}
+.pxthumb.on span{color:var(--accent)}
 
 /* Code. A full-height two-pane layout rather than a card, because an editor that only
    fills part of the window is an editor nobody writes in. */

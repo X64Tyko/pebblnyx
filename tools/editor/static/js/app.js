@@ -1392,10 +1392,10 @@ function drawSheetGrid(){
       const r=await post('/api/frame/read',
         {sheet:SH.sheet, x:c.x, y:c.y, w:c.w, h:c.h});
       if(r.error){ shLog(r.error,true); return }
-      PX.w=r.w; PX.h=r.h; PX.frames=1;
-      PX.data=Uint8Array.from(r.pixels); PX.undo=[];
+      PX.w=r.w; PX.h=r.h; PX.frames=1; PX.frame=0;
+      PX.data=Uint8Array.from(r.pixels); PX.undo=[]; PX.redo=[];
       PX.origin={sheet:SH.sheet, x:c.x, y:c.y};
-      $('#pxw').value=r.w; $('#pxh').value=r.h; $('#pxframes').value=1;
+      $('#pxw').value=r.w; $('#pxh').value=r.h;
       $('#pxtitle').textContent=`Canvas — ${SH.sheet} @ ${c.x},${c.y}`;
       $('#pxnote').textContent=`Editing one frame. Save writes it back into the sheet.`;
       pxDraw();
@@ -1502,10 +1502,10 @@ async function spShowFrames(name){
     b.onclick=async()=>{
       const f=await post('/api/frame/read',{sheet:r.sheet,x:c.x,y:c.y,w:c.w,h:c.h});
       if(f.error){ log.className='bad'; log.textContent=f.error; return }
-      PX.w=f.w; PX.h=f.h; PX.frames=1;
-      PX.data=Uint8Array.from(f.pixels); PX.undo=[];
+      PX.w=f.w; PX.h=f.h; PX.frames=1; PX.frame=0;
+      PX.data=Uint8Array.from(f.pixels); PX.undo=[]; PX.redo=[];
       PX.origin={sheet:r.sheet, x:c.x, y:c.y};
-      $('#pxw').value=f.w; $('#pxh').value=f.h; $('#pxframes').value=1;
+      $('#pxw').value=f.w; $('#pxh').value=f.h;
       $('#pxtitle').textContent=`Canvas — ${name} frame ${c.i}`;
       $('#pxnote').textContent='Editing one frame. Save writes it back into the sheet.';
       pxDraw();
@@ -3425,9 +3425,17 @@ window.addEventListener('keyup',e=>{
 // file. Saving then composites it back at that rect instead of replacing the file, because
 // the other poses on that sheet are someone else's work and editing one should not be able
 // to lose the row it sits in.
-const PX={w:16,h:24,frames:1,zoom:12,data:null,colour:0xFF,tool:'pen',undo:[],
-          origin:null};
+// One frame on screen at a time, with a filmstrip below the canvas to switch, add,
+// duplicate or delete one -- Aseprite's own model, replacing a single tall canvas that
+// showed every frame stacked into it at once with no per-frame navigation at all.
+// PX.data stays exactly what it always was: a flat buffer of EVERY frame, w*h each,
+// concatenated -- the same layout the sprite sheet is saved as on disk. Only what's
+// drawn and addressed changes; PX.frame (0-based) says which w*h slice of it is the
+// one currently on screen.
+const PX={w:16,h:24,frames:1,frame:0,zoom:12,data:null,colour:0xFF,tool:'pen',
+          undo:[],redo:[],origin:null};
 
+function pxPer(){ return PX.w*PX.h }
 function pxTotalH(){ return PX.h*PX.frames }
 
 function pxInit(w,h,frames){
@@ -3435,41 +3443,117 @@ function pxInit(w,h,frames){
   // Leaving it set is how Save would composite an unrelated drawing into someone's sheet.
   PX.origin=null;
   if($('#pxtitle')) $('#pxtitle').textContent='Canvas';
-  PX.w=w; PX.h=h; PX.frames=frames;
+  PX.w=w; PX.h=h; PX.frames=frames; PX.frame=0;
   PX.data=new Uint8Array(w*pxTotalH());   // 0 is transparent, as everywhere else
-  PX.undo=[];
+  PX.undo=[]; PX.redo=[];
   pxDraw();
 }
 
+// Snapshots frames and frame count alongside the pixels, not just PX.data on its own --
+// add/duplicate/delete-frame all change how long PX.data IS, so restoring the bytes
+// without restoring PX.frames would leave the two disagreeing about how many frames
+// there are.
+function pxSnapshotState(){ return {data:PX.data.slice(), frames:PX.frames, frame:PX.frame} }
+function pxRestoreState(s){
+  PX.data=s.data; PX.frames=s.frames; PX.frame=Math.min(s.frame, s.frames-1);
+}
 function pxSnapshot(){
-  PX.undo.push(PX.data.slice());
+  PX.undo.push(pxSnapshotState());
   if(PX.undo.length>40) PX.undo.shift();   // bounded: this is a scratch tool
+  PX.redo=[];                              // a new stroke retires whatever could be redone
+}
+
+// Inserts one frame's worth of pixels (blank, or a copy -- pxFrameAdd/pxFrameDup below)
+// at index `at`, shifting every frame from there on down one slot. Never touches the
+// bytes of any OTHER frame, which is the whole point versus the old Frames field's
+// full reallocation.
+function pxInsertFrame(at, bytes){
+  const per=pxPer();
+  const nd=new Uint8Array(PX.data.length+per);
+  nd.set(PX.data.subarray(0, at*per), 0);
+  nd.set(bytes, at*per);
+  nd.set(PX.data.subarray(at*per), (at+1)*per);
+  PX.data=nd; PX.frames++;
 }
 
 function pxDraw(){
-  const z=PX.zoom, H=pxTotalH();
-  for(const [id,scale] of [['pxcv',z],['pxcv1',1]]){
-    const cv=$('#'+id); cv.width=PX.w*scale; cv.height=H*scale;
+  const per=pxPer(), off=PX.frame*per;
+  for(const [id,scale] of [['pxcv',PX.zoom],['pxcv1',1]]){
+    const cv=$('#'+id); cv.width=PX.w*scale; cv.height=PX.h*scale;
     const g=cv.getContext('2d'); g.imageSmoothingEnabled=false;
     g.clearRect(0,0,cv.width,cv.height);
-    for(let y=0;y<H;y++)for(let x=0;x<PX.w;x++){
-      const v=PX.data[y*PX.w+x];
+    for(let y=0;y<PX.h;y++)for(let x=0;x<PX.w;x++){
+      const v=PX.data[off+y*PX.w+x];
       if(!v) continue;
       g.fillStyle=argbCss(v);
       g.fillRect(x*scale,y*scale,scale,scale);
     }
     if(scale>3&&$('#pxgrid').checked&&id==='pxcv'){
       g.strokeStyle='rgba(128,128,128,.28)'; g.lineWidth=1;
-      for(let x=0;x<=PX.w;x++){g.beginPath();g.moveTo(x*scale+.5,0);g.lineTo(x*scale+.5,H*scale);g.stroke()}
-      for(let y=0;y<=H;y++){g.beginPath();g.moveTo(0,y*scale+.5);g.lineTo(PX.w*scale,y*scale+.5);g.stroke()}
-      // Frame boundaries drawn stronger, since that is the division the importer reads.
-      g.strokeStyle='var(--accent)'; g.strokeStyle='rgba(85,170,255,.9)'; g.lineWidth=2;
-      for(let f=1;f<PX.frames;f++){
-        g.beginPath(); g.moveTo(0,f*PX.h*scale); g.lineTo(PX.w*scale,f*PX.h*scale); g.stroke();
-      }
+      for(let x=0;x<=PX.w;x++){g.beginPath();g.moveTo(x*scale+.5,0);g.lineTo(x*scale+.5,PX.h*scale);g.stroke()}
+      for(let y=0;y<=PX.h;y++){g.beginPath();g.moveTo(0,y*scale+.5);g.lineTo(PX.w*scale,y*scale+.5);g.stroke()}
     }
   }
+  $('#pxundo').disabled=!PX.undo.length;
+  $('#pxredo').disabled=!PX.redo.length;
+  pxDrawFilmstrip();
 }
+
+// The filmstrip. Each thumbnail is its own tiny canvas at the sprite's native
+// resolution -- one canvas pixel per sprite pixel -- scaled up or down to a fixed
+// DISPLAY height by CSS (.pxthumb canvas), so a 16x24 pose and a 32x32 one both read
+// clearly instead of one being squashed to fit a square box.
+function pxDrawFilmstrip(){
+  const el=$('#pxfilm'); if(!el) return;
+  el.innerHTML='';
+  for(let f=0; f<PX.frames; f++){
+    const b=document.createElement('button');
+    b.className='pxthumb'+(f===PX.frame?' on':'');
+    b.title=`frame ${f+1} of ${PX.frames}`;
+    const cv=document.createElement('canvas');
+    cv.width=PX.w; cv.height=PX.h;
+    const g=cv.getContext('2d'); g.imageSmoothingEnabled=false;
+    const off=f*pxPer();
+    for(let y=0;y<PX.h;y++)for(let x=0;x<PX.w;x++){
+      const v=PX.data[off+y*PX.w+x];
+      if(!v) continue;
+      g.fillStyle=argbCss(v);
+      g.fillRect(x,y,1,1);
+    }
+    b.appendChild(cv);
+    const num=document.createElement('span'); num.textContent=f+1;
+    b.appendChild(num);
+    b.onclick=()=>{ PX.frame=f; pxDraw() };
+    el.appendChild(b);
+  }
+  $('#pxframenote').textContent=PX.frames>1 ? `frame ${PX.frame+1} of ${PX.frames}` : '1 frame';
+  $('#pxframedel').disabled=PX.frames<=1;
+}
+
+$('#pxframeadd').onclick=()=>{
+  pxSnapshot();
+  pxInsertFrame(PX.frame+1, new Uint8Array(pxPer()));
+  PX.frame++;
+  pxDraw();
+};
+$('#pxframedup').onclick=()=>{
+  pxSnapshot();
+  const per=pxPer();
+  pxInsertFrame(PX.frame+1, PX.data.slice(PX.frame*per, (PX.frame+1)*per));
+  PX.frame++;
+  pxDraw();
+};
+$('#pxframedel').onclick=()=>{
+  if(PX.frames<=1) return;
+  pxSnapshot();
+  const per=pxPer();
+  const nd=new Uint8Array(PX.data.length-per);
+  nd.set(PX.data.subarray(0, PX.frame*per), 0);
+  nd.set(PX.data.subarray((PX.frame+1)*per), PX.frame*per);
+  PX.data=nd; PX.frames--;
+  if(PX.frame>=PX.frames) PX.frame=PX.frames-1;
+  pxDraw();
+};
 
 function argbCss(v){
   const r=((v>>4)&3)*85,g=((v>>2)&3)*85,b=(v&3)*85;
@@ -3507,7 +3591,7 @@ function pxAnimStop(){
 $('#pxplay').onclick=()=>{
   if(pxAnimTimer){ pxAnimStop(); return }
   if(PX.frames<=1){
-    $('#pxplaynote').textContent='Single frame -- nothing to animate. Set Frames above 1.';
+    $('#pxplaynote').textContent='Single frame -- nothing to animate. Add one with + Frame.';
     return;
   }
   $('#pxplaynote').textContent='';
@@ -3523,18 +3607,24 @@ $('#pxplay').onclick=()=>{
 
 function pxFill(x,y,target){
   // Iterative flood fill: a recursive one blows the stack on a full 128x128 canvas.
+  // Bounded to the CURRENT frame's own PX.h rows -- flooding across pxTotalH() (every
+  // frame's pixels concatenated) could leak into the next pose whenever its edge
+  // happened to share the same colour, which is a correctness bug the old single tall
+  // canvas had and this per-frame view closes along with everything else.
   if(target===PX.colour) return;
-  const H=pxTotalH(), stack=[[x,y]];
+  const off=PX.frame*pxPer(), stack=[[x,y]];
   while(stack.length){
     const [cx,cy]=stack.pop();
-    if(cx<0||cy<0||cx>=PX.w||cy>=H) continue;
-    const i=cy*PX.w+cx;
+    if(cx<0||cy<0||cx>=PX.w||cy>=PX.h) continue;
+    const i=off+cy*PX.w+cx;
     if(PX.data[i]!==target) continue;
     PX.data[i]=PX.colour;
     stack.push([cx+1,cy],[cx-1,cy],[cx,cy+1],[cx,cy-1]);
   }
 }
 
+// Canvas pixel coordinates ARE frame-local now that #pxcv only ever shows one frame --
+// pxPaint below is what adds PX.frame's own offset when it actually indexes PX.data.
 function pxAt(e){
   const r=$('#pxcv').getBoundingClientRect();
   return [Math.floor((e.clientX-r.left)/PX.zoom), Math.floor((e.clientY-r.top)/PX.zoom)];
@@ -3543,8 +3633,8 @@ function pxAt(e){
 let pxDown=false;
 function pxPaint(e,first){
   const [x,y]=pxAt(e);
-  if(x<0||y<0||x>=PX.w||y>=pxTotalH()) return;
-  const i=y*PX.w+x;
+  if(x<0||y<0||x>=PX.w||y>=PX.h) return;
+  const i=PX.frame*pxPer()+y*PX.w+x;
   if(PX.tool==='pick'){ pxSetColour(PX.data[i]); return }
   if(first) pxSnapshot();
   if(PX.tool==='fill') pxFill(x,y,PX.data[i]);
@@ -3561,6 +3651,9 @@ function pxSetColour(v){
     el.className=(+el.dataset.v===v?'on':'')+(+el.dataset.v===0?' tr':'');
   $('#pxcur').textContent = v ? `0x${v.toString(16).toUpperCase()} ${argbCss(v)}`
                               : 'transparent';
+  const sw=$('#pxcurswatch');
+  sw.classList.toggle('none', !v);
+  sw.style.background = v ? argbCss(v) : '';
 }
 
 function pxPalette(){
@@ -3574,19 +3667,39 @@ function pxPalette(){
   pxSetColour(0xFF);
 }
 
+// Compact icon toolbar -- .act (the rail's own icon+label convention) reused here
+// instead of the four full-width text buttons this used to be.
 for(const [id,tool] of [['toolpen','pen'],['toolfill','fill'],['toolpick','pick'],
                         ['toolerase','erase']])
   $('#'+id).onclick=()=>{
     PX.tool=tool;
     for(const t of ['toolpen','toolfill','toolpick','toolerase'])
-      $('#'+t).className = t===id ? 'primary' : '';
+      $('#'+t).classList.toggle('on', t===id);
   };
 
-$('#pxundo').onclick=()=>{ if(PX.undo.length){ PX.data=PX.undo.pop(); pxDraw() } };
-$('#pxclear').onclick=()=>{ pxSnapshot(); PX.data.fill(0); pxDraw() };
-for(const id of ['pxw','pxh','pxframes'])
+$('#pxundo').onclick=()=>{
+  if(!PX.undo.length) return;
+  PX.redo.push(pxSnapshotState());
+  pxRestoreState(PX.undo.pop());
+  pxDraw();
+};
+$('#pxredo').onclick=()=>{
+  if(!PX.redo.length) return;
+  PX.undo.push(pxSnapshotState());
+  pxRestoreState(PX.redo.pop());
+  pxDraw();
+};
+// Clears the frame on screen, not the whole sprite -- matching Aseprite's own "clear
+// cel" rather than wiping every pose because one needed a restart.
+$('#pxclear').onclick=()=>{
+  pxSnapshot();
+  const per=pxPer();
+  PX.data.fill(0, PX.frame*per, (PX.frame+1)*per);
+  pxDraw();
+};
+for(const id of ['pxw','pxh'])
   $('#'+id).addEventListener('change',()=>
-    pxInit(+$('#pxw').value,+$('#pxh').value,+$('#pxframes').value));
+    pxInit(+$('#pxw').value,+$('#pxh').value,PX.frames));
 $('#pxzoom').addEventListener('input',()=>{PX.zoom=+$('#pxzoom').value; pxDraw()});
 $('#pxgrid').addEventListener('change',pxDraw);
 
@@ -3701,12 +3814,12 @@ $('#pxopen').addEventListener('change',async()=>{
   const frames=(PX.h && r.h % PX.h===0) ? r.h/PX.h : 1;
   PX.origin=null;
   if($('#pxtitle')) $('#pxtitle').textContent='Canvas';
-  PX.w=r.w; PX.h=r.h/frames; PX.frames=frames;
-  $('#pxw').value=PX.w; $('#pxh').value=PX.h; $('#pxframes').value=frames;
-  PX.data=Uint8Array.from(r.pixels); PX.undo=[];
+  PX.w=r.w; PX.h=r.h/frames; PX.frames=frames; PX.frame=0;
+  $('#pxw').value=PX.w; $('#pxh').value=PX.h;
+  PX.data=Uint8Array.from(r.pixels); PX.undo=[]; PX.redo=[];
   $('#pxname').value=path;
   pxDraw();
-  $('#pxnote').textContent=`Loaded ${r.w}x${r.h}.`;
+  $('#pxnote').textContent=`Loaded ${r.w}x${r.h}${frames>1?` — ${frames} frame(s)`:''}.`;
 });
 
 $('#pxsave').onclick=async()=>{

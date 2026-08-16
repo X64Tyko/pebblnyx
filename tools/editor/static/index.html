@@ -599,10 +599,14 @@
     </div>
   </div>
 
-  <!-- Sprites: a pixel editor that paints in ARGB2222.
-       Not trying to be Aseprite. It exists so that trying an idea does not require
-       installing something else first, and so the colours on screen are the device's
-       actual 64 rather than an approximation quantised later. -->
+  <!-- Sprites: a pixel editor that paints in ARGB2222, built around Aseprite's own
+       core interaction model -- one frame on screen at a time, with a filmstrip below
+       it to add, duplicate, delete and switch between the others -- rather than the
+       single tall canvas every frame used to be stacked into, which had no per-frame
+       navigation at all and, worse, wiped every frame already painted the moment the
+       frame count changed. Still not trying to be Aseprite wholesale: no layers (a
+       Pebble sprite is one ARGB2222 pose, nothing to composite) and no selection or
+       shape tools yet, both real candidates for a later pass. -->
   <div id="pixel" style="display:none;flex:1;overflow:auto;padding:1.25rem">
     <div class="fontgrid">
       <div class="fontctl">
@@ -647,35 +651,42 @@
         </section>
 
         <div class="category">Paint</div>
+        <!-- Frame count used to be a number typed in here, which reallocated a blank
+             buffer on every change -- so adding a frame wiped every frame already
+             painted, including the current one. It's the filmstrip's job now (below
+             the canvas), which inserts or removes one frame's worth of pixels and
+             leaves the rest alone. Width/Height stay here: they're the canvas's own
+             pixel dimensions, independent of how many frames it holds. -->
         <section><h2>Canvas</h2>
           <div class="fields col">
             <label>Width<input id="pxw" type="number" value="16" min="1" max="128"></label>
             <label>Height<input id="pxh" type="number" value="24" min="1" max="128"></label>
-            <label>Frames<input id="pxframes" type="number" value="1" min="1" max="32"
-              title="stacked vertically, which is the layout the sprite importer expects"></label>
             <label>Zoom<input id="pxzoom" type="range" min="2" max="24" value="12"></label>
             <label class="check"><input id="pxgrid" type="checkbox" checked> Grid</label>
           </div>
-          <small>A sheet is frames stacked vertically — the layout
-            <code>[[sprite]] frames</code> already expects.</small>
         </section>
 
+        <!-- A compact icon grid rather than a column of full-width text buttons --
+             Aseprite's own toolbox shape, and the rail's own icon+label convention
+             (.act) reused rather than a second one invented for this tab. -->
         <section><h2>Tool</h2>
-          <div class="row">
-            <button id="toolpen" class="primary">Pencil</button>
-            <button id="toolfill">Fill</button>
-            <button id="toolpick">Pick</button>
-            <button id="toolerase">Erase</button>
+          <div class="pxtools">
+            <button id="toolpen" class="act on" title="Pencil"><i>✎</i><em>Pencil</em></button>
+            <button id="toolfill" class="act" title="Fill"><i>▧</i><em>Fill</em></button>
+            <button id="toolpick" class="act" title="Pick a colour off the canvas"><i>◎</i><em>Pick</em></button>
+            <button id="toolerase" class="act" title="Erase"><i>▱</i><em>Erase</em></button>
+            <button id="pxundo" class="act" title="Undo" disabled><i>↶</i><em>Undo</em></button>
+            <button id="pxredo" class="act" title="Redo" disabled><i>↷</i><em>Redo</em></button>
           </div>
-          <div class="row" style="margin-top:.4rem">
-            <button id="pxundo">Undo</button>
-            <button id="pxclear">Clear</button>
-          </div>
+          <button id="pxclear" style="margin-top:.4rem" title="Clear the current frame">Clear frame</button>
         </section>
 
         <section><h2>Colour</h2>
+          <div class="row" style="margin-bottom:.4rem">
+            <i id="pxcurswatch" class="none"></i>
+            <span id="pxcur" class="dim">—</span>
+          </div>
           <div id="pxpal" class="pal"></div>
-          <small id="pxcur">—</small>
         </section>
 
         <div class="category">Save &amp; declare</div>
@@ -739,6 +750,17 @@
         </div>
         <div class="plate wide"><h3 id="pxtitle">Canvas</h3>
           <div id="pxwrap"><canvas id="pxcv"></canvas></div>
+          <!-- The filmstrip: click a thumbnail to work on that frame, or add/duplicate/
+               remove one. Painting only ever touches the frame on screen -- switching
+               frames here never loses what's on the others, unlike the old numeric
+               Frames field it replaces. -->
+          <div class="row" style="margin-top:.6rem">
+            <button id="pxframeadd" title="append a new blank frame after this one">+ Frame</button>
+            <button id="pxframedup" title="duplicate this frame">⧉ Duplicate</button>
+            <button id="pxframedel" title="delete this frame">🗑 Delete</button>
+            <span id="pxframenote" class="dim"></span>
+          </div>
+          <div id="pxfilm"></div>
         </div>
         <div class="plate wide"><h3>Actual size</h3>
           <div id="px1wrap"><canvas id="pxcv1"></canvas></div>
