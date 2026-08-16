@@ -389,7 +389,14 @@ select.sw{font:11px ui-monospace,monospace}
 .maskgrid{position:absolute;top:0;left:0;display:grid;user-select:none}
 .maskgrid i{display:block;cursor:pointer;
   box-shadow:inset 0 0 0 1px rgba(128,128,128,.35)}
-.maskgrid i.ink{background:color-mix(in srgb, var(--accent) 50%, transparent)}
+/* Flat 50% tint alone reads as "no different" against art already close to --accent in
+   hue, so ink cells also get a diagonal hatch (contrast survives even when the flat fill
+   doesn't) plus a solid border tracing the exact boundary of the solid region. */
+.maskgrid i.ink{
+  background:repeating-linear-gradient(45deg,
+    color-mix(in srgb, var(--accent) 85%, transparent) 0 3px,
+    color-mix(in srgb, var(--accent) 40%, transparent) 3px 6px);
+  box-shadow:inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 95%, black)}
 /* `.fields label` stacks its children in a column and outspecifies a bare `.keypick`,
    so this row of controls needs the same specificity to stay a row. */
 .fields label.keypick{flex-direction:row;align-items:center;gap:.4rem}
