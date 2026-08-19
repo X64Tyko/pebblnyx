@@ -26,16 +26,27 @@ static void draw_worldtile(const PnxMap* map, const PnxWorldTile* wt, PnxTarget*
 	const int32_t T	 = map->tile_px;
 	const int32_t ox = (int32_t)wt->wx * map->worldtile;
 	const int32_t oy = (int32_t)wt->wy * map->worldtile;
+	// Hoisted out of the loop: idx_width is a per-MAP constant, so this branch is the same
+	// on every cell of every WorldTile a draw call touches and predicts perfectly -- one
+	// extra compare next to the atlas lookup/blit dispatch already sitting in this loop,
+	// not a new source of per-cell cost.
+	const int32_t iw = map->idx_width;
 
 	for (int32_t ty = y0; ty <= y1; ty++)
 	{
-		const uint8_t* row = wt->cells + (size_t)(ty - oy) * wt->cell_w * 2;
+		const uint8_t* row = wt->cells + (size_t)(ty - oy) * wt->cell_w * iw;
 		const int32_t sy   = ty * T - camera->y;
 
 		for (int32_t tx = x0; tx <= x1; tx++)
 		{
-			const uint8_t* cell	 = row + (size_t)(tx - ox) * 2;
-			const uint16_t entry = (uint16_t)(cell[0] | ((uint16_t)cell[1] << 8));
+			// Stored index -> dictionary entry -> the same tile-id-plus-flags word this loop
+			// always worked with (M12's own comment, pnx_assets.h's PnxMap.cell_dict).
+			const uint8_t* cell	 = row + (size_t)(tx - ox) * iw;
+			const uint16_t index = (iw == 1)
+				? cell[0]
+				: (uint16_t)(cell[0] | ((uint16_t)cell[1] << 8));
+			const uint8_t* d	 = map->cell_dict + (size_t)index * 2;
+			const uint16_t entry = (uint16_t)(d[0] | ((uint16_t)d[1] << 8));
 			const uint16_t id	 = entry & PNX_MAP_INDEX_MASK;
 
 			uint16_t local		  = 0;

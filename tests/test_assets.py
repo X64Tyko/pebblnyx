@@ -280,6 +280,147 @@ def check(label, cond):
         failures += 1
 
 
+HEADER_HDR_FLAGS_OFFSET = pnx_assets.HEADER_BYTES + 3  # the flags byte finish_map writes
+
+
+def check_lzss():
+    """lzss_compress/lzss_decompress (M12): round-tripped directly against a range of
+    inputs, then through a real map build with `compress_maps = true` -- the pipeline path
+    that actually matters, compared cell-for-cell against the same content built
+    uncompressed, since a compressed and an uncompressed build of the same manifest must
+    parse back to the identical map.
+    """
+    for label, data in [
+        ("empty", b""),
+        ("short, below the minimum match length", b"ab"),
+        ("highly repetitive", b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+        ("no repetition at all", bytes(range(64))),
+        ("real cell-plane-shaped data", bytes([0x07, 0x00] * 40 + [0x09, 0x00] * 12 +
+                                              [0x2F, 0x20] * 3)),
+    ]:
+        packed = pnx_assets.lzss_compress(data)
+        back = pnx_assets.lzss_decompress(packed, len(data))
+        check(f"lzss round-trip: {label}", back == data)
+        if data:
+            check(f"lzss round-trip: {label} (compressed at least records something)",
+                  len(packed) > 0)
+
+    # --- the real pipeline path: compress_maps = true, compared against the same content
+    # built uncompressed. A multi-bank map (worldtile small enough to force several banks
+    # for a map with real size) exercises more than one compressed bank, not just one.
+    rows = "\n".join("#" * 6 for _ in range(2)) + "\n" + "\n".join(".#..#." for _ in range(4))
+
+    def write_manifest(root, compress):
+        manifest_body = f'''
+            [project]
+            name = "t"
+            resources = "out"
+            header = "out/gen.h"
+            {"compress_maps = true" if compress else ""}
+
+            [[atlas]]
+            name = "tiles"
+            sheet = "sheet.png"
+            tile = 16
+            region = [0, 0, 2, 2]
+            max_tiles = 16
+            out = "tiles.bin"
+            autopick = ["floor", "wall", "accent"]
+
+            [legend."."]
+            tile = "floor"
+            flags = []
+            [legend."#"]
+            tile = "wall"
+            flags = []
+
+            [[map]]
+            name = "a"
+            out = "a.bin"
+            start = [1, 1]
+            warps = []
+            worldtile = 4
+            rows = """{rows}"""
+        '''
+        path = os.path.join(root, "m.toml")
+        with open(path, "w") as f:
+            f.write(textwrap.dedent(manifest_body))
+        return path
+
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+
+        plain_path = write_manifest(root, compress=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            pnx_assets.build(plain_path, os.path.join(root, "plain"),
+                             os.path.join(root, "plain", "gen.h"))
+
+        compressed_path = write_manifest(root, compress=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            pnx_assets.build(compressed_path, os.path.join(root, "compressed"),
+                             os.path.join(root, "compressed", "gen.h"))
+
+        plain_bin = read_blob(os.path.join(root, "plain"), "a.bin")
+        compressed_bin = read_blob(os.path.join(root, "compressed"), "a.bin")
+        plain_bank = read_blob(os.path.join(root, "plain"), "a_b0.bin")
+        compressed_bank = read_blob(os.path.join(root, "compressed"), "a_b0.bin")
+
+        check("compress_maps: compressed bank is smaller",
+              len(compressed_bank) < len(plain_bank))
+        check("compress_maps: sets the compressed flag bit",
+              (compressed_bin[HEADER_HDR_FLAGS_OFFSET] & 2) != 0)
+        check("compress_maps: uncompressed build leaves the bit clear",
+              (plain_bin[HEADER_HDR_FLAGS_OFFSET] & 2) == 0)
+
+        plain = pnx_assets.parse_map(plain_bin, [plain_bank])
+        compressed = pnx_assets.parse_map(compressed_bin, [compressed_bank])
+        check("compress_maps: identical cell content to the uncompressed build",
+              plain["cells"] == compressed["cells"])
+        check("compress_maps: identical dimensions",
+              (plain["w"], plain["h"]) == (compressed["w"], compressed["h"]))
+
+
+def check_cell_dictionary():
+    """build_cell_dictionary (M12): a WorldTile's cells store an index into this table
+    rather than the raw entry word -- pinned directly against hand-built cell planes,
+    including the idx_width boundary no real map in this repo happens to cross (never more
+    than 9 distinct entries in anything measured -- see PNX_BLOB_VERSION's v13 comment).
+    """
+    # --- ordinary case: 4 distinct entries repeated across 6 cells, first-seen order.
+    entries = [0x0007, 0x0009, 0x0007, 0x2f20, 0x0009, 0x0007]
+    tiles = b"".join(e.to_bytes(2, "little") for e in entries)
+    order, index_of, idx_width = pnx_assets.build_cell_dictionary(tiles)
+    check("dictionary: first-seen order", order == [0x0007, 0x0009, 0x2f20])
+    check("dictionary: idx_width 1 for a small table", idx_width == 1)
+    check("dictionary: every entry resolves to its own index",
+          [index_of[e] for e in entries] == [0, 1, 0, 2, 1, 0])
+
+    # --- the 256/257 boundary: idx_width must switch to 2 only once it has to.
+    exactly_256 = b"".join(i.to_bytes(2, "little") for i in range(256))
+    _, _, w256 = pnx_assets.build_cell_dictionary(exactly_256)
+    check("dictionary: idx_width stays 1 at exactly 256 entries", w256 == 1)
+
+    exactly_257 = b"".join(i.to_bytes(2, "little") for i in range(257))
+    _, _, w257 = pnx_assets.build_cell_dictionary(exactly_257)
+    check("dictionary: idx_width becomes 2 at 257 entries", w257 == 2)
+
+    # --- slice_worldtiles actually writes indices, not raw entries, at the chosen width.
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj_map = {"name": "d", "w": 3, "h": 2, "tiles": tiles,
+                    "extended": bytes(6), "atlas_table": [("tiles", 0, 4)],
+                    "tile_px": 16}
+        cols, rows, wtiles = pnx_assets.slice_worldtiles(proj_map, 8, index_of, idx_width)
+        check("slice_worldtiles: one WorldTile covers a map this small",
+              (cols, rows) == (1, 1))
+        cell_bytes = wtiles[0]["cells"]
+        check("slice_worldtiles: cells stored at idx_width, not raw 2 bytes/cell",
+              len(cell_bytes) == 6 * idx_width)
+        got = [cell_bytes[i] for i in range(6)]  # idx_width == 1 here
+        check("slice_worldtiles: stored indices match build_cell_dictionary's",
+              got == [index_of[e] for e in entries])
+
+
 def check_colorkey():
     """A keyed colour becomes transparent, and index 0 is what transparent means.
 
@@ -3172,6 +3313,8 @@ def main():
     # --- orientation. Runs early because everything after it assumes the portrait build
     # it has been comparing against is the one the rest of these tests describe.
     check_orientation()
+    check_lzss()
+    check_cell_dictionary()
     check_colorkey()
     check_nine_slice()
     check_atlas_rotation_dedup()

@@ -888,6 +888,100 @@ project that does call into one of these pays, are in
 
 ---
 
+## M12 — Map/WorldTile cell dictionary and LZSS bank compression — **DONE**
+
+A cell's raw stored form is a u16 (10-bit tile id + flip/rotate/warp/extended bits).
+Measured directly against every real map in the repo before designing anything: a legend
+only ever paints from a small palette, and no map tested uses more than 9 *distinct* entry
+values. Two dedup granularities were measured and rejected before this one: whole-WorldTile
+matching (byte-identical whole blocks) is worthless once a WorldTile is more than a few
+cells -- 0% dedup on a 192x192 field's 32-cell WorldTiles, negative on maps with only 6-9
+WorldTiles total, where the index overhead exceeds the savings -- and row-level dedup,
+while good on some maps, is inconsistent in a way a plain cell-value dictionary is not: a
+project-wide dictionary of the distinct entry words actually used, with each cell storing a
+1-byte index into it, lands within a couple of points of 50% of raw size on *every* map
+measured, small or large, synthetic or hand-authored.
+
+- **Always on, no project opt-out.** `build_cell_dictionary` (`tools/pnx_assets.py`) builds
+  the table once per map at pack time; the runtime reads it into the map's already-resident
+  preamble (`PnxMap.cell_dict`/`dict_count`/`idx_width`, `pnx_assets.h`) beside the atlas
+  table and `tile_palette` -- no new read call. `idx_width` is 1 byte unless a map uses more
+  than 256 distinct entries (none measured do), and degrades to 2 rather than failing the
+  build. `pnx_map_entry`, the one chokepoint every map accessor (`pnx_map_tile`/
+  `pnx_map_flags`/`pnx_map_solid`/etc.) already funnelled through, gained one
+  `cell_dict[index]` lookup; `pnx_tilemap.c`'s `draw_worldtile` gained the same for its hot
+  per-cell draw path, with `idx_width` hoisted out of the loop since it never varies within
+  one map.
+- **A real, load-bearing bug caught by the host tests, not shipped**: the fixed preamble
+  header grew from 16 to 18 bytes (the new `dict_count` field), and the FIRST read that
+  sizes the resident block was left reading only the old 16-byte span -- an out-of-bounds
+  stack read that surfaced as a segfault on a real two-atlas map (`examples/overworld`'s
+  `deck`) the moment host tests ran against rebuilt content, not as a compile-time error.
+  Fixed by growing the header-sized read buffer to match; the host test suite is exactly
+  what caught it before it reached a device.
+- **`PNX_BLOB_VERSION` bumps to 13** -- the `"PM"` blob's cell storage width changes; every
+  existing map asset was rebuilt through the pipeline as part of landing this, across every
+  example in the repo.
+- **LZSS on top: a project-level opt-in**, `[project] compress_maps = true` paired with
+  `PNX_USE_MAP_COMPRESS=1` in `pnx_config.h` (the same pairing `pack_2bit`/`PNX_PACK_2BIT`
+  already use) -- a real trade, not a strict win, so it does not default on. Compresses
+  whole BANKS, not individual WorldTiles: keeps the existing one-read-per-bank call pattern
+  and the cross-WorldTile back-references a per-WorldTile scheme would give up, at the cost
+  of making a compressed bank an ATOMIC streaming unit -- any one WorldTile needed from it
+  means decoding the whole thing. Decoding (`pnx_lzss_decode`, new) is a classic (12,4)
+  token -- a 4096-byte window, 3-18 byte matches, no entropy stage -- chosen for the decoder
+  it buys: a copy/literal loop and nothing else, gated behind `PNX_USE_MAP_COMPRESS` so a
+  project that never sets `compress_maps` links none of it. The encoder
+  (`tools/pnx_assets.py`'s `lzss_compress`) is build-time only, where speed and optimality
+  never matter, only the decoder's simplicity does.
+- **CPU decode cost, measured on real hardware.** A dedicated bench app
+  (`examples/lzssbench`) times 2,000 real `pnx_lzss_decode` calls against each of 14 real
+  compressed banks (16x16 up to 192x192 cells) the same way the synth voice cost got its own
+  spike rather than a guess. On the author's real Pebble Time 2 (`emery`, cortex-m33): ~3 us
+  fixed, ~62 ns/decoded byte, ~255-272 us for the largest bank shipped anywhere in this repo
+  -- under 1% of `emery`'s own measured frame budget. QEMU (`basalt`/`chalk`/`aplite`, the
+  "mature" boards this project otherwise trusts for timing) measured 4-10x LOWER per byte
+  than the real device for this same CPU-bound workload -- not a platform-speed difference,
+  a QEMU-vs-silicon one, and worth remembering before trusting an emulator for absolute
+  compute cost again. `aplite`/`basalt`/`chalk`/`diorite`/`gabbro`/`flint` decode cost is not
+  independently measured; `gabbro`/`flint` share `emery`'s core and are expected, not
+  confirmed, to be close.
+- **A runtime RAM cost no code-size table had shown until this pass.** `pnx_map_load`'s two
+  LZSS scratch buffers (`lzss_src`/`lzss_dst`, sized to one bank's max decoded bytes each)
+  are `pnx_arena_alloc`'d from whichever arena the project passed in -- real `malloc`'d heap,
+  invisible to `size_report.py`'s static `bss` column. On `stressbench`'s map that is ~800 B
+  on top of the project's own declared arena budget; on `worldtiles/plain`'s it would be
+  ~8,240 B. Confirmed directly on real `aplite`-equivalent QEMU (cortex-m3): `compress_maps`
+  alone, matching `stressbench`'s normal shipped config (diagnostics off), installs and runs
+  fine; also turning `PNX_USE_DIAGNOSTICS=1` on for the same build -- needed to pull the log
+  output this measurement used -- exhausts `aplite`'s heap outright (`arena init failed`,
+  1,520 B total heap against an ~9,500 B request). Not a `compress_maps` defect, but a real
+  demonstration of how little slack `aplite` runs with once more than one thing wants RAM
+  from the same small pool.
+
+**Result.** 845 host checks (up from 822 after M11) plus 488 Python pipeline checks (up
+from 466). Dictionary coverage: a direct `build_cell_dictionary` unit test pinning
+first-seen ordering and the `idx_width` boundary at exactly 256 vs. 257 distinct entries,
+`slice_worldtiles` writing indices at the chosen width rather than raw entries, and a
+real-content sanity check (`dict_count`/`idx_width` asserted sane on a loaded
+`examples/overworld` map). LZSS coverage: `lzss_compress`/`lzss_decompress` round-tripped
+directly against a range of inputs then through a real `compress_maps = true` pipeline
+build compared cell-for-cell against the same content built uncompressed;
+`pnx_lzss_decode` pinned in C against real encoder output, including a truncated-stream
+case that must stop rather than read past its buffers; and a dedicated fixture
+(`tests/fixtures/lzss/`) proving the full integration -- a real pipeline-built compressed
+map, loaded through the actual `pnx_map_load`/`worldtile_load_run` runtime path, with tile
+lookups checked across more than one WorldTile in the same decoded bank, not just the
+first. Full numbers -- resource bytes measured on real pipeline output (both a small,
+worst-case single-bank map and `worldtiles/plain`'s large, repetitive one), runtime code
+size measured on real linked `gabbro` AND `aplite` builds, real CPU decode cost off a
+physical Pebble Time 2, and the runtime arena/heap cost neither of the size tables above
+had ever put a number on -- are in
+[`MEASUREMENTS.md`](MEASUREMENTS.md#mapworldtile-cell-dictionary-m12) and
+[`MEASUREMENTS.md`](MEASUREMENTS.md#lzss-bank-compression-compress_maps-m12).
+
+---
+
 ## Editor track (parallel)
 
 A visual editor for levels, assets, testing and packaging — architecture and reasoning in

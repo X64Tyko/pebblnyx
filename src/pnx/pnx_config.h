@@ -55,6 +55,15 @@
 #define PNX_USE_HUD 1
 #endif
 
+// LZSS decoding for compressed WorldTile banks (M12). Paired with `compress_maps = true`
+// in the manifest's `[project]` table the same way `PNX_PACK_2BIT` is paired with
+// `pack_2bit` -- a project turns this on when it wants smaller map resources at the cost
+// of a real, if small, CPU decode per bank load, never silently. A map built compressed
+// against a runtime with this off refuses to load rather than reading garbage cells.
+#ifndef PNX_USE_MAP_COMPRESS
+#define PNX_USE_MAP_COMPRESS 0
+#endif
+
 // Defaults from the HARDWARE, not from a blanket "on": PBL_SPEAKER is a compiler define
 // the SDK hands exactly the platforms that have one (emery, flint -- see docs/PORTING.md,
 // "The .pbw is seven apps in a zip"), so a build for gabbro/basalt/chalk/diorite/aplite

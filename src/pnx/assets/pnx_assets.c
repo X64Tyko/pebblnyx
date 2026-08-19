@@ -2,6 +2,7 @@
 
 #if PNX_USE_ASSETS
 
+#include "pnx_lzss.h"
 #include "../platform/pnx_platform.h"
 #include "../core/pnx_diag.h"
 
@@ -640,10 +641,10 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	}
 	const uint32_t resource = s_resources[asset_id];
 
-	// The header plus the 16-byte preamble is everything needed to size the resident block,
-	// so the map costs two reads rather than one -- and never the whole blob, which for a
-	// large map is the thing that does not fit.
-	uint8_t head[PNX_BLOB_HEADER_BYTES + 16];
+	// The header plus the 18-byte fixed preamble (v13: +2 for dict_count) is everything
+	// needed to size the resident block, so the map costs two reads rather than one -- and
+	// never the whole blob, which for a large map is the thing that does not fit.
+	uint8_t head[PNX_BLOB_HEADER_BYTES + 18];
 	if (pnx_platform_resource_read(resource, 0, head, sizeof(head)) != sizeof(head))
 	{
 		pnx_log("map %u: too small to hold a header", asset_id);
@@ -675,25 +676,35 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	const uint16_t slot_bytes = read_u16(pre + 8);
 	const uint8_t want_slots = pre[10], atlas_slots = pre[11];
 	const uint32_t pool_bytes = read_u32(pre + 12);
+	// v13: the cell dictionary (M12) -- every WorldTile's cells are stored as indices into
+	// this table rather than raw entry words, so the preamble's fixed header grew by these
+	// two bytes to carry its size. idx_width (1 or 2 bytes per stored index) is derived from
+	// dict_count rather than stored again, the same way bank_count is derived from n rather
+	// than duplicated.
+	const uint16_t dict_count = read_u16(pre + 16);
+	const uint8_t idx_width	  = dict_count <= 256 ? 1 : 2;
 
 	if (w == 0 || h == 0 || cols == 0 || rows == 0 || worldtile == 0 || tile_px == 0 ||
 		(worldtile & (worldtile - 1)) || atlas_count == 0 ||
 		atlas_count > PNX_MAP_MAX_ATLASES || atlas_slots == 0 || atlas_slots > atlas_count ||
-		want_slots == 0)
+		want_slots == 0 || dict_count == 0)
 	{
-		pnx_log("map %u: %ux%u in %ux%u WorldTiles of %u, %u atlases in %u slots -- refused",
-				asset_id, w, h, cols, rows, worldtile, atlas_count, atlas_slots);
+		pnx_log(
+			"map %u: %ux%u in %ux%u WorldTiles of %u, %u atlases in %u slots, %u dict "
+			"entries -- refused",
+			asset_id, w, h, cols, rows, worldtile, atlas_count, atlas_slots, dict_count);
 		return false;
 	}
 
 	const uint16_t n = (uint16_t)cols * rows;
 	// No flag table any more (v11): collision/warp are read out of each cell's own u16 and
 	// the tile's owning atlas, not a map-owned plane -- so the only optional table left is
-	// the palette remap (flags bit 0).
-	const size_t resident = 16 + (size_t)atlas_count * 4 + ((size_t)atlas_slots + 1) * 4 +
+	// the palette remap (flags bit 0). v13 adds the cell dictionary, always present, at the
+	// end of the preamble.
+	const size_t resident = 18 + (size_t)atlas_count * 4 + ((size_t)atlas_slots + 1) * 4 +
 		4 // first_bank_asset, pad
 		+ ((flags & 1) ? pad4(tile_total) : 0) +
-		pad4((size_t)warps * sizeof(PnxWarp)) + pad4(n);
+		pad4((size_t)warps * sizeof(PnxWarp)) + pad4(n) + pad4((size_t)dict_count * 2);
 
 	uint8_t* pre_mem = (uint8_t*)pnx_arena_alloc(s_arena, resident, 4);
 	if (!pre_mem)
@@ -710,7 +721,7 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	}
 	s_bytes_loaded += (uint32_t)(sizeof(head) + resident);
 
-	const uint8_t* at = pre_mem + 16;
+	const uint8_t* at = pre_mem + 18;
 	uint16_t base	  = 0;
 	for (uint8_t i = 0; i < atlas_count; i++)
 	{
@@ -790,6 +801,13 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	out->warps = (const PnxWarp*)(const void*)at;
 	at += pad4((size_t)warps * sizeof(PnxWarp));
 	out->wt_mask = at;
+	at += pad4(n);
+
+	// The cell dictionary: dict_count entries, 2 bytes each, read the same byte-at-a-time
+	// way pnx_map_entry (pnx_assets.h) already reads a cell's own entry word -- endianness
+	// portable, not just alignment-safe, the same reason nothing else in this preamble casts
+	// a multi-byte field straight onto blob bytes.
+	out->cell_dict = at;
 
 	// Pools. The slot count is the smaller of what the pipeline asked for and what the map
 	// actually has -- a map of four WorldTiles never needs nine slots, and paying for them
@@ -831,10 +849,42 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	out->worldtile	 = worldtile;
 	out->wt_shift	 = shift_of(worldtile);
 	out->bank_shift	 = pre[7];
+	out->dict_count	 = dict_count;
+	out->idx_width	 = idx_width;
 	// Carried by the map rather than read off a loaded atlas: the streamer works in world
 	// pixels and has to size its window BEFORE any atlas is resident. The atlas load checks
 	// the two agree.
 	out->tile_px = tile_px;
+
+	// Bit 1 of `flags`: this map's banks are LZSS-compressed (`compress_maps`, M12). Bit 0
+	// is the palette remap, above; both ride the same byte rather than growing the header
+	// for a second single bit.
+#if PNX_USE_MAP_COMPRESS
+	out->compressed = (flags & 2) != 0;
+	if (out->compressed)
+	{
+		// Sized to one bank's max UNCOMPRESSED bytes -- see PnxMap's own comment for why
+		// that bound covers both the compressed read and the decoded output.
+		const size_t scratch = (size_t)(1u << out->bank_shift) * slot_bytes;
+		out->lzss_src		 = (uint8_t*)pnx_arena_alloc(s_arena, scratch, 4);
+		out->lzss_dst		 = (uint8_t*)pnx_arena_alloc(s_arena, scratch, 4);
+		if (!out->lzss_src || !out->lzss_dst)
+		{
+			pnx_log("map %u: arena full, needed %u for LZSS scratch, %u free", asset_id,
+					(unsigned)(scratch * 2), (unsigned)pnx_arena_remaining(s_arena));
+			return false;
+		}
+	}
+#else
+	if (flags & 2)
+	{
+		pnx_log(
+			"map %u: built with compress_maps, but PNX_USE_MAP_COMPRESS is 0 -- set it "
+			"in pnx_config.h, or rebuild the project without compress_maps",
+			asset_id);
+		return false;
+	}
+#endif
 
 	// **A map that fits is loaded whole, here, before this returns.** Every small map is in
 	// this case, so they behave exactly as they did before WorldTiles existed: one load
@@ -1019,7 +1069,7 @@ static bool worldtile_accept(PnxMap* m, uint32_t i, uint8_t slot)
 	wt->cell_h = dst[1];
 	wt->cells  = dst + 2;
 
-	const size_t cells_need = 2 + (size_t)wt->cell_w * wt->cell_h * 2;
+	const size_t cells_need = 2 + (size_t)wt->cell_w * wt->cell_h * m->idx_width;
 	if (wt->cell_w == 0 || wt->cell_h == 0 || wt->cell_w > m->worldtile ||
 		wt->cell_h > m->worldtile || cells_need + 2 > m->slot_bytes)
 	{
@@ -1076,24 +1126,72 @@ static bool worldtile_load_run(PnxMap* m, uint32_t first, uint8_t slot, uint8_t 
 		return false;
 	}
 
-	const uint16_t per_bank = (uint16_t)(1u << m->bank_shift);
-	const uint16_t bank		= (uint16_t)(first >> m->bank_shift);
-	const size_t offset =
-		PNX_BLOB_HEADER_BYTES + (size_t)(first & (per_bank - 1)) * m->slot_bytes;
-	const size_t len = (size_t)count * m->slot_bytes;
-	uint8_t* dst	 = m->slot_mem + (size_t)slot * m->slot_bytes;
+	const uint16_t per_bank	  = (uint16_t)(1u << m->bank_shift);
+	const uint16_t bank		  = (uint16_t)(first >> m->bank_shift);
+	const size_t local_offset = (size_t)(first & (per_bank - 1)) * m->slot_bytes;
+	const size_t len		  = (size_t)count * m->slot_bytes;
+	uint8_t* dst			  = m->slot_mem + (size_t)slot * m->slot_bytes;
 
 	const uint32_t resource = s_resources[m->first_bank_asset + bank];
-	if (pnx_platform_resource_read(resource, offset, dst, len) != len)
+
+#if PNX_USE_MAP_COMPRESS
+	if (m->compressed)
 	{
-		pnx_log("map: bank %u short read of %u bytes at %u for WorldTiles %u..%u", bank,
-				(unsigned)len, (unsigned)offset, (unsigned)first,
-				(unsigned)(first + count - 1));
-		for (uint8_t k = 0; k < count; k++)
-			atlas_unpin_mask(m, pinned[k]);
-		return false;
+		// Atomic: any one WorldTile from this bank means decoding all of it -- see PnxMap's
+		// own comment for why that is the accepted trade. A run never crosses a bank
+		// boundary (the caller's own guarantee), so a bank asked for by more than one run
+		// within a single stream_window pass decodes more than once -- a known cost this
+		// milestone accepts rather than adds a decoded-bank cache to avoid.
+		size_t compressed_size = 0;
+		if (!pnx_platform_resource_size(resource, &compressed_size) ||
+			compressed_size <= PNX_BLOB_HEADER_BYTES)
+		{
+			pnx_log("map: bank %u missing or too small to hold a compressed body", bank);
+			for (uint8_t k = 0; k < count; k++)
+				atlas_unpin_mask(m, pinned[k]);
+			return false;
+		}
+		const size_t body_len = compressed_size - PNX_BLOB_HEADER_BYTES;
+		const size_t scratch  = (size_t)per_bank * m->slot_bytes;
+		if (body_len > scratch ||
+			pnx_platform_resource_read(resource, PNX_BLOB_HEADER_BYTES, m->lzss_src,
+									   body_len) != body_len)
+		{
+			pnx_log("map: bank %u short read of its %u-byte compressed body", bank,
+					(unsigned)body_len);
+			for (uint8_t k = 0; k < count; k++)
+				atlas_unpin_mask(m, pinned[k]);
+			return false;
+		}
+		s_bytes_loaded += (uint32_t)body_len;
+
+		const size_t decoded = pnx_lzss_decode(m->lzss_src, body_len, m->lzss_dst, scratch);
+		if (local_offset + len > decoded)
+		{
+			pnx_log("map: bank %u decoded %u of the %u bytes WorldTiles %u..%u need", bank,
+					(unsigned)decoded, (unsigned)(local_offset + len), (unsigned)first,
+					(unsigned)(first + count - 1));
+			for (uint8_t k = 0; k < count; k++)
+				atlas_unpin_mask(m, pinned[k]);
+			return false;
+		}
+		memcpy(dst, m->lzss_dst + local_offset, len);
 	}
-	s_bytes_loaded += (uint32_t)len;
+	else
+#endif
+	{
+		const size_t offset = PNX_BLOB_HEADER_BYTES + local_offset;
+		if (pnx_platform_resource_read(resource, offset, dst, len) != len)
+		{
+			pnx_log("map: bank %u short read of %u bytes at %u for WorldTiles %u..%u", bank,
+					(unsigned)len, (unsigned)offset, (unsigned)first,
+					(unsigned)(first + count - 1));
+			for (uint8_t k = 0; k < count; k++)
+				atlas_unpin_mask(m, pinned[k]);
+			return false;
+		}
+		s_bytes_loaded += (uint32_t)len;
+	}
 
 	for (uint8_t k = 0; k < count; k++)
 	{

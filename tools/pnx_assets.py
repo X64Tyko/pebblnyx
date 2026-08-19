@@ -97,10 +97,14 @@ def fold_flag_into_entry(entry, flag):
 # Blob format versions. A mismatch between a stale .bin and a newer runtime is exactly
 # the kind of failure that presents as garbage pixels rather than an error, so every
 # blob is tagged and the runtime checks.
-BLOB_VERSION = 12  # v12: atlas blobs carry baked SCALED rects / COMPLEX masks (finish_atlas);
-                   # WorldTile payloads carry a sparse EXTENDED table (slice_worldtiles).
-                   # v11: collision/warp moved into the cell word; the old tile_flags[]-by-id
-                   # override bytes were dropped (retired, not reused for either of the above).
+BLOB_VERSION = 13  # v13: map preamble carries a cell dictionary (build_cell_dictionary) --
+                   # a WorldTile's cells are 1- or 2-byte indices into it rather than raw
+                   # u16 entry words, since every real map measured uses only a handful of
+                   # distinct entry values. v12: atlas blobs carry baked SCALED rects /
+                   # COMPLEX masks (finish_atlas); WorldTile payloads carry a sparse
+                   # EXTENDED table (slice_worldtiles). v11: collision/warp moved into the
+                   # cell word; the old tile_flags[]-by-id override bytes were dropped
+                   # (retired, not reused for either of the above).
 MAGIC_ATLAS = b"PA"
 MAGIC_SPRITE = b"PS"
 MAGIC_MAP = b"PM"
@@ -2260,7 +2264,115 @@ def rotate_maps(maps, orient):
         m["w"], m["h"] = nw, nh
 
 
-def slice_worldtiles(m, worldtile):
+def lzss_compress(data, window=4096, min_match=3, max_match=18):
+    """Encodes `data` for pnx_lzss_decode (src/pnx/assets/pnx_lzss.c) to read back -- a
+    classic (12,4) token: a control byte's 8 bits (LSB first) each say literal (1, one
+    byte follows) or match (0, a 2-byte back-reference follows: (distance-1) low byte,
+    then (distance-1)'s high nibble packed with (length-3) in the other nibble).
+
+    Build-time only, so a plain greedy longest-match search is fine -- encoder speed and
+    optimality never matter here, only the decoder's simplicity does, and that is what the
+    token format buys: a copy/literal loop, no entropy stage.
+    """
+    n = len(data)
+    i = 0
+    out = bytearray()
+    control_pos = None
+    bit_index = 8  # forces a fresh control byte before the first token
+
+    while i < n:
+        if bit_index == 8:
+            control_pos = len(out)
+            out.append(0)
+            bit_index = 0
+
+        start = max(0, i - window)
+        best_len, best_off = 0, 0
+        limit = min(max_match, n - i)
+        for j in range(start, i):
+            length = 0
+            while length < limit and data[j + length] == data[i + length]:
+                length += 1
+            if length > best_len:
+                best_len, best_off = length, i - j
+
+        if best_len >= min_match:
+            off = best_off - 1          # 0..4095, fits 12 bits
+            ln = best_len - min_match   # 0..15, fits 4 bits
+            out.append(off & 0xFF)
+            out.append(((off >> 8) & 0x0F) | (ln << 4))
+            i += best_len
+        else:
+            out[control_pos] |= (1 << bit_index)
+            out.append(data[i])
+            i += 1
+        bit_index += 1
+
+    return bytes(out)
+
+
+def lzss_decompress(data, out_len):
+    """The inverse of lzss_compress -- a pure-Python mirror of pnx_lzss_decode
+    (src/pnx/assets/pnx_lzss.c), so parse_map can read a compressed bank back without a C
+    dependency. Keep this in lockstep with that file if the token format ever changes; the
+    editor round-tripping a compressed map depends on the two agreeing exactly.
+    """
+    out = bytearray()
+    si = 0
+    n = len(data)
+    while len(out) < out_len and si < n:
+        control = data[si]
+        si += 1
+        for bit in range(8):
+            if len(out) >= out_len:
+                break
+            if control & (1 << bit):
+                if si >= n:
+                    return bytes(out)
+                out.append(data[si])
+                si += 1
+            else:
+                if si + 2 > n:
+                    return bytes(out)
+                lo, hi = data[si], data[si + 1]
+                si += 2
+                dist = (lo | ((hi & 0x0F) << 8)) + 1
+                length = (hi >> 4) + 3
+                if dist > len(out):
+                    return bytes(out)
+                start = len(out) - dist
+                for k in range(length):
+                    if len(out) >= out_len:
+                        break
+                    out.append(out[start + k])
+    return bytes(out)
+
+
+def build_cell_dictionary(tiles):
+    """Every distinct cell entry word (tile id + flip/rotate/warp/extended bits) a map's
+    cell plane actually uses, in first-seen order, plus the index width that fits the
+    count.
+
+    Real maps use only a handful of distinct entries -- a legend only ever paints from a
+    small palette, and it was measured directly (not assumed) against every map already in
+    this repo: never more than 9. A WorldTile stores a 1-byte (or, past 256 entries,
+    2-byte) index into this table instead of the raw 2-byte word -- see PNX_BLOB_VERSION's
+    v13 comment (pnx_assets.h) for the numbers this earns. `idx_width` degrades to 2 on a
+    map with more than 256 distinct entries rather than failing the build: no worse than
+    today's cost, never a build error over it.
+    """
+    order = []
+    index_of = {}
+    for i in range(0, len(tiles), 2):
+        entry = tiles[i] | (tiles[i + 1] << 8)
+        if entry not in index_of:
+            index_of[entry] = len(order)
+            order.append(entry)
+    idx_width = 1 if len(order) <= 256 else 2
+    return order, index_of, idx_width
+
+
+def slice_worldtiles(m, worldtile, index_of, idx_width):
     """Cut the cell plane into WorldTiles.
 
     Used to also carry each WorldTile's own COLLISION flag overrides -- retired along with
@@ -2297,8 +2409,9 @@ def slice_worldtiles(m, worldtile):
             for ly in range(ch):
                 for lx in range(cw):
                     i = (y0 + ly) * w + (x0 + lx)
-                    cells += m["tiles"][i * 2:i * 2 + 2]
-                    tile = (m["tiles"][i * 2] | (m["tiles"][i * 2 + 1] << 8)) & 0x03FF
+                    entry = m["tiles"][i * 2] | (m["tiles"][i * 2 + 1] << 8)
+                    cells += index_of[entry].to_bytes(idx_width, "little")
+                    tile = entry & 0x03FF
                     used.add(tile)
                     val = m["extended"][i]
                     if val:
@@ -2400,11 +2513,14 @@ def prepare_map(m, worldtile=WORLDTILE_DEFAULT, bank_bytes=WORLDTILE_BANK_BYTES)
     the only part that answers "how many banks", and it depends on nothing but the map, so
     it moves here and runs first.
     """
-    cols, rows, tiles = slice_worldtiles(m, worldtile)
+    cell_dict, index_of, idx_width = build_cell_dictionary(m["tiles"])
+    cols, rows, tiles = slice_worldtiles(m, worldtile, index_of, idx_width)
     slot_bytes = (max(len(t["payload"]) for t in tiles) + 3) & ~3
     shift = bank_shift_for(slot_bytes, bank_bytes)
 
     m["wt"] = (cols, rows, tiles)
+    m["cell_dict"] = cell_dict
+    m["idx_width"] = idx_width
     m["slot_bytes"] = slot_bytes
     m["bank_shift"] = shift
     m["bank_count"] = (cols * rows + (1 << shift) - 1) >> shift
@@ -2414,7 +2530,7 @@ def prepare_map(m, worldtile=WORLDTILE_DEFAULT, bank_bytes=WORLDTILE_BANK_BYTES)
 def finish_map(m, atlas_assets, atlas_bytes, pal_table=b"",
                worldtile=WORLDTILE_DEFAULT, atlas_slots=None, resident=False,
                bank_bytes=WORLDTILE_BANK_BYTES, first_bank_asset=0,
-               orient=ORIENT_BUTTONS_RIGHT):
+               orient=ORIENT_BUTTONS_RIGHT, compress=False):
     """Build the map blob: a resident preamble, then WorldTile payloads to stream.
 
     `atlas_assets` maps each of the map's atlas names to its asset id, which is how the
@@ -2447,12 +2563,14 @@ def finish_map(m, atlas_assets, atlas_bytes, pal_table=b"",
         u16 tile_total;  u8 tile_px, bank_shift
         u16 wt_slot_bytes;  u8 wt_slots, atlas_slots
         u32 atlas_pool_bytes
+        u16 dict_count (v13: the cell dictionary's entry count)
         atlas table    atlas_count * (u16 asset id, u16 first_tile)
         atlas slots    (atlas_slots + 1) * u32, offsets into the atlas pool
         u16 first_bank_asset, pad
         palette remap  tile_total bytes when present, padded to 4
         warps          warp_count * 5, padded to 4
         wt masks       wt_cols * wt_rows bytes, padded to 4
+        cell dict      dict_count * 2 bytes (v13), padded to 4
 
     Returns the map with `banks` set to the payload blobs the caller writes beside it.
     """
@@ -2492,18 +2610,29 @@ def finish_map(m, atlas_assets, atlas_bytes, pal_table=b"",
         body = bytearray()
         for t in tiles[start:start + per_bank]:
             body += t["payload"].ljust(slot_bytes, b"\0")
+        # LZSS-compressed under `compress_maps` (M12): the BODY only, never the header --
+        # every bank is still validated by a header-only read before any body is touched
+        # (pnx_map_load), and that check has to work whether or not the body past it is
+        # compressed. Runtime decode reads the whole compressed body in one call and treats
+        # the bank as an atomic streaming unit -- see pnx_lzss.h's own comment for why that
+        # is the accepted trade.
+        stored = lzss_compress(bytes(body)) if compress else bytes(body)
         # Stamped like every other blob, so a bank left over from a build in the other
         # orientation is refused rather than drawn sideways. The header is why a tile's
         # offset within its bank starts at HEADER_BYTES rather than at zero.
         banks.append(blob_header(MAGIC_BANK, len(tiles[start:start + per_bank]),
                                  slot_bytes & 0xFF, slot_bytes >> 8, 0, orient=orient)
-                     + bytes(body))
+                     + stored)
 
+    cell_dict = m["cell_dict"]
     preamble = bytearray()
-    preamble += bytes([len(m["atlas_table"]), cols, rows, 1 if pal_table else 0])
+    # Bit 0: palette remap present. Bit 1 (M12): this map's banks are LZSS-compressed.
+    preamble += bytes([len(m["atlas_table"]), cols, rows,
+                       (1 if pal_table else 0) | (2 if compress else 0)])
     preamble += tile_total.to_bytes(2, "little") + bytes([m["tile_px"], shift])
     preamble += slot_bytes.to_bytes(2, "little") + bytes([wt_slots, atlas_slots])
     preamble += pool[-1].to_bytes(4, "little")
+    preamble += len(cell_dict).to_bytes(2, "little")
     for name, first, _ in m["atlas_table"]:
         preamble += atlas_assets[name].to_bytes(2, "little") + first.to_bytes(2, "little")
     preamble += b"".join(o.to_bytes(4, "little") for o in pool)
@@ -2511,6 +2640,7 @@ def finish_map(m, atlas_assets, atlas_bytes, pal_table=b"",
     preamble += pad4(bytes(pal_table)) if pal_table else b""
     preamble += pad4(b"".join(bytes(x) for x in m["warps"]))
     preamble += pad4(bytes(t["mask"] for t in tiles))
+    preamble += pad4(b"".join(v.to_bytes(2, "little") for v in cell_dict))
 
     base = HEADER_BYTES + len(preamble)
     m["blob"] = blob_header(MAGIC_MAP, w, h, len(m["warps"]), worldtile,
@@ -2577,8 +2707,10 @@ def parse_map(blob, banks=()):
     slot_bytes = int.from_bytes(blob[p + 8:p + 10], "little")
     wt_slots, atlas_slots = blob[p + 10], blob[p + 11]
     atlas_pool_bytes = int.from_bytes(blob[p + 12:p + 16], "little")
+    dict_count = int.from_bytes(blob[p + 16:p + 18], "little")
+    idx_width = 1 if dict_count <= 256 else 2
 
-    at = p + 16
+    at = p + 18
     atlas_table = []
     for _ in range(atlas_count):
         atlas_table.append((int.from_bytes(blob[at:at + 2], "little"),
@@ -2601,26 +2733,56 @@ def parse_map(blob, banks=()):
     remap = take(tile_total) if flags & 1 else b""
     warps = take(warp_count * 5)
     masks = take(cols * rows)
+    dict_bytes = take(dict_count * 2)
+    cell_dict = [int.from_bytes(dict_bytes[i * 2:i * 2 + 2], "little")
+                for i in range(dict_count)]
 
     n = cols * rows
     per_bank = 1 << bank_shift
+    compressed = bool(flags & 2)
 
     # A WorldTile's home is arithmetic, not a lookup: payloads are padded to the slot
-    # stride, so bank and offset both fall out of the index.
+    # stride, so bank and offset both fall out of the index. A compressed bank (M12) is
+    # decoded once per bank and cached here rather than per WorldTile -- the atomic-unit
+    # cost the runtime accepts too (pnx_lzss.h's own comment).
+    decoded_banks = {}
+
+    def bank_body(bank_index):
+        raw = banks[bank_index]
+        if not compressed:
+            return raw
+        if bank_index not in decoded_banks:
+            tiles_in_bank = min(per_bank, n - bank_index * per_bank)
+            decoded_banks[bank_index] = lzss_decompress(
+                raw[HEADER_BYTES:], tiles_in_bank * slot_bytes)
+        return decoded_banks[bank_index]
+
     cells = bytearray(w * h * 2) if banks else bytearray()
     extended = {}
     for i in range(n if banks else 0):
         wx, wy = i % cols, i // cols
-        bank = banks[i >> bank_shift]
-        off = HEADER_BYTES + (i & (per_bank - 1)) * slot_bytes
-        body = bank[off:off + slot_bytes]
+        bank_index = i >> bank_shift
+        body_all = bank_body(bank_index)
+        off = (0 if compressed else HEADER_BYTES) + (i & (per_bank - 1)) * slot_bytes
+        body = body_all[off:off + slot_bytes]
         cw, ch = body[0], body[1]
+        # Stored as dictionary indices (v13), decoded back to the raw entry word here so
+        # every reader downstream of parse_map (cell_warp/cell_extended, tests, the editor)
+        # keeps seeing the same `cells` shape it always has -- the index is this format's
+        # concern, not theirs.
         for ly in range(ch):
-            src = 2 + ly * cw * 2
+            src = 2 + ly * cw * idx_width
             dst = ((wy * worldtile + ly) * w + wx * worldtile) * 2
-            cells[dst:dst + cw * 2] = body[src:src + cw * 2]
+            for lx in range(cw):
+                if idx_width == 1:
+                    index = body[src + lx]
+                else:
+                    index = int.from_bytes(body[src + lx * 2:src + lx * 2 + 2], "little")
+                entry = cell_dict[index]
+                cells[dst + lx * 2] = entry & 0xFF
+                cells[dst + lx * 2 + 1] = entry >> 8
 
-        ext_at = 2 + cw * ch * 2
+        ext_at = 2 + cw * ch * idx_width
         ext_count = int.from_bytes(body[ext_at:ext_at + 2], "little")
         ext_at += 2
         for _ in range(ext_count):
@@ -2635,6 +2797,7 @@ def parse_map(blob, banks=()):
             "atlas_table": atlas_table, "palette": remap,
             "warps": [tuple(warps[i * 5:i * 5 + 5]) for i in range(warp_count)],
             "masks": masks, "cells": bytes(cells), "extended": extended,
+            "cell_dict": cell_dict, "dict_count": dict_count, "idx_width": idx_width,
             "wt_slots": wt_slots, "wt_slot_bytes": slot_bytes,
             "atlas_slots": atlas_slots, "atlas_pool": pool,
             "atlas_pool_bytes": atlas_pool_bytes}
@@ -3968,6 +4131,16 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
         print("  pack_2bit: emitting ~bw resource variants (default on -- see "
               "docs/PORTING.md; set pack_2bit = false in [project] to opt out)")
 
+    # OFF by default, unlike pack_2bit: this trades a real CPU decode cost per bank load
+    # for smaller map resources (M12), and that trade is a project's own call to make, not
+    # a default every map pays for. Pairs with PNX_USE_MAP_COMPRESS (pnx_config.h) on the
+    # runtime side -- a map built with this on refuses to load against a runtime built
+    # without it, rather than reading compressed bytes as if they were plain cells.
+    compress_maps = bool(project.get("compress_maps", False))
+    if compress_maps:
+        print("  compress_maps: LZSS-compressing WorldTile bank bodies -- set "
+              "PNX_USE_MAP_COMPRESS=1 in the project's pnx_config.h to match")
+
     shared = []
     settle_palettes(atlases, sprites, shared, nine_slices)
     for a in atlases:
@@ -4009,7 +4182,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
         first_bank = asset_index[f"PNX_ASSET_BANK_{c_ident(m['name'])}_0"]
         finish_map(m, assets, sizes, table,
                    m["worldtile"], m["atlas_slots"], m["resident"],
-                   m["bank_bytes"], first_bank, orient)
+                   m["bank_bytes"], first_bank, orient, compress_maps)
     # Colour only, no ~bw variant: a 1-bit platform never loads this resource at all (see
     # PnxPalette's own comment, pnx_assets.h) -- there is nothing for a ~bw tag to shrink.
     palette_blob = (blob_header(MAGIC_PALETTES, len(shared), orient=orient)

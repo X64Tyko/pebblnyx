@@ -849,6 +849,160 @@ finding for WorldTile streaming -- a framework feature is cheap in the aggregate
 project that never touches it, because none of this is `#if`-gated except the two genuinely
 optional physics/collision modules.
 
+## Map/WorldTile cell dictionary (M12)
+
+A cell's raw stored form is a u16 (10-bit tile id + flip/rotate/warp/extended bits). Every
+real map in this repo uses only 3-9 *distinct* such values -- a legend only ever paints
+from a small palette. `build_cell_dictionary` (`tools/pnx_assets.py`) collects those
+distinct values once per map; a WorldTile's cells store a 1-byte (2-byte past 256 distinct
+values, none measured) index into that table instead of the raw 2 bytes.
+
+Resource bytes, measured on the real pipeline output (not simulated), before and after:
+
+| Map | Raw cell bytes | Distinct values | Dictionary-packed |
+|---|---|---|---|
+| `worldtiles/plain` (192x192) | 73,872 B | 9 | 37,080 B (50.2%) |
+| `overworld/outdoor` | 1,584 B | 4 | 776 B (49.0%) |
+| `overworld/cave` | 792 B | 4 | 392 B (49.5%) |
+| `overworld/deck` | 792 B | 4 | 392 B (49.5%) |
+| `stressbench/field` | 848 B | 3 | 398 B (46.9%) |
+
+`plain`'s bank count also dropped, 18 to 9: `bank_shift_for` sizes a bank from
+`slot_bytes`, and a WorldTile costing half as much lets twice as many fit under the same
+`bank_bytes` cap. Fewer banks is a second, independent saving on top of the byte count --
+the same lever M10's banking rework already showed is worth more than the bytes alone (a
+5.2x frame-time improvement came from re-banking with no byte-content change at all).
+
+Runtime code, measured with `tools/size_report.py` against a real linked `gabbro` build of
+`examples/stressbench` (`git stash` on the changed files for the "before" figure, same as
+M11's own measurement):
+
+| Module | Before | After | Δ |
+|---|---|---|---|
+| `pnx/assets` | 3,841 | 3,909 | **+68** |
+| `pnx/tilemap` | 684 | 706 | **+22** |
+| `pnx/collision`, `game` | 380, 3,826 | 414, 3,834 | **+34, +8** |
+| **app total incl. headers/padding** | **14,520 / 65,535 (22.2%)** | **14,656 / 65,535 (22.4%)** | **+136** |
+
+`pnx/collision` and `game` grow only because `pnx_map_entry` (`pnx_assets.h`) is a `static
+inline` function: its dictionary lookup is compiled into every translation unit that calls
+into it, not into `pnx/assets` alone. The dictionary table read itself (`pnx_map_load`) and
+`worldtile_accept`'s width-aware size check account for `pnx/assets`'s own growth;
+`pnx_tilemap.c`'s `draw_worldtile` accounts for `pnx/tilemap`'s.
+
+**In one line: ~132 B of linked code, paid by every project that uses maps at all (the
+dictionary has no opt-out), against resource savings of roughly half a map's cell bytes on
+every map measured and, on a large map, a real reduction in bank count on top of that.**
+
+## LZSS bank compression, `compress_maps` (M12)
+
+Optional, unlike the dictionary above: a project turns it on in `[project]` and matches it
+with `PNX_USE_MAP_COMPRESS=1` in `pnx_config.h`. Measured on `examples/stressbench`'s real
+map (already dictionary-packed), `compress_maps = true` on top:
+
+| | Dictionary only | + `compress_maps` | Δ |
+|---|---|---|---|
+| resource bytes | 4,904 B | 4,567 B | **-337 (-6.9%)** |
+| bank body | 398 B | 103 B | **-295 (-74%)** |
+
+`stressbench`'s map is small (a handful of WorldTiles, one bank) -- close to the worst case
+for a fixed per-bank compression overhead (every control byte and the 3-byte minimum match
+length cost proportionally more against a small payload). `worldtiles/plain` (192x192, 9
+banks) shows the other end, measured the same way -- real pipeline output, banks summed
+directly off disk:
+
+| | Raw cell bytes | Dictionary only | + `compress_maps` |
+|---|---|---|---|
+| `plain`, 9 banks | 73,872 B | 37,080 B (50.2%) | **4,807 B (6.5% of raw, 13.0% of dictionary-only)** |
+
+A large, repetitive map compresses much further on top of the dictionary than a small one
+does -- consistent with the dictionary table's own finding that bigger, more repetitive
+content dedups better, and with a Python prototype of the same encoder run against this
+exact map during design, which predicted 6.2% of raw and landed within half a point of the
+real pipeline's 6.5%.
+
+Runtime code, `tools/size_report.py` against a real linked build, `compress_maps` +
+`PNX_USE_MAP_COMPRESS=1` against the dictionary-only baseline above, `gabbro` and `aplite`
+side by side (the same `stressbench` build, both platforms compiled in the same
+`pebble build` -- not two separately-configured runs):
+
+| Module | `gabbro` before | `gabbro` after | Δ | `aplite` before | `aplite` after | Δ |
+|---|---|---|---|---|---|---|
+| `pnx/assets` | 3,909 | 4,365 | **+456** | 3,769 | 4,213 | **+444** |
+| `game` | 3,834 | 3,846 | **+12** | 3,834 | 3,846 | **+12** |
+| **app total incl. headers/padding** | **14,656 / 65,535 (22.4%)** | **15,124 / 65,535 (23.1%)** | **+468** | **14,388 / 65,535 (22.0%)** | **14,844 / 65,535 (22.7%)** | **+456** |
+
+All of it lands in `pnx/assets`: `pnx_lzss_decode` itself, `worldtile_load_run`'s compressed
+branch (the whole-bank read/decode/`memcpy` path), and the two scratch-buffer allocations
+`pnx_map_load` makes when a map's compressed bit is set. None of this links into a project
+that never sets `compress_maps`/`PNX_USE_MAP_COMPRESS` -- both gates are real, checked by
+building the same example both ways. `aplite` tracks `gabbro` almost exactly (+456 against
++468) -- the code cost itself is not platform-dependent in any way that matters.
+
+**The 65,535 ceiling this table checks against is the blob format's own `virtual_size` cap,
+not `aplite`'s real one.** Every other platform this framework targets has far more than
+64 KB of actual RAM, so that cap is normally the binding constraint and the one worth
+reporting against. `aplite` has 24,576 B, total, for the whole app -- code, static data,
+AND the heap `pnx_arena_init` mallocs from at runtime. Against that real ceiling,
+`stressbench` on `aplite` goes from 58.6% to 60.4% of all-in code+static budget by turning
+`compress_maps` on -- still comfortably inside it, but on a platform running that close to
+its ceiling already, "comfortably" is doing real work, not a rounding margin.
+
+**The scratch buffer's own cost is real RAM this table has never shown, on any platform.**
+`pnx_map_load`'s two `pnx_arena_alloc` calls for `lzss_src`/`lzss_dst` (`pnx_assets.c`) come
+out of whichever arena the project passed to `pnx_assets_init` -- `malloc`'d heap
+(`pnx_arena_init`, `pnx_arena.c`), not a static global, so `size_report.py`'s `bss` column
+never sees it at all. Each is sized to one bank's max uncompressed bytes; for
+`stressbench`'s field (one 398 B bank, dictionary-packed) that is 2 x ~400 B (4-byte
+aligned) = ~800 B, on top of whatever the project's own `SCENE_BYTES` was already going to
+hold. For `worldtiles/plain` (9 banks, ~4,120 B decoded each) the same arithmetic gives
+~8,240 B -- a real, and on `aplite` specifically not a small, addition to a project's own
+arena sizing that nothing before this measurement pass had put a number on.
+
+Confirmed directly, not just computed: `stressbench` built with `compress_maps` +
+`PNX_USE_MAP_COMPRESS=1` (diagnostics left at their normal shipped default, OFF, per that
+example's own `wscript`) installs and runs on real `aplite` silicon-equivalent QEMU
+(cortex-m3) -- SELECT-triggered frame-timing readouts update live on screen, no arena or map
+load failure. Turning `PNX_USE_DIAGNOSTICS=1` ALSO on for the same build, to pull log
+output for this measurement, tips it over: `arena init failed`, with the SDK's own exit-time
+report naming a 1,520 B heap total against an 8,704 B (`PERSIST_BYTES`+`SCENE_BYTES`) +
+~800 B (LZSS scratch) request. Diagnostics' own static ring buffer (`pnx_diag.c`) is what
+narrows the heap that far -- `stressbench` ships with it off on every platform for exactly
+this reason -- but the margin it exposes is real: `aplite` has little enough heap that a
+project already close to its own arena budget should size that budget with `compress_maps`
+in mind, not add it after the fact and assume it is free.
+
+CPU decode cost, measured for real rather than estimated: a dedicated bench
+(`examples/lzssbench`, built for this) ran 2,000 timed `pnx_lzss_decode` calls per bank
+across 14 real compressed banks (16x16 up to 192x192 -- `worldtiles/plain`'s own footprint)
+on the author's real Pebble Time 2 (`emery`, cortex-m33):
+
+| | Fixed cost | Per decoded byte | Worst bank (4,112 B decoded) |
+|---|---|---|---|
+| Real `emery` (PT2 hardware) | ~3 us | ~62 ns | ~255-272 us |
+
+Against `emery`'s own measured frame budget (~35-37 ms, see the frame-rate-ceiling work),
+the single largest bank a stream-in would ever trigger costs under 1% of one frame -- decode
+cost is not a latency concern at any bank size this framework ships. The same bench also ran
+clean on `basalt`/`chalk`/`aplite` QEMU (the "mature" boards this project otherwise trusts
+for timing) and landed 4-10x LOWER per byte than the real PT2 number above -- a real,
+noteworthy finding of its own: QEMU is not a reliable stand-in for absolute CPU-bound
+compute cost on this framework's real silicon, only real hardware answers that, which is why
+the number in the table above is the PT2 log and nothing else. `aplite`/`basalt`/`chalk`/
+`diorite`/`gabbro`/`flint` decode cost specifically has not been measured on real hardware;
+`gabbro`/`flint` share `emery`'s cortex-m33 core and are expected to land close to the table
+above, not independently confirmed.
+
+**In one line: roughly 470 B of linked code (platform-independent) for a project that opts
+in, against a resource cut from a real but modest 6.9% on a small single-bank map up to
+93.5% of raw on a large repetitive one, a CPU decode cost now measured at ~62 ns/byte on
+real PT2 hardware (under 1% of a frame even at the largest bank shipped anywhere in this
+repo), and a runtime heap cost -- 2x one bank's decoded size, `malloc`'d from the project's
+own arena, invisible to every code-size table before this one -- that is real everywhere and
+tight specifically on `aplite`, where the framework's own diagnostics ring buffer is already
+close enough to that platform's ceiling to be the thing that tips a debug build over, not
+`compress_maps` alone.**
+
 ## Layers, HUD, and 9-slice panels (M11)
 
 Three new pieces, in dependency order: `pnx_blit_4bpp_region` (`pnx_gfx.c`) reads an

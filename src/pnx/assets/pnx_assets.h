@@ -53,12 +53,18 @@
 
 // Every blob carries this, so a stale .bin against a newer runtime is a clean error
 // rather than garbage pixels. Bumped whenever a format changes.
-#define PNX_BLOB_VERSION 12 // v12: atlas blobs carry baked SCALED rects / COMPLEX
-							// masks (PnxAtlas.scaled_rects/complex_masks);
-							// WorldTile payloads carry a sparse EXTENDED table
-							// (PnxWorldTile.ext). v11: collision/warp moved into
-							// the cell word; the old tile_flags[]-by-id override
-							// bytes were dropped.
+#define PNX_BLOB_VERSION 13 // v13: map preamble carries a cell dictionary
+							// (PnxMap.cell_dict/dict_count/idx_width) -- a
+							// WorldTile's cells are stored as 1- or 2-byte
+							// indices into it rather than raw u16 entry words,
+							// since every real map measured uses only a
+							// handful of distinct entry values. v12: atlas
+							// blobs carry baked SCALED rects / COMPLEX masks
+							// (PnxAtlas.scaled_rects/complex_masks); WorldTile
+							// payloads carry a sparse EXTENDED table
+							// (PnxWorldTile.ext). v11: collision/warp moved
+							// into the cell word; the old tile_flags[]-by-id
+							// override bytes were dropped.
 #define PNX_BLOB_HEADER_BYTES 8
 
 // ------------------------------------------------------------------- palettes
@@ -303,6 +309,18 @@ typedef struct
 	const PnxWarp* warps;
 	const uint8_t* wt_mask; // wt_cols * wt_rows: which atlases each WorldTile needs
 
+	// The cell dictionary (M12): a WorldTile's cells are stored as INDICES into this table,
+	// not raw entry words. Every real map measured uses only a handful of distinct (tile id
+	// + flip/rotate/warp/extended) combinations -- a legend only ever paints from a small
+	// palette -- so `dict_count` is small (single digits in everything measured) and an
+	// `idx_width`-byte index costs less than the u16 it replaces. `cell_dict[index]` recovers
+	// the exact entry word `pnx_map_entry` used to read directly; nothing downstream of that
+	// function needs to know cells are stored indexed at all.
+	const uint8_t* cell_dict; // dict_count * 2 bytes, read the same way a cell's own entry
+							  // word is -- see pnx_map_entry's own comment
+	uint16_t dict_count;
+	uint8_t idx_width; // 1 or 2 bytes per stored cell; 2 only when dict_count > 256
+
 	// The atlas pool's slots are NOT a uniform stride. When there is a slot per atlas
 	// nothing is ever evicted, so each slot is exactly its atlas's size -- which for one
 	// large tileset beside one small one is the difference between fitting in RAM and not.
@@ -344,6 +362,23 @@ typedef struct
 	// need another read. Every small map is in this case, which is most of them: the
 	// streaming calls become one comparison and return.
 	bool held_whole;
+
+#if PNX_USE_MAP_COMPRESS
+	// Set when this map's banks are LZSS-compressed (`compress_maps` in the manifest's
+	// [project] table). A compressed bank is an ATOMIC streaming unit: any one WorldTile
+	// needed from it means reading and decoding the whole thing, not the precise
+	// partial-range reads an uncompressed bank allows -- see worldtile_load_run's own
+	// comment (pnx_assets.c) for why that is the right trade for what this buys.
+	//
+	// Both scratch buffers are sized to one bank's max UNCOMPRESSED bytes
+	// (`(1 << bank_shift) * slot_bytes`) and reused for every bank this map streams: `src`
+	// holds the compressed bytes just read (LZSS output can never exceed what it started
+	// from, so this bound covers the compressed size too), `dst` holds the decoded bank
+	// body a WorldTile's own bytes are then copied out of into its resident pool slot.
+	bool compressed;
+	uint8_t* lzss_src;
+	uint8_t* lzss_dst;
+#endif
 } PnxMap;
 
 typedef struct
@@ -668,9 +703,12 @@ static inline uint16_t pnx_map_entry(const PnxMap* m, int32_t x, int32_t y)
 	if (!wt)
 		return PNX_MAP_NO_CELL;
 	const uint32_t i =
-		((uint32_t)(y & (m->worldtile - 1)) * wt->cell_w + (uint32_t)(x & (m->worldtile - 1))) *
-		2u;
-	return (uint16_t)(wt->cells[i] | ((uint16_t)wt->cells[i + 1] << 8));
+		(uint32_t)(y & (m->worldtile - 1)) * wt->cell_w + (uint32_t)(x & (m->worldtile - 1));
+	const uint16_t index = (m->idx_width == 1)
+		? wt->cells[i]
+		: (uint16_t)(wt->cells[i * 2] | ((uint16_t)wt->cells[i * 2 + 1] << 8));
+	const uint8_t* d	 = m->cell_dict + (size_t)index * 2;
+	return (uint16_t)(d[0] | ((uint16_t)d[1] << 8));
 }
 
 static inline uint16_t pnx_map_tile(const PnxMap* m, int32_t x, int32_t y)

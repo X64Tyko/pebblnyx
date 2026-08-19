@@ -1,0 +1,44 @@
+[project]
+name = "lzss_fixture"
+resources = "resources"
+header = "gen.h"
+compress_maps = true
+
+[[atlas]]
+name = "tiles"
+sheet = "sheet.png"
+tile = 16
+region = [0, 0, 2, 2]
+max_tiles = 16
+out = "tiles.bin"
+autopick = ["floor", "wall", "accent"]
+[[atlas.collision]]
+tile = "wall"
+type = "solid"
+
+[legend."."]
+tile = "floor"
+flags = []
+[legend."#"]
+tile = "wall"
+flags = []
+[legend."A"]
+tile = "accent"
+flags = []
+
+[[map]]
+name = "a"
+out = "a.bin"
+start = [1, 1]
+warps = []
+worldtile = 4
+rows = """
+########
+#......#
+#.####.#
+#.#..#.#
+#.#AA#.#
+#.####.#
+#......#
+########
+"""

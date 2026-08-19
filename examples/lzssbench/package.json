@@ -1,0 +1,138 @@
+{
+  "name": "pnx-lzssbench",
+  "author": "tyton",
+  "version": "1.0.0",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "pnx lzssbench",
+    "uuid": "6be4415f-556e-4194-86ca-26b90fe674aa",
+    "sdkVersion": "3",
+    "enableMultiJS": false,
+    "targetPlatforms": [
+      "emery",
+      "gabbro",
+      "flint",
+      "basalt",
+      "chalk",
+      "diorite",
+      "aplite"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [],
+    "resources": {
+      "media": [
+        {
+          "type": "raw",
+          "name": "PALETTES",
+          "file": "palettes.bin"
+        },
+        {
+          "type": "raw",
+          "name": "TILES",
+          "file": "tiles.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S16",
+          "file": "map_s16.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S16_0",
+          "file": "map_s16_b0.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S32",
+          "file": "map_s32.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S32_0",
+          "file": "map_s32_b0.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S96",
+          "file": "map_s96.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S96_0",
+          "file": "map_s96_b0.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S96_1",
+          "file": "map_s96_b1.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S96_2",
+          "file": "map_s96_b2.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S192",
+          "file": "map_s192.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S192_0",
+          "file": "map_s192_b0.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S192_1",
+          "file": "map_s192_b1.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S192_2",
+          "file": "map_s192_b2.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S192_3",
+          "file": "map_s192_b3.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S192_4",
+          "file": "map_s192_b4.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S192_5",
+          "file": "map_s192_b5.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S192_6",
+          "file": "map_s192_b6.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S192_7",
+          "file": "map_s192_b7.bin"
+        },
+        {
+          "type": "raw",
+          "name": "S192_8",
+          "file": "map_s192_b8.bin"
+        },
+        {
+          "type": "raw",
+          "name": "BENCH",
+          "file": "font_bench.bin"
+        }
+      ]
+    }
+  }
+}
