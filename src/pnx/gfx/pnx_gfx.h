@@ -97,3 +97,17 @@ void pnx_blit_metatile_with(PnxTarget* t, const PnxAtlas* atlas, uint8_t tile,
 // Filled rectangle in screen space, clipped. For dialog boxes and HUD panels.
 void pnx_gfx_fill_rect(PnxTarget* t, int32_t x, int32_t y, int16_t w, int16_t h,
 					   uint8_t colour);
+
+// Blits an `sw` x `sh` window starting at `(sx, sy)` out of a larger 4bpp-packed source
+// image whose own full width is `src_w` -- unrelated to the window being copied. This is
+// what lets a 9-slice panel's corners/edges/centre be read out of ONE packed source image
+// at draw time rather than pre-sliced into nine separate buffers at pack time.
+//
+// No `flip`: nothing that calls this needs to mirror a panel, and the simplest thing that
+// could possibly need it does not exist yet -- see pnx_sprite.c, which never passes
+// PNX_FLIP_ROTATE either. Trades pnx_blit_4bpp's paired-nibble fast path for a per-pixel
+// loop; worth it here because a border region is small (an edge tile, a corner), never
+// the whole-screen span pnx_blit_4bpp's fast path earns its keep on.
+void pnx_blit_4bpp_region(PnxTarget* t, const uint8_t* src, int16_t src_w,
+						  const PnxPalette* palette, int32_t x, int32_t y, int16_t sx,
+						  int16_t sy, int16_t sw, int16_t sh);

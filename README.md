@@ -72,6 +72,7 @@ in [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md).
 ## Layout
 
 ```
+docs/QUICKSTART.md    checkout -> emulator/device: install, editor tour, manifest, code shape
 docs/PLATFORM.md      how these games are actually played: off the wrist, in two hands
 docs/GAME.md          the game this is built for, and what it demands
 docs/EDITOR.md        the visual editor: levels, assets, packaging -- no embedded emulator, see inside

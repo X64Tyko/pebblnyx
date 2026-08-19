@@ -13,6 +13,7 @@ class ScenesMixin:
                 "name": name,
                 "map": spec.get("map"),
                 "sprites": list(spec.get("sprites", [])),
+                "nine_slices": list(spec.get("nine_slices", [])),
                 "fonts": list(spec.get("fonts", [])),
                 # Carried through rather than dropped: a scene with no map may legitimately
                 # load atlases of its own (a menu drawing tiles), and silently discarding
@@ -34,7 +35,7 @@ class ScenesMixin:
         return None
 
     def save_scene(self, name, map_name=None, sprites=(), fonts=(), dialog=False,
-                   atlases=()):
+                   atlases=(), nine_slices=()):
         """Create or rewrite one [scene.*], validated the way build_scenes will validate it.
 
         The clash check is the one worth doing here rather than at build time: a scene
@@ -55,6 +56,11 @@ class ScenesMixin:
             if s not in known_sprites:
                 raise ValueError(f"no sprite named {s!r} "
                                  f"(known: {', '.join(known_sprites) or 'none'})")
+        known_nine_slices = [ns.get("name") for ns in self.man.get("nine_slice", [])]
+        for ns in nine_slices:
+            if ns not in known_nine_slices:
+                raise ValueError(f"no nine_slice named {ns!r} "
+                                 f"(known: {', '.join(known_nine_slices) or 'none'})")
         known_fonts = [f.get("name") for f in self.man.get("font", [])]
         for f in fonts:
             if f not in known_fonts:
@@ -77,7 +83,7 @@ class ScenesMixin:
                     f"map {map_name!r} already streams {', '.join(clash)}, so listing "
                     f"it here loads a second resident copy. Drop it.")
 
-        if not (map_name or sprites or fonts or atlases or dialog):
+        if not (map_name or sprites or nine_slices or fonts or atlases or dialog):
             raise ValueError("a scene that loads nothing cannot be built")
 
         # Key at a time, not block at a time. Replacing the whole table would be shorter
@@ -88,6 +94,8 @@ class ScenesMixin:
         want = [("map", f'map = "{map_name}"' if map_name else None),
                 ("atlases", "atlases = " + json.dumps(list(atlases)) if atlases else None),
                 ("sprites", "sprites = " + json.dumps(list(sprites)) if sprites else None),
+                ("nine_slices", "nine_slices = " + json.dumps(list(nine_slices))
+                                if nine_slices else None),
                 ("fonts", "fonts = " + json.dumps(list(fonts)) if fonts else None),
                 ("dialog", "dialog = true" if dialog else None)]
 

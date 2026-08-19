@@ -197,6 +197,19 @@ typedef struct
 	uint16_t frame_bytes; // w*h/2 colour, w*h/4 1-bit -- see PnxAtlas's own field
 } PnxSprite;
 
+// One packed panel image plus the four insets that carve it into nine regions: four
+// corners drawn once each, four edges tiled along their own axis, a centre tiled in
+// both -- a bordered HUD panel at any size without stretching a single pixel, since
+// nothing in this engine scales art (see pnx_gfx_draw_nine_slice's own comment). Single
+// frame, single palette: an animated panel is not a thing any game has asked for, and
+// PnxSprite already exists for the day one does.
+typedef struct
+{
+	const uint8_t* pixels; // w*h/2 colour, w*h/4 1-bit -- one packed image, not nine
+	uint8_t w, h;
+	uint8_t border_l, border_t, border_r, border_b; // pixel insets into `pixels`
+} PnxNineSlice;
+
 typedef struct
 {
 	uint8_t x, y;	  // tile the warp triggers on
@@ -505,6 +518,7 @@ bool pnx_scene_load(uint16_t scene_id);
 // Valid only after a successful pnx_scene_load. NULL when the scene declared none.
 const PnxAtlas* pnx_scene_atlas(uint8_t index);
 const PnxSprite* pnx_scene_sprite(uint8_t index);
+const PnxNineSlice* pnx_scene_nine_slice(uint8_t index);
 // Not const: a map streams, so its resident set changes as the camera moves. Handing back
 // a const pointer would have meant a `_mut` twin for the streaming calls, which says the
 // same thing less honestly.
@@ -514,12 +528,14 @@ const PnxFont* pnx_scene_font(uint8_t index);
 uint8_t pnx_scene_atlas_count(void);
 uint8_t pnx_scene_sprite_count(void);
 uint8_t pnx_scene_font_count(void);
+uint8_t pnx_scene_nine_slice_count(void);
 
 // Each returns false and leaves `out` untouched if the resource is missing, the blob is
 // the wrong type or version, or its declared dimensions do not match its actual size --
 // the last of which is what catches a truncated or half-written resource.
 bool pnx_atlas_load(PnxAtlas* out, uint16_t asset_id);
 bool pnx_sprite_load(PnxSprite* out, uint16_t asset_id);
+bool pnx_nineslice_load(PnxNineSlice* out, uint16_t asset_id);
 bool pnx_dialog_load(PnxDialog* out, uint16_t asset_id);
 
 // Takes no atlas: a map names the tilesets it was authored against and owns them, which

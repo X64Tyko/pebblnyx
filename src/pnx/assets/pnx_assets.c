@@ -13,6 +13,9 @@
 #ifndef PNX_SCENE_MAX_SPRITES
 #define PNX_SCENE_MAX_SPRITES 8
 #endif
+#ifndef PNX_SCENE_MAX_NINE_SLICES
+#define PNX_SCENE_MAX_NINE_SLICES 4
+#endif
 // Two covers the shape E7 was written around -- a small HUD face and a larger dialogue
 // one. Raising it costs sizeof(PnxFont) of bss per slot and nothing else.
 #ifndef PNX_SCENE_MAX_FONTS
@@ -29,10 +32,11 @@ static uint8_t s_orientation = PNX_ORIENT_UNSET;
 
 static PnxAtlas s_atlases[PNX_SCENE_MAX_ATLASES];
 static PnxSprite s_sprites[PNX_SCENE_MAX_SPRITES];
+static PnxNineSlice s_nine_slices[PNX_SCENE_MAX_NINE_SLICES];
 static PnxFont s_fonts[PNX_SCENE_MAX_FONTS];
 static PnxMap s_map;
 static PnxDialog s_dialog;
-static uint8_t s_atlas_count, s_sprite_count, s_font_count;
+static uint8_t s_atlas_count, s_sprite_count, s_nine_slice_count, s_font_count;
 static bool s_have_map, s_have_dialog;
 
 static PnxPalette* s_palettes;
@@ -546,6 +550,56 @@ bool pnx_sprite_load(PnxSprite* out, uint16_t asset_id)
 	out->h			   = h;
 	out->frame_count   = frames;
 	out->frame_bytes   = (uint16_t)frame_bytes;
+	return true;
+}
+
+bool pnx_nineslice_load(PnxNineSlice* out, uint16_t asset_id)
+{
+#if !PNX_DISPLAY_BW
+	if (!s_palettes)
+	{
+		pnx_log("nine_slice %u: load palettes first", asset_id);
+		return false;
+	}
+#endif
+
+	uint8_t w = 0, h = 0;
+	size_t payload		= 0;
+	const uint8_t* data = load_blob(asset_id, "N9", &w, &h, NULL, &payload);
+	if (!data)
+		return false;
+
+	// One packed image, not nine -- see PnxNineSlice's own comment. The four border bytes
+	// come first in the body (not in the fixed header: it has one spare field beyond
+	// w/h, not four), then the pixels, same as sprite frame data.
+#if PNX_DISPLAY_BW
+	const size_t pixel_bytes = (size_t)w * h / 4;
+#else
+	const size_t pixel_bytes = (size_t)w * h / 2;
+#endif
+	const size_t expected = 4 + pixel_bytes;
+	if (w == 0 || h == 0 || payload != expected)
+	{
+		pnx_log("nine_slice %u: %ux%u needs %u bytes, blob has %u", asset_id, w, h,
+				(unsigned)expected, (unsigned)payload);
+		return false;
+	}
+
+	const uint8_t bl = data[0], bt = data[1], br = data[2], bb = data[3];
+	if ((uint16_t)(bl + br) > w || (uint16_t)(bt + bb) > h)
+	{
+		pnx_log("nine_slice %u: borders %u/%u/%u/%u exceed %ux%u", asset_id, bl, bt, br, bb, w,
+				h);
+		return false;
+	}
+
+	out->pixels	  = data + 4;
+	out->w		  = w;
+	out->h		  = h;
+	out->border_l = bl;
+	out->border_t = bt;
+	out->border_r = br;
+	out->border_b = bb;
 	return true;
 }
 
@@ -1501,7 +1555,7 @@ bool pnx_scene_load(uint16_t scene_id)
 	// Everything the previous scene held goes at once. There is no partial free anywhere
 	// in the framework, and a scene boundary is the only point that needs one.
 	pnx_arena_reset(s_arena);
-	s_atlas_count = s_sprite_count = s_font_count = 0;
+	s_atlas_count = s_sprite_count = s_nine_slice_count = s_font_count = 0;
 	s_have_map = s_have_dialog = false;
 	s_palettes				   = NULL;
 	s_palette_count			   = 0;
@@ -1544,6 +1598,13 @@ bool pnx_scene_load(uint16_t scene_id)
 			if (ok)
 				s_sprite_count++;
 		}
+		else if (magic[0] == 'N' && magic[1] == '9')
+		{
+			ok = s_nine_slice_count < PNX_SCENE_MAX_NINE_SLICES &&
+				pnx_nineslice_load(&s_nine_slices[s_nine_slice_count], asset);
+			if (ok)
+				s_nine_slice_count++;
+		}
 		else if (magic[0] == 'P' && magic[1] == 'M')
 		{
 			// A map names and owns its own tilesets, so there is nothing to pair here any more.
@@ -1572,9 +1633,9 @@ bool pnx_scene_load(uint16_t scene_id)
 		}
 	}
 
-	pnx_log("scene %u: %u assets, %u atlases, %u sprites, %u fonts, arena %u/%u", scene_id,
-			count, s_atlas_count, s_sprite_count, s_font_count, (unsigned)s_arena->used,
-			(unsigned)s_arena->capacity);
+	pnx_log("scene %u: %u assets, %u atlases, %u sprites, %u nine-slices, %u fonts, arena %u/%u",
+			scene_id, count, s_atlas_count, s_sprite_count, s_nine_slice_count, s_font_count,
+			(unsigned)s_arena->used, (unsigned)s_arena->capacity);
 	return true;
 }
 
@@ -1585,6 +1646,10 @@ const PnxAtlas* pnx_scene_atlas(uint8_t index)
 const PnxSprite* pnx_scene_sprite(uint8_t index)
 {
 	return index < s_sprite_count ? &s_sprites[index] : NULL;
+}
+const PnxNineSlice* pnx_scene_nine_slice(uint8_t index)
+{
+	return index < s_nine_slice_count ? &s_nine_slices[index] : NULL;
 }
 const PnxFont* pnx_scene_font(uint8_t index)
 {
@@ -1605,6 +1670,10 @@ uint8_t pnx_scene_atlas_count(void)
 uint8_t pnx_scene_sprite_count(void)
 {
 	return s_sprite_count;
+}
+uint8_t pnx_scene_nine_slice_count(void)
+{
+	return s_nine_slice_count;
 }
 uint8_t pnx_scene_font_count(void)
 {

@@ -91,6 +91,17 @@ section h2{margin:0 0 .5rem;font:600 .68rem/1 ui-monospace,Menlo,monospace;
   justify-content:center}
 canvas{image-rendering:pixelated;cursor:crosshair;border:1px solid var(--line);
   border-radius:3px}
+/* A checkerboard rather than a flat background: a panel's tiled edges/centre reading
+   transparent (index 0, never drawn) has to be distinguishable from reading opaque black,
+   which a flat dark background cannot show. */
+.nspreview{display:inline-block;border:1px solid var(--line);border-radius:3px;
+  background-image:linear-gradient(45deg,var(--soft) 25%,transparent 25%),
+    linear-gradient(-45deg,var(--soft) 25%,transparent 25%),
+    linear-gradient(45deg,transparent 75%,var(--soft) 75%),
+    linear-gradient(-45deg,transparent 75%,var(--soft) 75%);
+  background-size:12px 12px;background-position:0 0,0 6px,6px -6px,-6px 0;
+  background-color:var(--surface);padding:2px}
+.nspreview img{display:block;image-rendering:pixelated}
 .tiles{display:flex;flex-wrap:wrap;gap:4px}
 .tile{border:2px solid transparent;border-radius:4px;padding:1px;cursor:pointer;
   background:none;line-height:0;position:relative}

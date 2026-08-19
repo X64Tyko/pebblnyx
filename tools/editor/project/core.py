@@ -117,6 +117,9 @@ class CoreMixin:
             "sprites": self.sprites(),
             "sprite_names": [s.get("name") for s in self.man.get("sprite", [])
                              if s.get("name")],
+            "nine_slices": self.nine_slices(),
+            "nine_slice_names": [ns.get("name") for ns in self.man.get("nine_slice", [])
+                                 if ns.get("name")],
             # The canvas the author is working on, which is the device's display turned
             # if the project is landscape. Sent as dimensions rather than as a flag so
             # the page never has to know which way round that is.

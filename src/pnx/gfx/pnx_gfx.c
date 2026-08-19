@@ -225,6 +225,93 @@ static void span_4bpp(uint8_t* row_base, int32_t x, const uint8_t* line, const u
 }
 #endif // !PNX_DISPLAY_BW
 
+// pnx_blit_4bpp_region's per-pixel writer: `col0 + i` is the SOURCE column (offset into a
+// row that does not start at 0, unlike span_4bpp's), `x + i` is the destination column.
+// Kept separate from span_4bpp rather than generalised into it -- that function is the
+// per-frame hot path (every sprite, every tile) and stays exactly as measured; this one
+// is not.
+#if !PNX_DISPLAY_BW
+static void span_4bpp_at(uint8_t* row_base, int32_t x, const uint8_t* line, const uint8_t* pal,
+						 int32_t col0, int32_t i0, int32_t i1)
+{
+	for (int32_t i = i0; i < i1; i++)
+	{
+		const int32_t col	 = col0 + i;
+		const uint8_t packed = line[col >> 1];
+		const uint8_t v		 = (col & 1) ? (uint8_t)(packed & 0x0F) : (uint8_t)(packed >> 4);
+		if (v != PNX_PALETTE_TRANSPARENT)
+			row_base[x + i] = pal[v];
+	}
+}
+#endif // !PNX_DISPLAY_BW
+
+// Same idea as span_4bpp_at, for a ~bw packed source: dithering is still keyed off the
+// SCREEN position (x + i, per span_2bpp_packed's own comment), only the bit lookup moves.
+#if PNX_DISPLAY_BW
+static void span_2bpp_packed_at(uint8_t* row_base, int32_t x, const uint8_t* line, int32_t col0,
+								int32_t i0, int32_t i1, int32_t dither_y)
+{
+	for (int32_t i = i0; i < i1; i++)
+	{
+		const int32_t col	= col0 + i;
+		const uint8_t byte	= line[col >> 2];
+		const uint8_t state = (uint8_t)((byte >> (6 - 2 * (col & 3))) & 3u);
+		if (state == 0)
+			continue;
+		const bool ink = (state == 3) ? (((x + i + dither_y) & 1) == 0) : (state == 2);
+		pnx_bw_set_pixel(row_base, x + i, ink);
+	}
+}
+#endif // PNX_DISPLAY_BW
+
+void pnx_blit_4bpp_region(PnxTarget* t, const uint8_t* src, int16_t src_w,
+						  const PnxPalette* palette, int32_t x, int32_t y, int16_t sx,
+						  int16_t sy, int16_t sw, int16_t sh)
+{
+#if PNX_DISPLAY_BW
+	if (!src)
+		return;
+#else
+	if (!src || !palette)
+		return;
+#endif
+
+	const int16_t th = pnx_target_height(t);
+#if PNX_DISPLAY_BW
+	const int32_t stride = src_w / 4;
+#else
+	const int32_t stride = src_w / 2;
+#endif
+
+	int32_t j0 = 0, j1 = sh;
+	if (y < 0)
+		j0 = -y;
+	if (y + sh > th)
+		j1 = th - y;
+
+	for (int32_t j = j0; j < j1; j++)
+	{
+		PnxRow row = pnx_target_row(t, (int16_t)(y + j));
+		if (!row.data)
+			continue;
+
+		int32_t i0 = 0, i1 = sw;
+		if (x + i0 < row.min_x)
+			i0 = row.min_x - x;
+		if (x + i1 > row.max_x + 1)
+			i1 = row.max_x + 1 - x;
+		if (i1 <= i0)
+			continue;
+
+		const uint8_t* line = src + (sy + j) * stride;
+#if PNX_DISPLAY_BW
+		span_2bpp_packed_at(row.data, x, line, sx, i0, i1, y + j);
+#else
+		span_4bpp_at(row.data, x, line, palette->entries, sx, i0, i1);
+#endif
+	}
+}
+
 void pnx_blit_metatile(PnxTarget* t, const PnxAtlas* atlas, uint8_t tile, int32_t x, int32_t y)
 {
 	pnx_blit_metatile_with(t, atlas, tile, pnx_atlas_tile_palette(atlas, tile), x, y);

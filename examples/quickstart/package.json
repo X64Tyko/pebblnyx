@@ -1,5 +1,5 @@
 {
-  "name": "pnx-stressbench",
+  "name": "pnx-quickstart",
   "author": "tyton",
   "version": "1.0.0",
   "keywords": [
@@ -8,18 +8,13 @@
   "private": true,
   "dependencies": {},
   "pebble": {
-    "displayName": "pnx stressbench",
-    "uuid": "4caab00a-2d3c-4e75-94f0-66c4e0bfd082",
+    "displayName": "pnx quickstart",
+    "uuid": "cf2354aa-5ae5-4b70-8884-f1a2ea1581c4",
     "sdkVersion": "3",
     "enableMultiJS": false,
     "targetPlatforms": [
       "emery",
-      "gabbro",
-      "flint",
-      "basalt",
-      "chalk",
-      "diorite",
-      "aplite"
+      "flint"
     ],
     "watchapp": {
       "watchface": false
@@ -44,28 +39,28 @@
         },
         {
           "type": "raw",
-          "name": "FIELD",
-          "file": "map_field.bin"
+          "name": "ROOM1",
+          "file": "map_room1.bin"
         },
         {
           "type": "raw",
-          "name": "FIELD_0",
-          "file": "map_field_b0.bin"
+          "name": "ROOM1_0",
+          "file": "map_room1_b0.bin"
         },
         {
           "type": "raw",
-          "name": "DIALOG",
-          "file": "dialog.bin"
+          "name": "ROOM2",
+          "file": "map_room2.bin"
         },
         {
           "type": "raw",
-          "name": "TONE",
-          "file": "sfx_tone.bin"
+          "name": "ROOM2_0",
+          "file": "map_room2_b0.bin"
         },
         {
           "type": "raw",
-          "name": "BENCH",
-          "file": "font_bench.bin"
+          "name": "SCENES",
+          "file": "scenes.bin"
         }
       ]
     }

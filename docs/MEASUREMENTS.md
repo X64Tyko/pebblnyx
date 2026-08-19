@@ -849,6 +849,69 @@ finding for WorldTile streaming -- a framework feature is cheap in the aggregate
 project that never touches it, because none of this is `#if`-gated except the two genuinely
 optional physics/collision modules.
 
+## Layers, HUD, and 9-slice panels (M11)
+
+Three new pieces, in dependency order: `pnx_blit_4bpp_region` (`pnx_gfx.c`) reads an
+arbitrary sub-rect out of a larger packed source image; `PNX_USE_NINESLICE`
+(`pnx_nineslice.c`) uses it to draw a bordered panel's nine regions -- corners once,
+edges/centre tiled -- at any box size; `PNX_USE_LAYERS` (`pnx_layer.c`) composites draw
+order and parallax across a small ordered list of layers, sprite-layer filtering added to
+`pnx_sprite.c` via four spare bits already sitting unused in `PnxSpriteInstance.flags`;
+`PNX_USE_HUD` (`pnx_hud.c`) is the widget layer above both -- bars, labelled rows, panels --
+migrated out of `resonant/src/c/ui.c`'s own hand-rolled copies rather than written fresh.
+Full design in `docs/ROADMAP.md`'s M11.
+
+`examples/stressbench/package.json`'s media list is out of sync with its manifest --
+missing the `DIALOG` resource entry `assets_gen.h`'s `PNX_ASSET_RESOURCE_TABLE` already
+names, a pre-existing gap unrelated to this milestone. The numbers below are measured
+after resyncing it with the pipeline's own `--package` flag (`python3 tools/pnx_assets.py
+assets.toml --package package.json`, the same sync `resonant`'s README documents), the
+only change made to `examples/stressbench` to obtain them.
+
+`examples/stressbench` calls into none of the five new/changed files -- no game code there
+builds a `PnxLayer`, draws a `PnxNineSlice`, or calls
+`pnx_hud_bar_draw`/`pnx_sprites_draw_layer`. `tools/size_report.py` against a `gabbro`
+build, before and after this milestone:
+
+| Module | Before | After | Δ |
+|---|---|---|---|
+| `pnx/gfx` | 1,038 | 1,038 | **0** |
+| `pnx/sprites` | 102 | 102 | **0** |
+| **app total incl. headers/padding** | **14,520 / 65,535 (22.2%)** | **14,520 / 65,535 (22.2%)** | **0** |
+
+Byte-for-byte identical, not merely close: `--gc-sections` strips
+`pnx_blit_4bpp_region`, `pnx_sprites_draw_layer`, and all three new modules down to nothing
+the moment nothing calls them -- `pnx_nineslice.c`/`pnx_hud.c`/`pnx_layer.c` do not appear
+in the report at all. A stronger result than most `PNX_USE_*` modules produce: most cost
+something small even when unused (a `#if`-gated struct field, a stub); these five add only
+new functions, so an unused one costs zero linked bytes.
+
+Cost once a project calls into one of these is not yet a linked-app number the way
+`pnx/collision`/`pnx/physics` got in M10 -- that needs a real caller wired into an example.
+`arm-none-eabi-size` on each file's own **unlinked** `.o` (same `gabbro` build) is a
+pessimistic upper bound in the meantime: a whole translation unit rarely links in smaller
+than it compiles.
+
+| File | Unlinked `.o` text | What's in it |
+|---|---|---|
+| `pnx_nineslice.c` | 880 B | `pnx_gfx_draw_nine_slice` + `blit_tiled` (`PNX_USE_NINESLICE`) |
+| `pnx_hud.c` | 290 B | `pnx_hud_bar_draw`/`pnx_hud_row_draw`/`pnx_hud_panel_draw` (`PNX_USE_HUD`) |
+| `pnx_layer.c` | 140 B | `pnx_layers_draw` + `scaled_camera` (`PNX_USE_LAYERS`) |
+| `pnx_gfx.c`, added | 220 B | `pnx_blit_4bpp_region` + `span_4bpp_at`/`span_2bpp_packed_at` |
+| `pnx_sprite.c`, added | 100 B | `pnx_sprites_draw_layer` + the `sprites_sort_by_y`/`sprites_draw_ordered` split |
+
+`pnx_gfx.c`'s function is deliberately a per-pixel loop rather than `span_4bpp`'s
+paired-nibble fast path (see that function's own comment: a border region is small enough
+that simplicity beats speed here, unlike the whole-screen spans `span_4bpp` earns its
+complexity on). `pnx_sprite.c`'s addition is `pnx_sprites_draw_layer` plus the
+`sprites_sort_by_y`/`sprites_draw_ordered` split `pnx_sprites_draw_sorted` now shares with
+it -- a single-layer game still calls the unchanged entry point and still pays for exactly
+one insertion sort, not two.
+
+**In one line: zero linked bytes on a real device build for a project that does not use
+layers/HUD/panels, and roughly 140-880 B of unlinked code per piece as a pessimistic
+ceiling on what a project that does use one pays.**
+
 ## WorldTile streaming (M4d)
 
 `examples/worldtiles` is a 192x192 field -- 73,728 bytes of cell plane, more than half

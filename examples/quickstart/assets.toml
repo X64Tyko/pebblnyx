@@ -1,0 +1,104 @@
+# Asset manifest for the QUICKSTART.md walkthrough.
+#
+# Deliberately the smallest manifest that still has everything a real game manifest has:
+# one tileset, one sprite, a legend, two maps joined by a warp, and the scenes that load
+# them. Everything bigger in examples/overworld or examples/worldtiles is more of the
+# same shapes, not a different structure.
+#
+# Build it with:
+#     ../../tools/pnx_assets.py assets.toml --preview
+
+[project]
+name = "quickstart"
+resources = "resources"
+header = "src/c/assets_gen.h"
+budget_bytes = 262144
+
+# ---------------------------------------------------------------------------- atlas
+
+[[atlas]]
+name = "tiles"
+sheet = "art/tiles.png"
+tile = 16
+region = [0, 0, 2, 1]
+out = "tiles.bin"
+autopick = ["floor", "wall"]
+
+[[atlas.collision]]
+tile = "wall"
+type = "solid"
+
+# --------------------------------------------------------------------------- sprites
+
+# Three 16x24 frames stacked vertically: a stand pose and two mid-strides.
+[[sprite]]
+name = "hero"
+sheet = "art/hero.png"
+frames = [[0, 0, 16, 24], [0, 24, 16, 24], [0, 48, 16, 24]]
+out = "hero.bin"
+
+[sprite.anim]
+stand = 0
+step_a = 1
+step_b = 2
+
+# ---------------------------------------------------------------------------- legend
+
+[legend."."]
+tile = "floor"
+
+[legend."#"]
+tile = "wall"
+
+# A door: walkable, and triggers a warp when stepped on. Reuses the floor tile rather
+# than a third one, since this sheet only has two -- a real map usually gives a door its
+# own tile so it reads as a door and not a floor.
+[legend."D"]
+tile = "floor"
+flags = ["warp"]
+
+# ------------------------------------------------------------------------------ maps
+
+[[map]]
+name = "room1"
+out = "map_room1.bin"
+start = [2, 4]
+# Destinations land one tile clear of the far door, so arriving does not immediately
+# re-trigger the door that just brought you here.
+warps = [{ at = [9, 4], to = ["room2", 1, 4] }]
+rows = """
+##########
+#........#
+#........#
+#........#
+#........D
+#........#
+#........#
+##########
+"""
+
+[[map]]
+name = "room2"
+out = "map_room2.bin"
+start = [1, 4]
+warps = [{ at = [0, 4], to = ["room1", 8, 4] }]
+rows = """
+##########
+#........#
+#........#
+#........#
+D........#
+#........#
+#........#
+##########
+"""
+
+# ---------------------------------------------------------------------------- scenes
+
+[scene.room1]
+map = "room1"
+sprites = ["hero"]
+
+[scene.room2]
+map = "room2"
+sprites = ["hero"]

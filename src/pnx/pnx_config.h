@@ -29,6 +29,32 @@
 #define PNX_USE_TEXT 1
 #endif
 
+// 9-slice panels: pnx_gfx_draw_nine_slice, drawing a PnxNineSlice's corners once and
+// tiling its edges/centre to fill an arbitrary box. The asset type itself (PnxNineSlice,
+// pnx_nineslice_load) is unconditional in pnx_assets.c, same as PnxSprite -- this flag
+// gates only the drawing module, so a game that never draws a bordered panel does not pay
+// for it, the way PNX_USE_SPRITES already works relative to PnxSprite.
+#ifndef PNX_USE_NINESLICE
+#define PNX_USE_NINESLICE 1
+#endif
+
+// Layer compositing: draw-order groups, parallax, and a place for the HUD to live.
+// Depends on PNX_USE_SPRITES for its PNX_LAYER_SPRITES kind (pnx_layer.h's own comment
+// explains why that is not threaded through as a further #if). A game that hand-rolls its
+// own fixed draw order and has no reason to generalise it -- resonant did, before this
+// milestone -- can leave this off; nothing else in the framework requires it.
+#ifndef PNX_USE_LAYERS
+#define PNX_USE_LAYERS 1
+#endif
+
+// HUD widgets: bars, labelled rows, bordered panels -- pnx_hud_bar_draw/pnx_hud_row_draw/
+// pnx_hud_panel_draw. Depends on PNX_USE_NINESLICE (the panel widget) and PNX_USE_TEXT
+// (the row widget), the same soft-dependency posture pnx_layer.h documents for its own
+// PNX_USE_SPRITES dependency.
+#ifndef PNX_USE_HUD
+#define PNX_USE_HUD 1
+#endif
+
 // Defaults from the HARDWARE, not from a blanket "on": PBL_SPEAKER is a compiler define
 // the SDK hands exactly the platforms that have one (emery, flint -- see docs/PORTING.md,
 // "The .pbw is seven apps in a zip"), so a build for gabbro/basalt/chalk/diorite/aplite

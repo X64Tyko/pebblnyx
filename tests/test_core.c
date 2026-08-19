@@ -245,6 +245,7 @@ void test_synth(void);
 void test_save(void);
 void test_app(void);
 void test_physics(void);
+void test_layer(void);
 
 int main(void)
 {
@@ -263,6 +264,7 @@ int main(void)
 	test_save();
 	test_app();
 	test_physics();
+	test_layer();
 
 	printf("\n%d checks, %d failures\n", s_checks, s_failures);
 	return s_failures == 0 ? 0 : 1;

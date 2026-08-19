@@ -794,6 +794,100 @@ whether a single manifest declares a SCALED tile).
 
 ---
 
+## M11 — Layers, HUD, and 9-slice panels — **DONE**
+
+Started from a concrete gap: every pnx game hand-sequenced its own draw order in one
+function (`resonant/src/c/main.c`'s `game_draw`: tilemap, sprites, HUD, battle overlay,
+dialog, all called in a fixed order, with nothing generic underneath it), and drew its UI
+chrome as flat `pnx_gfx_fill_rect` boxes -- `resonant/src/c/ui.c`'s dialog box and stat bar
+were black rectangles with a 1px rule line, no bordered art anywhere, and
+`examples/pinball` had no HUD at all. There was no concept of a draw-order "layer"
+anywhere in the framework (only false positives on search: the Pebble SDK's own `Layer*`
+canvas primitive, and `pnx/README.md`'s unrelated "module dependency layering"). This
+generalises the ad hoc sequencing into a reusable module, and gives it something worth
+drawing: a bordered panel that is not just a rectangle.
+
+- **9-slice panels tile, not stretch.** `pnx_blit_4bpp` has never scaled anything -- it
+  flips and rotates, and `pnx_blit_metatile`'s own comment already explains why repeated
+  blits beat a second, resampled buffer on this hardware. `pnx_gfx_draw_nine_slice`
+  (`pnx_nineslice.c`) draws a panel's four corners exact and tiles its four edges and
+  centre to fill an arbitrary box, the last tile in each run truncated to a partial size
+  rather than overflowing -- the one new blit primitive this needed,
+  `pnx_blit_4bpp_region` (`pnx_gfx.c`), reads an arbitrary sub-rect out of a larger packed
+  source image rather than assuming the source's own stride equals the region being
+  copied. A stretch fill mode is a plausible, non-breaking future addition (a new region
+  shape, not a change to this one); it is not built, so the API carries no fill-mode
+  parameter for a mode that does not exist yet.
+- **A new asset type, not a repurposed sprite.** `PnxNineSlice` (`pnx_assets.h`) is a
+  single packed image plus four border-inset bytes, loaded through a new `"N9"` blob magic
+  exactly the way `PnxSprite`/`PnxDialog`/`PnxFont` each get their own magic and loader.
+  The four border bytes are appended to the blob BODY rather than squeezed into the fixed
+  8-byte header (which has one spare field beyond w/h, not four) -- the same choice M10
+  made for SCALED/COMPLEX collision data. No `PNX_BLOB_VERSION` bump: that constant guards
+  against a stale build of the SAME blob type, and a wholly new, independent magic does not
+  retroactively invalidate anything `"PS"`/`"PA"`/etc. already promised.
+- **Border insets survive build-time rotation.** A landscape project pre-rotates its art at
+  build time (M4c) the same way a map's start position or a tile plane does; a panel's
+  border has to rotate with it or a left edge silently becomes a top edge on a rotated
+  build. `rotate_border` (`tools/pnx_assets.py`) derives the new insets by running the
+  panel's own two opposite corners through the SAME `rotate_point` every other rotated
+  coordinate in the pipeline already trusts, rather than a hand-derived, independently
+  verified edge-permutation table of its own.
+- **Layers cost nothing for a game that does not need them.** `PnxLayer`
+  (`pnx_layer.c`/`.h`) is one of two kinds -- an arbitrary callback (a parallax background,
+  a tilemap, the HUD itself) or a filtered slice of one shared `PnxSpriteInstance` pool,
+  sorted back-to-front by feet Y the way `pnx_sprites_draw_sorted` already did for a flat
+  array. "Grounded enemies" and "fliers" are two layer ids into the SAME instance array,
+  not two arrays to keep in sync -- and the id costs zero bytes, packed into four bits of
+  `PnxSpriteInstance.flags` that `PNX_SPRITE_MIRROR`/`PNX_SPRITE_HIDDEN` were not using,
+  rather than growing the struct. Each layer's `parallax_pct` scales the camera offset
+  before it draws: 255 is today's ordinary 1:1 motion (every existing single-layer game,
+  unchanged), 0 is screen-fixed (a HUD layer), anything between is a background that
+  crawls slower than the foreground.
+- **HUD widgets are a migration, not a rewrite.** `ui_bar_draw`/`ui_row_draw`
+  (`resonant/src/c/ui.c`) were already game-agnostic -- they took only primitives, no
+  `Game*` state -- so they moved into the framework as `pnx_hud_bar_draw`/
+  `pnx_hud_row_draw` (`pnx_hud.c`), with the one piece of real game logic they contained
+  (resolving `selected`/`enabled` to a colour) left where it belongs, in resonant's own
+  now-thinner wrappers. `pnx_hud_panel_draw` is a thin call into
+  `pnx_gfx_draw_nine_slice` -- the module's value is the widget layer above the primitive,
+  not a second copy of it.
+- **Full asset-pipeline and editor support, not just a runtime primitive.**
+  `tools/pnx_assets.py` gained `pack_nine_slice`/`finish_nine_slice`, a `[[nine_slice]]`
+  manifest table, and `settle_palettes`/`build_scenes` support so a panel shares the
+  project's palette budget and a scene can declare `nine_slices = [...]` the same way it
+  already declares `sprites`/`fonts`. The editor (`tools/editor/project/nine_slice.py` +
+  matching routes + a new "9-slice" section in the Sprites tab) mirrors `SpritesMixin`
+  throughout -- declare, validate through the real `pack_nine_slice`, save, remove, see
+  what scene loads one -- plus the one genuinely new piece of UI: a LIVE preview that
+  tiles the panel at an adjustable test box size, running the exact region math
+  `pnx_gfx_draw_nine_slice` runs at draw time (just against PIL crops instead of packed
+  4bpp bytes), so an author sees repeats look right before a device build rather than
+  trusting four border numbers alone.
+- **The real consumer is resonant, migrated, not a fresh example built to exercise this.**
+  `ui_bar_draw`/`ui_row_draw` now call the framework versions for every existing call site
+  (the title menu, the options list, the pause menu, the ATB gauge) with zero call-site
+  changes -- the same role `examples/pinball` played for M10's physics/collision modules.
+  Converting `ui_dialog_draw`/`ui_command_draw`'s flat panels to `pnx_hud_panel_draw`
+  against a real bordered `PnxNineSlice` is left for whoever authors the first panel
+  through the new editor support, since it needs art that does not exist yet -- the
+  primitive and the pipeline to make it are what this milestone delivers.
+
+**Result.** 831 host checks (up from 807 after M10, across the framework's own `tests/`)
+plus 466 Python pipeline/editor checks (up from 425): the sub-rect blit's odd-nibble-column
+case (untouched by any existing blit path), nine-slice tiling and undersized-box clamping,
+`rotate_border` pinned against hand-derived expectations for all four orientations, layer
+parallax/dispatch, sprite-layer filtering, and the full editor declare/validate/preview/
+save/remove/scene-membership cycle for a panel. `tools/size_report.py` against a real
+`gabbro` build of `examples/stressbench` shows **zero bytes added** to its linked app
+total: nothing in that example calls into any of the five new/changed files, and
+`--gc-sections` strips all of it -- `pnx_nineslice.c`/`pnx_hud.c`/`pnx_layer.c` do not
+appear in the report at all. Full numbers, including an unlinked-`.o` ceiling on what a
+project that does call into one of these pays, are in
+[`MEASUREMENTS.md`](MEASUREMENTS.md#layers-hud-and-9-slice-panels-m11).
+
+---
+
 ## Editor track (parallel)
 
 A visual editor for levels, assets, testing and packaging — architecture and reasoning in

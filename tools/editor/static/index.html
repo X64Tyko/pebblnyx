@@ -622,11 +622,27 @@
   <div id="pixel" style="display:none;flex:1;overflow:auto;padding:1.25rem">
     <div class="fontgrid">
       <div class="fontctl">
-        <!-- Three jobs share this column -- bringing in reference art, painting pixels,
-             and saving/registering the result -- and used to read as one undifferentiated
-             stack of controls. Grouped under named phases the way Aseprite/Piskel draw a
-             hard line between "import" and "the painting toolbox", rather than mixing
-             the two. -->
+        <!-- Four jobs share this column -- opening something that already exists, bringing
+             in reference art, painting pixels, and saving/registering the result -- and
+             used to read as one undifferentiated stack of controls. Grouped under named
+             phases the way Aseprite/Piskel draw a hard line between "import" and "the
+             painting toolbox", rather than mixing the two.
+
+             Opening comes first, and not just alphabetically: a page's first section is
+             where people look for "load what's already here" -- burying #spsel and
+             #pxopen down in Declare/File (where they still work exactly as before) read as
+             though no such door existed at all. Both selects keep their ids and onchange
+             wiring; only their position in the DOM moved. -->
+        <div class="category">Existing</div>
+        <section><h2>Open</h2>
+          <div class="fields col">
+            <label>Sprite<select id="spsel"><option value="">— new —</option></select></label>
+            <label>Pixel art<select id="pxopen"><option value="">—</option></select></label>
+          </div>
+          <small class="dim">Pick a sprite to edit its declaration and frames below, or
+            open a PNG straight into the canvas.</small>
+        </section>
+
         <div class="category">Import</div>
         <!-- Frames picked off a sheet. The declare form below can only describe a
              vertical stack, which is the layout this engine's own examples happen to use
@@ -704,7 +720,6 @@
         <div class="category">Save &amp; declare</div>
         <section><h2>File</h2>
           <div class="fields col">
-            <label>Open<select id="pxopen"><option value="">—</option></select></label>
             <label>Save as<input id="pxname" placeholder="art/hero.png"></label>
           </div>
           <button id="pxsave" class="primary">Save PNG</button>
@@ -717,7 +732,6 @@
              the picks above when there are any, and from the canvas size otherwise. -->
         <section><h2>Declare</h2>
           <div class="fields col">
-            <label>Sprite<select id="spsel"><option value="">— new —</option></select></label>
             <label>Name<input id="spname" placeholder="hero" size="10"></label>
             <label>Sheet<select id="spsheet"></select></label>
             <label>Frame w<input id="spfw" type="number" value="16" min="1" max="255"></label>
@@ -747,6 +761,48 @@
                These rects come from the declaration, so every layout opens alike. -->
           <div id="spframes" class="cells" style="margin-top:.5rem"></div>
           <small id="spframelog" class="dim">Pick a sprite to open its frames.</small>
+        </section>
+
+        <div class="category">Panels</div>
+        <!-- A 9-slice panel is a sprite with exactly one frame plus four border insets
+             (tools/pnx_assets.py's pack_nine_slice) -- corners drawn once, edges and
+             centre tiled to fill any box. Declared here rather than in a tab of its own:
+             the source art is the same art/ PNGs sprites already draw from, and "does the
+             tiling look right" only answers itself at a size nobody drew art for, which
+             is what the live preview below renders. -->
+        <section><h2>9-slice</h2>
+          <div class="fields col">
+            <label>Panel<select id="nssel"><option value="">— new —</option></select></label>
+            <label>Name<input id="nsname" placeholder="panel" size="10"></label>
+            <label>Sheet<select id="nssheet"></select></label>
+            <label>Rect x<input id="nsrx" type="number" value="0" min="0"
+              title="rect fields left at 0/0/0/0 use the sheet's own full size"></label>
+            <label>Rect y<input id="nsry" type="number" value="0" min="0"></label>
+            <label>Rect w<input id="nsrw" type="number" value="0" min="0"
+              title="0 uses the sheet's full width"></label>
+            <label>Rect h<input id="nsrh" type="number" value="0" min="0"
+              title="0 uses the sheet's full height"></label>
+            <label>Border L<input id="nsbl" type="number" value="4" min="0"></label>
+            <label>Border T<input id="nsbt" type="number" value="4" min="0"></label>
+            <label>Border R<input id="nsbr" type="number" value="4" min="0"></label>
+            <label>Border B<input id="nsbb" type="number" value="4" min="0"></label>
+          </div>
+          <div class="row" style="margin-top:.4rem">
+            <button id="nssave" class="primary">Save panel</button>
+            <button id="nsdel">Remove</button>
+          </div>
+          <small id="nslog">—</small>
+
+          <!-- Live, not just the numbers validate reports: tiled at an adjustable test
+               box, so an author sees repeats look right before a device build rather than
+               trusting four border values alone. Runs the exact region math
+               pnx_gfx_draw_nine_slice (src/pnx/gfx/pnx_nineslice.c) does at draw time. -->
+          <div class="fields col" style="margin-top:.5rem">
+            <label>Preview w<input id="nstw" type="number" value="48" min="1" max="200"></label>
+            <label>Preview h<input id="nsth" type="number" value="32" min="1" max="228"></label>
+          </div>
+          <div id="nspreview" class="nspreview"><img id="nspreviewimg" alt=""></div>
+          <small id="nsprevlog" class="dim">—</small>
         </section>
       </div>
 

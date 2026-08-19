@@ -1657,6 +1657,117 @@ $('#spdel').onclick=async()=>{
   budget(true);
 };
 
+// ----------------------------------------------------------------- 9-slice panels
+//
+// A panel is a sprite with one frame plus four border insets (tools/pnx_assets.py's
+// pack_nine_slice) -- corners drawn once, edges/centre tiled to fill any box. The form
+// mirrors the sprite one throughout; the preview below it is the one thing sprites never
+// needed, since "does the tiling look right" only answers itself at a size nobody drew
+// art for.
+
+function nsLog(msg,bad){
+  const el=$('#nslog');
+  el.className=bad===false?'ok':(bad?'bad':'');
+  el.textContent=msg||'—';
+}
+
+function drawNineSliceForm(){
+  const sel=$('#nssel'), cur=sel.value;
+  const list=(S.data&&S.data.nine_slices)||[];
+  sel.innerHTML='<option value="">— new —</option>'
+    +list.map(n=>`<option${n.name===cur?' selected':''}>${n.name}</option>`).join('');
+  const sheets=$('#nssheet');
+  const arts=(S.art||[]).map(a=>a.path);
+  sheets.innerHTML=arts.map(p=>`<option>${p}</option>`).join('');
+  nsPreview();
+}
+
+$('#nssel').onchange=()=>{
+  const name=$('#nssel').value;
+  if(!name){ nsLog(''); return }
+  const n=(S.data.nine_slices||[]).find(x=>x.name===name);
+  if(!n) return;
+  $('#nsname').value=n.name;
+  $('#nssheet').value=n.sheet;
+  const r=n.rect||[0,0,0,0];
+  $('#nsrx').value=r[0]; $('#nsry').value=r[1]; $('#nsrw').value=r[2]; $('#nsrh').value=r[3];
+  const b=n.border&&n.border.length===4?n.border:[4,4,4,4];
+  $('#nsbl').value=b[0]; $('#nsbt').value=b[1]; $('#nsbr').value=b[2]; $('#nsbb').value=b[3];
+  nsLog('');
+  nsPreview();
+};
+
+// The rect fields, read as "0,0,0,0 means the whole sheet" -- entering a real w/h is what
+// opts into a sub-rect, so a panel that IS the whole PNG never has to restate its size.
+function nsRect(){
+  const x=+$('#nsrx').value, y=+$('#nsry').value, w=+$('#nsrw').value, h=+$('#nsrh').value;
+  return (w>0&&h>0) ? [x,y,w,h] : null;
+}
+function nsBorder(){
+  return [+$('#nsbl').value, +$('#nsbt').value, +$('#nsbr').value, +$('#nsbb').value];
+}
+
+// Debounced: every keystroke in a border field would otherwise fire a request per
+// keystroke, and the preview is a nice-to-have that should never make typing feel slow.
+let nsPreviewTimer=null;
+function nsPreview(){
+  clearTimeout(nsPreviewTimer);
+  nsPreviewTimer=setTimeout(nsPreviewNow, 150);
+}
+async function nsPreviewNow(){
+  const sheet=$('#nssheet').value;
+  const img=$('#nspreviewimg'), log=$('#nsprevlog');
+  if(!sheet){ img.removeAttribute('src'); log.textContent='Pick a sheet to preview.'; return }
+  const r=await post('/api/nine_slice/preview',
+    {sheet, border:nsBorder(), rect:nsRect(),
+     test_w:+$('#nstw').value, test_h:+$('#nsth').value});
+  if(r.error){ log.className='bad'; log.textContent=r.error; return }
+  img.src=r.img;
+  log.className='dim';
+  log.textContent=`${r.panel_w}x${r.panel_h} panel, tiled to ${r.w}x${r.h}.`;
+}
+for(const id of ['nssheet','nsrx','nsry','nsrw','nsrh','nsbl','nsbt','nsbr','nsbb',
+                 'nstw','nsth']){
+  $('#'+id).addEventListener('input', nsPreview);
+}
+
+$('#nssave').onclick=async()=>{
+  const name=$('#nsname').value.trim();
+  if(!name){ nsLog('Name the panel first.',true); return }
+  const sheet=$('#nssheet').value;
+  if(!sheet){ nsLog('No PNG in the project to point at.',true); return }
+  const border=nsBorder(), rect=nsRect();
+  const existing=(S.data.nine_slices||[]).find(x=>x.name===$('#nssel').value)||{};
+  const colorkey=existing.colorkey||null;
+  // Validated through the real pack_nine_slice before anything is written, the same
+  // bargain the sprite form makes.
+  const v=await post('/api/nine_slice/validate',{name,sheet,border,rect,colorkey});
+  if(!v.ok){ nsLog(v.error,true); return }
+
+  const r=await post('/api/nine_slice/save',{name,sheet,border,rect,colorkey});
+  if(!r.ok){ nsLog(r.error,true); return }
+  await load(); drawNineSliceForm(); $('#nssel').value=name;
+  nsLog(`Saved "${name}" — ${v.w}x${v.h} panel, border ${v.border.join('/')}. Press Build.`,
+        false);
+  budget(true);
+};
+
+$('#nsdel').onclick=async()=>{
+  const name=$('#nssel').value||$('#nsname').value.trim();
+  if(!name){ nsLog('Pick a panel to remove.',true); return }
+  const u=await post('/api/nine_slice/users',{name});
+  if(u.users&&u.users.length){
+    nsLog(`Cannot remove "${name}" — ${u.users.join(', ')} loads it.`,true); return;
+  }
+  if(!confirm(`Remove panel "${name}" from the manifest?\n\n`
+              +`Nothing loads it. The PNG on disk is left alone.`)) return;
+  const r=await post('/api/nine_slice/remove',{name});
+  if(!r.ok){ nsLog(r.error,true); return }
+  await load(); drawNineSliceForm(); $('#nssel').value='';
+  nsLog(`Removed "${name}". Press Build.`,false);
+  budget(true);
+};
+
 // --------------------------------------------------------- removing a font
 //
 // The list is rebuilt from state rather than held, so a font added in the panel above
@@ -2610,6 +2721,7 @@ function drawScenes(){
   const d=S.data||{};
   const scenes=d.scenes||[], maps=(d.maps||[]).map(m=>m.name);
   const sprites=d.sprite_names||[], fonts=(d.fonts||[]).map(f=>f.name);
+  const nineSlices=d.nine_slice_names||[];
 
   // A map nothing loads is the dead end worth naming: it builds, it costs bytes, and the
   // game has no way to reach it.
@@ -2643,6 +2755,7 @@ function drawScenes(){
     // Sprites and fonts, a checkbox each. Listed rather than typed because every name
     // here has to resolve at build time, and a select cannot be misspelled.
     for(const [label,all,cur,key] of [['sprites',sprites,sc.sprites,'sprites'],
+                                      ['9-slice',nineSlices,sc.nine_slices,'nine_slices'],
                                       ['fonts',fonts,sc.fonts,'fonts']]){
       const row=document.createElement('div');
       row.className='mini';
@@ -2706,8 +2819,8 @@ function drawScenes(){
 // the same reason writeLegend resends. A partial write would drop the fonts when you
 // ticked a sprite.
 async function writeScene(sc,changes){
-  const body={name:sc.name, map:sc.map, sprites:sc.sprites, fonts:sc.fonts,
-              dialog:sc.dialog, atlases:sc.atlases, ...changes};
+  const body={name:sc.name, map:sc.map, sprites:sc.sprites, nine_slices:sc.nine_slices,
+              fonts:sc.fonts, dialog:sc.dialog, atlases:sc.atlases, ...changes};
   const r=await post('/api/scene',body);
   if(!r.ok){ sceneSay(r.error); drawScenes(); return }
   await reload(); drawScenes(); sceneSay('');
@@ -3792,6 +3905,7 @@ async function pxLoadList(select){
       .join('');
   }
   drawSpriteForm();
+  drawNineSliceForm();
 }
 
 // Importing art. Files arrive either from the picker or from a drop, and both end here:

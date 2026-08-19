@@ -37,6 +37,18 @@
 #include "gfx/pnx_sprite.h"
 #endif
 
+#if PNX_USE_NINESLICE
+#include "gfx/pnx_nineslice.h"
+#endif
+
+#if PNX_USE_LAYERS
+#include "gfx/pnx_layer.h"
+#endif
+
+#if PNX_USE_HUD
+#include "gfx/pnx_hud.h"
+#endif
+
 #if PNX_USE_TEXT
 #include "gfx/pnx_text.h"
 #endif

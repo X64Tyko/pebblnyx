@@ -20,22 +20,27 @@ void pnx_sprite_draw(const PnxSprite* sprite, PnxTarget* target, const PnxCamera
 				  sprite->h, mirror);
 }
 
-void pnx_sprites_draw_sorted(const PnxSpriteInstance* instances, uint8_t count, uint8_t* order,
-							 PnxTarget* target, const PnxCamera* camera)
+// Builds `order` from every visible instance (every visible instance on `layer`, if
+// `filter_layer` is set), then insertion-sorts it by feet Y. Shared by the whole-array and
+// single-layer draw entry points below, so there is exactly one sort to get right rather
+// than two copies that could drift.
+//
+// Insertion sort: n is small (a screen holds a handful of characters) and the order is
+// nearly sorted frame to frame, which is the case insertion sort is best at and quicksort
+// is worst at.
+static uint8_t sprites_sort_by_y(const PnxSpriteInstance* instances, uint8_t count,
+								 uint8_t* order, bool filter_layer, uint8_t layer)
 {
-	if (!instances || !order)
-		return;
-
 	uint8_t n = 0;
 	for (uint8_t i = 0; i < count; i++)
 	{
-		if (!(instances[i].flags & PNX_SPRITE_HIDDEN))
-			order[n++] = i;
+		if (instances[i].flags & PNX_SPRITE_HIDDEN)
+			continue;
+		if (filter_layer && PNX_SPRITE_LAYER(instances[i].flags) != layer)
+			continue;
+		order[n++] = i;
 	}
 
-	// Insertion sort: n is small (a screen holds a handful of characters) and the order
-	// is nearly sorted frame to frame, which is the case insertion sort is best at and
-	// quicksort is worst at.
 	for (uint8_t i = 1; i < n; i++)
 	{
 		const uint8_t key = order[i];
@@ -47,7 +52,12 @@ void pnx_sprites_draw_sorted(const PnxSpriteInstance* instances, uint8_t count, 
 		}
 		order[j + 1] = key;
 	}
+	return n;
+}
 
+static void sprites_draw_ordered(const PnxSpriteInstance* instances, const uint8_t* order,
+								 uint8_t n, PnxTarget* target, const PnxCamera* camera)
+{
 	for (uint8_t k = 0; k < n; k++)
 	{
 		const PnxSpriteInstance* s = &instances[order[k]];
@@ -61,6 +71,26 @@ void pnx_sprites_draw_sorted(const PnxSpriteInstance* instances, uint8_t count, 
 		pnx_sprite_draw(asset, target, camera, s->x, s->y, s->frame, pal,
 						(s->flags & PNX_SPRITE_MIRROR) != 0);
 	}
+}
+
+void pnx_sprites_draw_sorted(const PnxSpriteInstance* instances, uint8_t count, uint8_t* order,
+							 PnxTarget* target, const PnxCamera* camera)
+{
+	if (!instances || !order)
+		return;
+
+	const uint8_t n = sprites_sort_by_y(instances, count, order, false, 0);
+	sprites_draw_ordered(instances, order, n, target, camera);
+}
+
+void pnx_sprites_draw_layer(const PnxSpriteInstance* instances, uint8_t count, uint8_t* order,
+							PnxTarget* target, const PnxCamera* camera, uint8_t layer)
+{
+	if (!instances || !order)
+		return;
+
+	const uint8_t n = sprites_sort_by_y(instances, count, order, true, layer);
+	sprites_draw_ordered(instances, order, n, target, camera);
 }
 
 #endif // PNX_USE_SPRITES

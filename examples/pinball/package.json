@@ -2,7 +2,9 @@
   "name": "pnx-pinball",
   "author": "tyton",
   "version": "1.0.0",
-  "keywords": ["pebble-app"],
+  "keywords": [
+    "pebble-app"
+  ],
   "private": true,
   "dependencies": {},
   "pebble": {
@@ -10,9 +12,27 @@
     "uuid": "3e3698e8-dae2-4539-852b-96336ee098c0",
     "sdkVersion": "3",
     "enableMultiJS": false,
-    "targetPlatforms": ["emery", "flint"],
-    "watchapp": { "watchface": false },
+    "targetPlatforms": [
+      "emery",
+      "flint"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
     "messageKeys": [],
-    "resources": { "media": [] }
+    "resources": {
+      "media": [
+        {
+          "type": "raw",
+          "name": "PALETTES",
+          "file": "palettes.bin"
+        },
+        {
+          "type": "raw",
+          "name": "BOARD",
+          "file": "board.bin"
+        }
+      ]
+    }
   }
 }

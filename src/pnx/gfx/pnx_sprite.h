@@ -28,6 +28,14 @@ typedef struct
 #define PNX_SPRITE_HIDDEN		   0x02
 #define PNX_SPRITE_PALETTE_DEFAULT 0xFF
 
+// A layer id lives in the top 4 bits of `flags` -- MIRROR/HIDDEN only use the bottom 2,
+// and pnx_layer.h's PNX_LAYER_SPRITES kind reads this to pick an instance's layer out of
+// a shared pool, at zero cost to the struct: pnx_sprite.h's own comment already calls out
+// footprint, not layout, as what a game holding hundreds of these should be sized for.
+// Up to 16 layers (0-15) for free.
+#define PNX_SPRITE_LAYER_SHIFT	4
+#define PNX_SPRITE_LAYER(flags) ((uint8_t)((flags) >> PNX_SPRITE_LAYER_SHIFT))
+
 void pnx_sprite_draw(const PnxSprite* sprite, PnxTarget* target, const PnxCamera* camera,
 					 int32_t wx, int32_t wy, uint8_t frame, const PnxPalette* palette,
 					 bool mirror);
@@ -39,5 +47,12 @@ void pnx_sprite_draw(const PnxSprite* sprite, PnxTarget* target, const PnxCamera
 // `order` must have room for `count` entries; it is scratch, not state.
 void pnx_sprites_draw_sorted(const PnxSpriteInstance* instances, uint8_t count, uint8_t* order,
 							 PnxTarget* target, const PnxCamera* camera);
+
+// Same, restricted to instances whose PNX_SPRITE_LAYER matches `layer` -- "grounded
+// enemies" and "fliers" are two calls against the SAME instance array with different
+// layer ids, not two arrays to keep in sync. pnx_layer.h's PNX_LAYER_SPRITES layers call
+// this; a single-layer game has no reason to and keeps calling pnx_sprites_draw_sorted.
+void pnx_sprites_draw_layer(const PnxSpriteInstance* instances, uint8_t count, uint8_t* order,
+							PnxTarget* target, const PnxCamera* camera, uint8_t layer);
 
 #endif // PNX_USE_SPRITES

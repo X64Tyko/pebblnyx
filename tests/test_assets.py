@@ -139,7 +139,7 @@ def manifest(root, **overrides):
         body += textwrap.dedent(parts[key])
     # Dialog before font: `charset = "auto"` derives its glyph set from the pages, so a
     # font test that supplies dialog needs it to come first in the same manifest.
-    for key in ("sprite", "dialog", "font", "scene", "tile_flags"):
+    for key in ("sprite", "nine_slice", "dialog", "font", "scene", "tile_flags"):
         if key in parts:
             body += textwrap.dedent(parts[key])
 
@@ -365,6 +365,116 @@ def check_colorkey():
         autopick = ["floor", "wall", "accent"]
         colorkey = "magenta"
     ''')
+
+
+def check_nine_slice():
+    """9-slice panels: border insets round-trip through the blob, survive build-time
+    rotation the same way a map's start position does, and a malformed border is a build
+    error naming the actual problem rather than a wrong picture on a watch.
+    """
+    # --- rotate_border, pinned directly. A panel authored border 2/3/4/5 (l/t/r/b) in a
+    # 10x10 panel: rotate_point's own comment derives BUTTONS_TOP as left->top->right->
+    # bottom->left, so bottom becomes left, left becomes top, top becomes right, right
+    # becomes bottom -- (5, 2, 3, 4). Pinned here so a future edit to rotate_point cannot
+    # silently change what "a border survives a rotation" means.
+    check("rotate_border buttons_top",
+          pnx_assets.rotate_border(2, 3, 4, 5, 10, 10, pnx_assets.ORIENT_BUTTONS_TOP)
+          == (5, 2, 3, 4))
+    check("rotate_border buttons_bottom",
+          pnx_assets.rotate_border(2, 3, 4, 5, 10, 10, pnx_assets.ORIENT_BUTTONS_BOTTOM)
+          == (3, 4, 5, 2))
+    check("rotate_border buttons_left (180)",
+          pnx_assets.rotate_border(2, 3, 4, 5, 10, 10, pnx_assets.ORIENT_BUTTONS_LEFT)
+          == (4, 5, 2, 3))
+    check("rotate_border identity",
+          pnx_assets.rotate_border(2, 3, 4, 5, 10, 10, pnx_assets.ORIENT_BUTTONS_RIGHT)
+          == (2, 3, 4, 5))
+
+    # --- pack_nine_slice/finish_nine_slice directly, called the way pack_atlas is in
+    # check_colorkey's own second half: a real 6x6 panel, border 2/2/2/2 on every side.
+    with tempfile.TemporaryDirectory() as root:
+        sheet = os.path.join(root, "panel.png")
+        make_colour_sheet(sheet, [(255, 0, 0)], tile=6)  # one flat 6x6 tile
+        with contextlib.redirect_stdout(io.StringIO()):
+            ns = pnx_assets.pack_nine_slice(
+                root, {"name": "panel", "sheet": "panel.png",
+                       "border": [2, 2, 2, 2], "out": "panel.bin"},
+                pnx_assets.ORIENT_BUTTONS_RIGHT)
+        check("pack_nine_slice: dimensions carried through unrotated",
+              (ns["w"], ns["h"]) == (6, 6))
+        check("pack_nine_slice: border carried through unrotated",
+              ns["border"] == (2, 2, 2, 2))
+        check("pack_nine_slice: one frame -- settle_palettes/sprite_colour_sets reuse "
+              "needs exactly this shape",
+              len(ns["frames"]) == 1 and len(ns["frames"][0]) == 36)
+
+        # settle_palettes has to run before ANY frozen=True merge -- finish_sprite's own
+        # docstring explains why (packing fixes indices against the settled sort order).
+        shared = []
+        pnx_assets.settle_palettes([], [], shared, [ns])
+        with contextlib.redirect_stdout(io.StringIO()):
+            pnx_assets.finish_nine_slice(ns, shared, pnx_assets.ORIENT_BUTTONS_RIGHT, False)
+        blob = ns["blob"]
+        check("blob: magic N9", blob[0:2] == b"N9")
+        check("blob: header carries w/h", (blob[3], blob[4]) == (6, 6))
+        check("blob: border bytes immediately follow the header",
+              tuple(blob[8:12]) == (2, 2, 2, 2))
+        check("blob: pixel payload is w*h/2 bytes after the border",
+              len(blob) == pnx_assets.HEADER_BYTES + 4 + 6 * 6 // 2)
+
+    # --- border validation, through the real manifest path
+    expect_fail("nine_slice: border wrong length", "left, top, right, bottom",
+                nine_slice='''
+        [[nine_slice]]
+        name = "panel"
+        sheet = "sheet.png"
+        border = [2, 2]
+        out = "panel.bin"
+    ''')
+    expect_fail("nine_slice: border too big for the panel", "does not fit",
+                nine_slice='''
+        [[nine_slice]]
+        name = "panel"
+        sheet = "sheet.png"
+        rect = [0, 0, 8, 8]
+        border = [5, 5, 5, 5]
+        out = "panel.bin"
+    ''')
+    expect_fail("nine_slice: negative border", "must not be negative",
+                nine_slice='''
+        [[nine_slice]]
+        name = "panel"
+        sheet = "sheet.png"
+        border = [-1, 2, 2, 2]
+        out = "panel.bin"
+    ''')
+
+    # --- end to end: a full manifest build emits the header constants and the asset id.
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            path = manifest(root, nine_slice='''
+                [[nine_slice]]
+                name = "panel"
+                sheet = "sheet.png"
+                rect = [0, 0, 8, 8]
+                border = [2, 2, 2, 2]
+                out = "panel.bin"
+            ''')
+            pnx_assets.build(path, os.path.join(root, "out"),
+                             os.path.join(root, "out", "gen.h"))
+        d = defines(os.path.join(root, "out"))
+        # An asset id is an ENUM member, not a #define -- defines() only sees the latter,
+        # so this one reads the header text directly rather than through that helper.
+        with open(os.path.join(root, "out", "gen.h")) as f:
+            header_text = f.read()
+        check("header: PNX_ASSET_NINE_SLICE_PANEL exists",
+              "PNX_ASSET_NINE_SLICE_PANEL," in header_text)
+        check("header: PANEL_W/H", (d.get("PANEL_W"), d.get("PANEL_H")) == (8, 8))
+        check("header: PANEL_BORDER_L/T/R/B",
+              (d.get("PANEL_BORDER_L"), d.get("PANEL_BORDER_T"),
+               d.get("PANEL_BORDER_R"), d.get("PANEL_BORDER_B")) == (2, 2, 2, 2))
+        check("panel.bin was written", os.path.exists(os.path.join(root, "out", "panel.bin")))
 
 
 def check_atlas_rotation_dedup():
@@ -2067,6 +2177,118 @@ out = "npc.bin"
         check("and the manifest builds", builds(proj.path, root, "out_sp3"))
 
 
+def check_nine_slice_preview_compose():
+    """_nine_slice_compose (tools/editor/project/nine_slice.py) tiles a panel the same
+    way pnx_gfx_draw_nine_slice (src/pnx/gfx/pnx_nineslice.c) does at draw time -- pinned
+    directly against a hand-built 6x6 panel with a distinct colour per region, the editor
+    preview's own equivalent of test_gfx.c's nine-slice pixel cases.
+    """
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "..", "tools", "editor"))
+    from project.nine_slice import _nine_slice_compose   # noqa: E402
+
+    panel = Image.new("RGBA", (6, 6))
+    px = panel.load()
+    regions = {
+        (0, 0): (255, 0, 0), (4, 0): (0, 255, 0),      # top-left, top-right corners
+        (0, 4): (0, 0, 255), (4, 4): (255, 255, 0),    # bottom-left, bottom-right corners
+        (2, 0): (255, 0, 255), (2, 4): (0, 255, 255),  # top, bottom edges
+        (0, 2): (128, 128, 128), (4, 2): (64, 64, 64), # left, right edges
+        (2, 2): (255, 128, 0),                         # centre
+    }
+    for (ox, oy), colour in regions.items():
+        for j in range(2):
+            for i in range(2):
+                px[ox + i, oy + j] = colour + (255,)
+
+    out = _nine_slice_compose(panel, 2, 2, 2, 2, 10, 8)
+    op = out.load()
+    check("compose: top-left corner unmoved", op[0, 0][:3] == (255, 0, 0))
+    check("compose: top-right corner at the new right edge", op[9, 0][:3] == (0, 255, 0))
+    check("compose: bottom-left corner at the new bottom edge", op[0, 7][:3] == (0, 0, 255))
+    check("compose: bottom-right corner", op[9, 7][:3] == (255, 255, 0))
+    check("compose: top edge tiles across the new width",
+          op[4, 0][:3] == (255, 0, 255) and op[5, 0][:3] == (255, 0, 255))
+    check("compose: left edge tiles down the new height",
+          op[0, 3][:3] == (128, 128, 128))
+    check("compose: centre tiles in both axes",
+          op[4, 3][:3] == (255, 128, 0) and op[7, 5][:3] == (255, 128, 0))
+
+    # Undersized box: clamps rather than reading past the source, same as
+    # pnx_gfx_draw_nine_slice's own comment on the clamp.
+    tiny = _nine_slice_compose(panel, 2, 2, 2, 2, 3, 6)
+    check("compose: undersized box still renders the top-left corner's own colour",
+          tiny.load()[0, 0][:3] == (255, 0, 0))
+
+
+def check_editor_nine_slice():
+    """Declaring a 9-slice panel through the editor, previewing it tiled, and the scene
+    wiring that lets a game actually load one -- NineSliceMixin's own shape, mirrored
+    against check_editor_sprites throughout."""
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        Image.new("RGBA", (8, 8), (30, 90, 200, 255)).save(
+            os.path.join(root, "panel.png"))
+        proj = editor_project(root, nine_slice='''
+[[nine_slice]]
+name = "old"
+sheet = "panel.png"
+border = [1, 1, 1, 1]
+out = "old.bin"
+# A comment that has to survive a rewrite.
+''')
+
+        proj.save_nine_slice("panel", "panel.png", [2, 2, 2, 2], [0, 0, 8, 8])
+        got = {ns["name"]: ns for ns in proj.nine_slices()}
+        check("a nine_slice is declared", got["panel"]["border"] == [2, 2, 2, 2])
+        check("with its rect", got["panel"]["rect"] == [0, 0, 8, 8])
+        check("and the manifest builds", builds(proj.path, root, "out_ns"))
+
+        preview = proj.nine_slice_preview("panel.png", [2, 2, 2, 2], [0, 0, 8, 8],
+                                          test_w=20, test_h=16)
+        check("preview renders at the requested test size",
+              (preview["w"], preview["h"]) == (20, 16))
+        check("preview reports the source panel size",
+              (preview["panel_w"], preview["panel_h"]) == (8, 8))
+
+        # Rewriting an existing panel keeps the comment inside its block.
+        proj.save_nine_slice("old", "panel.png", [3, 3, 3, 3])
+        check("rewriting a nine_slice keeps its comments",
+              "has to survive a rewrite" in open(proj.path).read())
+        check("and updates its border",
+              {ns["name"]: ns for ns in proj.nine_slices()}["old"]["border"] == [3, 3, 3, 3])
+
+        for label, call in (
+            ("a border that does not fit the panel",
+             lambda: proj.save_nine_slice("bad", "panel.png", [5, 5, 5, 5], [0, 0, 8, 8])),
+            ("a border of the wrong length",
+             lambda: proj.save_nine_slice("bad", "panel.png", [1, 1])),
+            ("a negative border",
+             lambda: proj.save_nine_slice("bad", "panel.png", [-1, 1, 1, 1])),
+            ("a name that is not an identifier",
+             lambda: proj.save_nine_slice("Bad Panel", "panel.png", [1, 1, 1, 1])),
+        ):
+            try:
+                call()
+                check(f"a nine_slice refuses {label}", False)
+            except ValueError:
+                check(f"a nine_slice refuses {label}", True)
+
+        proj.save_scene("s1", nine_slices=["panel"])
+        check("what loads a nine_slice is reported",
+              proj.nine_slice_users("panel") == ["scene s1"])
+        try:
+            proj.remove_nine_slice("panel")
+            check("removing a nine_slice a scene loads is refused", False)
+        except ValueError:
+            check("removing a nine_slice a scene loads is refused", True)
+
+        proj.remove_nine_slice("old")
+        check("an unused nine_slice is removed",
+              [ns["name"] for ns in proj.nine_slices()] == ["panel"])
+        check("and the manifest still builds", builds(proj.path, root, "out_ns2"))
+
+
 def check_mapfile_format():
     """The `.pnxmap` container, on its own before anything builds with it."""
     import pnx_mapfile as mf
@@ -2951,6 +3173,7 @@ def main():
     # it has been comparing against is the one the rest of these tests describe.
     check_orientation()
     check_colorkey()
+    check_nine_slice()
     check_atlas_rotation_dedup()
     check_editor_analyse_dedup()
 
@@ -3574,6 +3797,8 @@ def main():
     check_editor_new_map_scene()
     check_editor_map_lifecycle()
     check_editor_sprites()
+    check_nine_slice_preview_compose()
+    check_editor_nine_slice()
     check_mapfile_format()
     check_source_maps()
     check_editor_map_migration()

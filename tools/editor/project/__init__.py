@@ -18,6 +18,7 @@ from editor.project.core import CoreMixin
 from editor.project.atlas import AtlasMixin
 from editor.project.maps import MapsMixin
 from editor.project.sprites import SpritesMixin
+from editor.project.nine_slice import NineSliceMixin
 from editor.project.fonts import FontsMixin
 from editor.project.code import CodeMixin
 from editor.project.build import BuildMixin
@@ -27,8 +28,9 @@ from editor.project.dialog import DialogMixin
 from editor.project.scenes import ScenesMixin
 
 
-class Project(CoreMixin, AtlasMixin, MapsMixin, SpritesMixin, FontsMixin, CodeMixin,
-              BuildMixin, ProjectKeysMixin, MusicMixin, DialogMixin, ScenesMixin):
+class Project(CoreMixin, AtlasMixin, MapsMixin, SpritesMixin, NineSliceMixin, FontsMixin,
+              CodeMixin, BuildMixin, ProjectKeysMixin, MusicMixin, DialogMixin,
+              ScenesMixin):
     """Everything the editor knows, reloaded from disk on demand."""
 
     PLATFORMS = {

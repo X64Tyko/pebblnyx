@@ -13,10 +13,11 @@ how a request is served; `tools/pnx_editor.py`'s original `_route_get`/`_route_p
 were two ~500-line `if/elif` chains doing this same dispatch by hand.
 """
 
-from editor.routes import atlas, maps, sprites, fonts, code, music, dialog, scenes
+from editor.routes import atlas, maps, sprites, nine_slice, fonts, code, music, dialog, scenes
 from editor.routes import sdk, device, project
 
-_DOMAINS = (atlas, maps, sprites, fonts, code, music, dialog, scenes, sdk, device, project)
+_DOMAINS = (atlas, maps, sprites, nine_slice, fonts, code, music, dialog, scenes, sdk, device,
+           project)
 
 GET_EXACT = {}
 GET_PREFIX = []

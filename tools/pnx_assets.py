@@ -110,6 +110,12 @@ MAGIC_SCENES = b"PC"
 MAGIC_MUSIC = b"PN"
 MAGIC_SAMPLE = b"PW"
 MAGIC_FONT = b"PF"
+# A 9-slice panel: one packed image plus four border-inset bytes ahead of the pixels,
+# same reasoning as MAGIC_ATLAS's SCALED/COMPLEX tables (finish_atlas) -- appended to the
+# body rather than squeezed into the fixed header, which has one spare field beyond w/h,
+# not four. No BLOB_VERSION bump: this is a new, independent magic, not a change to the
+# byte layout of anything BLOB_VERSION already promises about "PS"/"PA"/etc.
+MAGIC_NINE_SLICE = b"N9"
 # A WorldTile bank. Stamped like everything else: a bank is geometry, so one left over
 # from a build in the other orientation is a scrambled world rather than a stale sample,
 # and M4c's rule that every blob carries its orientation exists for exactly that.
@@ -375,6 +381,25 @@ def rotate_grid(buf, w, h, orient, stride=1):
             dst = (ny * nw + nx) * stride
             out[dst:dst + stride] = buf[src:src + stride]
     return bytes(out), nw, nh
+
+
+def rotate_border(bl, bt, br, bb, w, h, orient):
+    """A 9-slice panel's four border insets, rotated the same way its pixels are.
+
+    Reuses rotate_point rather than a hand-derived edge-permutation table: the inner
+    rect's two opposite corners (in the AUTHOR's w x h frame) rotate to two points in the
+    framebuffer's nw x nh frame, and the new border sizes are just those points' distance
+    from the new edges. One primitive, trusted everywhere else in this file a coordinate
+    needs to survive a build-time rotation (map starts, tile planes -- see rotate_point's
+    own comment), rather than a second, independently-derived transform that could disagree
+    with it.
+    """
+    nw, nh = rotate_dims(w, h, orient)
+    x0, y0 = rotate_point(bl, bt, w, h, orient)
+    x1, y1 = rotate_point(w - 1 - br, h - 1 - bb, w, h, orient)
+    lo_x, hi_x = (x0, x1) if x0 <= x1 else (x1, x0)
+    lo_y, hi_y = (y0, y1) if y0 <= y1 else (y1, y0)
+    return lo_x, lo_y, nw - 1 - hi_x, nh - 1 - hi_y
 
 
 def rotate_levels(rows, orient):
@@ -1042,8 +1067,9 @@ def sprite_colour_sets(sprite):
     return [frozenset(c for c in f if c != TRANSPARENT) for f in sprite["frames"]]
 
 
-def settle_palettes(atlases, sprites, shared):
-    """Grow `shared` to cover every atlas and sprite BEFORE any pixel data is packed.
+def settle_palettes(atlases, sprites, shared, nine_slices=()):
+    """Grow `shared` to cover every atlas, sprite and nine_slice BEFORE any pixel data is
+    packed.
 
     This exists because packing and merging cannot be interleaved. Packing an atlas fixes
     its 4bpp indices against the sort order of the palette it was assigned; a later sprite
@@ -1055,7 +1081,8 @@ def settle_palettes(atlases, sprites, shared):
     `frozen=True` and cannot move anything under an asset already written.
 
     Sprites WITH variants are skipped: those build Ordered palettes and only ever append,
-    and appending is safe -- it cannot renumber an existing entry.
+    and appending is safe -- it cannot renumber an existing entry. A nine_slice never has
+    variants, so it always goes through the plain merge below.
     """
     for a in atlases:
         shared[:] = merge_palettes(atlas_colour_sets(a), shared)[0]
@@ -1063,6 +1090,8 @@ def settle_palettes(atlases, sprites, shared):
         if sp.get("variants"):
             continue
         shared[:] = merge_palettes(sprite_colour_sets(sp), shared)[0]
+    for ns in nine_slices:
+        shared[:] = merge_palettes(sprite_colour_sets(ns), shared)[0]
 
 
 def gcolor_luminance(c):
@@ -1594,6 +1623,93 @@ def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False):
     print(f"    {sprite['name']}: uses {len(set(assign))} palette(s), "
           f"{len(palettes) - before} new to the project")
     return sprite
+
+
+# ---------------------------------------------------------------------- nine_slice
+
+def pack_nine_slice(root, spec, orient=ORIENT_BUTTONS_RIGHT):
+    """A 9-slice panel: one packed image plus four border insets, sliced from a sheet
+    exactly like a sprite frame. Shares pack_sprite's image loading, colour key and
+    quantisation -- a panel IS a sprite with exactly one frame, no anim, no variants, plus
+    the border metadata a sprite has no use for. `frames` is a one-element list (rather
+    than a bare `frame`) purely so settle_palettes/sprite_colour_sets can treat a
+    nine_slice exactly like a variant-free sprite, with no parallel copy of either.
+    """
+    name = spec["name"]
+    im = load_sheet(root, spec["sheet"])
+    px = im.load()
+    key = parse_colorkey(spec, f"nine_slice {name!r}")
+    sheet_w, sheet_h = im.size
+
+    x, y, w, h = spec.get("rect", (0, 0, sheet_w, sheet_h))
+    if x + w > sheet_w or y + h > sheet_h:
+        raise BuildError(f"nine_slice {name!r}: rect {x},{y} {w}x{h} runs past the sheet "
+                         f"({sheet_w}x{sheet_h})")
+
+    border = spec.get("border")
+    if not (isinstance(border, (list, tuple)) and len(border) == 4):
+        raise BuildError(f"nine_slice {name!r}: border must be [left, top, right, bottom]")
+    bl, bt, br, bb = (int(v) for v in border)
+    if any(v < 0 for v in (bl, bt, br, bb)):
+        raise BuildError(f"nine_slice {name!r}: border values must not be negative")
+    if bl + br > w or bt + bb > h:
+        raise BuildError(
+            f"nine_slice {name!r}: border {bl}/{bt}/{br}/{bb} does not fit a {w}x{h} panel")
+
+    buf = bytearray(w * h)
+    for j in range(h):
+        for i in range(w):
+            buf[j * w + i] = to_gcolor8(px[x + i, y + j], key)
+
+    # Same reasoning as pack_sprite's own version of this check: a flat two-per-byte
+    # stream with no per-row padding needs an even total, not an even width.
+    if (w * h) % 2:
+        raise BuildError(f"nine_slice {name!r}: {w}x{h} has an odd pixel count, which "
+                         f"cannot pack two-per-byte at 4bpp")
+
+    frame, sw, sh = rotate_grid(bytes(buf), w, h, orient)
+    bl, bt, br, bb = rotate_border(bl, bt, br, bb, w, h, orient)
+    fixed, merged = reduce_colours(frame)
+
+    print(f"  nine_slice {name}: {w}x{h} panel"
+          + (f", stored {sw}x{sh}" if (sw, sh) != (w, h) else "")
+          + f", border {bl}/{bt}/{br}/{bb}")
+    if merged:
+        print(f"    NOTE exceeded {PALETTE_USABLE} colours and was reduced -- edit the "
+              f"art to avoid this")
+
+    return {"name": name, "w": sw, "h": sh, "frames": [fixed],
+            "border": (bl, bt, br, bb), "out": spec["out"]}
+
+
+def finish_nine_slice(ns, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False):
+    sets = sprite_colour_sets(ns)  # `ns["frames"]` is the one-element list pack_nine_slice
+                                   # built for exactly this reuse.
+
+    before = len(shared)
+    palettes, assign = merge_palettes(sets, shared, frozen=True)
+    shared[:] = palettes
+
+    if assign[0] is None:
+        raise BuildError(f"nine_slice {ns['name']!r}: still exceeds {PALETTE_USABLE} "
+                         f"colours after reduction")
+
+    frame = ns["frames"][0]
+    pixels = pack_unit_4bpp(frame, palettes[assign[0]])
+    border_bytes = bytes(ns["border"])
+
+    ns["blob"] = (blob_header(MAGIC_NINE_SLICE, ns["w"], ns["h"], orient=orient)
+                 + border_bytes + pixels)
+    ns["palettes"] = palettes
+    ns["assign"] = assign
+
+    if pack_2bit:
+        pixels_bw = pack_unit_2bpp(frame)
+        ns["blob_bw"] = (blob_header(MAGIC_NINE_SLICE, ns["w"], ns["h"], orient=orient)
+                         + border_bytes + pixels_bw)
+
+    print(f"    {ns['name']}: uses 1 palette(s), {len(palettes) - before} new to the project")
+    return ns
 
 
 # ------------------------------------------------------------------------------ map
@@ -3265,7 +3381,8 @@ def build_scenes(man, asset_index, maps=(), orient=ORIENT_BUTTONS_RIGHT):
         spec = specs[name]
         ids = []
 
-        for kind, key in (("ATLAS", "atlases"), ("SPRITE", "sprites"), ("FONT", "fonts")):
+        for kind, key in (("ATLAS", "atlases"), ("SPRITE", "sprites"),
+                         ("NINE_SLICE", "nine_slices"), ("FONT", "fonts")):
             for ref in spec.get(key, []):
                 handle = f"PNX_ASSET_{kind}_{c_ident(ref)}"
                 if handle not in asset_index:
@@ -3371,7 +3488,8 @@ def bw_variant_path(out):
 
 def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0,
                     scenes=None, songs=None, samples=None, fonts=None,
-                    blob_files=None, orient=ORIENT_BUTTONS_RIGHT, flag_names=None):
+                    blob_files=None, orient=ORIENT_BUTTONS_RIGHT, flag_names=None,
+                    nine_slices=None):
     L = [
         "// GENERATED by tools/pnx_assets.py -- do not edit.",
         "//",
@@ -3394,6 +3512,7 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
     assets = ([("PALETTES", "palettes")]
               + [("ATLAS", a["name"]) for a in atlases]
               + [("SPRITE", s["name"]) for s in sprites]
+              + [("NINE_SLICE", ns["name"]) for ns in (nine_slices or [])]
               # Each map is followed by its WorldTile banks, consecutively, which is what
               # the blob's `first_bank_asset` relies on. Must stay in step with `ordered`
               # in build() -- these two lists ARE the asset id order.
@@ -3496,6 +3615,13 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
         for anim_name, idx in sorted(s["anim"].items()):
             L.append(f"#define {n}_{c_ident(anim_name)} {idx}")
         L.append("")
+
+    for ns in (nine_slices or []):
+        n = c_ident(ns["name"])
+        bl, bt, br, bb = ns["border"]
+        L += [f"#define {n}_W {ns['w']}", f"#define {n}_H {ns['h']}",
+              f"#define {n}_BORDER_L {bl}", f"#define {n}_BORDER_T {bt}",
+              f"#define {n}_BORDER_R {br}", f"#define {n}_BORDER_B {bb}", ""]
 
     for m in maps:
         n = c_ident(m["name"])
@@ -3687,6 +3813,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
         collision_by_atlas[atlas["name"]] = parse_atlas_collision(spec, atlas, r)
 
     sprites = [pack_sprite(root, sp, orient) for sp in man.get("sprite", [])]
+    nine_slices = [pack_nine_slice(root, ns, orient) for ns in man.get("nine_slice", [])]
 
     flag_names = parse_flag_names(man.get("tile_flags", {}))
     legend = parse_legend(man.get("legend", {}), flag_names)
@@ -3805,6 +3932,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
     ordered = (["PNX_ASSET_PALETTES_PALETTES"]
                + [f"PNX_ASSET_ATLAS_{c_ident(a['name'])}" for a in atlases]
                + [f"PNX_ASSET_SPRITE_{c_ident(sp['name'])}" for sp in sprites]
+               + [f"PNX_ASSET_NINE_SLICE_{c_ident(ns['name'])}" for ns in nine_slices]
                # A map, then its WorldTile banks, consecutively -- which is what lets the
                # blob store one `first_bank_asset` and find bank i at that plus i.
                + [h for m in maps
@@ -3841,7 +3969,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
               "docs/PORTING.md; set pack_2bit = false in [project] to opt out)")
 
     shared = []
-    settle_palettes(atlases, sprites, shared)
+    settle_palettes(atlases, sprites, shared, nine_slices)
     for a in atlases:
         # [[atlas.collision]]'s mode byte bakes into PnxAtlas.tile_flags, revived rather
         # than removed: it was baked and loaded by the C reader but had no consumer
@@ -3854,6 +3982,8 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
     check_flip_metatiles(maps, atlases)
     for sp in sprites:
         finish_sprite(sp, shared, orient, pack_2bit)
+    for ns in nine_slices:
+        finish_nine_slice(ns, shared, orient, pack_2bit)
 
     by_name = {a["name"]: a for a in atlases}
     for m in maps:
@@ -3923,6 +4053,12 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
         blobs.append((sp["name"], sp["out"]))
         if sp.get("blob_bw"):
             write_blob(os.path.join(out_dir, bw_variant_path(sp["out"])), sp["blob_bw"])
+    for ns in nine_slices:
+        entries.append(("nine_slice", ns["name"],
+                        write_blob(os.path.join(out_dir, ns["out"]), ns["blob"])))
+        blobs.append((ns["name"], ns["out"]))
+        if ns.get("blob_bw"):
+            write_blob(os.path.join(out_dir, bw_variant_path(ns["out"])), ns["blob_bw"])
     for m in maps:
         entries.append(("map", m["name"],
                         write_blob(os.path.join(out_dir, m["out"]), m["blob"])))
@@ -3972,7 +4108,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
 
     generate_header(header_path, atlases, sprites, maps, dialog, roles_by_atlas,
                     len(shared), scenes, songs, samples, fonts,
-                    [out for _name, out in blobs], orient, flag_names)
+                    [out for _name, out in blobs], orient, flag_names, nine_slices)
     print(f"\nheader: {header_path}")
 
     if fonts:

@@ -5,6 +5,7 @@
 // somewhere unrelated. On the host it is an assertion.
 
 #include "../src/pnx/gfx/pnx_gfx.h"
+#include "../src/pnx/gfx/pnx_nineslice.h"
 #include "../src/pnx/gfx/pnx_tilemap.h"
 #include "../src/pnx/core/pnx_arena.h"
 #include "../src/pnx/platform/pnx_platform_host.h"
@@ -23,6 +24,9 @@ static const char* s_tilemap_files[] = PNX_ASSET_FILE_TABLE;
 static char s_tilemap_paths[PNX_ASSET_COUNT][64];
 
 static void test_tilemap(void);
+#if PNX_USE_NINESLICE
+static void test_nine_slice(void);
+#endif
 
 extern int s_failures;
 extern int s_checks;
@@ -310,8 +314,129 @@ void test_gfx(void)
 	G_CHECK_EQ(pnx_floor_div(15, 16), 0);
 	G_CHECK_EQ(pnx_floor_div(16, 16), 1);
 
+#if PNX_USE_NINESLICE
+	test_nine_slice();
+#endif
+
 	test_tilemap();
 }
+
+#if PNX_USE_NINESLICE
+// --------------------------------------------------------------------- 9-slice
+
+// A 4x4 source, 2 bytes/row: distinguishes an even-column read (span_4bpp_at's high
+// nibble) from an odd one (its low nibble) -- the one path pnx_blit_4bpp never exercises,
+// since every region a border produces in test_nine_slice below starts on an even column.
+// Row 1: index 5 at col 1, everything else transparent (index 0).
+static const uint8_t REGION_SRC[8] = {
+	0x00,
+	0x00, // row 0
+	0x05,
+	0x00, // row 1: col 0 = 0 (transparent), col 1 = 5
+	0x00,
+	0x00, // row 2
+	0x00,
+	0x00, // row 3
+};
+
+// A 6x6 panel, border (2,2,2,2): four 2x2 corners, four 2x2 edge segments, a 2x2 centre --
+// each region a distinct palette index (1-9), so a misrouted region reads as the WRONG
+// index rather than merely the wrong pixel, which is what actually pins down which of the
+// nine blit_tiled calls in pnx_gfx_draw_nine_slice is at fault when one is.
+//
+// clang-format off
+static const uint8_t PANEL_SRC[18] = {
+	0x11, 0x55, 0x22, // row 0: TL(1) TL(1) | top(5) top(5) | TR(2) TR(2)
+	0x11, 0x55, 0x22, // row 1: same -- border height 2, uniform
+	0x77, 0x99, 0x88, // row 2: L(7) L(7) | centre(9) centre(9) | R(8) R(8)
+	0x77, 0x99, 0x88, // row 3: same
+	0x33, 0x66, 0x44, // row 4: BL(3) BL(3) | bottom(6) bottom(6) | BR(4) BR(4)
+	0x33, 0x66, 0x44, // row 5: same
+};
+// clang-format on
+
+static void test_nine_slice(void)
+{
+	printf("nine_slice\n");
+
+	PnxPalette pal;
+	memset(&pal, 0, sizeof(pal));
+	for (int i = 0; i <= 9; i++)
+		pal.entries[i] = (uint8_t)(i * 0x10); // entries[k] == 0x10*k, easy to eyeball
+
+	pnx_host_reset();
+	PnxTarget* t = pnx_host_target();
+
+	// --- pnx_blit_4bpp_region: a sub-rect out of a LARGER source, odd source column.
+	//
+	// Window (sx=1, sy=1, sw=1, sh=1) of REGION_SRC is the single opaque pixel; blitted to
+	// (20, 20) it must land there and nowhere else, proving the region blit reads the
+	// correct nibble at an odd column rather than the byte's other half.
+	pnx_gfx_clear(t, 0x40);
+	pnx_blit_4bpp_region(t, REGION_SRC, 4, &pal, 20, 20, 1, 1, 1, 1);
+	G_CHECK_EQ(pixel_at(t, 20, 20), 0x50);
+	G_CHECK_EQ(pixel_at(t, 19, 20), 0x40);
+	G_CHECK_EQ(pixel_at(t, 21, 20), 0x40);
+
+	// A wider window that includes the transparent column 0 alongside it -- transparency
+	// must still be honoured when reading a sub-rect, exactly as pnx_blit_4bpp guarantees
+	// for the whole-image case.
+	pnx_gfx_clear(t, 0x40);
+	pnx_blit_4bpp_region(t, REGION_SRC, 4, &pal, 20, 20, 0, 1, 2, 1);
+	G_CHECK_EQ(pixel_at(t, 20, 20), 0x40); // col 0: transparent, preserved
+	G_CHECK_EQ(pixel_at(t, 21, 20), 0x50); // col 1: opaque
+
+	const PnxNineSlice ns = {
+		.pixels	  = PANEL_SRC,
+		.w		  = 6,
+		.h		  = 6,
+		.border_l = 2,
+		.border_t = 2,
+		.border_r = 2,
+		.border_b = 2,
+	};
+
+	// --- exact size: box == panel size, every region drawn once, no tiling at all.
+	pnx_gfx_clear(t, 0x40);
+	pnx_gfx_draw_nine_slice(t, &ns, &pal, 10, 10, 6, 6);
+	G_CHECK_EQ(pixel_at(t, 10, 10), 0x10); // top-left corner
+	G_CHECK_EQ(pixel_at(t, 15, 10), 0x20); // top-right corner
+	G_CHECK_EQ(pixel_at(t, 10, 15), 0x30); // bottom-left corner
+	G_CHECK_EQ(pixel_at(t, 15, 15), 0x40); // bottom-right corner
+	G_CHECK_EQ(pixel_at(t, 12, 10), 0x50); // top edge
+	G_CHECK_EQ(pixel_at(t, 12, 15), 0x60); // bottom edge
+	G_CHECK_EQ(pixel_at(t, 10, 12), 0x70); // left edge
+	G_CHECK_EQ(pixel_at(t, 15, 12), 0x80); // right edge
+	G_CHECK_EQ(pixel_at(t, 12, 12), 0x90); // centre
+
+	// --- grown box: centre (2x2 source) tiles exactly 3x2 times to fill a 6x4 span.
+	// Corners stay put at the box's own corners; edges tile only along their own axis.
+	pnx_gfx_clear(t, 0x40);
+	pnx_gfx_draw_nine_slice(t, &ns, &pal, 10, 10, 10, 8);
+	G_CHECK_EQ(pixel_at(t, 10, 10), 0x10); // top-left corner unmoved
+	G_CHECK_EQ(pixel_at(t, 19, 10), 0x20); // top-right corner at the NEW right edge
+	G_CHECK_EQ(pixel_at(t, 10, 17), 0x30); // bottom-left corner at the NEW bottom edge
+	G_CHECK_EQ(pixel_at(t, 19, 17), 0x40); // bottom-right corner
+	G_CHECK_EQ(pixel_at(t, 12, 10), 0x50); // top edge, first repeat
+	G_CHECK_EQ(pixel_at(t, 16, 10), 0x50); // top edge, third repeat (2px each: 12,14,16)
+	G_CHECK_EQ(pixel_at(t, 12, 12), 0x90); // centre, first tile
+	G_CHECK_EQ(pixel_at(t, 16, 14), 0x90); // centre, last full tile (3rd col, 2nd row)
+
+	// --- partial tile: centre span 7 is not a multiple of the 2px source tile, so the
+	// last repeat is truncated to 1px rather than overflowing into the right edge.
+	pnx_gfx_clear(t, 0x40);
+	pnx_gfx_draw_nine_slice(t, &ns, &pal, 10, 10, 11, 6);
+	G_CHECK_EQ(pixel_at(t, 18, 12), 0x90); // truncated centre tile's one visible column
+	G_CHECK_EQ(pixel_at(t, 19, 12), 0x80); // right edge starts exactly here, untouched by it
+
+	// --- box smaller than its own borders: clamps rather than reading past the source or
+	// double-drawing a corner. A 3x6 box splits its 2+2 horizontal border into 1/2 or 2/1,
+	// never reads column 2 of a source whose own border is only 2 wide.
+	pnx_gfx_clear(t, 0x40);
+	pnx_gfx_draw_nine_slice(t, &ns, &pal, 10, 10, 3, 6);
+	G_CHECK_EQ(pixel_at(t, 10, 10), 0x10); // still the top-left corner's own colour
+}
+#endif // PNX_USE_NINESLICE
 
 // ------------------------------------------------------------------------- tilemap
 //
