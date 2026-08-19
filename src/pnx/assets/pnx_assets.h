@@ -53,7 +53,16 @@
 
 // Every blob carries this, so a stale .bin against a newer runtime is a clean error
 // rather than garbage pixels. Bumped whenever a format changes.
-#define PNX_BLOB_VERSION 13 // v13: map preamble carries a cell dictionary
+#define PNX_BLOB_VERSION 14 // v14: a map is 1..PNX_MAP_MAX_LAYERS streamed layers
+							// (PnxMapLayer) instead of one implicit grid -- the "PM"
+							// blob's header bytes 3..5 are now layer_count/
+							// primary_layer/warp_count (were w/h/warp_count), and
+							// its preamble carries one directory block per layer
+							// (its own w/h/worldtile/bank range/parallax/wrap)
+							// after the shared atlas table, ahead of the shared
+							// palette/warp/cell-dictionary tables. Bank asset ids
+							// are now per-layer (PNX_ASSET_BANK_<map>_<layer>_<i>).
+							// v13: map preamble carries a cell dictionary
 							// (PnxMap.cell_dict/dict_count/idx_width) -- a
 							// WorldTile's cells are stored as 1- or 2-byte
 							// indices into it rather than raw u16 entry words,
@@ -241,6 +250,14 @@ typedef struct
 #define PNX_MAP_MAX_ATLASES 8
 #define PNX_MAP_NO_SLOT		0xFF
 
+// A map declares 1..PNX_MAP_MAX_LAYERS WorldTile-streamed planes (M13), composited in
+// array order -- background, ground, overlay, whatever a project calls them. The
+// framework does not prescribe what an index MEANS, only how many can exist. Sprite
+// layers (`PNX_SPRITE_LAYER_COUNT`, `pnx_sprite.h`) are a separate 0-15 range; the two
+// interleave for free through `pnx_layers_draw` (`pnx_layer.h`), which walks one ordered
+// `PnxLayer[]` regardless of whether an entry is a map layer or a sprite layer.
+#define PNX_MAP_MAX_LAYERS 4
+
 // How many resource READS a single pnx_map_stream call will issue.
 //
 // Reads, not WorldTiles, and the difference is not pedantic: a run of consecutive
@@ -300,38 +317,17 @@ typedef struct
 // still need a per-cell exception list, and it lives on PnxWorldTile above rather than
 // here, for the same residency reason the old flag plane existed: a tag is asked about
 // exactly when its cell (and so its WorldTile) is already resident, never before.
+// One streamed plane (M13). Everything that used to be the map's only WorldTile grid now
+// lives here, one per declared layer -- a layer behaves exactly as the map used to: sliced
+// into WorldTiles, held whole when it fits its own pool, streamed against the camera when
+// it does not. What is new is that there can be more than one, each with its own extent
+// (`w`/`h`, which may be smaller than another layer's -- a screen-sized parallax layer or a
+// partial overlay are both just a small `w`/`h`), its own WorldTile granularity, and its
+// own run of bank assets. A map's atlas table and tile-id space are NOT here -- see
+// PnxMap's own comment for why those stay shared.
 typedef struct
 {
-	// Optional palette variant: tile_total bytes naming the palette slot to use instead of
-	// the atlas's own, so one atlas serves several recoloured zones. NULL means use the
-	// atlas's. 44 bytes for the cave tileset against ~5,600 for a second copy of it.
-	const uint8_t* tile_palette;
-	const PnxWarp* warps;
 	const uint8_t* wt_mask; // wt_cols * wt_rows: which atlases each WorldTile needs
-
-	// The cell dictionary (M12): a WorldTile's cells are stored as INDICES into this table,
-	// not raw entry words. Every real map measured uses only a handful of distinct (tile id
-	// + flip/rotate/warp/extended) combinations -- a legend only ever paints from a small
-	// palette -- so `dict_count` is small (single digits in everything measured) and an
-	// `idx_width`-byte index costs less than the u16 it replaces. `cell_dict[index]` recovers
-	// the exact entry word `pnx_map_entry` used to read directly; nothing downstream of that
-	// function needs to know cells are stored indexed at all.
-	const uint8_t* cell_dict; // dict_count * 2 bytes, read the same way a cell's own entry
-							  // word is -- see pnx_map_entry's own comment
-	uint16_t dict_count;
-	uint8_t idx_width; // 1 or 2 bytes per stored cell; 2 only when dict_count > 256
-
-	// The atlas pool's slots are NOT a uniform stride. When there is a slot per atlas
-	// nothing is ever evicted, so each slot is exactly its atlas's size -- which for one
-	// large tileset beside one small one is the difference between fitting in RAM and not.
-	// Only a map that really streams its atlases pays for slots that all hold the largest.
-	const uint8_t* pool_offset; // (atlas_slots + 1) u32 offsets into pool_mem
-
-	PnxMapAtlas atlas[PNX_MAP_MAX_ATLASES];
-	PnxAtlas* pool;		 // atlas_slots views onto pool_mem
-	uint8_t* pool_mem;	 // pool_bytes
-	uint8_t* pool_owner; // atlas_slots: which atlas index sits there, or NO_SLOT
-	uint8_t* pool_pins;	 // atlas_slots: live WorldTiles depending on that slot
 
 	PnxWorldTile* slots; // slot_count of them
 	uint8_t* slot_mem;	 // slot_count * slot_bytes
@@ -342,36 +338,103 @@ typedef struct
 	// how far in it starts -- see docs/MEASUREMENTS.md. A tile's home needs no lookup:
 	// bank `index >> bank_shift`, offset `(index & mask) * slot_bytes`, since payloads are
 	// padded to the slot stride. Which also makes a run of consecutive tiles one read.
+	// Every layer owns its OWN run -- `PNX_ASSET_BANK_<map>_<layer>_<i>` in the generated
+	// header -- because two layers rarely share a WorldTile size, and so never share a
+	// bank stride.
 	uint16_t first_bank_asset;
 	uint8_t bank_shift;
 
-	uint32_t resource;	 // the map's own resource: the resident preamble
-	uint16_t tile_count; // the map's whole tile id space, summed across every atlas slice
 	uint16_t slot_bytes;
-	uint8_t w, h;
-	uint8_t warp_count;
-	uint8_t atlas_count;
-	uint8_t atlas_slots;
+	uint8_t w, h; // this layer's own extent; may be smaller than another layer's
 	uint8_t slot_count;
 	uint8_t wt_cols, wt_rows;
 	uint8_t worldtile; // cells per side
 	uint8_t wt_shift;  // log2(worldtile): a cell finds its WorldTile by shifting
-	uint8_t tile_px;
 
-	// Every WorldTile and every atlas has a slot, so the map was loaded whole and can never
-	// need another read. Every small map is in this case, which is most of them: the
-	// streaming calls become one comparison and return.
+	// Consumed by pnx_layer.c's pnx_layers_draw, the same PNX_LAYER_PARALLAX_WORLD/SCREEN
+	// scale every other layer kind uses -- a map layer is not a special case to that
+	// compositor, just another PNX_LAYER_CALLBACK.
+	uint8_t parallax_pct;
+
+	// A layer smaller than the camera's view (the common case for a parallax background)
+	// repeats: sampling and streaming both wrap modulo this layer's own w/h instead of
+	// clamping at its edge. A non-wrap layer keeps the ordinary clamp -- open sky past the
+	// last WorldTile, not a repeated one.
+	bool wrap;
+
+	// Every WorldTile and every atlas has a slot, so this layer was loaded whole and can
+	// never need another read. Every small layer is in this case, which is most of them:
+	// the streaming calls become one comparison and return.
 	bool held_whole;
+} PnxMapLayer;
+
+typedef struct
+{
+	// Optional palette variant: tile_total bytes naming the palette slot to use instead of
+	// the atlas's own, so one atlas serves several recoloured zones. NULL means use the
+	// atlas's. 44 bytes for the cave tileset against ~5,600 for a second copy of it.
+	const uint8_t* tile_palette;
+	// Warps apply to the PRIMARY layer only -- the one gameplay actually happens on. A
+	// background or overlay layer is art, not a place the player's own position is ever
+	// tested against.
+	const PnxWarp* warps;
+
+	// The cell dictionary (M12): a WorldTile's cells are stored as INDICES into this table,
+	// not raw entry words. Shared across every layer, not one per layer -- a map's tiles
+	// are one shared id space (see below), so its distinct (tile id + flip/rotate/warp/
+	// extended) combinations are one shared table too, the same reason the atlas table
+	// itself is shared rather than duplicated. `cell_dict[index]` recovers the exact entry
+	// word `pnx_map_entry` used to read directly; nothing downstream of that function needs
+	// to know cells are stored indexed at all.
+	const uint8_t* cell_dict; // dict_count * 2 bytes, read the same way a cell's own entry
+							  // word is -- see pnx_map_entry's own comment
+	uint16_t dict_count;
+	uint8_t idx_width; // 1 or 2 bytes per stored cell; 2 only when dict_count > 256
+
+	// ONE shared atlas table and tile-id space for the whole map (M13): any layer's cells
+	// may reference any tile from any atlas the map declares -- there is no per-layer
+	// atlas. The pool's slots are NOT a uniform stride: when there is a slot per atlas
+	// nothing is ever evicted, so each slot is exactly its atlas's size. Only a map that
+	// really streams its atlases pays for slots that all hold the largest. Two layers
+	// sharing an atlas do not double-load it -- `pool_pins[slot]` already just counts live
+	// WorldTiles depending on a slot, regardless of which layer they belong to.
+	const uint8_t* pool_offset; // (atlas_slots + 1) u32 offsets into pool_mem
+
+	PnxMapAtlas atlas[PNX_MAP_MAX_ATLASES];
+	PnxAtlas* pool;		 // atlas_slots views onto pool_mem
+	uint8_t* pool_mem;	 // pool_bytes
+	uint8_t* pool_owner; // atlas_slots: which atlas index sits there, or NO_SLOT
+	uint8_t* pool_pins;	 // atlas_slots: live WorldTiles depending on that slot
+
+	PnxMapLayer layers[PNX_MAP_MAX_LAYERS];
+	uint8_t layer_count;
+	// Which of `layers` owns `warps` and is what pnx_map_solid/pnx_map_tile/pnx_map_flags/
+	// pnx_map_extended/pnx_map_warp_at operate on by default -- unchanged call signatures
+	// for the common, single-layer case. The `_layer` sibling of each takes an explicit
+	// index for anything else.
+	uint8_t primary_layer;
+
+	uint32_t resource;	 // the map's own resource: the resident preamble
+	uint16_t tile_count; // the map's whole tile id space, summed across every atlas slice
+	uint8_t warp_count;
+	uint8_t atlas_count;
+	uint8_t atlas_slots;
+	uint8_t tile_px;
 
 #if PNX_USE_MAP_COMPRESS
 	// Set when this map's banks are LZSS-compressed (`compress_maps` in the manifest's
-	// [project] table). A compressed bank is an ATOMIC streaming unit: any one WorldTile
-	// needed from it means reading and decoding the whole thing, not the precise
-	// partial-range reads an uncompressed bank allows -- see worldtile_load_run's own
-	// comment (pnx_assets.c) for why that is the right trade for what this buys.
+	// [project] table) -- one flag for the whole map, not per layer: the manifest's own
+	// toggle is project-wide, so no real map ever has some layers compressed and others
+	// not. A compressed bank is an ATOMIC streaming unit: any one WorldTile needed from it
+	// means reading and decoding the whole thing, not the precise partial-range reads an
+	// uncompressed bank allows -- see worldtile_load_run's own comment (pnx_assets.c) for
+	// why that is the right trade for what this buys.
 	//
-	// Both scratch buffers are sized to one bank's max UNCOMPRESSED bytes
-	// (`(1 << bank_shift) * slot_bytes`) and reused for every bank this map streams: `src`
+	// ONE scratch pair, shared and reused across every layer's banks, not one per layer:
+	// streaming is sequential (one bank decodes, gets consumed, then the next), so nothing
+	// is lost by sharing, and a second/third/fourth layer's own scratch would otherwise
+	// duplicate RAM for no reason. Sized to the LARGEST bank across every layer
+	// (`max over layers of (1 << bank_shift) * slot_bytes`) so it covers all of them: `src`
 	// holds the compressed bytes just read (LZSS output can never exceed what it started
 	// from, so this bound covers the compressed size too), `dst` holds the decoded bank
 	// body a WorldTile's own bytes are then copied out of into its resident pool slot.
@@ -586,18 +649,21 @@ bool pnx_dialog_load(PnxDialog* out, uint16_t asset_id);
 bool pnx_map_load(PnxMap* out, uint16_t asset_id);
 
 // Bring the WorldTiles covering a world-pixel rectangle into residency, plus one
-// WorldTile of margin around it.
+// WorldTile of margin around it -- across EVERY layer the map declares (M13), each scaled
+// by its own `parallax_pct` and wrapped modulo its own extent first if `wrap` is set.
 //
-// `pnx_map_stream` spends at most PNX_MAP_STREAM_BUDGET reads and returns how many
-// WorldTiles are still missing, so a caller can see it falling behind. Per frame.
+// `pnx_map_stream` spends at most PNX_MAP_STREAM_BUDGET reads TOTAL across every layer,
+// not per layer, and returns how many WorldTiles are still missing summed the same way, so
+// a caller can see it falling behind. Per frame.
 //
-// `pnx_map_stream_now` returns only once everything the rectangle needs is loaded. For a
-// scene load or a warp, where there is no previous frame to show and a partial world would
-// be visible as holes.
+// `pnx_map_stream_now` returns only once everything every layer's rectangle needs is
+// loaded. For a scene load or a warp, where there is no previous frame to show and a
+// partial world would be visible as holes.
 uint8_t pnx_map_stream(PnxMap* m, int32_t x, int32_t y, int32_t w, int32_t h);
 uint8_t pnx_map_stream_now(PnxMap* m, int32_t x, int32_t y, int32_t w, int32_t h);
 
-// WorldTiles resident right now, for diagnostics and for tests that assert on eviction.
+// WorldTiles resident right now, summed across every layer, for diagnostics and for tests
+// that assert on eviction.
 uint8_t pnx_map_resident(const PnxMap* m);
 
 // Reads a whole blob into the scene arena and validates magic and version, handing back
@@ -685,25 +751,61 @@ void pnx_decode_4bpp(const uint8_t* src, const PnxPalette* palette, uint8_t* dst
 // A cell that is not resident. Distinct from tile 0, which is a real tile.
 #define PNX_MAP_NO_CELL 0xFFFF
 
-// The WorldTile holding this cell, or NULL when it is not resident. `worldtile` is a power
-// of two so this is a shift, which is the whole reason the pipeline insists on one.
+// Folds `x`/`y` into a wrap layer's own [0, w) / [0, h) range in place; a no-op on a
+// non-wrap layer. Shared by every accessor below so "wrap" has exactly one meaning: every
+// one of them agrees on which cell a coordinate outside the layer's own extent names.
+static inline void pnx_map_layer_wrap_xy(const PnxMapLayer* l, int32_t* x, int32_t* y)
+{
+	if (!l->wrap)
+		return;
+	*x = *x % l->w;
+	if (*x < 0)
+		*x += l->w;
+	*y = *y % l->h;
+	if (*y < 0)
+		*y += l->h;
+}
+
+// The WorldTile holding this cell on a given layer, or NULL when it is not resident (or
+// `x`/`y` is outside that layer's own extent, and the layer does not wrap). `worldtile` is
+// a power of two so this is a shift, which is the whole reason the pipeline insists on one.
+//
+// A wrap layer repeats instead of clamping: `x`/`y` are floor-modulo'd into
+// [0, w) / [0, h) first (`pnx_map_layer_wrap_xy`), so a screen-sized parallax layer tiles
+// seamlessly past its own edge instead of running out into nothing.
+static inline const PnxWorldTile* pnx_map_worldtile_layer(const PnxMap* m, uint8_t layer,
+														  int32_t x, int32_t y)
+{
+	if (layer >= m->layer_count)
+		return NULL;
+	const PnxMapLayer* l = &m->layers[layer];
+	pnx_map_layer_wrap_xy(l, &x, &y);
+	if (x < 0 || y < 0 || x >= l->w || y >= l->h)
+		return NULL;
+	const uint32_t i   = (uint32_t)(y >> l->wt_shift) * l->wt_cols + (uint32_t)(x >> l->wt_shift);
+	const uint8_t slot = l->wt_slot[i];
+	return slot == PNX_MAP_NO_SLOT ? NULL : &l->slots[slot];
+}
+
 static inline const PnxWorldTile* pnx_map_worldtile(const PnxMap* m, int32_t x, int32_t y)
 {
-	const uint32_t i   = (uint32_t)(y >> m->wt_shift) * m->wt_cols + (uint32_t)(x >> m->wt_shift);
-	const uint8_t slot = m->wt_slot[i];
-	return slot == PNX_MAP_NO_SLOT ? NULL : &m->slots[slot];
+	return pnx_map_worldtile_layer(m, m->primary_layer, x, y);
 }
 
 // PNX_MAP_NO_CELL when the cell's WorldTile is not resident. Callers on the hot path have
 // already been told which WorldTiles are live -- pnx_tilemap_draw walks them -- so this is
 // for the ones that ask about a single arbitrary cell.
-static inline uint16_t pnx_map_entry(const PnxMap* m, int32_t x, int32_t y)
+static inline uint16_t pnx_map_entry_layer(const PnxMap* m, uint8_t layer, int32_t x, int32_t y)
 {
-	const PnxWorldTile* wt = pnx_map_worldtile(m, x, y);
+	if (layer >= m->layer_count)
+		return PNX_MAP_NO_CELL;
+	const PnxMapLayer* l = &m->layers[layer];
+	pnx_map_layer_wrap_xy(l, &x, &y);
+	const PnxWorldTile* wt = pnx_map_worldtile_layer(m, layer, x, y);
 	if (!wt)
 		return PNX_MAP_NO_CELL;
-	const uint32_t i =
-		(uint32_t)(y & (m->worldtile - 1)) * wt->cell_w + (uint32_t)(x & (m->worldtile - 1));
+	const uint32_t i = (uint32_t)(y & (l->worldtile - 1)) * wt->cell_w +
+		(uint32_t)(x & (l->worldtile - 1));
 	const uint16_t index = (m->idx_width == 1)
 		? wt->cells[i]
 		: (uint16_t)(wt->cells[i * 2] | ((uint16_t)wt->cells[i * 2 + 1] << 8));
@@ -711,19 +813,34 @@ static inline uint16_t pnx_map_entry(const PnxMap* m, int32_t x, int32_t y)
 	return (uint16_t)(d[0] | ((uint16_t)d[1] << 8));
 }
 
-static inline uint16_t pnx_map_tile(const PnxMap* m, int32_t x, int32_t y)
+static inline uint16_t pnx_map_entry(const PnxMap* m, int32_t x, int32_t y)
 {
-	const uint16_t e = pnx_map_entry(m, x, y);
+	return pnx_map_entry_layer(m, m->primary_layer, x, y);
+}
+
+static inline uint16_t pnx_map_tile_layer(const PnxMap* m, uint8_t layer, int32_t x, int32_t y)
+{
+	const uint16_t e = pnx_map_entry_layer(m, layer, x, y);
 	return e == PNX_MAP_NO_CELL ? PNX_MAP_NO_CELL : (e & PNX_MAP_INDEX_MASK);
 }
 
-// PNX_FLIP_X / PNX_FLIP_Y, ready to hand to pnx_blit_4bpp.
-static inline uint8_t pnx_map_flip(const PnxMap* m, int32_t x, int32_t y)
+static inline uint16_t pnx_map_tile(const PnxMap* m, int32_t x, int32_t y)
 {
-	const uint16_t e = pnx_map_entry(m, x, y);
+	return pnx_map_tile_layer(m, m->primary_layer, x, y);
+}
+
+// PNX_FLIP_X / PNX_FLIP_Y, ready to hand to pnx_blit_4bpp.
+static inline uint8_t pnx_map_flip_layer(const PnxMap* m, uint8_t layer, int32_t x, int32_t y)
+{
+	const uint16_t e = pnx_map_entry_layer(m, layer, x, y);
 	if (e == PNX_MAP_NO_CELL)
 		return 0;
 	return (uint8_t)(((e & PNX_MAP_FLIP_X) ? 1u : 0u) | ((e & PNX_MAP_FLIP_Y) ? 2u : 0u));
+}
+
+static inline uint8_t pnx_map_flip(const PnxMap* m, int32_t x, int32_t y)
+{
+	return pnx_map_flip_layer(m, m->primary_layer, x, y);
 }
 
 // Which of the map's atlases a tile id belongs to, and its index within that atlas.
@@ -758,22 +875,32 @@ static inline const PnxAtlas* pnx_map_atlas(const PnxMap* m, uint16_t tile, uint
 // accessor rather than folded into flip's return value so existing callers passing that
 // straight to pnx_blit_4bpp are untouched. Nothing draws a rotated tile yet (see
 // PNX_MAP_ROTATE's own comment); this just makes the bit reachable for when something does.
+static inline bool pnx_map_rotate_layer(const PnxMap* m, uint8_t layer, int32_t x, int32_t y)
+{
+	const uint16_t e = pnx_map_entry_layer(m, layer, x, y);
+	return e != PNX_MAP_NO_CELL && (e & PNX_MAP_ROTATE) != 0;
+}
+
 static inline bool pnx_map_rotate(const PnxMap* m, int32_t x, int32_t y)
 {
-	const uint16_t e = pnx_map_entry(m, x, y);
-	return e != PNX_MAP_NO_CELL && (e & PNX_MAP_ROTATE) != 0;
+	return pnx_map_rotate_layer(m, m->primary_layer, x, y);
 }
 
 // PNX_TILE_WARP if the cell carries the warp bit, else 0. Reads the cell's OWN bit
 // (PNX_MAP_WARP) directly now, rather than a tile-owned table with per-cell overrides --
 // collision/warp both moved out of that table (see PnxMap's own comment). A cell whose
 // WorldTile is not resident answers 0 rather than guessing, same as pnx_map_flip.
-static inline uint8_t pnx_map_flags(const PnxMap* m, int32_t x, int32_t y)
+static inline uint8_t pnx_map_flags_layer(const PnxMap* m, uint8_t layer, int32_t x, int32_t y)
 {
-	const uint16_t e = pnx_map_entry(m, x, y);
+	const uint16_t e = pnx_map_entry_layer(m, layer, x, y);
 	if (e == PNX_MAP_NO_CELL)
 		return 0;
 	return (e & PNX_MAP_WARP) ? PNX_TILE_WARP : 0;
+}
+
+static inline uint8_t pnx_map_flags(const PnxMap* m, int32_t x, int32_t y)
+{
+	return pnx_map_flags_layer(m, m->primary_layer, x, y);
 }
 
 // Out-of-bounds counts as solid, so a map needs no border wall to contain the player
@@ -795,12 +922,17 @@ static inline uint8_t pnx_map_flags(const PnxMap* m, int32_t x, int32_t y)
 // toward not rejecting a reachable map, a live player errs toward not clipping through a
 // wall that is only partly open. A caller that wants the real shape uses those finer
 // primitives against the tile's own rect/mask, not this.
-static inline bool pnx_map_solid(const PnxMap* m, int32_t x, int32_t y)
+static inline bool pnx_map_solid_layer(const PnxMap* m, uint8_t layer, int32_t x, int32_t y)
 {
-	if (x < 0 || y < 0 || x >= m->w || y >= m->h)
+	if (layer >= m->layer_count)
+		return true;
+	const PnxMapLayer* l = &m->layers[layer];
+	int32_t wx = x, wy = y;
+	pnx_map_layer_wrap_xy(l, &wx, &wy);
+	if (wx < 0 || wy < 0 || wx >= l->w || wy >= l->h)
 		return true;
 
-	const uint16_t tile = pnx_map_tile(m, x, y);
+	const uint16_t tile = pnx_map_tile_layer(m, layer, x, y);
 	if (tile == PNX_MAP_NO_CELL)
 		return true;
 
@@ -814,21 +946,29 @@ static inline bool pnx_map_solid(const PnxMap* m, int32_t x, int32_t y)
 	return a->tile_flags[local] != PNX_COLLISION_NONE;
 }
 
+static inline bool pnx_map_solid(const PnxMap* m, int32_t x, int32_t y)
+{
+	return pnx_map_solid_layer(m, m->primary_layer, x, y);
+}
+
 // The cell's EXTENDED tag, if PNX_MAP_EXTENDED is set on it. Returns false (leaving
 // `out_value` untouched) for a cell with no tag, a non-resident cell, or -- defensively,
 // should the format and the table ever disagree -- a set bit whose WorldTile table has no
 // matching entry. Linear over `wt->ext_count`, which is sparse by construction (most
 // WorldTiles tag no cells at all): the same tradeoff pnx_map_warp_at already makes for a
 // map's handful of warps.
-static inline bool pnx_map_extended(const PnxMap* m, int32_t x, int32_t y, uint8_t* out_value)
+static inline bool pnx_map_extended_layer(const PnxMap* m, uint8_t layer, int32_t x, int32_t y,
+										  uint8_t* out_value)
 {
-	const uint16_t e = pnx_map_entry(m, x, y);
+	const uint16_t e = pnx_map_entry_layer(m, layer, x, y);
 	if (e == PNX_MAP_NO_CELL || !(e & PNX_MAP_EXTENDED))
 		return false;
 
-	const PnxWorldTile* wt = pnx_map_worldtile(m, x, y);
-	const uint8_t lx	   = (uint8_t)(x & (m->worldtile - 1));
-	const uint8_t ly	   = (uint8_t)(y & (m->worldtile - 1));
+	const PnxMapLayer* l = &m->layers[layer];
+	pnx_map_layer_wrap_xy(l, &x, &y);
+	const PnxWorldTile* wt = pnx_map_worldtile_layer(m, layer, x, y);
+	const uint8_t lx	   = (uint8_t)(x & (l->worldtile - 1));
+	const uint8_t ly	   = (uint8_t)(y & (l->worldtile - 1));
 	for (uint16_t k = 0; k < wt->ext_count; k++)
 	{
 		const uint8_t* e2 = wt->ext + (uint32_t)k * 3;
@@ -842,7 +982,12 @@ static inline bool pnx_map_extended(const PnxMap* m, int32_t x, int32_t y, uint8
 	return false;
 }
 
-// Returns NULL when there is no warp on that tile.
+static inline bool pnx_map_extended(const PnxMap* m, int32_t x, int32_t y, uint8_t* out_value)
+{
+	return pnx_map_extended_layer(m, m->primary_layer, x, y, out_value);
+}
+
+// Returns NULL when there is no warp on that tile. Warps apply to the primary layer only.
 const PnxWarp* pnx_map_warp_at(const PnxMap* m, int32_t x, int32_t y);
 
 // Page text for entry `entry`, page `page`, or NULL if either is out of range.

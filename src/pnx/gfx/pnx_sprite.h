@@ -35,6 +35,10 @@ typedef struct
 // Up to 16 layers (0-15) for free.
 #define PNX_SPRITE_LAYER_SHIFT	4
 #define PNX_SPRITE_LAYER(flags) ((uint8_t)((flags) >> PNX_SPRITE_LAYER_SHIFT))
+// The ceiling that shift implies, exposed so game code has a symbolic bound instead of a
+// hardcoded 16 -- the framework does not prescribe what a sprite layer id MEANS (M13,
+// alongside PNX_MAP_MAX_LAYERS, pnx_assets.h), only how many can exist.
+#define PNX_SPRITE_LAYER_COUNT 16
 
 void pnx_sprite_draw(const PnxSprite* sprite, PnxTarget* target, const PnxCamera* camera,
 					 int32_t wx, int32_t wy, uint8_t frame, const PnxPalette* palette,

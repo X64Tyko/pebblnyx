@@ -71,14 +71,15 @@ void test_map_compress(void)
 
 	PnxMap m;
 	M_CHECK(pnx_map_load(&m, PNX_ASSET_MAP_A));
+	const PnxMapLayer* l = &m.layers[m.primary_layer];
 	M_CHECK(m.compressed);
-	M_CHECK((int)m.w == MAP_A_W);
-	M_CHECK((int)m.h == MAP_A_H);
+	M_CHECK((int)l->w == MAP_A_W);
+	M_CHECK((int)l->h == MAP_A_H);
 
 	// Held whole (the map fits its pool), so pnx_map_load already ran the compressed
 	// branch of worldtile_load_run for every WorldTile by the time this returns -- the
 	// exact thing this file exists to prove works, not merely compiles.
-	M_CHECK(pnx_map_resident(&m) == m.wt_cols * m.wt_rows);
+	M_CHECK(pnx_map_resident(&m) == l->wt_cols * l->wt_rows);
 
 	// The border is wall, the interior start tile is not -- same shape of assertion
 	// test_assets.c already makes against an UNCOMPRESSED map, run here against a

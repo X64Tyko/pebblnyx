@@ -620,7 +620,8 @@ bool pnx_nineslice_load(PnxNineSlice* out, uint16_t asset_id)
 
 // Defined below with the rest of the streamer; pnx_map_load calls it to fill a map small
 // enough to be held whole before it returns.
-static bool worldtile_load_run(PnxMap* m, uint32_t first, uint8_t slot, uint8_t count);
+static bool worldtile_load_run(PnxMap* m, PnxMapLayer* l, uint32_t first, uint8_t slot,
+							   uint8_t count);
 
 // log2 for the power-of-two WorldTile size, so a cell finds its WorldTile by shifting.
 // The pipeline refuses anything that is not a power of two, so this cannot fail.
@@ -632,6 +633,18 @@ static uint8_t shift_of(uint8_t n)
 	return s;
 }
 
+// A generously-sized worst-case probe: the blob header, the 12-byte shared fixed section,
+// the atlas table at its largest (PNX_MAP_MAX_ATLASES entries), the pool_offset table at
+// its largest, and the per-layer fixed directory at its largest (PNX_MAP_MAX_LAYERS
+// entries) -- every one of those is capped by a compile-time constant, so one read this
+// size always covers all of it regardless of what a real map actually declares, the same
+// way the old single-layer probe was sized to the (then-fixed) preamble header. What comes
+// after this -- each layer's own wt_mask, the palette, the warps, the cell dictionary -- is
+// genuinely variable length, and is read a second time once this probe has said how big.
+#define MAP_PROBE_BYTES                                                                     \
+	(PNX_BLOB_HEADER_BYTES + 12 + PNX_MAP_MAX_ATLASES * 4 + (PNX_MAP_MAX_ATLASES + 1) * 4 + \
+	 PNX_MAP_MAX_LAYERS * 13)
+
 bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 {
 	if (!s_arena || asset_id >= s_resource_count)
@@ -641,11 +654,28 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	}
 	const uint32_t resource = s_resources[asset_id];
 
-	// The header plus the 18-byte fixed preamble (v13: +2 for dict_count) is everything
-	// needed to size the resident block, so the map costs two reads rather than one -- and
-	// never the whole blob, which for a large map is the thing that does not fit.
-	uint8_t head[PNX_BLOB_HEADER_BYTES + 18];
-	if (pnx_platform_resource_read(resource, 0, head, sizeof(head)) != sizeof(head))
+	// The blob header's four generic bytes now carry layer_count/primary_layer/warp_count
+	// (v14) rather than a single grid's own w/h/warp_count/worldtile -- see MAP_PROBE_BYTES'
+	// own comment for why one fixed-size probe still covers everything up to the genuinely
+	// variable tables (each layer's wt_mask, the palette, the warps, the cell dictionary).
+	//
+	// MAP_PROBE_BYTES is a worst-case UPPER bound (8 atlases, 4 layers), not a guaranteed
+	// lower one -- a small map's WHOLE resource (this is the map's own resident preamble,
+	// never the banks) can be smaller than that, and asking to read past the end of a real
+	// resource is refused outright rather than handed back short. So the probe is clamped
+	// to the resource's real size first; what matters is only that the clamped read still
+	// reaches every fixed field this function indexes into `head` for below, which the
+	// checks right after it confirm explicitly rather than assuming.
+	size_t resource_bytes = 0;
+	if (!pnx_platform_resource_size(resource, &resource_bytes))
+	{
+		pnx_log("map %u: resource missing", asset_id);
+		return false;
+	}
+	uint8_t head[MAP_PROBE_BYTES];
+	size_t probe_len = resource_bytes < sizeof(head) ? resource_bytes : sizeof(head);
+	if (probe_len < PNX_BLOB_HEADER_BYTES + 12 ||
+		pnx_platform_resource_read(resource, 0, head, probe_len) != probe_len)
 	{
 		pnx_log("map %u: too small to hold a header", asset_id);
 		return false;
@@ -668,43 +698,76 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 		return false;
 	}
 
-	const uint8_t w = head[3], h = head[4], warps = head[5], worldtile = head[6];
-	const uint8_t* pre		  = head + PNX_BLOB_HEADER_BYTES;
-	const uint8_t atlas_count = pre[0], cols = pre[1], rows = pre[2], flags = pre[3];
-	const uint16_t tile_total = read_u16(pre + 4);
-	const uint8_t tile_px	  = pre[6];
-	const uint16_t slot_bytes = read_u16(pre + 8);
-	const uint8_t want_slots = pre[10], atlas_slots = pre[11];
-	const uint32_t pool_bytes = read_u32(pre + 12);
-	// v13: the cell dictionary (M12) -- every WorldTile's cells are stored as indices into
-	// this table rather than raw entry words, so the preamble's fixed header grew by these
-	// two bytes to carry its size. idx_width (1 or 2 bytes per stored index) is derived from
-	// dict_count rather than stored again, the same way bank_count is derived from n rather
-	// than duplicated.
-	const uint16_t dict_count = read_u16(pre + 16);
-	const uint8_t idx_width	  = dict_count <= 256 ? 1 : 2;
-
-	if (w == 0 || h == 0 || cols == 0 || rows == 0 || worldtile == 0 || tile_px == 0 ||
-		(worldtile & (worldtile - 1)) || atlas_count == 0 ||
-		atlas_count > PNX_MAP_MAX_ATLASES || atlas_slots == 0 || atlas_slots > atlas_count ||
-		want_slots == 0 || dict_count == 0)
+	const uint8_t layer_count = head[3], primary_layer = head[4], warps = head[5];
+	if (layer_count == 0 || layer_count > PNX_MAP_MAX_LAYERS || primary_layer >= layer_count)
 	{
-		pnx_log(
-			"map %u: %ux%u in %ux%u WorldTiles of %u, %u atlases in %u slots, %u dict "
-			"entries -- refused",
-			asset_id, w, h, cols, rows, worldtile, atlas_count, atlas_slots, dict_count);
+		pnx_log("map %u: %u layers, primary %u -- refused", asset_id, layer_count,
+				primary_layer);
 		return false;
 	}
 
-	const uint16_t n = (uint16_t)cols * rows;
+	const uint8_t* pre		  = head + PNX_BLOB_HEADER_BYTES;
+	const uint8_t atlas_count = pre[0], tile_px = pre[1], flags = pre[2], atlas_slots = pre[3];
+	const uint16_t tile_total = read_u16(pre + 4);
+	const uint16_t dict_count = read_u16(pre + 6);
+	const uint32_t pool_bytes = read_u32(pre + 8);
+	const uint8_t idx_width	  = dict_count <= 256 ? 1 : 2;
+
+	if (tile_px == 0 || atlas_count == 0 || atlas_count > PNX_MAP_MAX_ATLASES ||
+		atlas_slots == 0 || atlas_slots > atlas_count || dict_count == 0)
+	{
+		pnx_log("map %u: %u atlases in %u slots, %u dict entries -- refused", asset_id,
+				atlas_count, atlas_slots, dict_count);
+		return false;
+	}
+
+	// The per-layer fixed directory sits right after the shared atlas + pool_offset tables,
+	// both sized now that atlas_count/atlas_slots are known. MAP_PROBE_BYTES covers this
+	// whole region at ITS worst case, but the probe actually read was clamped to the
+	// resource's real size above -- so this checks the real map, not the format ceiling,
+	// actually reached that far before indexing into it.
+	const size_t fixed_region =
+		12 + (size_t)atlas_count * 4 + ((size_t)atlas_slots + 1) * 4 + (size_t)layer_count * 13;
+	if (PNX_BLOB_HEADER_BYTES + fixed_region > probe_len)
+	{
+		pnx_log("map %u: %u atlases/%u layers need %u B of fixed header, resource has %u",
+				asset_id, atlas_count, layer_count, (unsigned)fixed_region,
+				(unsigned)(probe_len - PNX_BLOB_HEADER_BYTES));
+		return false;
+	}
+	const uint8_t* layer_dir =
+		pre + 12 + (size_t)atlas_count * 4 + ((size_t)atlas_slots + 1) * 4;
+
+	// Two totals accumulate across this scan: `resident` (everything the real read below
+	// needs, sized exactly once) and `max_scratch` (the biggest bank any layer owns, which
+	// is what the shared LZSS scratch pair -- one pair for the whole map, not one per layer,
+	// see PnxMap's own comment -- has to cover).
+	size_t resident = 12 + (size_t)atlas_count * 4 + ((size_t)atlas_slots + 1) * 4 +
+		(size_t)layer_count * 13;
+	size_t max_scratch = 0;
+	for (uint8_t li = 0; li < layer_count; li++)
+	{
+		const uint8_t* ld = layer_dir + (size_t)li * 13;
+		const uint8_t lw = ld[0], lh = ld[1], worldtile = ld[2], cols = ld[3], rows = ld[4];
+		const uint8_t bank_shift  = ld[5];
+		const uint16_t slot_bytes = read_u16(ld + 7);
+		if (lw == 0 || lh == 0 || cols == 0 || rows == 0 || worldtile == 0 ||
+			(worldtile & (worldtile - 1)) || slot_bytes == 0)
+		{
+			pnx_log("map %u: layer %u is %ux%u in %ux%u WorldTiles of %u -- refused", asset_id,
+					li, lw, lh, cols, rows, worldtile);
+			return false;
+		}
+		resident += pad4((size_t)cols * rows);
+		const size_t scratch = (size_t)(1u << bank_shift) * slot_bytes;
+		if (scratch > max_scratch)
+			max_scratch = scratch;
+	}
 	// No flag table any more (v11): collision/warp are read out of each cell's own u16 and
 	// the tile's owning atlas, not a map-owned plane -- so the only optional table left is
-	// the palette remap (flags bit 0). v13 adds the cell dictionary, always present, at the
-	// end of the preamble.
-	const size_t resident = 18 + (size_t)atlas_count * 4 + ((size_t)atlas_slots + 1) * 4 +
-		4 // first_bank_asset, pad
-		+ ((flags & 1) ? pad4(tile_total) : 0) +
-		pad4((size_t)warps * sizeof(PnxWarp)) + pad4(n) + pad4((size_t)dict_count * 2);
+	// the palette remap (flags bit 0).
+	resident += ((flags & 1) ? pad4(tile_total) : 0) + pad4((size_t)warps * sizeof(PnxWarp)) +
+		pad4((size_t)dict_count * 2);
 
 	uint8_t* pre_mem = (uint8_t*)pnx_arena_alloc(s_arena, resident, 4);
 	if (!pre_mem)
@@ -721,7 +784,7 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	}
 	s_bytes_loaded += (uint32_t)(sizeof(head) + resident);
 
-	const uint8_t* at = pre_mem + 18;
+	const uint8_t* at = pre_mem + 12;
 	uint16_t base	  = 0;
 	for (uint8_t i = 0; i < atlas_count; i++)
 	{
@@ -759,35 +822,99 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 		return false;
 	}
 
-	out->first_bank_asset = read_u16(at);
-	at += 4;
-
-	// Every bank checked once, here, rather than on every read. Stamping is worthless
-	// unless something looks, and looking per read would cost a seek to offset 0 in front
-	// of each one -- on a platform where the seek IS the cost. A scene boundary can afford
-	// bank_count reads of eight bytes; a frame cannot.
-	const uint16_t bank_count = (uint16_t)(((n - 1) >> pre[7]) + 1);
-	if (out->first_bank_asset == 0 ||
-		(uint32_t)out->first_bank_asset + bank_count > s_resource_count)
+	out->pool		= PNX_ARENA_CALLOC_ARRAY(s_arena, PnxAtlas, atlas_slots);
+	out->pool_mem	= (uint8_t*)pnx_arena_alloc(s_arena, pool_bytes, 4);
+	out->pool_owner = (uint8_t*)pnx_arena_alloc(s_arena, atlas_slots, 4);
+	out->pool_pins	= (uint8_t*)pnx_arena_alloc(s_arena, atlas_slots, 4);
+	if (!out->pool || !out->pool_mem || !out->pool_owner || !out->pool_pins)
 	{
-		pnx_log("map %u: %u banks from asset %u, past the %u the project has", asset_id,
-				bank_count, out->first_bank_asset, s_resource_count);
+		pnx_log("map %u: arena full, needed %u for %u atlas slots, %u free", asset_id,
+				(unsigned)pool_bytes, atlas_slots, (unsigned)pnx_arena_remaining(s_arena));
 		return false;
 	}
-	for (uint16_t b = 0; b < bank_count; b++)
+	memset(out->pool_owner, PNX_MAP_NO_SLOT, atlas_slots);
+	memset(out->pool_pins, 0, atlas_slots);
+
+	// Per-layer directory, then per-layer wt_mask -- two contiguous zones in that order,
+	// matching how the pipeline wrote them (finish_map, tools/pnx_assets.py) and matching
+	// the layout the probe above sized: every layer's fixed 13 bytes first, THEN every
+	// layer's own wt_mask, never interleaved, which is what let one probe size the whole
+	// thing without needing any layer's own cols/rows in advance.
+	const uint8_t* dir = at;
+	at += (size_t)layer_count * 13;
+	for (uint8_t li = 0; li < layer_count; li++)
 	{
-		uint8_t bh[PNX_BLOB_HEADER_BYTES];
-		const uint32_t res = s_resources[out->first_bank_asset + b];
-		if (pnx_platform_resource_read(res, 0, bh, sizeof(bh)) != sizeof(bh) || bh[0] != 'P' ||
-			bh[1] != 'K' || bh[2] != PNX_BLOB_VERSION ||
-			(s_orientation != PNX_ORIENT_UNSET && bh[7] != s_orientation))
+		const uint8_t* ld = dir + (size_t)li * 13;
+		PnxMapLayer* l	  = &out->layers[li];
+		const uint8_t lw = ld[0], lh = ld[1], worldtile = ld[2], cols = ld[3], rows = ld[4];
+		const uint8_t bank_shift = ld[5], want_slots = ld[6];
+		const uint16_t slot_bytes		= read_u16(ld + 7);
+		const uint16_t first_bank_asset = read_u16(ld + 9);
+		const uint8_t parallax_pct = ld[11], wrap = ld[12];
+
+		const uint16_t n		  = (uint16_t)cols * rows;
+		const uint16_t bank_count = (uint16_t)(((n - 1) >> bank_shift) + 1);
+		if (want_slots == 0 || first_bank_asset == 0 ||
+			(uint32_t)first_bank_asset + bank_count > s_resource_count)
 		{
-			pnx_log("map %u: bank %u is not a v%u %s WorldTile bank -- rebuild assets",
-					asset_id, b, PNX_BLOB_VERSION,
-					s_orientation == PNX_ORIENT_UNSET ? "current" : "matching");
+			pnx_log("map %u: layer %u -- %u banks from asset %u, past the %u the project has",
+					asset_id, li, bank_count, first_bank_asset, s_resource_count);
 			return false;
 		}
-		s_bytes_loaded += sizeof(bh);
+		// Every bank checked once, here, rather than on every read -- see the map-wide
+		// comment this replaces for why per-read stamping is not the alternative.
+		for (uint16_t b = 0; b < bank_count; b++)
+		{
+			uint8_t bh[PNX_BLOB_HEADER_BYTES];
+			const uint32_t res = s_resources[first_bank_asset + b];
+			if (pnx_platform_resource_read(res, 0, bh, sizeof(bh)) != sizeof(bh) ||
+				bh[0] != 'P' || bh[1] != 'K' || bh[2] != PNX_BLOB_VERSION ||
+				(s_orientation != PNX_ORIENT_UNSET && bh[7] != s_orientation))
+			{
+				pnx_log(
+					"map %u: layer %u bank %u is not a v%u %s WorldTile bank -- rebuild "
+					"assets",
+					asset_id, li, b, PNX_BLOB_VERSION,
+					s_orientation == PNX_ORIENT_UNSET ? "current" : "matching");
+				return false;
+			}
+			s_bytes_loaded += sizeof(bh);
+		}
+
+		l->wt_mask = at;
+		at += pad4(n);
+
+		// The slot count is the smaller of what the pipeline asked for and what this layer
+		// actually has -- a layer of four WorldTiles never needs nine slots.
+		const uint8_t slots = want_slots < n ? want_slots : (uint8_t)n;
+		l->slots			= PNX_ARENA_CALLOC_ARRAY(s_arena, PnxWorldTile, slots);
+		l->slot_mem			= (uint8_t*)pnx_arena_alloc(s_arena, (size_t)slots * slot_bytes, 4);
+		l->wt_slot			= (uint8_t*)pnx_arena_alloc(s_arena, n, 4);
+		if (!l->slots || !l->slot_mem || !l->wt_slot)
+		{
+			pnx_log(
+				"map %u: layer %u -- arena full, needed %u for %u WorldTile slots, %u free",
+				asset_id, li, (unsigned)((size_t)slots * slot_bytes), slots,
+				(unsigned)pnx_arena_remaining(s_arena));
+			return false;
+		}
+		memset(l->wt_slot, PNX_MAP_NO_SLOT, n);
+
+		l->first_bank_asset = first_bank_asset;
+		l->bank_shift		= bank_shift;
+		l->slot_bytes		= slot_bytes;
+		l->w				= lw;
+		l->h				= lh;
+		l->slot_count		= slots;
+		l->wt_cols			= cols;
+		l->wt_rows			= rows;
+		l->worldtile		= worldtile;
+		l->wt_shift			= shift_of(worldtile);
+		l->parallax_pct		= parallax_pct;
+		l->wrap				= wrap != 0;
+		// Only when this layer's atlases fit too: with fewer atlas slots than atlases,
+		// holding every WorldTile at once is not something the (shared) pool can express.
+		l->held_whole = (slots == n && atlas_slots >= atlas_count);
 	}
 
 	out->tile_palette = NULL;
@@ -800,8 +927,6 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	// bytes the pipeline writes. _Static_assert below keeps that true.
 	out->warps = (const PnxWarp*)(const void*)at;
 	at += pad4((size_t)warps * sizeof(PnxWarp));
-	out->wt_mask = at;
-	at += pad4(n);
 
 	// The cell dictionary: dict_count entries, 2 bytes each, read the same byte-at-a-time
 	// way pnx_map_entry (pnx_assets.h) already reads a cell's own entry word -- endianness
@@ -809,69 +934,37 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	// a multi-byte field straight onto blob bytes.
 	out->cell_dict = at;
 
-	// Pools. The slot count is the smaller of what the pipeline asked for and what the map
-	// actually has -- a map of four WorldTiles never needs nine slots, and paying for them
-	// would make small maps cost more resident than they did before any of this.
-	const uint8_t slots = want_slots < n ? want_slots : (uint8_t)n;
-	out->slots			= PNX_ARENA_CALLOC_ARRAY(s_arena, PnxWorldTile, slots);
-	out->slot_mem		= (uint8_t*)pnx_arena_alloc(s_arena, (size_t)slots * slot_bytes, 4);
-	out->wt_slot		= (uint8_t*)pnx_arena_alloc(s_arena, n, 4);
-	out->pool			= PNX_ARENA_CALLOC_ARRAY(s_arena, PnxAtlas, atlas_slots);
-	out->pool_mem		= (uint8_t*)pnx_arena_alloc(s_arena, pool_bytes, 4);
-	out->pool_owner		= (uint8_t*)pnx_arena_alloc(s_arena, atlas_slots, 4);
-	out->pool_pins		= (uint8_t*)pnx_arena_alloc(s_arena, atlas_slots, 4);
-	if (!out->slots || !out->slot_mem || !out->wt_slot || !out->pool || !out->pool_mem ||
-		!out->pool_owner || !out->pool_pins)
-	{
-		pnx_log(
-			"map %u: arena full, needed %u for %u WorldTile slots and %u atlas slots, "
-			"%u free",
-			asset_id, (unsigned)((size_t)slots * slot_bytes + pool_bytes), slots, atlas_slots,
-			(unsigned)pnx_arena_remaining(s_arena));
-		return false;
-	}
-
-	memset(out->wt_slot, PNX_MAP_NO_SLOT, n);
-	memset(out->pool_owner, PNX_MAP_NO_SLOT, atlas_slots);
-	memset(out->pool_pins, 0, atlas_slots);
-
-	out->resource	 = resource;
-	out->tile_count	 = tile_total;
-	out->slot_bytes	 = slot_bytes;
-	out->w			 = w;
-	out->h			 = h;
-	out->warp_count	 = warps;
-	out->atlas_count = atlas_count;
-	out->atlas_slots = atlas_slots;
-	out->slot_count	 = slots;
-	out->wt_cols	 = cols;
-	out->wt_rows	 = rows;
-	out->worldtile	 = worldtile;
-	out->wt_shift	 = shift_of(worldtile);
-	out->bank_shift	 = pre[7];
-	out->dict_count	 = dict_count;
-	out->idx_width	 = idx_width;
+	out->resource	   = resource;
+	out->tile_count	   = tile_total;
+	out->warp_count	   = warps;
+	out->atlas_count   = atlas_count;
+	out->atlas_slots   = atlas_slots;
+	out->dict_count	   = dict_count;
+	out->idx_width	   = idx_width;
+	out->layer_count   = layer_count;
+	out->primary_layer = primary_layer;
 	// Carried by the map rather than read off a loaded atlas: the streamer works in world
 	// pixels and has to size its window BEFORE any atlas is resident. The atlas load checks
 	// the two agree.
 	out->tile_px = tile_px;
 
-	// Bit 1 of `flags`: this map's banks are LZSS-compressed (`compress_maps`, M12). Bit 0
-	// is the palette remap, above; both ride the same byte rather than growing the header
-	// for a second single bit.
+	// Bit 1 of `flags`: this map's banks are LZSS-compressed (`compress_maps`, M12) -- one
+	// flag for the whole map, not per layer (see PnxMap's own comment). Bit 0 is the
+	// palette remap, above; both ride the same byte rather than growing the header for a
+	// second single bit.
 #if PNX_USE_MAP_COMPRESS
 	out->compressed = (flags & 2) != 0;
 	if (out->compressed)
 	{
-		// Sized to one bank's max UNCOMPRESSED bytes -- see PnxMap's own comment for why
-		// that bound covers both the compressed read and the decoded output.
-		const size_t scratch = (size_t)(1u << out->bank_shift) * slot_bytes;
-		out->lzss_src		 = (uint8_t*)pnx_arena_alloc(s_arena, scratch, 4);
-		out->lzss_dst		 = (uint8_t*)pnx_arena_alloc(s_arena, scratch, 4);
+		// Sized to the LARGEST bank across every layer -- see PnxMap's own comment for why
+		// one shared pair, not one per layer, and why this bound covers both the
+		// compressed read and the decoded output.
+		out->lzss_src = (uint8_t*)pnx_arena_alloc(s_arena, max_scratch, 4);
+		out->lzss_dst = (uint8_t*)pnx_arena_alloc(s_arena, max_scratch, 4);
 		if (!out->lzss_src || !out->lzss_dst)
 		{
 			pnx_log("map %u: arena full, needed %u for LZSS scratch, %u free", asset_id,
-					(unsigned)(scratch * 2), (unsigned)pnx_arena_remaining(s_arena));
+					(unsigned)(max_scratch * 2), (unsigned)pnx_arena_remaining(s_arena));
 			return false;
 		}
 	}
@@ -886,33 +979,30 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	}
 #endif
 
-	// **A map that fits is loaded whole, here, before this returns.** Every small map is in
-	// this case, so they behave exactly as they did before WorldTiles existed: one load
-	// point, everything resident, no streaming code ever running. Leaving them to fill
-	// lazily would have been cheaper by a few reads and wrong in a way that matters -- a
-	// map that never streams should never be seen to stream, and a game measuring flash
-	// traffic would otherwise find a "resident" map still reading as the player walks.
-	//
-	// Only when the atlases fit too: with fewer atlas slots than atlases, holding every
-	// WorldTile at once is not something the pool can express, and the streamer's window is
-	// what keeps the two in step.
-	out->held_whole = (slots == n && atlas_slots >= atlas_count);
-	if (out->held_whole)
+	// **A layer that fits is loaded whole, here, before this returns.** Every small layer
+	// is in this case, so it behaves exactly as a map used to before M13: one load point,
+	// everything resident, no streaming code ever running. Leaving it to fill lazily would
+	// have been cheaper by a few reads and wrong in a way that matters -- a layer that never
+	// streams should never be seen to stream, and a game measuring flash traffic would
+	// otherwise find a "resident" layer still reading as the player walks.
+	for (uint8_t li = 0; li < layer_count; li++)
 	{
-		// One read per bank, not one per WorldTile. Slot i holds tile i here, so a bank's
-		// tiles are consecutive at both ends and the run loader can take the whole thing --
-		// which on a 144-WorldTile map is 18 reads instead of 144, and 18 seeks instead of
-		// 144 into a resource where the seek is what costs.
-		uint16_t per_bank = (uint16_t)(1u << out->bank_shift);
+		PnxMapLayer* l = &out->layers[li];
+		if (!l->held_whole)
+			continue;
+		// One read per bank, not one per WorldTile -- see the map-wide comment this
+		// replaces for the seek-cost reasoning.
+		const uint16_t n  = (uint16_t)l->wt_cols * l->wt_rows;
+		uint16_t per_bank = (uint16_t)(1u << l->bank_shift);
 		if (per_bank > PNX_MAP_MAX_RUN)
 			per_bank = PNX_MAP_MAX_RUN;
 		for (uint16_t i = 0; i < n; i += per_bank)
 		{
 			const uint16_t run = (n - i) < per_bank ? (uint16_t)(n - i) : per_bank;
-			if (!worldtile_load_run(out, i, (uint8_t)i, (uint8_t)run))
+			if (!worldtile_load_run(out, l, i, (uint8_t)i, (uint8_t)run))
 			{
-				pnx_log("map %u: WorldTiles %u..%u failed while loading the map whole",
-						asset_id, i, i + run - 1);
+				pnx_log("map %u: layer %u WorldTiles %u..%u failed while loading whole",
+						asset_id, li, i, i + run - 1);
 				return false;
 			}
 		}
@@ -1011,14 +1101,14 @@ static void atlas_unpin_mask(PnxMap* m, uint8_t mask)
 	}
 }
 
-static void worldtile_release(PnxMap* m, uint8_t slot)
+static void worldtile_release(PnxMap* m, PnxMapLayer* l, uint8_t slot)
 {
-	PnxWorldTile* wt = &m->slots[slot];
+	PnxWorldTile* wt = &l->slots[slot];
 	if (!wt->live)
 		return;
-	const uint32_t i = (uint32_t)wt->wy * m->wt_cols + wt->wx;
-	atlas_unpin_mask(m, m->wt_mask[i]);
-	m->wt_slot[i] = PNX_MAP_NO_SLOT;
+	const uint32_t i = (uint32_t)wt->wy * l->wt_cols + wt->wx;
+	atlas_unpin_mask(m, l->wt_mask[i]);
+	l->wt_slot[i] = PNX_MAP_NO_SLOT;
 	wt->live	  = false;
 }
 
@@ -1031,10 +1121,12 @@ static void worldtile_release(PnxMap* m, uint8_t slot)
 // pipeline rejects but which a hand-built blob could still ask for.
 //
 // The mask lives beside the index rather than in the payload precisely so this ordering is
-// possible without reading the payload to find out what it needs.
-static bool worldtile_pin(PnxMap* m, uint32_t i, uint8_t* out_pinned)
+// possible without reading the payload to find out what it needs. The pool it pins into is
+// the map's, shared across every layer (see PnxMap's own comment) -- this is why two
+// layers sharing an atlas do not double-load it.
+static bool worldtile_pin(PnxMap* m, PnxMapLayer* l, uint32_t i, uint8_t* out_pinned)
 {
-	const uint8_t mask = m->wt_mask[i];
+	const uint8_t mask = l->wt_mask[i];
 	uint8_t pinned	   = 0;
 	for (uint8_t k = 0; k < m->atlas_count; k++)
 	{
@@ -1055,10 +1147,10 @@ static bool worldtile_pin(PnxMap* m, uint32_t i, uint8_t* out_pinned)
 }
 
 // Unpacks a payload that has already landed in its slot.
-static bool worldtile_accept(PnxMap* m, uint32_t i, uint8_t slot)
+static bool worldtile_accept(PnxMap* m, PnxMapLayer* l, uint32_t i, uint8_t slot)
 {
-	const uint8_t* dst = m->slot_mem + (size_t)slot * m->slot_bytes;
-	PnxWorldTile* wt   = &m->slots[slot];
+	const uint8_t* dst = l->slot_mem + (size_t)slot * l->slot_bytes;
+	PnxWorldTile* wt   = &l->slots[slot];
 
 	// v12: [cw, ch] + cells + ext_count(u16) + ext(ext_count * 3) -- EXTENDED's sparse tag
 	// table. Collision/warp already moved into the cell's own u16 (see PnxMap's own
@@ -1070,11 +1162,11 @@ static bool worldtile_accept(PnxMap* m, uint32_t i, uint8_t slot)
 	wt->cells  = dst + 2;
 
 	const size_t cells_need = 2 + (size_t)wt->cell_w * wt->cell_h * m->idx_width;
-	if (wt->cell_w == 0 || wt->cell_h == 0 || wt->cell_w > m->worldtile ||
-		wt->cell_h > m->worldtile || cells_need + 2 > m->slot_bytes)
+	if (wt->cell_w == 0 || wt->cell_h == 0 || wt->cell_w > l->worldtile ||
+		wt->cell_h > l->worldtile || cells_need + 2 > l->slot_bytes)
 	{
 		pnx_log("map: WorldTile %u claims %ux%u cells, %u bytes of %u", (unsigned)i,
-				wt->cell_w, wt->cell_h, (unsigned)(cells_need + 2), m->slot_bytes);
+				wt->cell_w, wt->cell_h, (unsigned)(cells_need + 2), l->slot_bytes);
 		return false;
 	}
 
@@ -1082,17 +1174,17 @@ static bool worldtile_accept(PnxMap* m, uint32_t i, uint8_t slot)
 	wt->ext		  = dst + cells_need + 2;
 
 	const size_t need = cells_need + 2 + (size_t)wt->ext_count * 3;
-	if (need > m->slot_bytes)
+	if (need > l->slot_bytes)
 	{
 		pnx_log("map: WorldTile %u claims %u extended tag(s), %u bytes of %u", (unsigned)i,
-				wt->ext_count, (unsigned)need, m->slot_bytes);
+				wt->ext_count, (unsigned)need, l->slot_bytes);
 		return false;
 	}
 
-	wt->wx		  = (uint8_t)(i % m->wt_cols);
-	wt->wy		  = (uint8_t)(i / m->wt_cols);
+	wt->wx		  = (uint8_t)(i % l->wt_cols);
+	wt->wy		  = (uint8_t)(i / l->wt_cols);
 	wt->live	  = true;
-	m->wt_slot[i] = slot;
+	l->wt_slot[i] = slot;
 	return true;
 }
 
@@ -1106,7 +1198,8 @@ static bool worldtile_accept(PnxMap* m, uint32_t i, uint8_t slot)
 // and contiguous in the pool.
 //
 // The caller guarantees the run stays inside one bank and inside the slot array.
-static bool worldtile_load_run(PnxMap* m, uint32_t first, uint8_t slot, uint8_t count)
+static bool worldtile_load_run(PnxMap* m, PnxMapLayer* l, uint32_t first, uint8_t slot,
+							   uint8_t count)
 {
 	// Sized independently of the stream budget, which counts READS and says nothing about
 	// how many WorldTiles one carries. A bank can hold up to 128 of them at the smallest
@@ -1117,7 +1210,7 @@ static bool worldtile_load_run(PnxMap* m, uint32_t first, uint8_t slot, uint8_t 
 
 	for (uint8_t k = 0; k < count; k++)
 	{
-		if (worldtile_pin(m, first + k, &pinned[k]))
+		if (worldtile_pin(m, l, first + k, &pinned[k]))
 			continue;
 		// Whatever was pinned for earlier tiles of this run has to go back, or those atlas
 		// slots are held by WorldTiles that never became resident.
@@ -1126,13 +1219,13 @@ static bool worldtile_load_run(PnxMap* m, uint32_t first, uint8_t slot, uint8_t 
 		return false;
 	}
 
-	const uint16_t per_bank	  = (uint16_t)(1u << m->bank_shift);
-	const uint16_t bank		  = (uint16_t)(first >> m->bank_shift);
-	const size_t local_offset = (size_t)(first & (per_bank - 1)) * m->slot_bytes;
-	const size_t len		  = (size_t)count * m->slot_bytes;
-	uint8_t* dst			  = m->slot_mem + (size_t)slot * m->slot_bytes;
+	const uint16_t per_bank	  = (uint16_t)(1u << l->bank_shift);
+	const uint16_t bank		  = (uint16_t)(first >> l->bank_shift);
+	const size_t local_offset = (size_t)(first & (per_bank - 1)) * l->slot_bytes;
+	const size_t len		  = (size_t)count * l->slot_bytes;
+	uint8_t* dst			  = l->slot_mem + (size_t)slot * l->slot_bytes;
 
-	const uint32_t resource = s_resources[m->first_bank_asset + bank];
+	const uint32_t resource = s_resources[l->first_bank_asset + bank];
 
 #if PNX_USE_MAP_COMPRESS
 	if (m->compressed)
@@ -1141,7 +1234,9 @@ static bool worldtile_load_run(PnxMap* m, uint32_t first, uint8_t slot, uint8_t 
 		// own comment for why that is the accepted trade. A run never crosses a bank
 		// boundary (the caller's own guarantee), so a bank asked for by more than one run
 		// within a single stream_window pass decodes more than once -- a known cost this
-		// milestone accepts rather than adds a decoded-bank cache to avoid.
+		// milestone accepts rather than adds a decoded-bank cache to avoid. The scratch
+		// pair is the MAP's, shared across every layer (see PnxMap's own comment) -- safe
+		// because streaming is sequential, never concurrent across layers.
 		size_t compressed_size = 0;
 		if (!pnx_platform_resource_size(resource, &compressed_size) ||
 			compressed_size <= PNX_BLOB_HEADER_BYTES)
@@ -1152,7 +1247,7 @@ static bool worldtile_load_run(PnxMap* m, uint32_t first, uint8_t slot, uint8_t 
 			return false;
 		}
 		const size_t body_len = compressed_size - PNX_BLOB_HEADER_BYTES;
-		const size_t scratch  = (size_t)per_bank * m->slot_bytes;
+		const size_t scratch  = (size_t)per_bank * l->slot_bytes;
 		if (body_len > scratch ||
 			pnx_platform_resource_read(resource, PNX_BLOB_HEADER_BYTES, m->lzss_src,
 									   body_len) != body_len)
@@ -1195,12 +1290,12 @@ static bool worldtile_load_run(PnxMap* m, uint32_t first, uint8_t slot, uint8_t 
 
 	for (uint8_t k = 0; k < count; k++)
 	{
-		if (worldtile_accept(m, first + k, (uint8_t)(slot + k)))
+		if (worldtile_accept(m, l, first + k, (uint8_t)(slot + k)))
 			continue;
 		// Roll the whole run back: a half-accepted run would leave slots marked live with
 		// pins that no longer describe them.
 		for (uint8_t j = 0; j < k; j++)
-			worldtile_release(m, (uint8_t)(slot + j));
+			worldtile_release(m, l, (uint8_t)(slot + j));
 		for (uint8_t j = k; j < count; j++)
 			atlas_unpin_mask(m, pinned[j]);
 		return false;
@@ -1226,31 +1321,57 @@ static int32_t floor_div(int32_t a, int32_t b)
 	return a >= 0 ? a / b : -(((-a) + b - 1) / b);
 }
 
-static uint8_t stream_window(PnxMap* m, int32_t x, int32_t y, int32_t w, int32_t h,
-							 uint8_t budget)
+// `x`/`y`/`w`/`h` are the RAW camera rectangle, not yet scaled for this layer's own
+// parallax -- stream_window does that itself (pnx_layer.c's pnx_layers_draw does the same
+// scaling for DRAWING; this is the streaming side of the same idea, and the two have to
+// agree on what "where this layer is looking" means or a fast-parallax background streams
+// against a window the draw call never asked for).
+//
+// Wrap is honoured for SAMPLING (pnx_map_worldtile_layer, drawing) but this window is
+// still clamped to the layer's own [0, wt_cols) / [0, wt_rows) rather than wrapping the
+// STREAMING window itself -- a real, accepted scope limit: a wrap layer is meant for a
+// screen-sized parallax background, which fits inside its own pool and takes the
+// held_whole path below without ever reaching this clamp at all. Only a wrap layer too
+// large to hold whole would notice the difference, at one seam, and that is not a shape
+// this milestone's own examples build.
+static uint8_t stream_window(PnxMap* m, PnxMapLayer* l, int32_t x, int32_t y, int32_t w,
+							 int32_t h, uint8_t* budget)
 {
-	// A map held whole has nothing to load and nothing it may evict -- the eviction pass
+	// A layer held whole has nothing to load and nothing it may evict -- the eviction pass
 	// below would happily drop WorldTiles outside the window and read them back as the
-	// camera returned, turning a map that fits into one that streams. Every small map
+	// camera returned, turning a layer that fits into one that streams. Every small layer
 	// takes this path, so it is also where most of the per-frame cost of streaming goes
 	// for games that never needed it.
-	if (!m->slots || m->held_whole)
+	if (!l->slots || l->held_whole)
 		return 0;
+
+	// 255 (PNX_LAYER_PARALLAX_WORLD, pnx_layer.h) is ordinary 1:1 motion, handed through
+	// untouched rather than a 255/255 multiply that happens to be exact -- the same
+	// shortcut pnx_layer.c's own scaled_camera takes, and for the same reason: a
+	// single-layer map costs nothing extra to stream through this. Not `#include`-ing
+	// pnx_layer.h for the constant: assets sits BELOW gfx/layer in this framework's
+	// dependency order, and a plain 255 is exactly what that header's own comment defines
+	// PNX_MAP_LAYER's parallax_pct against too.
+	if (l->parallax_pct != 255)
+	{
+		x = (int32_t)(((int64_t)x * l->parallax_pct) / 255);
+		y = (int32_t)(((int64_t)y * l->parallax_pct) / 255);
+	}
 
 	// One WorldTile of margin on each side, matching worldtile_window() in the pipeline --
 	// which is what sized the pool. The two have to agree or the streamer asks for more
 	// slots than it was given and thrashes.
-	const int32_t span = (int32_t)m->tile_px * m->worldtile;
+	const int32_t span = (int32_t)m->tile_px * l->worldtile;
 	int32_t x0 = floor_div(x, span) - 1, y0 = floor_div(y, span) - 1;
 	int32_t x1 = floor_div(x + w - 1, span) + 1, y1 = floor_div(y + h - 1, span) + 1;
 	if (x0 < 0)
 		x0 = 0;
 	if (y0 < 0)
 		y0 = 0;
-	if (x1 >= m->wt_cols)
-		x1 = m->wt_cols - 1;
-	if (y1 >= m->wt_rows)
-		y1 = m->wt_rows - 1;
+	if (x1 >= l->wt_cols)
+		x1 = l->wt_cols - 1;
+	if (y1 >= l->wt_rows)
+		y1 = l->wt_rows - 1;
 	if (x1 < x0 || y1 < y0)
 		return 0;
 
@@ -1270,14 +1391,14 @@ static uint8_t stream_window(PnxMap* m, int32_t x, int32_t y, int32_t w, int32_t
 	//
 	// Safe to do unconditionally: the window already carries the streamer's margin, so
 	// anything outside it is not on screen and is not about to be.
-	for (uint8_t i = 0; i < m->slot_count; i++)
+	for (uint8_t i = 0; i < l->slot_count; i++)
 	{
-		const PnxWorldTile* wt = &m->slots[i];
+		const PnxWorldTile* wt = &l->slots[i];
 		if (!wt->live)
 			continue;
 		if (wt->wx < x0 || wt->wx > x1 || wt->wy < y0 || wt->wy > y1)
 		{
-			worldtile_release(m, i);
+			worldtile_release(m, l, i);
 		}
 	}
 
@@ -1286,8 +1407,8 @@ static uint8_t stream_window(PnxMap* m, int32_t x, int32_t y, int32_t w, int32_t
 		int32_t wx = x0;
 		while (wx <= x1)
 		{
-			const uint32_t first = (uint32_t)wy * m->wt_cols + wx;
-			if (m->wt_slot[first] != PNX_MAP_NO_SLOT)
+			const uint32_t first = (uint32_t)wy * l->wt_cols + wx;
+			if (l->wt_slot[first] != PNX_MAP_NO_SLOT)
 			{
 				wx++;
 				continue;
@@ -1296,16 +1417,16 @@ static uint8_t stream_window(PnxMap* m, int32_t x, int32_t y, int32_t w, int32_t
 			// How far this run of missing WorldTiles goes. Consecutive along the row, which
 			// makes them consecutive in the bank, and stopping at the bank boundary because one
 			// read cannot cross two resources.
-			const uint32_t per_bank = 1u << m->bank_shift;
+			const uint32_t per_bank = 1u << l->bank_shift;
 			int32_t run				= 1;
-			while (wx + run <= x1 && m->wt_slot[first + run] == PNX_MAP_NO_SLOT &&
-				   ((first + run) >> m->bank_shift) == (first >> m->bank_shift) &&
+			while (wx + run <= x1 && l->wt_slot[first + run] == PNX_MAP_NO_SLOT &&
+				   ((first + run) >> l->bank_shift) == (first >> l->bank_shift) &&
 				   (uint32_t)run < per_bank && run < PNX_MAP_MAX_RUN)
 			{
 				run++;
 			}
 
-			if (budget == 0)
+			if (*budget == 0)
 			{
 				missing += (uint8_t)run;
 				wx += run;
@@ -1318,10 +1439,10 @@ static uint8_t stream_window(PnxMap* m, int32_t x, int32_t y, int32_t w, int32_t
 			uint8_t slot = PNX_MAP_NO_SLOT;
 			while (run > 0 && slot == PNX_MAP_NO_SLOT)
 			{
-				for (uint8_t i = 0; i + run <= m->slot_count; i++)
+				for (uint8_t i = 0; i + run <= l->slot_count; i++)
 				{
 					uint8_t k = 0;
-					while (k < run && !m->slots[i + k].live)
+					while (k < run && !l->slots[i + k].live)
 						k++;
 					if (k == run)
 					{
@@ -1340,25 +1461,25 @@ static uint8_t stream_window(PnxMap* m, int32_t x, int32_t y, int32_t w, int32_t
 				// and take it alone.
 				run			   = 1;
 				uint32_t worst = 0;
-				for (uint8_t i = 0; i < m->slot_count; i++)
+				for (uint8_t i = 0; i < l->slot_count; i++)
 				{
-					const uint32_t d = wt_distance(&m->slots[i], cx, cy);
+					const uint32_t d = wt_distance(&l->slots[i], cx, cy);
 					if (slot == PNX_MAP_NO_SLOT || d > worst)
 					{
 						slot  = i;
 						worst = d;
 					}
 				}
-				worldtile_release(m, slot);
+				worldtile_release(m, l, slot);
 			}
 
-			if (!worldtile_load_run(m, first, slot, (uint8_t)run))
+			if (!worldtile_load_run(m, l, first, slot, (uint8_t)run))
 			{
 				missing++;
 				wx++;
 				continue;
 			}
-			budget--; // one READ, however many WorldTiles it carried
+			(*budget)--; // one READ, however many WorldTiles it carried
 			wx += run;
 		}
 	}
@@ -1369,7 +1490,16 @@ uint8_t pnx_map_stream(PnxMap* m, int32_t x, int32_t y, int32_t w, int32_t h)
 {
 	if (!m)
 		return 0;
-	return stream_window(m, x, y, w, h, PNX_MAP_STREAM_BUDGET);
+	// ONE budget, shared and decremented across every layer -- not PNX_MAP_STREAM_BUDGET
+	// per layer, which would make a four-layer map stream four times the reads a
+	// single-layer one does for the same window. Layers earlier in the array get first
+	// call on it; a layer that never needs to stream (held whole, or nothing missing)
+	// leaves the rest for the next one.
+	uint8_t budget	= PNX_MAP_STREAM_BUDGET;
+	uint8_t missing = 0;
+	for (uint8_t li = 0; li < m->layer_count; li++)
+		missing += stream_window(m, &m->layers[li], x, y, w, h, &budget);
+	return missing;
 }
 
 uint8_t pnx_map_stream_now(PnxMap* m, int32_t x, int32_t y, int32_t w, int32_t h)
@@ -1377,17 +1507,32 @@ uint8_t pnx_map_stream_now(PnxMap* m, int32_t x, int32_t y, int32_t w, int32_t h
 	if (!m)
 		return 0;
 
-	// The budget is the whole pool: a scene load or a warp has no previous frame to show, so
-	// there is nothing to protect by spreading the reads over several. Sixteen WorldTiles
-	// and four atlases is ~1.5 ms against a 37.33 ms frame.
-	return stream_window(m, x, y, w, h, m->slot_count);
+	// Each layer gets its OWN full-pool budget, not a shared one: a scene load or a warp
+	// has no previous frame to show, so there is nothing to protect by spreading the reads
+	// over several, for any layer. Sixteen WorldTiles and four atlases is ~1.5 ms against
+	// a 37.33 ms frame; that bound applies per layer here, same as it always did before a
+	// map could have more than one.
+	uint8_t missing = 0;
+	for (uint8_t li = 0; li < m->layer_count; li++)
+	{
+		uint8_t budget = m->layers[li].slot_count;
+		missing += stream_window(m, &m->layers[li], x, y, w, h, &budget);
+	}
+	return missing;
 }
 
+// Summed across every layer.
 uint8_t pnx_map_resident(const PnxMap* m)
 {
 	uint8_t n = 0;
-	for (uint8_t i = 0; m && i < m->slot_count; i++)
-		n += m->slots[i].live ? 1 : 0;
+	if (!m)
+		return 0;
+	for (uint8_t li = 0; li < m->layer_count; li++)
+	{
+		const PnxMapLayer* l = &m->layers[li];
+		for (uint8_t i = 0; i < l->slot_count; i++)
+			n += l->slots[i].live ? 1 : 0;
+	}
 	return n;
 }
 

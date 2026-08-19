@@ -89,17 +89,18 @@ static bool register_worldtiles(void)
 // map there was a hole" is not a report anybody can act on.
 static int32_t first_hole(const PnxMap* m, const PnxCamera* cam)
 {
-	const int32_t T	 = m->tile_px;
+	const PnxMapLayer* l = &m->layers[m->primary_layer];
+	const int32_t T		 = m->tile_px;
 	const int32_t x0 = pnx_floor_div(cam->x, T), y0 = pnx_floor_div(cam->y, T);
 	const int32_t x1 = x0 + cam->view_w / T + 1, y1 = y0 + cam->view_h / T + 1;
 
 	for (int32_t ty = y0; ty <= y1; ty++)
 	{
-		if (ty < 0 || ty >= m->h)
+		if (ty < 0 || ty >= l->h)
 			continue;
 		for (int32_t tx = x0; tx <= x1; tx++)
 		{
-			if (tx < 0 || tx >= m->w)
+			if (tx < 0 || tx >= l->w)
 				continue;
 			if (pnx_map_tile(m, tx, ty) == PNX_MAP_NO_CELL)
 				return ty * 1000 + tx;
@@ -113,16 +114,17 @@ static int32_t first_hole(const PnxMap* m, const PnxCamera* cam)
 static void walk_everything(PnxMap* m, PnxCamera* cam, int32_t step, int32_t* out_holes,
 							uint32_t* out_worst_missing)
 {
-	int32_t holes	= 0;
-	uint32_t worst	= 0;
+	const PnxMapLayer* l = &m->layers[m->primary_layer];
+	int32_t holes		 = 0;
+	uint32_t worst		 = 0;
 	const int32_t w = pnx_tilemap_width(m), h = pnx_tilemap_height(m);
 
-	for (int32_t ty = 0; ty < m->h; ty += step)
+	for (int32_t ty = 0; ty < l->h; ty += step)
 	{
 		const bool east = ((ty / step) & 1) == 0;
-		for (int32_t i = 0; i < m->w; i += step)
+		for (int32_t i = 0; i < l->w; i += step)
 		{
-			const int32_t tx = east ? i : (m->w - 1 - i);
+			const int32_t tx = east ? i : (l->w - 1 - i);
 			pnx_camera_center(cam, tx * m->tile_px, ty * m->tile_px, w, h);
 			const uint8_t missing = pnx_map_stream(m, cam->x, cam->y, cam->view_w, cam->view_h);
 			if (missing > worst)
@@ -163,19 +165,20 @@ void test_stream(void)
 	// --- the streamed world
 	PnxMap field;
 	S_CHECK(pnx_map_load(&field, PNX_ASSET_MAP_FIELD));
-	S_CHECK_EQ(field.w, MAP_FIELD_W);
-	S_CHECK_EQ(field.h, MAP_FIELD_H);
+	const PnxMapLayer* fl = &field.layers[field.primary_layer];
+	S_CHECK_EQ(fl->w, MAP_FIELD_W);
+	S_CHECK_EQ(fl->h, MAP_FIELD_H);
 	S_CHECK_EQ(field.atlas_count, 3);
 
 	// The WorldTile size is chosen per map by the pipeline, so the grid is asserted against
 	// the map's own dimensions rather than against a number -- a hardcoded 144 would only
 	// have been testing whichever size was in favour the day it was written.
-	S_CHECK_EQ(field.wt_cols, (MAP_FIELD_W + field.worldtile - 1) / field.worldtile);
-	S_CHECK_EQ(field.wt_rows, (MAP_FIELD_H + field.worldtile - 1) / field.worldtile);
+	S_CHECK_EQ(fl->wt_cols, (MAP_FIELD_W + fl->worldtile - 1) / fl->worldtile);
+	S_CHECK_EQ(fl->wt_rows, (MAP_FIELD_H + fl->worldtile - 1) / fl->worldtile);
 
 	// The two numbers that make this a streaming test rather than a big-map test: fewer
 	// WorldTile slots than WorldTiles, and fewer atlas slots than atlases.
-	S_CHECK(field.slot_count < field.wt_cols * field.wt_rows);
+	S_CHECK(fl->slot_count < fl->wt_cols * fl->wt_rows);
 	S_CHECK(field.atlas_slots < field.atlas_count);
 
 	// Too large to be held whole, so nothing is resident until it is asked for -- and
@@ -207,15 +210,15 @@ void test_stream(void)
 	size_t map_res_bytes = 0;
 	S_CHECK(pnx_platform_resource_size(s_resources[PNX_ASSET_MAP_FIELD], &map_res_bytes));
 	S_CHECK(map_res_bytes < 4096);
-	S_CHECK(field.first_bank_asset > PNX_ASSET_MAP_FIELD);
+	S_CHECK(fl->first_bank_asset > PNX_ASSET_MAP_FIELD);
 
 	const uint16_t banks =
-		(uint16_t)((((field.wt_cols * field.wt_rows) - 1) >> field.bank_shift) + 1);
+		(uint16_t)((((fl->wt_cols * fl->wt_rows) - 1) >> fl->bank_shift) + 1);
 	size_t worst_bank = 0;
 	for (uint16_t b = 0; b < banks; b++)
 	{
 		size_t sz = 0;
-		S_CHECK(pnx_platform_resource_size(s_resources[field.first_bank_asset + b], &sz));
+		S_CHECK(pnx_platform_resource_size(s_resources[fl->first_bank_asset + b], &sz));
 		if (sz > worst_bank)
 			worst_bank = sz;
 	}
@@ -252,7 +255,7 @@ void test_stream(void)
 	// be read more than once, so the running total must exceed a single copy of everything.
 	const uint32_t read_after_walk = pnx_assets_bytes_loaded();
 	S_CHECK(read_after_walk > read_after_load);
-	S_CHECK(pnx_map_resident(&field) <= field.slot_count);
+	S_CHECK(pnx_map_resident(&field) <= fl->slot_count);
 
 	// --- sprinting: eight tiles a tick, which crosses a whole WorldTile per tick at the
 	//     size the pipeline picks. The budgeted call has to keep up, and the reason it can
@@ -305,9 +308,10 @@ void test_stream(void)
 	{
 		PnxMap m;
 		S_CHECK(pnx_map_load(&m, small[i]));
-		S_CHECK_EQ(m.slot_count, m.wt_cols * m.wt_rows);
-		S_CHECK_EQ(pnx_map_resident(&m), m.wt_cols * m.wt_rows); // whole, before any stream
-		S_CHECK_EQ(pnx_map_stream_now(&m, 0, 0, 200, 228), 0);	 // and the stream is a no-op
+		const PnxMapLayer* ml = &m.layers[m.primary_layer];
+		S_CHECK_EQ(ml->slot_count, ml->wt_cols * ml->wt_rows);
+		S_CHECK_EQ(pnx_map_resident(&m), ml->wt_cols * ml->wt_rows); // whole, before any stream
+		S_CHECK_EQ(pnx_map_stream_now(&m, 0, 0, 200, 228), 0);		 // and the stream is a no-op
 
 		// Its warp must land on a walkable tile of the field, which is what makes the round
 		// trip real rather than a door into a wall.
@@ -357,27 +361,28 @@ void test_stream(void)
 	const uint32_t reads_before = pnx_host_resource_reads();
 	PnxMap plain;
 	S_CHECK(pnx_map_load(&plain, PNX_ASSET_MAP_PLAIN));
+	const PnxMapLayer* pl	  = &plain.layers[plain.primary_layer];
 	const uint32_t load_reads = pnx_host_resource_reads() - reads_before;
-	S_CHECK_EQ(plain.w, field.w);
-	S_CHECK_EQ(plain.h, field.h);
+	S_CHECK_EQ(pl->w, fl->w);
+	S_CHECK_EQ(pl->h, fl->h);
 
 	// The same world, tiled DIFFERENTLY, and that is the pipeline being right rather than
 	// inconsistent: a streaming map holds a fixed window, so a big WorldTile means a big
 	// margin ring of world nobody can see; a map held whole has no ring, so a big WorldTile
 	// just means fewer per-tile headers. The two modes want opposite sizes.
-	S_CHECK(plain.worldtile > field.worldtile);
-	S_CHECK(plain.wt_cols * plain.wt_rows < field.wt_cols * field.wt_rows);
+	S_CHECK(pl->worldtile > fl->worldtile);
+	S_CHECK(pl->wt_cols * pl->wt_rows < fl->wt_cols * fl->wt_rows);
 
 	// Held whole means a slot for every WorldTile and a slot for every atlas -- so nothing
 	// is ever evicted, and the streamer's eviction path never runs.
-	S_CHECK_EQ(plain.slot_count, plain.wt_cols * plain.wt_rows);
+	S_CHECK_EQ(pl->slot_count, pl->wt_cols * pl->wt_rows);
 	S_CHECK_EQ(plain.atlas_slots, plain.atlas_count);
 
 	// Whole means whole, before anything asks: a map that fits its pool is filled by
 	// pnx_map_load, so the streaming path never runs for it. Without that the comparison
 	// would be dishonest -- `plain` would still be reading flash as the player walked, and
 	// "held whole" would only describe the allocation.
-	S_CHECK_EQ(pnx_map_resident(&plain), plain.wt_cols * plain.wt_rows);
+	S_CHECK_EQ(pnx_map_resident(&plain), pl->wt_cols * pl->wt_rows);
 	S_CHECK_EQ(pnx_map_stream_now(&plain, 0, 0, 200, 228), 0);
 	const size_t plain_bytes = scene.used;
 

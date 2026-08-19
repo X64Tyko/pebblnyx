@@ -496,7 +496,7 @@ static void test_tilemap(void)
 	// --- the ship: two atlases, and a WorldTile boundary down the middle of the screen
 	PnxMap ship;
 	G_CHECK(pnx_map_load(&ship, PNX_ASSET_MAP_DECK));
-	G_CHECK(ship.wt_cols > 1); // there has to BE a boundary to draw across
+	G_CHECK(ship.layers[0].wt_cols > 1); // there has to BE a boundary to draw across
 	G_CHECK_EQ(pnx_map_stream_now(&ship, 0, 0, 200, 228), 0);
 
 	// Note there is no "load it and draw before streaming" case to test here: `deck` fits
@@ -507,7 +507,7 @@ static void test_tilemap(void)
 	// Park the camera so the first WorldTile boundary falls mid-screen and assert both
 	// sides drew: a WorldTile placed at the wrong origin leaves one half blank or doubles
 	// the other. Taken from the map's own tiling, since the pipeline chooses the size.
-	const int32_t boundary = (int32_t)ship.worldtile * ship.tile_px;
+	const int32_t boundary = (int32_t)ship.layers[0].worldtile * ship.tile_px;
 	pnx_camera_center(&cam, boundary, 3 * ship.tile_px, pnx_tilemap_width(&ship),
 					  pnx_tilemap_height(&ship));
 	G_CHECK_EQ(pnx_map_stream_now(&ship, cam.x, cam.y, cam.view_w, cam.view_h), 0);

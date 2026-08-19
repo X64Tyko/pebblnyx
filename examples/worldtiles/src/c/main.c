@@ -174,9 +174,10 @@ static bool enter_scene(Game* g, uint8_t scene, int32_t tx, int32_t ty)
 	// comparison turns on, so it is read from the arena rather than recomputed.
 	g->scene_bytes = g->scene.used;
 
+	const PnxMapLayer* primary = &map->layers[map->primary_layer];
 	pnx_log("scene %u (%s): %ux%u, %u/%u WorldTiles resident, %u B arena, %u B read", scene,
-			MAP_NAME[map_of_scene(scene)], map->w, map->h, pnx_map_resident(map),
-			(unsigned)(map->wt_cols * map->wt_rows), (unsigned)g->scene_bytes,
+			MAP_NAME[map_of_scene(scene)], primary->w, primary->h, pnx_map_resident(map),
+			(unsigned)(primary->wt_cols * primary->wt_rows), (unsigned)g->scene_bytes,
 			(unsigned)pnx_assets_bytes_loaded());
 	return true;
 }
@@ -287,21 +288,22 @@ static void autopilot(Game* g)
 
 static void draw_residency(PnxTarget* t, const PnxMap* m, const PnxCamera* cam)
 {
-	const int32_t span	 = (int32_t)m->tile_px * m->worldtile;
+	const PnxMapLayer* l = &m->layers[m->primary_layer];
+	const int32_t span	 = (int32_t)m->tile_px * l->worldtile;
 	const int32_t cam_wx = cam->x / span, cam_wy = cam->y / span;
 
-	const int16_t gw = (int16_t)(m->wt_cols * GRID_CELL);
-	const int16_t gh = (int16_t)(m->wt_rows * GRID_CELL);
+	const int16_t gw = (int16_t)(l->wt_cols * GRID_CELL);
+	const int16_t gh = (int16_t)(l->wt_rows * GRID_CELL);
 	const int16_t x0 = (int16_t)(200 - gw - 3);
 	const int16_t y0 = 3;
 
 	pnx_gfx_fill_rect(t, x0 - 2, y0 - 2, (int16_t)(gw + 4), (int16_t)(gh + 4), 0xC0);
 
-	for (uint8_t wy = 0; wy < m->wt_rows; wy++)
+	for (uint8_t wy = 0; wy < l->wt_rows; wy++)
 	{
-		for (uint8_t wx = 0; wx < m->wt_cols; wx++)
+		for (uint8_t wx = 0; wx < l->wt_cols; wx++)
 		{
-			const bool live		= m->wt_slot[(uint32_t)wy * m->wt_cols + wx] != PNX_MAP_NO_SLOT;
+			const bool live		= l->wt_slot[(uint32_t)wy * l->wt_cols + wx] != PNX_MAP_NO_SLOT;
 			const bool here		= (wx == cam_wx && wy == cam_wy);
 			const uint8_t shade = here ? 0xFF : (live ? 0xEA : 0xD5);
 			pnx_gfx_fill_rect(t, x0 + wx * GRID_CELL, y0 + wy * GRID_CELL, GRID_CELL - GRID_PAD,
@@ -492,7 +494,10 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 		// for whether that answer was bought at any cost worth caring about.
 		pnx_format(g->hud, sizeof(g->hud), "%s %uKB %u/%u m%u %u.%ufps",
 				   MAP_NAME[map_of_scene(g->current_scene)], (unsigned)(g->scene_bytes / 1024),
-				   m ? pnx_map_resident(m) : 0, m ? (unsigned)(m->wt_cols * m->wt_rows) : 0,
+				   m ? pnx_map_resident(m) : 0,
+				   m ? (unsigned)(m->layers[m->primary_layer].wt_cols *
+								  m->layers[m->primary_layer].wt_rows)
+					 : 0,
 				   (unsigned)g->worst_missing, (unsigned)(st->fps_x10 / 10),
 				   (unsigned)(st->fps_x10 % 10));
 		if (g->ticks == 25)

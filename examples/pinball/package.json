@@ -26,11 +26,6 @@
           "type": "raw",
           "name": "PALETTES",
           "file": "palettes.bin"
-        },
-        {
-          "type": "raw",
-          "name": "BOARD",
-          "file": "board.bin"
         }
       ]
     }

@@ -280,7 +280,8 @@ def check(label, cond):
         failures += 1
 
 
-HEADER_HDR_FLAGS_OFFSET = pnx_assets.HEADER_BYTES + 3  # the flags byte finish_map writes
+HEADER_HDR_FLAGS_OFFSET = pnx_assets.HEADER_BYTES + 2  # the flags byte finish_map writes
+                                                        # (v14: shared-fixed offset 2)
 
 
 def check_lzss():
@@ -755,10 +756,15 @@ def check_orientation():
             swaps = orient in pnx_assets.LANDSCAPE_ORIENTS
 
             # --- dimensions swap in the two landscape orientations, and hold in the one
-            #     that instead turns everything upside down
+            #     that instead turns everything upside down. Read through parse_map, not
+            #     off a raw byte offset: w/h live in the per-layer directory now (v14,
+            #     M13), not the header's own bytes 3/4 (those are layer_count/
+            #     primary_layer since M13, and do not rotate).
             fm, rm = read_blob(flat, "a.bin"), read_blob(out, "a.bin")
+            fmp, rmp = pnx_assets.parse_map(fm), pnx_assets.parse_map(rm)
             check(f"{name}: map w/h {'swap' if swaps else 'hold'}",
-                  (rm[3], rm[4]) == ((fm[4], fm[3]) if swaps else (fm[3], fm[4])))
+                  (rmp["w"], rmp["h"]) ==
+                  ((fmp["h"], fmp["w"]) if swaps else (fmp["w"], fmp["h"])))
 
             fd, rd = defines(flat), defines(out)
             check(f"{name}: header map dims {'swap' if swaps else 'hold'}",

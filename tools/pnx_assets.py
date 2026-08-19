@@ -97,7 +97,19 @@ def fold_flag_into_entry(entry, flag):
 # Blob format versions. A mismatch between a stale .bin and a newer runtime is exactly
 # the kind of failure that presents as garbage pixels rather than an error, so every
 # blob is tagged and the runtime checks.
-BLOB_VERSION = 13  # v13: map preamble carries a cell dictionary (build_cell_dictionary) --
+BLOB_VERSION = 14  # v14: a map is 1..PNX_MAP_MAX_LAYERS streamed layers instead of one
+                   # implicit grid (M13). The header's four generic bytes are now
+                   # layer_count/primary_layer/warp_count/pad (were w/h/warp_count/
+                   # worldtile); the preamble carries a shared 12-byte fixed section
+                   # (atlas_count, tile_px, flags, atlas_slots, tile_total, dict_count,
+                   # pool_bytes) then one 13-byte fixed directory entry PER LAYER
+                   # (w, h, worldtile, cols, rows, bank_shift, want_slots, slot_bytes,
+                   # first_bank_asset, parallax_pct, wrap) followed immediately by that
+                   # layer's own wt_mask -- see finish_map's own layout comment. This
+                   # pass emits exactly one layer (layer_count=1, primary_layer=0) for
+                   # every `[[map]]`; multi-layer authoring (`[[map.layer]]`) is not
+                   # wired into the manifest yet, only the format supports it.
+                   # v13: map preamble carries a cell dictionary (build_cell_dictionary) --
                    # a WorldTile's cells are 1- or 2-byte indices into it rather than raw
                    # u16 entry words, since every real map measured uses only a handful of
                    # distinct entry values. v12: atlas blobs carry baked SCALED rects /
@@ -2557,20 +2569,32 @@ def finish_map(m, atlas_assets, atlas_bytes, pal_table=b"",
     is then a contiguous read that lands in consecutive pool slots, which is what lets the
     runtime fetch a whole row, or a whole bank, in one call instead of one per tile.
 
-    Layout after the 8-byte header (w, h, warp_count, worldtile in bytes 3..6):
+    Layout after the 8-byte header (v14, M13: layer_count, primary_layer, warp_count,
+    pad in bytes 3..6 -- a single grid's own w/h/worldtile do not mean anything once a
+    map is 1..PNX_MAP_MAX_LAYERS of them):
 
-        u8  atlas_count, wt_cols, wt_rows, flags (bit 0: palette remap present)
-        u16 tile_total;  u8 tile_px, bank_shift
-        u16 wt_slot_bytes;  u8 wt_slots, atlas_slots
-        u32 atlas_pool_bytes
-        u16 dict_count (v13: the cell dictionary's entry count)
-        atlas table    atlas_count * (u16 asset id, u16 first_tile)
-        atlas slots    (atlas_slots + 1) * u32, offsets into the atlas pool
-        u16 first_bank_asset, pad
-        palette remap  tile_total bytes when present, padded to 4
-        warps          warp_count * 5, padded to 4
-        wt masks       wt_cols * wt_rows bytes, padded to 4
-        cell dict      dict_count * 2 bytes (v13), padded to 4
+        SHARED, once per map:
+          u8  atlas_count, tile_px, flags (bit 0: palette remap, bit 1: compressed),
+              atlas_slots
+          u16 tile_total;  u16 dict_count;  u32 atlas_pool_bytes
+          atlas table    atlas_count * (u16 asset id, u16 first_tile)
+          atlas slots    (atlas_slots + 1) * u32, offsets into the atlas pool
+        PER LAYER, layer_count times (this function always emits exactly one, layer 0):
+          u8  w, h, worldtile, wt_cols, wt_rows, bank_shift, want_slots
+          u16 slot_bytes;  u16 first_bank_asset
+          u8  parallax_pct, wrap
+          wt mask        wt_cols * wt_rows bytes, padded to 4
+        SHARED, once more, after every layer:
+          palette remap  tile_total bytes when present, padded to 4
+          warps          warp_count * 5, padded to 4
+          cell dict      dict_count * 2 bytes, padded to 4
+
+    Every layer's fixed 13 bytes are written before ANY layer's wt_mask -- two
+    contiguous zones, not interleaved -- because the runtime sizes its one read for the
+    whole preamble from a worst-case-bounded probe before it knows any layer's own
+    cols/rows; interleaving would mean it could not compute that size without already
+    having read the very thing it is trying to size. See pnx_map_load's own comment
+    (pnx_assets.c) for the reader this has to match exactly.
 
     Returns the map with `banks` set to the payload blobs the caller writes beside it.
     """
@@ -2625,25 +2649,38 @@ def finish_map(m, atlas_assets, atlas_bytes, pal_table=b"",
                      + stored)
 
     cell_dict = m["cell_dict"]
+
+    # Shared, once per map: see finish_map's own layout comment for the field order this
+    # has to match exactly (pnx_map_load's shared-fixed-section read, pnx_assets.c).
     preamble = bytearray()
     # Bit 0: palette remap present. Bit 1 (M12): this map's banks are LZSS-compressed.
-    preamble += bytes([len(m["atlas_table"]), cols, rows,
-                       (1 if pal_table else 0) | (2 if compress else 0)])
-    preamble += tile_total.to_bytes(2, "little") + bytes([m["tile_px"], shift])
-    preamble += slot_bytes.to_bytes(2, "little") + bytes([wt_slots, atlas_slots])
-    preamble += pool[-1].to_bytes(4, "little")
+    preamble += bytes([len(m["atlas_table"]), m["tile_px"],
+                       (1 if pal_table else 0) | (2 if compress else 0), atlas_slots])
+    preamble += tile_total.to_bytes(2, "little")
     preamble += len(cell_dict).to_bytes(2, "little")
+    preamble += pool[-1].to_bytes(4, "little")
     for name, first, _ in m["atlas_table"]:
         preamble += atlas_assets[name].to_bytes(2, "little") + first.to_bytes(2, "little")
     preamble += b"".join(o.to_bytes(4, "little") for o in pool)
-    preamble += first_bank_asset.to_bytes(2, "little") + bytes(2)
+
+    # One layer (index 0, primary): this pass emits exactly one, always -- see
+    # BLOB_VERSION's own v14 comment for why. `parallax_pct = 255` (PNX_LAYER_PARALLAX_
+    # WORLD) and `wrap = 0` are what every layer this pipeline writes today means:
+    # ordinary 1:1 world motion, no repeat.
+    preamble += bytes([w, h, worldtile, cols, rows, shift, wt_slots])
+    preamble += slot_bytes.to_bytes(2, "little")
+    preamble += first_bank_asset.to_bytes(2, "little")
+    preamble += bytes([255, 0])
+    preamble += pad4(bytes(t["mask"] for t in tiles))
+
+    # Shared again, after every layer.
     preamble += pad4(bytes(pal_table)) if pal_table else b""
     preamble += pad4(b"".join(bytes(x) for x in m["warps"]))
-    preamble += pad4(bytes(t["mask"] for t in tiles))
     preamble += pad4(b"".join(v.to_bytes(2, "little") for v in cell_dict))
 
     base = HEADER_BYTES + len(preamble)
-    m["blob"] = blob_header(MAGIC_MAP, w, h, len(m["warps"]), worldtile,
+    # Header's four generic bytes (v14): layer_count, primary_layer, warp_count, pad.
+    m["blob"] = blob_header(MAGIC_MAP, 1, 0, len(m["warps"]), 0,
                             orient=orient) + bytes(preamble)
     m["banks"] = banks
     m["bank_shift"] = shift
@@ -2699,18 +2736,26 @@ def parse_map(blob, banks=()):
     if blob[2] != BLOB_VERSION:
         raise BuildError(f"map blob is v{blob[2]}, this pipeline writes v{BLOB_VERSION}")
 
-    w, h, warp_count, worldtile = blob[3], blob[4], blob[5], blob[6]
+    # v14 (M13): header's four generic bytes are layer_count/primary_layer/warp_count/pad.
+    # This reader only handles the single-layer case (layer_count == 1) every manifest
+    # this pipeline builds today produces -- see finish_map's own v14 comment. A blob with
+    # more than one layer is not yet something anything downstream of parse_map (tests,
+    # the editor) knows how to consume.
+    layer_count, primary_layer, warp_count = blob[3], blob[4], blob[5]
+    if layer_count != 1 or primary_layer != 0:
+        raise BuildError(
+            f"map blob has {layer_count} layers (primary {primary_layer}) -- parse_map "
+            f"only reads the single-layer case; multi-layer authoring is not wired into "
+            f"the manifest yet (BLOB_VERSION's own v14 comment)")
+
     p = HEADER_BYTES
-    atlas_count, cols, rows, flags = blob[p:p + 4]
+    atlas_count, tile_px, flags, atlas_slots = blob[p:p + 4]
     tile_total = int.from_bytes(blob[p + 4:p + 6], "little")
-    tile_px, bank_shift = blob[p + 6], blob[p + 7]
-    slot_bytes = int.from_bytes(blob[p + 8:p + 10], "little")
-    wt_slots, atlas_slots = blob[p + 10], blob[p + 11]
-    atlas_pool_bytes = int.from_bytes(blob[p + 12:p + 16], "little")
-    dict_count = int.from_bytes(blob[p + 16:p + 18], "little")
+    dict_count = int.from_bytes(blob[p + 6:p + 8], "little")
+    atlas_pool_bytes = int.from_bytes(blob[p + 8:p + 12], "little")
     idx_width = 1 if dict_count <= 256 else 2
 
-    at = p + 18
+    at = p + 12
     atlas_table = []
     for _ in range(atlas_count):
         atlas_table.append((int.from_bytes(blob[at:at + 2], "little"),
@@ -2721,8 +2766,12 @@ def parse_map(blob, banks=()):
             for i in range(atlas_slots + 1)]
     at += (atlas_slots + 1) * 4
 
-    first_bank_asset = int.from_bytes(blob[at:at + 2], "little")
-    at += 4
+    # The one layer's own fixed 13 bytes, then its wt_mask -- see finish_map's own layout
+    # comment for why those are two separate zones rather than one, even for one layer.
+    w, h, worldtile, cols, rows, bank_shift, wt_slots = blob[at:at + 7]
+    slot_bytes = int.from_bytes(blob[at + 7:at + 9], "little")
+    first_bank_asset = int.from_bytes(blob[at + 9:at + 11], "little")
+    at += 13
 
     def take(n):
         nonlocal at
@@ -2730,9 +2779,9 @@ def parse_map(blob, banks=()):
         at += (n + 3) & ~3
         return chunk
 
+    masks = take(cols * rows)
     remap = take(tile_total) if flags & 1 else b""
     warps = take(warp_count * 5)
-    masks = take(cols * rows)
     dict_bytes = take(dict_count * 2)
     cell_dict = [int.from_bytes(dict_bytes[i * 2:i * 2 + 2], "little")
                 for i in range(dict_count)]

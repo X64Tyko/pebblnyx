@@ -354,8 +354,10 @@ void test_assets(void)
 	// still invite.
 	PnxMap outdoor;
 	A_CHECK(pnx_map_load(&outdoor, A_OUTDOOR));
-	A_CHECK_EQ(outdoor.w, MAP_OUTDOOR_W);
-	A_CHECK_EQ(outdoor.h, MAP_OUTDOOR_H);
+	A_CHECK_EQ(outdoor.layers[0].w, MAP_OUTDOOR_W);
+	A_CHECK_EQ(outdoor.layers[0].h, MAP_OUTDOOR_H);
+	A_CHECK_EQ(outdoor.layer_count, 1);
+	A_CHECK_EQ(outdoor.primary_layer, 0);
 	A_CHECK_EQ(outdoor.warp_count, 1);
 	A_CHECK_EQ(outdoor.atlas_count, 1);
 	A_CHECK_EQ(outdoor.tile_px, TILES_TILE_PX);
@@ -366,15 +368,15 @@ void test_assets(void)
 	// so idx_width should be 1 here; dict_count has to be at least 1 (something is on the
 	// map) and can never exceed the cell count itself (a dictionary larger than the data
 	// it indexes would mean something read past the table).
-	A_CHECK(outdoor.dict_count >= 1 &&
-			outdoor.dict_count <= (uint16_t)(outdoor.w * outdoor.h));
+	A_CHECK(outdoor.dict_count >= 1 && outdoor.dict_count <= (uint16_t)(outdoor.layers[0].w * outdoor.layers[0].h));
 	A_CHECK_EQ(outdoor.idx_width, 1);
 
 	// Small enough to be held whole, so pnx_map_load filled it and the streaming path never
 	// runs -- which is how every map in this example behaves, and how they all behaved
 	// before WorldTiles existed. A map too large to hold comes back empty instead; that
 	// case is tested in test_stream.c, which has one.
-	A_CHECK_EQ(pnx_map_resident(&outdoor), outdoor.wt_cols * outdoor.wt_rows);
+	A_CHECK_EQ(pnx_map_resident(&outdoor),
+			   outdoor.layers[0].wt_cols * outdoor.layers[0].wt_rows);
 	A_CHECK(pnx_map_tile(&outdoor, 0, 0) != PNX_MAP_NO_CELL);
 	A_CHECK_EQ(pnx_map_stream_now(&outdoor, 0, 0, 200, 228), 0);
 
@@ -439,8 +441,8 @@ void test_assets(void)
 
 	// The outdoor map declares no variant, so it must fall through to the atlas's own palettes.
 	A_CHECK(outdoor.tile_palette == NULL);
-	A_CHECK_EQ(cave.w, MAP_CAVE_W);
-	A_CHECK_EQ(cave.h, MAP_CAVE_H);
+	A_CHECK_EQ(cave.layers[0].w, MAP_CAVE_W);
+	A_CHECK_EQ(cave.layers[0].h, MAP_CAVE_H);
 
 	// The return warp must land on a walkable tile in the other map -- the pipeline
 	// checks this, and this confirms the check describes the shipped bytes.
@@ -543,7 +545,7 @@ void test_assets(void)
 	A_CHECK(pnx_scene_map() != NULL);
 	A_CHECK(pnx_scene_dialog() != NULL);
 	if (pnx_scene_map())
-		A_CHECK_EQ(pnx_scene_map()->w, MAP_OUTDOOR_W);
+		A_CHECK_EQ(pnx_scene_map()->layers[0].w, MAP_OUTDOOR_W);
 
 	// A scene's map is usable the moment the scene loads. That holds because this map fits
 	// its pool; a scene whose map does not needs pnx_map_stream_now before the first frame,
@@ -585,7 +587,7 @@ void test_assets(void)
 	A_CHECK(pnx_scene_dialog() == NULL);	 // nor dialog
 	A_CHECK_EQ(pnx_scene_font_count(), 1);	 // HUD only: no conversations here
 	if (pnx_scene_map())
-		A_CHECK_EQ(pnx_scene_map()->w, MAP_CAVE_W);
+		A_CHECK_EQ(pnx_scene_map()->layers[0].w, MAP_CAVE_W);
 	A_CHECK(arena.used < after_outdoor); // smaller scene, less arena
 
 	// Reloading the bigger scene must fit again, which it cannot if resets leak.
