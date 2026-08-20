@@ -355,6 +355,16 @@
               <option value="2">scaled</option>
               <option value="3">complex</option>
             </select></label>
+            <!-- What touching this shape MEANS, independent of its MODE above (a wall
+                 blocks movement; a hurtbox/hitbox is read by the game's own combat code;
+                 an overlap is a sensor). Defaults to wall, same as every entry written
+                 before `kind` existed -- see PNX_COLLISION_KIND_* (pnx_assets.h). -->
+            <label class="mini">Kind<select id="tekind">
+              <option value="0">wall</option>
+              <option value="1">hurt</option>
+              <option value="2">hit</option>
+              <option value="3">overlap</option>
+            </select></label>
           </div>
           <!-- SCALED: an inset rect, dragged over a zoomed still of the tile rather than
                typed as four numbers -- a fence's solid half is a shape, not an
@@ -647,7 +657,18 @@
         <!-- Frames picked off a sheet. The declare form below can only describe a
              vertical stack, which is the layout this engine's own examples happen to use
              and not the one most sheets ship in — a run of poses across a row, several
-             rows to a character. Anything else meant writing the rectangles by hand. -->
+             rows to a character, or a tightly packed sheet where poses are not one
+             uniform size at all. Two ways to pick frames from something else:
+
+             GRID mode is for a sheet that IS laid out on a grid, but not necessarily
+             starting at 0,0 or filling the whole sheet -- the grid is drawn as LINES over
+             the intact sheet image (not split into cropped cell thumbnails: seeing the
+             grid against the real art is what makes spacing/origin easy to eyeball), and
+             a drag across several cells picks them as ONE combined frame -- for a sprite
+             bigger than one grid cell.
+
+             FREEFORM mode is for a tightly packed sheet with no grid at all: drag a box
+             directly on the sheet, fine-tune it numerically, and add it as a frame. -->
         <section><h2>From sheet</h2>
           <!-- Bringing the file in. Every sheet list here is filled by walking the
                project's art/ folder, and until this there was no way to put anything in
@@ -660,22 +681,55 @@
             <span class="dim">or drop one here</span>
           </div>
           <small id="shimplog" class="dim"></small>
-          <div class="fields col">
-            <label>Sheet<select id="shsheet"></select></label>
-            <label>Frame w<input id="shfw" type="number" value="16" min="1" max="255"></label>
-            <label>Frame h<input id="shfh" type="number" value="24" min="1" max="255"></label>
-            <label>Origin x<input id="shox" type="number" value="0" min="0"
-              title="where the grid starts, for sheets with a border"></label>
-            <label>Origin y<input id="shoy" type="number" value="0" min="0"></label>
-            <label>Gap x<input id="shgx" type="number" value="0" min="0"
-              title="spacing between frames, for sheets drawn on a grid with gutters"></label>
-            <label>Gap y<input id="shgy" type="number" value="0" min="0"></label>
+          <label>Sheet<select id="shsheet"></select></label>
+
+          <div class="row" style="margin:.5rem 0">
+            <button id="shmodegrid" class="act on" title="the sheet IS laid out on a grid"
+              ><em>Grid</em></button>
+            <button id="shmodefree" class="act"
+              title="a tightly packed sheet, no grid"><em>Freeform</em></button>
           </div>
+
+          <div id="shgridmode">
+            <div class="fields col">
+              <label>Frame w<input id="shfw" type="number" value="16" min="1" max="255"></label>
+              <label>Frame h<input id="shfh" type="number" value="24" min="1" max="255"></label>
+              <label>Origin x<input id="shox" type="number" value="0" min="0"
+                title="where the grid starts, for sheets with a border"></label>
+              <label>Origin y<input id="shoy" type="number" value="0" min="0"></label>
+              <label>Gap x<input id="shgx" type="number" value="0" min="0"
+                title="spacing between frames, for sheets drawn on a grid with gutters"></label>
+              <label>Gap y<input id="shgy" type="number" value="0" min="0"></label>
+            </div>
+            <small id="shlog">Click a cell to pick it; drag across several to combine them
+              into one frame. Order is the anim order.</small>
+          </div>
+
+          <div id="shfreemode" style="display:none">
+            <div class="fields col">
+              <label>x<input id="shrx" type="number" value="0" min="0"></label>
+              <label>y<input id="shry" type="number" value="0" min="0"></label>
+              <label>w<input id="shrw" type="number" value="16" min="1"></label>
+              <label>h<input id="shrh" type="number" value="16" min="1"></label>
+            </div>
+            <div class="row" style="margin-top:.4rem">
+              <button id="shaddframe" class="primary">+ Frame</button>
+            </div>
+            <small id="shfreelog">Drag on the sheet below to draw a frame, or type the
+              rect directly, then + Frame.</small>
+          </div>
+
+          <div id="shimgwrap" style="position:relative;display:none;margin-top:.5rem;
+            max-width:100%">
+            <img id="shimg" alt="" style="max-width:100%;display:block;image-rendering:pixelated">
+            <canvas id="shoverlay" style="position:absolute;left:0;top:0;pointer-events:none">
+            </canvas>
+          </div>
+
           <div class="row" style="margin-top:.4rem">
-            <button id="shslice" class="primary">Slice</button>
             <button id="shclear">Clear picks</button>
           </div>
-          <small id="shlog">Click frames in the order the animation plays.</small>
+          <div id="shpicked" class="tiles" style="margin-top:.5rem"></div>
         </section>
 
         <div class="category">Paint</div>
@@ -763,6 +817,64 @@
           <small id="spframelog" class="dim">Pick a sprite to open its frames.</small>
         </section>
 
+        <!-- Per-frame collision -- a frame's own SCALED rect or COMPLEX mask, the same
+             two shapes an atlas tile authors (#tileeditor), keyed by frame instead of
+             tile id since frames are not one uniform size. Opened via the small badge on
+             each #spframes cell (its own click still opens the frame for pixel editing --
+             this is a separate action, not a second meaning for the same click). -->
+        <section><h2>Frame collision <span id="sfnote" class="dim"></span></h2>
+          <div class="mini">
+            <img id="sfimg" alt=""
+                 style="width:64px;height:64px;image-rendering:pixelated;
+                        border:1px solid var(--line);border-radius:3px">
+            <label class="mini">Collision<select id="sfmode">
+              <option value="0">none</option>
+              <option value="1">solid</option>
+              <option value="2">scaled</option>
+              <option value="3">complex</option>
+            </select></label>
+            <label class="mini">Kind<select id="sfkind">
+              <option value="0">wall</option>
+              <option value="1">hurt</option>
+              <option value="2">hit</option>
+              <option value="3">overlap</option>
+            </select></label>
+          </div>
+          <div id="sfscaled" style="display:none">
+            <small class="dim">Drag on the frame to draw the rect.</small>
+            <div id="sfrectwrap" style="position:relative;display:inline-block;
+                                        cursor:crosshair;margin-top:.4rem">
+              <img id="sfrectimg" alt="" draggable="false"
+                   style="image-rendering:pixelated;display:block;
+                          border:1px solid var(--line)">
+              <div id="sfrectbox" style="position:absolute;pointer-events:none;
+                                         display:none;border:2px solid var(--accent);
+                                         background:color-mix(in srgb, var(--accent) 25%,
+                                         transparent)"></div>
+            </div>
+            <div class="mini"><span id="sfrectnote" class="dim"></span></div>
+          </div>
+          <div id="sfcomplex" style="display:none">
+            <div class="row" style="margin-bottom:.4rem;margin-top:.4rem">
+              <small class="dim">Click, or click-drag, to paint the solid pixels.</small>
+              <button id="sfmaskreset"
+                title="discard any authored mask; use the art's own opacity">Reset to art</button>
+            </div>
+            <div id="sfmaskwrap" style="position:relative;display:inline-block">
+              <img id="sfmaskimg" alt="" draggable="false"
+                   style="image-rendering:pixelated;display:block;
+                          border:1px solid var(--line)">
+              <div id="sfmaskgrid" class="maskgrid"></div>
+            </div>
+          </div>
+          <div class="row" style="margin-top:.7rem">
+            <button id="sfsave" class="primary">Save frame</button>
+            <button id="sfclearcol">Clear collision</button>
+          </div>
+          <small id="sflog" class="dim">Pick a frame above (the small badge, not the
+            frame itself) to edit its collision.</small>
+        </section>
+
         <div class="category">Panels</div>
         <!-- A 9-slice panel is a sprite with exactly one frame plus four border insets
              (tools/pnx_assets.py's pack_nine_slice) -- corners drawn once, edges and
@@ -807,15 +919,6 @@
       </div>
 
       <div class="fontview">
-        <!-- The sliced sheet. Clicking a cell picks it as the next frame; clicking a
-             picked one drops it and renumbers the rest, because the order IS the anim
-             index and a gap in it would be a frame nobody can name. -->
-        <div class="plate wide" id="shplate" style="display:none">
-          <h3>Sheet frames <small id="shcount" class="dim"></small></h3>
-          <div id="shgrid" class="tiles"></div>
-          <small class="dim">Click to pick in order · double-click a picked frame to
-            edit it on the canvas</small>
-        </div>
         <div class="plate wide"><h3 id="pxtitle">Canvas</h3>
           <div id="pxwrap"><canvas id="pxcv"></canvas></div>
           <!-- The filmstrip: click a thumbnail to work on that frame, or add/duplicate/
@@ -1170,5 +1273,6 @@
 </div>
 <script src="/static/js/app.js"></script>
 <script src="/static/js/atlas.js"></script>
+<script src="/static/js/sprites.js"></script>
 <script src="/static/js/audio-preview.js"></script>
 </body></html>

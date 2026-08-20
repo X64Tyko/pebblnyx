@@ -67,4 +67,14 @@ bool pnx_collision_tiles_solid(const PnxMap* map, const PnxAABB* box);
 // out.
 bool pnx_collision_move(const PnxMap* map, PnxAABB* box, int32_t dx, int32_t dy);
 
+// Same as pnx_collision_tiles_solid/pnx_collision_move, filtered by collision KIND
+// (PNX_COLLISION_KIND_BIT/PNX_COLLISION_KIND_ALL, assets/pnx_assets.h) instead of always
+// meaning "wall". `pnx_collision_tiles_solid`/`pnx_collision_move` are these with
+// `kind_mask = PNX_COLLISION_KIND_BIT(PNX_COLLISION_KIND_WALL)` -- every existing caller
+// keeps meaning exactly what it always did, since WALL was the only kind that existed
+// before this.
+bool pnx_collision_tiles_solid_kind(const PnxMap* map, const PnxAABB* box, uint8_t kind_mask);
+bool pnx_collision_move_kind(const PnxMap* map, PnxAABB* box, int32_t dx, int32_t dy,
+							 uint8_t kind_mask);
+
 #endif // PNX_USE_COLLISION

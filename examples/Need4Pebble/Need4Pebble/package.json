@@ -1,0 +1,26 @@
+{
+  "name": "need_4_pebble",
+  "author": "X64Tyko",
+  "version": "1.0.0",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Need 4 Pebble",
+    "uuid": "72d97aac-74e5-4dcc-95b8-8c1cd6fc75a4",
+    "sdkVersion": "3",
+    "enableMultiJS": false,
+    "targetPlatforms": [
+      "emery"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [],
+    "resources": {
+      "media": []
+    }
+  }
+}

@@ -384,6 +384,72 @@ short_read:
 	return false;
 }
 
+// SCALED rects / COMPLEX masks, appended after a sprite's pixel payload -- same sparse
+// shape as parse_atlas_shapes, keyed by FRAME index instead of tile id. A COMPLEX
+// record's mask_bytes is NOT one shared constant the way an atlas's tile_px is: frames
+// are not uniform size (see PnxSprite's own comment), so each record is only as wide as
+// the frame it names, and this has to walk them one at a time rather than index by a
+// fixed stride.
+static bool parse_sprite_shapes(const uint8_t* p, size_t remaining, uint8_t frame_count,
+								PnxSprite* out, uint16_t asset_id, size_t* out_consumed)
+{
+	size_t at = 0;
+
+	if (remaining < at + 2)
+		goto short_read;
+	const uint16_t scaled_count = read_u16(p + at);
+	at += 2;
+	const size_t scaled_span = (size_t)scaled_count * 6;
+	if (remaining < at + scaled_span)
+		goto short_read;
+	out->scaled_rects = p + at;
+	out->scaled_count = scaled_count;
+	at += scaled_span;
+	for (uint16_t i = 0; i < scaled_count; i++)
+	{
+		const uint16_t f = read_u16(out->scaled_rects + (size_t)i * 6);
+		if (f >= frame_count)
+		{
+			pnx_log("sprite %u: scaled rect %u names frame %u of %u", asset_id, i, f,
+					frame_count);
+			return false;
+		}
+	}
+
+	if (remaining < at + 2)
+		goto short_read;
+	const uint16_t complex_count = read_u16(p + at);
+	at += 2;
+	out->complex_masks = p + at;
+	out->complex_count = complex_count;
+	for (uint16_t i = 0; i < complex_count; i++)
+	{
+		if (remaining < at + 2)
+			goto short_read;
+		const uint16_t f = read_u16(p + at);
+		if (f >= frame_count)
+		{
+			pnx_log("sprite %u: complex mask %u names frame %u of %u", asset_id, i, f,
+					frame_count);
+			return false;
+		}
+		PnxSpriteFrame fr;
+		pnx_sprite_frame_get(out, (uint8_t)f, &fr);
+		const size_t mask_bytes = ((size_t)fr.w * fr.h + 7) / 8;
+		const size_t rec		= 2 + mask_bytes;
+		if (remaining < at + rec)
+			goto short_read;
+		at += rec;
+	}
+
+	*out_consumed = at;
+	return true;
+
+short_read:
+	pnx_log("sprite %u: shape tables run past the end of the blob", asset_id);
+	return false;
+}
+
 static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size_t cap)
 {
 #if !PNX_DISPLAY_BW
@@ -525,32 +591,91 @@ bool pnx_sprite_load(PnxSprite* out, uint16_t asset_id)
 	}
 #endif
 
-	uint8_t w = 0, h = 0, frames = 0;
+	uint8_t frame_count = 0;
 	size_t payload		= 0;
-	const uint8_t* data = load_blob(asset_id, "PS", &w, &h, &frames, &payload);
+	const uint8_t* data = load_blob(asset_id, "PS", &frame_count, NULL, NULL, &payload);
 	if (!data)
 		return false;
-
-	// One format, unconditionally -- see atlas_load_into's own comment.
-#if PNX_DISPLAY_BW
-	const size_t frame_bytes = (size_t)w * h / 4;
-#else
-	const size_t frame_bytes = (size_t)w * h / 2;
-#endif
-	const size_t expected = pad4(frames) + frames * frame_bytes;
-	if (w == 0 || h == 0 || frames == 0 || payload != expected)
+	if (frame_count == 0)
 	{
-		pnx_log("sprite %u: %u frames of %ux%u needs %u bytes, blob has %u", asset_id, frames,
-				w, h, (unsigned)expected, (unsigned)payload);
+		pnx_log("sprite %u: zero frames", asset_id);
 		return false;
 	}
 
-	out->frame_palette = data;
-	out->pixels		   = data + pad4(frames);
-	out->w			   = w;
-	out->h			   = h;
-	out->frame_count   = frames;
-	out->frame_bytes   = (uint16_t)frame_bytes;
+	// frame_meta, then frame_palette (padded to 4), then every frame's pixels packed
+	// back-to-back, then the sparse SCALED/COMPLEX shape tables -- see PnxSprite's own
+	// comment. Not one `expected == payload` equality the way the old fixed-stride format
+	// could check: a frame's own pixel span comes from its own record, and the shape
+	// tables are sparse, so this is validated incrementally instead.
+	const size_t meta_span = (size_t)frame_count * PNX_SPRITE_FRAME_BYTES;
+	const size_t pal_span  = pad4(frame_count);
+	if (payload < meta_span + pal_span)
+	{
+		pnx_log("sprite %u: %u bytes too small for %u frame(s)", asset_id, (unsigned)payload,
+				frame_count);
+		return false;
+	}
+
+	out->frame_meta	   = data;
+	out->frame_palette = data + meta_span;
+	out->pixels		   = data + meta_span + pal_span;
+	out->frame_count   = frame_count;
+	out->scaled_rects  = NULL;
+	out->complex_masks = NULL;
+	out->scaled_count  = 0;
+	out->complex_count = 0;
+
+	const size_t pixel_budget = payload - meta_span - pal_span;
+	size_t shapes_start		  = 0;
+	for (uint8_t i = 0; i < frame_count; i++)
+	{
+		const uint8_t* e   = out->frame_meta + (size_t)i * PNX_SPRITE_FRAME_BYTES;
+		const uint32_t off = (uint32_t)(e[0] | ((uint32_t)e[1] << 8));
+		const uint8_t w = e[2], h = e[3];
+		// One format, unconditionally -- see atlas_load_into's own comment.
+		if (w == 0 || h == 0 || (((uint32_t)w * h) % 2) != 0)
+		{
+			pnx_log("sprite %u: frame %u is %ux%u, invalid for 4bpp packing", asset_id, i, w,
+					h);
+			return false;
+		}
+#if PNX_DISPLAY_BW
+		const size_t fb = (size_t)w * h / 4;
+#else
+		const size_t fb = (size_t)w * h / 2;
+#endif
+		const size_t end = (size_t)off + fb;
+		if (end > pixel_budget)
+		{
+			pnx_log("sprite %u: frame %u's pixels run past the blob", asset_id, i);
+			return false;
+		}
+		if (end > shapes_start)
+			shapes_start = end;
+	}
+
+	size_t shapes_consumed = 0;
+	if (!parse_sprite_shapes(out->pixels + shapes_start, pixel_budget - shapes_start,
+							 frame_count, out, asset_id, &shapes_consumed))
+		return false;
+	if (shapes_start + shapes_consumed != pixel_budget)
+	{
+		pnx_log("sprite %u: %u bytes past the shape tables go unaccounted for", asset_id,
+				(unsigned)(pixel_budget - shapes_start - shapes_consumed));
+		return false;
+	}
+
+#if !PNX_DISPLAY_BW
+	for (uint8_t i = 0; i < frame_count; i++)
+	{
+		if (out->frame_palette[i] >= s_palette_count)
+		{
+			pnx_log("sprite %u: frame %u wants palette %u, only %u loaded", asset_id, i,
+					out->frame_palette[i], s_palette_count);
+			return false;
+		}
+	}
+#endif
 	return true;
 }
 
@@ -1713,6 +1838,47 @@ const uint8_t* pnx_atlas_tile_complex_mask(const PnxAtlas* a, uint16_t tile)
 		const uint8_t* e = a->complex_masks + (size_t)i * (2 + mask_bytes);
 		if (read_u16(e) == tile)
 			return e + 2;
+	}
+	return NULL;
+}
+
+bool pnx_sprite_frame_scaled_rect(const PnxSprite* s, uint8_t frame, uint8_t* x, uint8_t* y,
+								  uint8_t* w, uint8_t* h)
+{
+	for (uint16_t i = 0; i < s->scaled_count; i++)
+	{
+		const uint8_t* e = s->scaled_rects + (size_t)i * 6;
+		if (read_u16(e) == frame)
+		{
+			if (x)
+				*x = e[2];
+			if (y)
+				*y = e[3];
+			if (w)
+				*w = e[4];
+			if (h)
+				*h = e[5];
+			return true;
+		}
+	}
+	return false;
+}
+
+// Records are not fixed-stride here the way an atlas's are (PnxSprite's own comment): a
+// frame's mask is only as wide as that frame, so this walks from the start computing each
+// record's own span rather than indexing directly.
+const uint8_t* pnx_sprite_frame_complex_mask(const PnxSprite* s, uint8_t frame)
+{
+	const uint8_t* p = s->complex_masks;
+	for (uint16_t i = 0; i < s->complex_count; i++)
+	{
+		const uint16_t f = read_u16(p);
+		PnxSpriteFrame fr;
+		pnx_sprite_frame_get(s, (uint8_t)f, &fr);
+		const size_t mask_bytes = ((size_t)fr.w * fr.h + 7) / 8;
+		if (f == frame)
+			return p + 2;
+		p += 2 + mask_bytes;
 	}
 	return NULL;
 }

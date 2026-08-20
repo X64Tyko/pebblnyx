@@ -13,6 +13,10 @@ def handle_post_api_sheet_frames(self, session, raw):
         d["sheet"], d["fw"], d["fh"], d.get("ox", 0), d.get("oy", 0),
         d.get("gx", 0), d.get("gy", 0), d.get("colorkey"))))
 
+def handle_post_api_sheet_image(self, session, raw):
+    d = json.loads(raw)
+    self._send(200, json.dumps(session.proj.sheet_image(d["sheet"])))
+
 def handle_post_api_frame_read(self, session, raw):
     d = json.loads(raw)
     self._send(200, json.dumps(session.proj.frame_read(
@@ -34,6 +38,18 @@ def handle_post_api_sprite_save(self, session, raw):
     session.proj.save_sprite(d["name"], d["sheet"], d["frames"],
                              d.get("anim"), d.get("variants", []),
                              d.get("colorkey"), d.get("bw_variant"))
+    self._send(200, json.dumps({"ok": True}))
+
+def handle_post_api_sprite_collision(self, session, raw):
+    d = json.loads(raw)
+    session.proj.save_sprite_collision(
+        d["name"], int(d["frame"]), int(d["mode"]), kind=int(d.get("kind", 0)),
+        rect=d.get("rect"), mask_rows=d.get("mask"))
+    self._send(200, json.dumps({"ok": True}))
+
+def handle_post_api_sprite_collision_remove(self, session, raw):
+    d = json.loads(raw)
+    session.proj.remove_sprite_collision(d["name"], int(d["frame"]))
     self._send(200, json.dumps({"ok": True}))
 
 def handle_post_api_sprite_remove(self, session, raw):
@@ -81,10 +97,13 @@ GET_PREFIX = [
 ]
 POST_EXACT = {
     '/api/sheet/frames': handle_post_api_sheet_frames,
+    '/api/sheet/image': handle_post_api_sheet_image,
     '/api/frame/read': handle_post_api_frame_read,
     '/api/frame/write': handle_post_api_frame_write,
     '/api/sprite/validate': handle_post_api_sprite_validate,
     '/api/sprite/save': handle_post_api_sprite_save,
+    '/api/sprite/collision': handle_post_api_sprite_collision,
+    '/api/sprite/collision/remove': handle_post_api_sprite_collision_remove,
     '/api/sprite/remove': handle_post_api_sprite_remove,
     '/api/sprite/users': handle_post_api_sprite_users,
     '/api/art/import': handle_post_api_art_import,

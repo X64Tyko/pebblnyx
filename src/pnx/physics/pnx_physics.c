@@ -177,9 +177,67 @@ bool pnx_physics_collide_point(PnxBall* ball, PnxPixel p, pnx_fx bounce)
 {
 	// A point IS a degenerate segment (a == b) -- collide_segment_moving's own
 	// closest-point math already has a dedicated branch for that, so this is the whole
-	// implementation. See PNX_COLLISION_COMPLEX's own comment (pnx_assets.h) for what
-	// still has to exist before a caller has a pixel to pass here.
+	// implementation.
 	return collide_segment_moving(ball, p.x, p.y, p.x, p.y, bounce, 0, 0);
+}
+
+// The same one-line bit test as pnx_collision_mask_pixel (assets/pnx_assets.h) --
+// duplicated rather than included, because this module deliberately does not depend on
+// pnx_assets (see pnx_physics.h's own file comment: table geometry here is caller-bridged
+// content, not a coupling this module takes on itself). A raw mask pointer/w/h is exactly
+// that bridge -- the caller already unpacked it from a PnxAtlas or PnxSprite.
+static bool mask_pixel(const uint8_t* mask, uint8_t w, uint8_t x, uint8_t y)
+{
+	const uint32_t i = (uint32_t)y * w + x;
+	return (mask[i / 8] & (0x80 >> (i % 8))) != 0;
+}
+
+bool pnx_physics_collide_mask(PnxBall* ball, const uint8_t* mask, uint8_t w, uint8_t h,
+							  int32_t origin_x, int32_t origin_y, pnx_fx bounce)
+{
+	// The walk pnx_physics_collide_point's own comment used to describe as "not built
+	// yet" -- a COMPLEX mask is baked and loadable (pnx_atlas_tile_complex_mask/
+	// pnx_sprite_frame_complex_mask, assets/pnx_assets.h), this is what walks it.
+	//
+	// O(w*h) every call, same "no broad phase here" tradeoff pnx_physics_collide_segment's
+	// own comment already makes for a table's wall list -- fine at the mask sizes this
+	// engine's tiles/frames actually reach, but a caller testing many candidate
+	// tiles/frames a tick should cheaply reject most of them (an AABB test against the
+	// tile/frame's own bounds) before ever calling this.
+	const int32_t px = pnx_fx_to_int(ball->x);
+	const int32_t py = pnx_fx_to_int(ball->y);
+
+	// Nearest INK pixel to the ball's centre, not the first one the walk visits -- the
+	// contact that matters is whichever the ball is actually closest to, the same
+	// closest-point reasoning pnx_physics_collide_aabb/collide_segment already use.
+	bool found	   = false;
+	int32_t best_x = 0, best_y = 0, best_dist = 0;
+	for (uint8_t y = 0; y < h; y++)
+	{
+		for (uint8_t x = 0; x < w; x++)
+		{
+			if (!mask_pixel(mask, w, x, y))
+				continue;
+			const int32_t wx   = origin_x + x;
+			const int32_t wy   = origin_y + y;
+			const int32_t dx   = wx - px;
+			const int32_t dy   = wy - py;
+			const int32_t dist = dx * dx + dy * dy;
+			if (!found || dist < best_dist)
+			{
+				found	  = true;
+				best_dist = dist;
+				best_x	  = wx;
+				best_y	  = wy;
+			}
+		}
+	}
+	if (!found)
+		return false;
+
+	// The nearest ink pixel IS the closest point -- no segment/AABB math needed, same
+	// degenerate case pnx_physics_collide_point's own comment describes.
+	return resolve_contact(ball, px, py, best_x, best_y, best_dist, bounce, 0, 0);
 }
 
 bool pnx_physics_collide_flipper(PnxBall* ball, const PnxFlipper* flip, pnx_fx swing_rate)

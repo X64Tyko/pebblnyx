@@ -509,19 +509,20 @@ class AtlasMixin:
                     if rgb:
                         ip[k, j] = rgb + (255,)
 
-            mode, extra = collision.get(i, (pa.COLLISION_NONE, None))
-            cinfo = {"mode": mode}
+            mode, kind, extra = collision.get(i, (pa.COLLISION_NONE, pa.COLLISION_KIND_WALL,
+                                                   None))
+            cinfo = {"mode": mode, "kind": kind}
             if mode == pa.COLLISION_SCALED:
                 cinfo["rect"] = list(extra)
             elif mode == pa.COLLISION_COMPLEX:
-                mask_bytes = extra if extra is not None else pa.pack_collision_mask(buf, T)
-                cinfo["mask"] = pa.unpack_collision_mask(mask_bytes, T)
+                mask_bytes = extra if extra is not None else pa.pack_collision_mask(buf, T, T)
+                cinfo["mask"] = pa.unpack_collision_mask(mask_bytes, T, T)
                 cinfo["authored"] = extra is not None
             # The art's own opacity, always -- even when an authored mask is in effect
             # above -- so "reset to art" in the editor has something to reset TO without
             # a second round trip (there is no local copy of "what the tile's own opacity
             # says" once an override replaces it in `mask`).
-            cinfo["auto_mask"] = pa.unpack_collision_mask(pa.pack_collision_mask(buf, T), T)
+            cinfo["auto_mask"] = pa.unpack_collision_mask(pa.pack_collision_mask(buf, T, T), T, T)
 
             tiles.append({
                 "index": i, "role": by_index.get(i),
@@ -784,10 +785,16 @@ class AtlasMixin:
                 i += 1
         return out
 
-    def _atlas_collision_lines(self, tile, kind, rect=None, mask_rows=None):
+    def _atlas_collision_lines(self, tile, type_name, kind_name="wall", rect=None,
+                               mask_rows=None):
         body = ["[[atlas.collision]]",
                f'tile = "{tile}"' if isinstance(tile, str) else f"tile = {int(tile)}",
-               f'type = "{kind}"']
+               f'type = "{type_name}"']
+        # Omitted when "wall", same as every entry written before `kind` existed -- WALL
+        # is the default (COLLISION_KIND_NAMES), so this keeps an unremarkable entry
+        # exactly as short as it always was.
+        if kind_name != "wall":
+            body.append(f'kind = "{kind_name}"')
         if rect is not None:
             body.append(f"rect = [{rect[0]}, {rect[1]}, {rect[2]}, {rect[3]}]")
         if mask_rows is not None:
@@ -796,7 +803,8 @@ class AtlasMixin:
             body.append('"""')
         return body
 
-    def save_atlas_collision(self, atlas, tile, mode, rect=None, mask_rows=None):
+    def save_atlas_collision(self, atlas, tile, mode, kind=pa.COLLISION_KIND_WALL, rect=None,
+                             mask_rows=None):
         """Create or rewrite one tile's [[atlas.collision]] entry.
 
         `tile` is written exactly as given -- a role name or a raw index -- matching the
@@ -811,10 +819,14 @@ class AtlasMixin:
         spec = next((a for a in self.man.get("atlas", []) if a.get("name") == atlas), None)
         if not spec:
             raise ValueError(f"no atlas named {atlas!r}")
-        kind = {v: k for k, v in pa.COLLISION_NAMES.items()}.get(mode)
-        if kind is None:
+        type_name = {v: k for k, v in pa.COLLISION_NAMES.items()}.get(mode)
+        if type_name is None:
             raise ValueError(f"collision mode {mode!r} is not one of "
                              f"{sorted(pa.COLLISION_NAMES.values())}")
+        kind_name = {v: k for k, v in pa.COLLISION_KIND_NAMES.items()}.get(kind)
+        if kind_name is None:
+            raise ValueError(f"collision kind {kind!r} is not one of "
+                             f"{sorted(pa.COLLISION_KIND_NAMES.values())}")
 
         try:
             with contextlib.redirect_stdout(io.StringIO()):
@@ -827,7 +839,9 @@ class AtlasMixin:
         entries = [e for e in spec.get("collision", [])
                   if self._resolve_atlas_tile(spec, packed, roles, e.get("tile")) !=
                   self._resolve_atlas_tile(spec, packed, roles, tile)]
-        new_entry = {"tile": tile, "type": kind}
+        new_entry = {"tile": tile, "type": type_name}
+        if kind_name != "wall":
+            new_entry["kind"] = kind_name
         if rect is not None:
             new_entry["rect"] = list(rect)
         if mask_rows is not None:
@@ -841,7 +855,7 @@ class AtlasMixin:
 
         target = self._resolve_atlas_tile(spec, packed, roles, tile)
         lines, astart, aend = self._atlas_full_block(atlas)
-        new_lines = self._atlas_collision_lines(tile, kind, rect, mask_rows)
+        new_lines = self._atlas_collision_lines(tile, type_name, kind_name, rect, mask_rows)
 
         for estart, eend, existing_tile in self._atlas_collision_entries(atlas):
             if self._resolve_atlas_tile(spec, packed, roles, existing_tile) == target:

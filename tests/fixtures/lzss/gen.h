@@ -6,6 +6,9 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h> // NULL -- a sprite clip with no authored per-frame
+					// durations emits its _DURATIONS symbol as this, not an
+					// array (see the sprite loop below)
 
 // Built for orientation buttons_right. Every dimension and coordinate
 // below is in the FRAMEBUFFER's frame, already rotated -- a map that reads 32

@@ -51,9 +51,43 @@
 #define PNX_COLLISION_SCALED  2
 #define PNX_COLLISION_COMPLEX 3
 
+// Collision KIND: what touching the shape MEANS, orthogonal to the MODE above (which only
+// says its shape). One shape, one kind, per tile/frame -- not several simultaneous shapes
+// with different kinds on one. Packed into the same byte as MODE (`(kind << 2) | mode`,
+// PNX_COLLISION_MODE/PNX_COLLISION_KIND below unpack it), so this costs nothing beyond
+// the byte tile_flags/frame flags already spent -- MODE only ever used 2 of its 8 bits.
+// WALL is 0 so a manifest entry with no `kind =` (every one written before this existed)
+// means exactly what it always did.
+#define PNX_COLLISION_KIND_WALL	   0
+#define PNX_COLLISION_KIND_HURT	   1
+#define PNX_COLLISION_KIND_HIT	   2
+#define PNX_COLLISION_KIND_OVERLAP 3
+
+#define PNX_COLLISION_MODE(flags) ((flags) & 0x03)
+#define PNX_COLLISION_KIND(flags) (((flags) >> 2) & 0x03)
+// A bitmask over the four kinds above, for the `kind_mask` filter parameter on
+// pnx_map_solid_kind/pnx_collision_move_kind -- e.g. ordinary movement collision passes
+// PNX_COLLISION_KIND_BIT(PNX_COLLISION_KIND_WALL) to ignore hurt/hit/overlap tiles.
+#define PNX_COLLISION_KIND_BIT(kind) (1u << (kind))
+#define PNX_COLLISION_KIND_ALL		 0x0Fu
+
 // Every blob carries this, so a stale .bin against a newer runtime is a clean error
 // rather than garbage pixels. Bumped whenever a format changes.
-#define PNX_BLOB_VERSION 14 // v14: a map is 1..PNX_MAP_MAX_LAYERS streamed layers
+#define PNX_BLOB_VERSION 15 // v15: "PS" sprite frames are no longer fixed-stride -- each
+							// frame carries its own PNX_SPRITE_FRAME_BYTES record
+							// (offset/w/h/origin_x/origin_y/flags) in the new
+							// PnxSprite.frame_meta table instead of sharing one
+							// sprite-wide w/h/frame_bytes, so a tightly packed sheet's
+							// frames can differ in size and each names its own root
+							// (PnxSpriteFrame, pnx_sprite_frame_get). Frames also gain
+							// per-frame collision, the same SCALED-rect/COMPLEX-mask
+							// sparse tables PnxAtlas already carries
+							// (PnxSprite.scaled_rects/complex_masks), keyed by frame
+							// instead of tile. And BOTH "PA" and "PS" tile_flags/frame
+							// `flags` bytes gain a KIND nibble (PNX_COLLISION_KIND_*)
+							// packed above the existing 2-bit MODE, in the same byte --
+							// see PNX_COLLISION_MODE/PNX_COLLISION_KIND. v14: a map is
+							// 1..PNX_MAP_MAX_LAYERS streamed layers
 							// (PnxMapLayer) instead of one implicit grid -- the "PM"
 							// blob's header bytes 3..5 are now layer_count/
 							// primary_layer/warp_count (were w/h/warp_count), and
@@ -185,32 +219,76 @@ static inline bool pnx_atlas_is_metatiled(const PnxAtlas* a)
 
 // SCALED's inset rect for `tile`, tile-local pixels. False (leaving x/y/w/h untouched) if
 // `tile` is not SCALED, which pnx_atlas_tile(a, tile)'s caller can also just check via
-// `a->tile_flags[tile] == PNX_COLLISION_SCALED` first if it wants to skip the scan.
+// `PNX_COLLISION_MODE(a->tile_flags[tile]) == PNX_COLLISION_SCALED` first if it wants to
+// skip the scan (the kind bits above MODE mean a raw `== PNX_COLLISION_SCALED` no longer
+// works once a tile's kind is non-WALL).
 bool pnx_atlas_tile_scaled_rect(const PnxAtlas* a, uint16_t tile, uint8_t* x, uint8_t* y,
 								uint8_t* w, uint8_t* h);
 
 // COMPLEX's 1bpp mask for `tile`, or NULL if `tile` is not COMPLEX. `mask_bytes` is
-// (a->tile_px * a->tile_px + 7) / 8; pnx_atlas_mask_pixel is the bit test against it.
+// (a->tile_px * a->tile_px + 7) / 8; pnx_collision_mask_pixel is the bit test against it.
 const uint8_t* pnx_atlas_tile_complex_mask(const PnxAtlas* a, uint16_t tile);
 
-// One bit out of a mask pnx_atlas_tile_complex_mask returned -- row-major, MSB first (see
-// PnxAtlas.complex_masks' own comment). No bounds check: `px`/`py` are the caller's to
-// keep inside `a->tile_px`, the same contract pnx_atlas_tile's index already carries.
-static inline bool pnx_atlas_mask_pixel(const uint8_t* mask, uint8_t tile_px, uint8_t px,
-										uint8_t py)
+// One bit out of a mask pnx_atlas_tile_complex_mask/pnx_sprite_frame_complex_mask
+// returned -- row-major, MSB first (see PnxAtlas.complex_masks' own comment). Shared by
+// atlas tiles and sprite frames: the indexing only ever needed the row WIDTH, not
+// squareness, so one function serves a square atlas tile (`w = a->tile_px`) and a
+// variable-size sprite frame (`w` = that frame's own width) alike. No bounds check:
+// `px`/`py` are the caller's to keep inside the mask's own `w`/height.
+static inline bool pnx_collision_mask_pixel(const uint8_t* mask, uint8_t w, uint8_t px,
+											uint8_t py)
 {
-	const uint32_t i = (uint32_t)py * tile_px + px;
+	const uint32_t i = (uint32_t)py * w + px;
 	return (mask[i / 8] & (0x80 >> (i % 8))) != 0;
 }
 
+// One frame's metrics, unpacked from its 8-byte record in PnxSprite.frame_meta -- the
+// same role PnxGlyph/pnx_font_glyph plays for a font's variable-size glyphs, applied here
+// because a tightly packed sheet's frames are not one uniform size either. `origin_x`/
+// `origin_y` are the pixel offset from THIS frame's own top-left to the sprite's root
+// (what pnx_sprite_draw anchors on): with frames of different sizes, "centered, feet at
+// the bottom" is no longer one fixed w/2,h for the whole sprite, so each frame says where
+// its own root is. `flags` is PNX_COLLISION_MODE/PNX_COLLISION_KIND packed the same way
+// PnxAtlas.tile_flags is (see the #define block above PnxAtlas).
 typedef struct
 {
-	const uint8_t* pixels;		  // frame_count * frame_bytes
-	const uint8_t* frame_palette; // frame_count, palette slot per frame
+	const uint8_t* pixels;
 	uint8_t w, h;
+	uint8_t origin_x, origin_y;
+	uint8_t flags;
+} PnxSpriteFrame;
+
+#define PNX_SPRITE_FRAME_BYTES 8
+
+typedef struct
+{
+	const uint8_t* pixels;		  // every frame's pixels, packed back-to-back
+	const uint8_t* frame_meta;	  // frame_count * PNX_SPRITE_FRAME_BYTES, see PnxSpriteFrame
+	const uint8_t* frame_palette; // frame_count, palette slot per frame
+	// SCALED rects / COMPLEX masks, sparse, keyed by FRAME index -- identical byte shape
+	// to PnxAtlas's own scaled_rects/complex_masks (see that struct's own comment) except
+	// a COMPLEX record's mask_bytes is computed from THAT frame's own w*h rather than a
+	// single shared tile_px, since frames are not uniform size.
+	const uint8_t* scaled_rects;
+	const uint8_t* complex_masks;
+	uint16_t scaled_count;
+	uint16_t complex_count;
 	uint8_t frame_count;
-	uint16_t frame_bytes; // w*h/2 colour, w*h/4 1-bit -- see PnxAtlas's own field
 } PnxSprite;
+
+// Unpacks frame `frame`'s record. No bounds check on `frame`: the loader has already
+// validated every offset, and this runs per sprite instance per frame, same contract as
+// pnx_font_glyph.
+static inline void pnx_sprite_frame_get(const PnxSprite* s, uint8_t frame, PnxSpriteFrame* out)
+{
+	const uint8_t* e = s->frame_meta + (uint32_t)frame * PNX_SPRITE_FRAME_BYTES;
+	out->w			 = e[2];
+	out->h			 = e[3];
+	out->origin_x	 = e[4];
+	out->origin_y	 = e[5];
+	out->flags		 = e[6];
+	out->pixels		 = s->pixels + (uint32_t)(e[0] | ((uint32_t)e[1] << 8));
+}
 
 // One packed panel image plus the four insets that carve it into nine regions: four
 // corners drawn once each, four edges tiled along their own axis, a centre tiled in
@@ -694,13 +772,31 @@ static inline const PnxPalette* pnx_atlas_tile_palette(const PnxAtlas* a, uint8_
 
 static inline const uint8_t* pnx_sprite_frame(const PnxSprite* s, uint8_t frame)
 {
-	return s->pixels + (uint32_t)frame * s->frame_bytes;
+	const uint8_t* e = s->frame_meta + (uint32_t)frame * PNX_SPRITE_FRAME_BYTES;
+	return s->pixels + (uint32_t)(e[0] | ((uint32_t)e[1] << 8));
 }
 
 static inline const PnxPalette* pnx_sprite_frame_palette(const PnxSprite* s, uint8_t frame)
 {
 	return pnx_palette(s->frame_palette[frame]);
 }
+
+// PNX_COLLISION_MODE/PNX_COLLISION_KIND-packed byte for this frame's own collision shape,
+// mirroring PnxAtlas.tile_flags -- see the #define block above PnxAtlas for both macros.
+static inline uint8_t pnx_sprite_frame_flags(const PnxSprite* s, uint8_t frame)
+{
+	return s->frame_meta[(uint32_t)frame * PNX_SPRITE_FRAME_BYTES + 6];
+}
+
+// SCALED's inset rect for `frame`, frame-local pixels. False (x/y/w/h untouched) if
+// `frame` is not SCALED. Linear scan, same sparse-table tradeoff as
+// pnx_atlas_tile_scaled_rect.
+bool pnx_sprite_frame_scaled_rect(const PnxSprite* s, uint8_t frame, uint8_t* x, uint8_t* y,
+								  uint8_t* w, uint8_t* h);
+
+// COMPLEX's 1bpp mask for `frame`, or NULL if `frame` is not COMPLEX. mask_bytes is
+// (frame's own w*h + 7)/8 -- read the frame's own w/h via pnx_sprite_frame_get first.
+const uint8_t* pnx_sprite_frame_complex_mask(const PnxSprite* s, uint8_t frame);
 
 // Expands 4bpp source into 8bpp GColor8. Transparent pixels are left untouched in dst,
 // so a caller can pre-fill a background. The real blitter (M3) does this inline with
@@ -922,7 +1018,13 @@ static inline uint8_t pnx_map_flags(const PnxMap* m, int32_t x, int32_t y)
 // toward not rejecting a reachable map, a live player errs toward not clipping through a
 // wall that is only partly open. A caller that wants the real shape uses those finer
 // primitives against the tile's own rect/mask, not this.
-static inline bool pnx_map_solid_layer(const PnxMap* m, uint8_t layer, int32_t x, int32_t y)
+//
+// `kind_mask` (PNX_COLLISION_KIND_BIT/PNX_COLLISION_KIND_ALL) filters which KIND of
+// collision counts as blocking here -- a tile whose kind bit is not set in the mask reads
+// as open, even if its MODE is SOLID/SCALED/COMPLEX. pnx_map_solid_layer/pnx_map_solid
+// (below) are the WALL-only callers every existing caller already gets, unchanged.
+static inline bool pnx_map_solid_kind(const PnxMap* m, uint8_t layer, int32_t x, int32_t y,
+									  uint8_t kind_mask)
 {
 	if (layer >= m->layer_count)
 		return true;
@@ -943,7 +1045,15 @@ static inline bool pnx_map_solid_layer(const PnxMap* m, uint8_t layer, int32_t x
 	// "unknown" resolves to solid for the same reason a non-resident WorldTile does above.
 	if (!a)
 		return true;
-	return a->tile_flags[local] != PNX_COLLISION_NONE;
+	const uint8_t flags = a->tile_flags[local];
+	if (PNX_COLLISION_MODE(flags) == PNX_COLLISION_NONE)
+		return false;
+	return (kind_mask & PNX_COLLISION_KIND_BIT(PNX_COLLISION_KIND(flags))) != 0;
+}
+
+static inline bool pnx_map_solid_layer(const PnxMap* m, uint8_t layer, int32_t x, int32_t y)
+{
+	return pnx_map_solid_kind(m, layer, x, y, PNX_COLLISION_KIND_BIT(PNX_COLLISION_KIND_WALL));
 }
 
 static inline bool pnx_map_solid(const PnxMap* m, int32_t x, int32_t y)

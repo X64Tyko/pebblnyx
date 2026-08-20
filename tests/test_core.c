@@ -245,6 +245,7 @@ void test_synth(void);
 void test_save(void);
 void test_app(void);
 void test_physics(void);
+void test_sprite(void);
 void test_layer(void);
 void test_map_compress(void);
 
@@ -265,6 +266,7 @@ int main(void)
 	test_save();
 	test_app();
 	test_physics();
+	test_sprite();
 	test_layer();
 	test_map_compress();
 

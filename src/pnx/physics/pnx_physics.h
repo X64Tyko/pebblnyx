@@ -119,12 +119,21 @@ bool pnx_physics_collide_aabb(PnxBall* ball, const PnxBox* box);
 // A single point -- e.g. one "ink" pixel out of a COMPLEX tile's 1bpp mask -- resolved
 // exactly like a segment collision, because it IS one: a point is a segment whose two ends
 // coincide, and pnx_physics_collide_segment's own closest-point math already has a
-// dedicated branch for that case (a degenerate a == b segment). So COMPLEX tiles need no
-// third collision primitive -- only something to walk the mask and hand this the "ink"
-// pixel nearest the ball, which is not built yet: tools/pnx_assets.py parses and validates
-// a COMPLEX tile's mask but does not bake it into a side table the atlas blob carries (see
-// PNX_COLLISION_COMPLEX, assets/pnx_assets.h), so there is nothing yet to walk.
+// dedicated branch for that case (a degenerate a == b segment).
 bool pnx_physics_collide_point(PnxBall* ball, PnxPixel p, pnx_fx bounce);
+
+// Walks a COMPLEX mask (row-major MSB-first 1bpp, `w` x `h`, the same layout
+// pnx_atlas_tile_complex_mask/pnx_sprite_frame_complex_mask hand back -- assets/
+// pnx_assets.h) placed at world-pixel `origin_x`/`origin_y`, and resolves against
+// whichever ink pixel is closest to the ball, the same closest-point contract every other
+// primitive here already follows. False if the mask has no ink pixel at all (never true
+// in practice for a real COMPLEX tile/frame, but a caller building one by hand could pass
+// an all-empty one). This is the piece pnx_physics_collide_point's own comment used to
+// describe as not built yet -- deliberately takes a raw mask/size/origin rather than a
+// PnxAtlas/PnxSprite, so this module still does not depend on pnx_assets (see this file's
+// own header comment); the caller unpacks the asset and bridges it here, same as PnxBox.
+bool pnx_physics_collide_mask(PnxBall* ball, const uint8_t* mask, uint8_t w, uint8_t h,
+							  int32_t origin_x, int32_t origin_y, pnx_fx bounce);
 
 // Resolves against a flipper's CURRENT pose (idle_tip lerped toward struck_tip by
 // `swing`), as an ordinary segment collision, plus one thing a static segment cannot

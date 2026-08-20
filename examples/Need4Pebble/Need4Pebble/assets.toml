@@ -1,0 +1,32 @@
+# Asset manifest for need_4_pebble.
+#
+# This is the single source of truth for content. No C file should name a PNG, a pixel
+# offset, a sheet layout or a magic tile id -- everything reaches game code through the
+# header the pipeline generates from this file.
+#
+# TOML rather than JSON so the reasoning behind the content can live beside it.
+
+[project]
+name = "need_4_pebble"
+resources = "resources"
+header = "src/c/assets_gen.h"
+# The appstore rejects bundles over 256KB of resources. The device's hard cap is 1MB, but
+# shipping is the constraint that actually binds.
+budget_bytes = 262144
+
+# Add content with the editor's Import and Fonts tabs, or by hand:
+#
+#   [[atlas]]   a tileset carved from a sheet
+#   [[sprite]]  animation frames
+#   [[font]]    a rasterised typeface  (a licence is required)
+#   [[map]]     a grid of legend characters
+#   [scene.*]   what loads together -- the only load point the framework has
+#
+# A map draws from one atlas by default -- the first one declared. To use several:
+#
+#   [[map]]
+#   atlases = ["village", "forest"]   # the order fixes the map's tile id space
+#
+# and give a legend character an `atlas` key to say which one its role resolves against.
+# A scene must NOT list a map's atlases: the map owns them, sizes its own pool and streams
+# them by WorldTile, so naming one in a scene loads a second resident copy.

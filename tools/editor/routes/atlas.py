@@ -97,8 +97,8 @@ def handle_post_api_atlas(self, session, raw):
 def handle_post_api_atlas_collision(self, session, raw):
     d = json.loads(raw)
     session.proj.save_atlas_collision(
-        d["atlas"], d["tile"], int(d["mode"]), d.get("rect"),
-        d.get("mask"))
+        d["atlas"], d["tile"], int(d["mode"]), kind=int(d.get("kind", 0)),
+        rect=d.get("rect"), mask_rows=d.get("mask"))
     self._send(200, json.dumps({"ok": True}))
 
 def handle_post_api_atlas_collision_remove(self, session, raw):

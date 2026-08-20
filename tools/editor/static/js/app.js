@@ -1411,91 +1411,12 @@ function showTab(which){
 // as rectangles: a sheet is frames stacked vertically, which is the layout both the
 // painter above and `[[sprite]] frames` already assume.
 
-// Frames picked off a sheet, in click order. Null means "none picked", which is different
-// from an empty list and is why this is not just an array: with no picks the declare form
-// falls back to deriving a vertical stack from the canvas size, which is what it did
-// before and is still right for art painted here.
-const SH={cells:null, picks:[], sheet:null};
-
-function spFrames(){
-  if(SH.picks.length) return SH.picks.map(i=>{
-    const c=SH.cells[i]; return [c.x,c.y,c.w,c.h];
-  });
-  const w=+$('#spfw').value, h=+$('#spfh').value, n=+$('#spn').value;
-  return Array.from({length:n},(_,i)=>[0,i*h,w,h]);
-}
-
-function shLog(msg,bad){
-  const el=$('#shlog');
-  el.className=bad===false?'ok':(bad?'bad':'');
-  el.textContent=msg;
-}
-
-function drawSheetGrid(){
-  const grid=$('#shgrid'); grid.innerHTML='';
-  if(!SH.cells){ $('#shplate').style.display='none'; return }
-  $('#shplate').style.display='';
-  $('#shcount').textContent=`${SH.cells.length} cells · ${SH.picks.length} picked`;
-  SH.cells.forEach((c,i)=>{
-    const at=SH.picks.indexOf(i);
-    const b=document.createElement('button');
-    b.className='tile'+(at>=0?' sel':'')+(c.blank?' used':'');
-    b.title=`${c.x},${c.y} ${c.w}x${c.h}`+(c.blank?' — blank':'')
-      +(at>=0?` — frame ${at}`:'');
-    b.innerHTML=`<img src="${c.img}" alt="">`
-      +`<b>${at>=0?at:(c.blank?'·':'')}</b>`;
-    b.onclick=()=>{
-      const k=SH.picks.indexOf(i);
-      if(k>=0) SH.picks.splice(k,1); else SH.picks.push(i);
-      drawSheetGrid();
-      // The declare form's size boxes follow the picks, so what is about to be written
-      // and what is on screen cannot disagree.
-      if(SH.picks.length){
-        $('#spfw').value=c.w; $('#spfh').value=c.h; $('#spn').value=SH.picks.length;
-      }
-      shLog(SH.picks.length?`${SH.picks.length} frame(s) picked — they become anim `
-            +`indices 0..${SH.picks.length-1}.`
-            :'Click frames in the order the animation plays.');
-    };
-    // Editing one pose out of a sheet, which the canvas could not do: it opened whole
-    // files, so touching one frame of an eight-pose sheet meant loading all eight.
-    b.ondblclick=async ev=>{
-      ev.preventDefault();
-      const r=await post('/api/frame/read',
-        {sheet:SH.sheet, x:c.x, y:c.y, w:c.w, h:c.h});
-      if(r.error){ shLog(r.error,true); return }
-      PX.w=r.w; PX.h=r.h; PX.frames=1; PX.frame=0;
-      PX.data=Uint8Array.from(r.pixels); PX.undo=[]; PX.redo=[];
-      PX.origin={sheet:SH.sheet, x:c.x, y:c.y};
-      $('#pxw').value=r.w; $('#pxh').value=r.h;
-      $('#pxtitle').textContent=`Canvas — ${SH.sheet} @ ${c.x},${c.y}`;
-      $('#pxnote').textContent=`Editing one frame. Save writes it back into the sheet.`;
-      pxDraw();
-      shLog(`Editing frame at ${c.x},${c.y}.`,false);
-    };
-    grid.appendChild(b);
-  });
-}
-
-$('#shslice').onclick=async()=>{
-  const sheet=$('#shsheet').value;
-  if(!sheet){ shLog('No PNG in the project to slice.',true); return }
-  const r=await post('/api/sheet/frames',{sheet, fw:+$('#shfw').value, fh:+$('#shfh').value,
-    ox:+$('#shox').value, oy:+$('#shoy').value,
-    gx:+$('#shgx').value, gy:+$('#shgy').value});
-  if(r.error){ shLog(r.error,true); return }
-  SH.cells=r.cells; SH.picks=[]; SH.sheet=sheet;
-  $('#spsheet').value=sheet;
-  drawSheetGrid();
-  shLog(`${r.cols}x${r.rows} of ${$('#shfw').value}x${$('#shfh').value}`
-    +(r.capped?` — showing the first ${r.limit}`:'')
-    +'. Click frames in play order.');
-};
-
-$('#shclear').onclick=()=>{
-  SH.picks=[]; drawSheetGrid();
-  shLog('Picks cleared — the declare form is back to a vertical stack.');
-};
+// The sheet-import picker (grid + freeform modes: SH object, spFrames(), shLog(), the
+// #shmodegrid/#shmodefree/#shclear/#shaddframe wiring) now lives in sprites.js, loaded
+// after this file -- it grew from a single grid-slice-and-click picker into two distinct
+// interaction modes (an overlay-on-the-intact-sheet grid picker with multi-cell combine,
+// and a freeform drag-a-box picker for a sheet with no grid at all), which earned it the
+// same one-tab-one-file split atlas.js already has.
 
 function spLog(msg,bad){
   const el=$('#splog');
@@ -1566,11 +1487,28 @@ async function spShowFrames(name){
   const r=await post('/api/sprite/frames',{name});
   if(r.error){ log.className='bad'; log.textContent=r.error; return }
 
+  SF.cells=r.cells; SF.sprite=name;
   r.cells.forEach(c=>{
     const b=document.createElement('button');
     b.className='cell'+(c.blank?' blank':'');
+    b.style.position='relative';
     b.title=`frame ${c.i} — ${c.w}x${c.h} at ${c.x},${c.y}\nclick to edit it`;
-    b.innerHTML=`<img src="${c.img}" alt=""><span>${c.i}</span>`;
+    const col=c.collision||{mode:0};
+    // A small badge, not part of the button's own click target -- clicking the frame
+    // still opens it for pixel editing; the badge is the separate door into its
+    // collision. Coloured by MODE at rest (grey once anything but none is set), the
+    // KIND name on hover -- kind only matters once there is a shape to have one.
+    const badge=`<i data-role="collision" title="${col.mode?('collision: '+
+      ['none','solid','scaled','complex'][col.mode]+' / '+
+      ['wall','hurt','hit','overlap'][col.kind||0]):'no collision'}"
+      style="position:absolute;top:1px;right:1px;width:8px;height:8px;border-radius:50%;
+      cursor:pointer;border:1px solid rgba(0,0,0,.4);
+      background:${col.mode?'var(--accent)':'rgba(255,255,255,.25)'}"></i>`;
+    b.innerHTML=`<img src="${c.img}" alt=""><span>${c.i}</span>${badge}`;
+    b.querySelector('[data-role="collision"]').addEventListener('click',ev=>{
+      ev.stopPropagation();
+      openSpriteFrameEditor(c.i);
+    });
     b.onclick=async()=>{
       const f=await post('/api/frame/read',{sheet:r.sheet,x:c.x,y:c.y,w:c.w,h:c.h});
       if(f.error){ log.className='bad'; log.textContent=f.error; return }
@@ -1617,7 +1555,7 @@ $('#spsave').onclick=async()=>{
   // Frames picked off the sheet win over the vertical stack, and they carry their own
   // sheet with them: picking poses out of one file and declaring them against another
   // would validate and then draw the wrong art.
-  const useSheet=SH.picks.length?SH.sheet:sheet;
+  const useSheet=SH.frames.length?SH.sheet:sheet;
   // variants/colorkey have no edit control of their own in this panel -- carried through
   // from what is already declared so saving a name/frame change does not silently drop
   // them. bw_variant DOES have a control (#spbw), and depends on variants surviving this.
@@ -1636,8 +1574,13 @@ $('#spsave').onclick=async()=>{
     {name,sheet:useSheet,frames,anim,variants,colorkey,bw_variant:bwVariant});
   if(!r.ok){ spLog(r.error,true); return }
   await load(); drawSpriteForm(); $('#spsel').value=name;
-  spLog(`Saved "${name}" — ${v.frames} frame(s) of ${v.w}x${v.h}`
-    +`${SH.picks.length?' picked from '+useSheet:''}. Press Build.`,false);
+  // Frames are not required to share one size any more, so the size note only names ONE
+  // when they actually agree -- otherwise it says how many distinct sizes there are,
+  // matching the pipeline's own build-log phrasing (tools/pnx_assets.py's pack_sprite).
+  const sizeSet=new Set((v.sizes||[]).map(s=>s[0]+'x'+s[1]));
+  const sizeNote=sizeSet.size===1?[...sizeSet][0]:`${sizeSet.size} distinct sizes`;
+  spLog(`Saved "${name}" — ${v.frames} frame(s), ${sizeNote}`
+    +`${SH.frames.length?' picked from '+useSheet:''}. Press Build.`,false);
   budget(true);
 };
 
@@ -4018,9 +3961,10 @@ $('#pxsave').onclick=async()=>{
       w:PX.w, h:PX.h, pixels:Array.from(PX.data)});
     if(r.error){ $('#pxnote').textContent=r.error; return }
     $('#pxnote').textContent=`Wrote the frame back into ${o.sheet} at ${o.x},${o.y}.`;
-    // Re-slice so the grid shows what was just painted rather than the stale thumbnail.
-    if(SH.sheet===o.sheet){ const keep=SH.picks.slice(); await $('#shslice').onclick();
-                            SH.picks=keep; drawSheetGrid() }
+    // Reload the sheet image so the grid/freeform picker shows what was just painted
+    // rather than the stale one -- SH.frames (picked RECTS, not indices) survive this
+    // untouched, since a repaint changes pixels, not geometry.
+    if(SH.sheet===o.sheet) await shReloadSheet();
     // And the declared-frame strip, for the same reason: it is the other view of the same
     // pixels, and a thumbnail that still shows the pose you just repainted reads as a save
     // that did not happen.

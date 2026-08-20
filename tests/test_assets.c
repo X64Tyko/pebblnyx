@@ -297,23 +297,31 @@ void test_assets(void)
 	// --- sprites
 	PnxSprite hero;
 	A_CHECK(pnx_sprite_load(&hero, A_HERO));
-	A_CHECK_EQ(hero.w, 16);
-	A_CHECK_EQ(hero.h, 24);
 	A_CHECK_EQ(hero.frame_count, 3);
-	A_CHECK_EQ(hero.frame_bytes, 16 * 24 / 2);
-	A_CHECK_EQ(pnx_sprite_frame(&hero, 1) - pnx_sprite_frame(&hero, 0), hero.frame_bytes);
+	PnxSpriteFrame hero_f0, hero_f1;
+	pnx_sprite_frame_get(&hero, 0, &hero_f0);
+	pnx_sprite_frame_get(&hero, 1, &hero_f1);
+	A_CHECK_EQ(hero_f0.w, 16);
+	A_CHECK_EQ(hero_f0.h, 24);
+	// No origin authored in the fixture -- the pipeline default is centred, feet at the
+	// bottom: w/2, h.
+	A_CHECK_EQ(hero_f0.origin_x, 8);
+	A_CHECK_EQ(hero_f0.origin_y, 24);
+	A_CHECK_EQ(hero_f1.pixels - hero_f0.pixels, 16 * 24 / 2);
 	A_CHECK(pnx_sprite_frame_palette(&hero, 0) != NULL);
 
 	// The npc sheet has no alpha channel, so its transparency comes from a colour key.
 	// If the key were dropped the frame would be fully opaque, which is worth pinning.
 	PnxSprite npc;
 	A_CHECK(pnx_sprite_load(&npc, A_NPC));
+	PnxSpriteFrame npc_f0;
+	pnx_sprite_frame_get(&npc, 0, &npc_f0);
 	uint8_t npc_px[16 * 24];
 	memset(npc_px, 0xAA, sizeof(npc_px));
-	pnx_decode_4bpp(pnx_sprite_frame(&npc, 0), pnx_sprite_frame_palette(&npc, 0), npc_px,
-					npc.w * npc.h);
+	pnx_decode_4bpp(npc_f0.pixels, pnx_sprite_frame_palette(&npc, 0), npc_px,
+					npc_f0.w * npc_f0.h);
 	int transparent = 0;
-	for (int i = 0; i < npc.w * npc.h; i++)
+	for (int i = 0; i < npc_f0.w * npc_f0.h; i++)
 		if (npc_px[i] == 0xAA)
 			transparent++;
 	A_CHECK(transparent > 0);
@@ -327,11 +335,11 @@ void test_assets(void)
 	// failure that matters.
 	uint8_t ice_px[16 * 24];
 	memset(ice_px, 0xAA, sizeof(ice_px));
-	pnx_decode_4bpp(pnx_sprite_frame(&npc, 0), pnx_palette(SPRITE_NPC_PALETTE_NPC_ICE), ice_px,
-					npc.w * npc.h);
+	pnx_decode_4bpp(npc_f0.pixels, pnx_palette(SPRITE_NPC_PALETTE_NPC_ICE), ice_px,
+					npc_f0.w * npc_f0.h);
 
 	int shape_same = 1, colour_diffs = 0;
-	for (int i = 0; i < npc.w * npc.h; i++)
+	for (int i = 0; i < npc_f0.w * npc_f0.h; i++)
 	{
 		const int a_clear = (npc_px[i] == 0xAA), b_clear = (ice_px[i] == 0xAA);
 		if (a_clear != b_clear)

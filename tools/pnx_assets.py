@@ -52,6 +52,21 @@ COLLISION_COMPLEX = 3
 COLLISION_NAMES = {"solid": COLLISION_SOLID, "scaled": COLLISION_SCALED,
                    "complex": COLLISION_COMPLEX}
 
+# KIND: what touching the shape MEANS, orthogonal to the MODE above (which only says its
+# shape) -- see PNX_COLLISION_KIND_* (pnx_assets.h) for the runtime side. Packed into the
+# same byte as mode (`(kind << 2) | mode`) by finish_atlas/finish_sprite, so this costs
+# nothing beyond the byte mode already had a tile/frame's-worth of. WALL is 0 so a
+# `[[atlas.collision]]`/`[[sprite.collision]]` entry with no `kind =` -- every one written
+# before this existed -- means exactly what it always did.
+COLLISION_KIND_WALL = 0
+COLLISION_KIND_HURT = 1
+COLLISION_KIND_HIT = 2
+COLLISION_KIND_OVERLAP = 3
+COLLISION_KIND_NAMES = {"wall": COLLISION_KIND_WALL, "hurt": COLLISION_KIND_HURT,
+                        "hit": COLLISION_KIND_HIT, "overlap": COLLISION_KIND_OVERLAP}
+
+ANIM_DEFAULT_FPS = 8
+
 # Pre-shift warp bit in the legend's flag byte -- unrelated to collision now, so back to
 # owning the low bit on its own rather than sharing with a collision mode.
 TILE_WARP = 0x01
@@ -97,7 +112,18 @@ def fold_flag_into_entry(entry, flag):
 # Blob format versions. A mismatch between a stale .bin and a newer runtime is exactly
 # the kind of failure that presents as garbage pixels rather than an error, so every
 # blob is tagged and the runtime checks.
-BLOB_VERSION = 14  # v14: a map is 1..PNX_MAP_MAX_LAYERS streamed layers instead of one
+BLOB_VERSION = 15  # v15: "PS" sprite frames are no longer fixed-stride -- each frame
+                   # carries its own 8-byte record (offset/w/h/origin_x/origin_y/flags/
+                   # pad) in a new frame_meta table instead of sharing one sprite-wide
+                   # w/h/frame_bytes, so a tightly packed sheet's frames can differ in
+                   # size and each names its own root. Frames also gain per-frame
+                   # collision -- the same SCALED-rect/COMPLEX-mask sparse tables "PA"
+                   # already carries, keyed by frame instead of tile. And BOTH "PA" and
+                   # "PS" tile_flags/frame flags bytes gain a KIND nibble
+                   # (COLLISION_KIND_*) packed above the existing 2-bit mode, in the
+                   # same byte. See finish_sprite/finish_atlas and PnxSprite/
+                   # PNX_COLLISION_KIND (pnx_assets.h).
+                   # v14: a map is 1..PNX_MAP_MAX_LAYERS streamed layers instead of one
                    # implicit grid (M13). The header's four generic bytes are now
                    # layer_count/primary_layer/warp_count/pad (were w/h/warp_count/
                    # worldtile); the preamble carries a shared 12-byte fixed section
@@ -372,6 +398,41 @@ def rotate_point(x, y, w, h, orient):
     if orient == ORIENT_BUTTONS_LEFT:
         return w - 1 - x, h - 1 - y
     return x, y
+
+
+def rotate_origin(ox, oy, w, h, orient):
+    """A sprite frame's root -> the same point in the framebuffer's frame, for
+    pack_sprite's per-frame origin.
+
+    Not rotate_point: that formula has a `-1` because it indexes a PIXEL (a cell in
+    [0,w-1]x[0,h-1]), and a sprite's origin is a BOUNDARY coordinate instead (0..w, 0..h
+    inclusive -- oy = h is the ordinary "feet at the bottom edge" default, one past the
+    last row, the same way rotate_border treats a rect's edges as insets rather than
+    pixel indices). Dropping the `-1` is the whole difference: the same four physical
+    rotations rotate_point derives, applied to a continuous boundary instead of a discrete
+    cell.
+    """
+    if orient == ORIENT_BUTTONS_TOP:
+        return h - oy, ox
+    if orient == ORIENT_BUTTONS_BOTTOM:
+        return oy, w - ox
+    if orient == ORIENT_BUTTONS_LEFT:
+        return w - ox, h - oy
+    return ox, oy
+
+
+def rotate_rect(rx, ry, rw, rh, w, h, orient):
+    """A sprite frame's authored SCALED collision rect -> the same rect in the
+    framebuffer's frame, for parse_shape_collision's per-frame `rect`.
+
+    Both corners are boundary coordinates (rotate_origin's own domain), so this is just
+    rotate_origin applied twice -- the near corner and the far corner -- normalised back
+    into (x, y, w, h). No new derivation: a rect IS two points.
+    """
+    x0, y0 = rotate_origin(rx, ry, w, h, orient)
+    x1, y1 = rotate_origin(rx + rw, ry + rh, w, h, orient)
+    nx, ny = min(x0, x1), min(y0, y1)
+    return nx, ny, abs(x1 - x0), abs(y1 - y0)
 
 
 def rotate_dims(w, h, orient):
@@ -796,14 +857,14 @@ def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bi
     4bpp -- see pack_unit_2bpp. Sharing that structure is what lets the ~bw variant be a
     pure pixel-format swap rather than a second copy of the whole packing decision.
 
-    `collision` is parse_atlas_collision's {local index: (mode, extra)} -- the mode byte
-    packs into `flags` same as before, but SCALED's rect and COMPLEX's mask are too big
-    for one byte each and get their own SPARSE tail tables instead, appended after the
-    pixel payload in both `blob` and `blob_bw` (the shape does not depend on pixel
-    format, so there is no reason for two copies of it). A COMPLEX tile with no explicit
-    mask defaults to its own opacity -- pack_collision_mask against `tiles[i]` -- which is
-    why this has to run here rather than in parse_atlas_collision: the tile's own pixels
-    are not settled (mirrored, rotated, carved) until now.
+    `collision` is parse_atlas_collision's {local index: (mode, kind, extra)} -- mode and
+    kind both pack into the one `flags` byte (`(kind << 2) | mode`), but SCALED's rect and
+    COMPLEX's mask are too big for one byte each and get their own SPARSE tail tables
+    instead, appended after the pixel payload in both `blob` and `blob_bw` (the shape does
+    not depend on pixel format, so there is no reason for two copies of it). A COMPLEX
+    tile with no explicit mask defaults to its own opacity -- pack_collision_mask against
+    `tiles[i]` -- which is why this has to run here rather than in parse_atlas_collision:
+    the tile's own pixels are not settled (mirrored, rotated, carved) until now.
     """
     tiles, T = atlas["tiles"], atlas["tile_px"]
     sets = atlas_colour_sets(atlas)
@@ -819,16 +880,20 @@ def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bi
         raise BuildError(f"atlas {atlas['name']!r}: {len(palettes)} palettes, but the "
                          f"per-tile palette index is a u8")
 
-    flags = bytes(collision.get(i, (COLLISION_NONE, None))[0] for i in range(len(tiles)))
+    default = (COLLISION_NONE, COLLISION_KIND_WALL, None)
+    flags = bytes(((collision.get(i, default)[1] << 2) | collision.get(i, default)[0])
+                  for i in range(len(tiles)))
 
     # SCALED rects and COMPLEX masks, sparse -- most tiles are NONE or plain SOLID, which
-    # already fit in `flags` above and cost nothing more here.
+    # already fit in `flags` above and cost nothing more here. `kind` is not repeated into
+    # either sparse table: it is already packed into `flags` above, one byte per tile,
+    # which fully determines a tile's (mode, kind) regardless of whether it also has an
+    # entry here.
     scaled = bytearray()
     scaled_count = 0
     complex_masks = bytearray()
     complex_count = 0
-    mask_bytes = (T * T + 7) // 8
-    for i, (mode, extra) in sorted(collision.items()):
+    for i, (mode, kind, extra) in sorted(collision.items()):
         if mode == COLLISION_SCALED:
             rx, ry, rw, rh = extra
             scaled += i.to_bytes(2, "little") + bytes([rx, ry, rw, rh])
@@ -837,7 +902,7 @@ def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bi
             # `extra` is already-packed mask bytes when the manifest authored one
             # explicitly (parse_atlas_collision); otherwise fall back to the tile's own
             # opacity, computed now because this is the first point the art is settled.
-            mask = extra if extra is not None else pack_collision_mask(tiles[i], T)
+            mask = extra if extra is not None else pack_collision_mask(tiles[i], T, T)
             complex_masks += i.to_bytes(2, "little") + mask
             complex_count += 1
     shapes = (scaled_count.to_bytes(2, "little") + bytes(scaled)
@@ -929,9 +994,9 @@ def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bi
     atlas["tile_flags"] = flags # kept beside the blob, not just baked into it -- see
                                 # "assign" above for the same reasoning (tests/editor
                                 # read this instead of re-parsing bytes back out)
-    atlas["scaled_rects"] = {i: extra for i, (mode, extra) in collision.items()
+    atlas["scaled_rects"] = {i: extra for i, (mode, kind, extra) in collision.items()
                              if mode == COLLISION_SCALED}
-    atlas["complex_tiles"] = sorted(i for i, (mode, _) in collision.items()
+    atlas["complex_tiles"] = sorted(i for i, (mode, kind, extra) in collision.items()
                                     if mode == COLLISION_COMPLEX)
 
     # A palette variant becomes an ORDERED palette per palette the atlas uses, whose k-th entry
@@ -1237,63 +1302,65 @@ def pad4(data):
     return data + b"\0" * ((-len(data)) % 4)
 
 
-def pack_collision_mask(buf, T):
-    """A COMPLEX tile's own opacity, as a 1bpp mask: 1 where the tile has ink, 0 where it
-    is transparent. `buf` is a T*T GColor8 buffer (atlas["tiles"]' own format --
-    TRANSPARENT is the sentinel, same convention pack_atlas already carves tiles into).
+def pack_collision_mask(buf, w, h):
+    """A tile's or sprite frame's own opacity, as a 1bpp mask: 1 where it has ink, 0 where
+    it is transparent. `buf` is a w*h GColor8 buffer (atlas["tiles"]'/a sprite frame's own
+    format -- TRANSPARENT is the sentinel, same convention pack_atlas already carves tiles
+    into). `w`/`h` are independent (not assumed square) so this serves both an atlas's
+    always-square tiles and a sprite's not-necessarily-square frames alike.
 
     Row-major, MSB first -- the same bit order pack_unit_2bpp already uses, so "packed
     bits" means one thing in this file rather than two conventions that happen to coexist.
     """
-    out = bytearray((T * T + 7) // 8)
+    out = bytearray((w * h + 7) // 8)
     for i, v in enumerate(buf):
         if v != TRANSPARENT:
             out[i // 8] |= 0x80 >> (i % 8)
     return bytes(out)
 
 
-def unpack_collision_mask(mask, T):
-    """Inverse of pack_collision_mask: packed 1bpp bytes -> a list of T '#'/'.' row
-    strings. Not used by the build -- it never needs a mask back as text -- but the
-    editor does, to show what a tile's mask currently looks like (authored or the tile's
-    own derived opacity) before someone repaints it.
+def unpack_collision_mask(mask, w, h):
+    """Inverse of pack_collision_mask: packed 1bpp bytes -> a list of h '#'/'.' row
+    strings of w characters each. Not used by the build -- it never needs a mask back as
+    text -- but the editor does, to show what a tile's/frame's mask currently looks like
+    (authored or its own derived opacity) before someone repaints it.
     """
     rows = []
-    for j in range(T):
+    for j in range(h):
         row = []
-        for i in range(T):
-            n = j * T + i
+        for i in range(w):
+            n = j * w + i
             row.append("#" if mask[n // 8] & (0x80 >> (n % 8)) else ".")
         rows.append("".join(row))
     return rows
 
 
-def parse_collision_mask_ascii(text, T, atlas_name, idx):
-    """A COMPLEX tile's AUTHORED mask: T rows of T characters, '#' ink / '.' empty -- the
-    same ASCII-art convention a map's `rows` already uses, so this reads the same way at a
-    glance and survives a diff the same way. Overrides pack_collision_mask's default (the
-    tile's own opacity) with a shape drawn on purpose: a curve that should collide
-    narrower than its silhouette suggests, say, or a tile whose collision is deliberately
-    simpler than its art.
+def parse_collision_mask_ascii(text, w, h, where, idx):
+    """A COMPLEX tile's/frame's AUTHORED mask: h rows of w characters, '#' ink / '.'
+    empty -- the same ASCII-art convention a map's `rows` already uses, so this reads the
+    same way at a glance and survives a diff the same way. Overrides pack_collision_mask's
+    default (the art's own opacity) with a shape drawn on purpose: a curve that should
+    collide narrower than its silhouette suggests, say, or collision deliberately simpler
+    than the art.
 
     Built by converting the text to a synthetic GColor8 buffer and handing it to
     pack_collision_mask, rather than packing bits directly -- one bit-packing routine for
     the whole file, not two conventions that happen to agree today.
     """
     rows = text.strip("\n").split("\n")
-    if len(rows) != T or any(len(r) != T for r in rows):
-        raise BuildError(f"atlas {atlas_name!r}: tile {idx}'s mask must be exactly {T} "
-                         f"rows of {T} characters ('#' ink, '.' empty), got "
+    if len(rows) != h or any(len(r) != w for r in rows):
+        raise BuildError(f"{where}: {idx}'s mask must be exactly {h} rows of {w} "
+                         f"characters ('#' ink, '.' empty), got "
                          f"{len(rows)} row(s) of {[len(r) for r in rows]} chars")
-    buf = bytearray(T * T)
+    buf = bytearray(w * h)
     for j, row in enumerate(rows):
         for i, ch in enumerate(row):
             if ch not in "#.":
-                raise BuildError(f"atlas {atlas_name!r}: tile {idx}'s mask has {ch!r} "
+                raise BuildError(f"{where}: {idx}'s mask has {ch!r} "
                                  f"at {i},{j} -- only '#' (ink) and '.' (empty) are "
                                  f"allowed")
-            buf[j * T + i] = OPAQUE if ch == "#" else TRANSPARENT
-    return pack_collision_mask(buf, T)
+            buf[j * w + i] = OPAQUE if ch == "#" else TRANSPARENT
+    return pack_collision_mask(buf, w, h)
 
 
 # ------------------------------------------------------------------ semantic tiles
@@ -1356,86 +1423,186 @@ def autopick_tiles(atlas, names):
     return picked
 
 
+def parse_shape_collision(entries, resolve_index, count, shape_wh, where):
+    """Shared by parse_atlas_collision and parse_sprite_collision -> {index: (mode, kind,
+    extra)}. `resolve_index(entry)` turns one entry's own index key (a role name or int
+    for an atlas tile, an int for a sprite frame -- the two differ only in how the index
+    is NAMED, not in anything below) into a plain int; `shape_wh(index)` returns that
+    index's own (w, h) for rect/mask bounds checking, which for an atlas is always
+    (T, T) and for a sprite frame is that frame's own, since frames are not uniform size
+    (see finish_sprite's own comment). `where` is a human-readable label ("atlas %r"/
+    "sprite %r") for error messages.
+
+    `extra` is None for SOLID, an (x, y, w, h) local rect for SCALED, and for COMPLEX
+    either None (the mask defaults to the art's own ink, computed once pixels are settled
+    in finish_atlas/finish_sprite -- not here, since that pixel data is not final yet) or
+    already-packed mask bytes when the entry authors one explicitly (`mask`,
+    parse_collision_mask_ascii) -- an override, not a description of the art, so it is
+    parsed eagerly here rather than deferred.
+    """
+    out = {}
+    for entry in entries:
+        idx = resolve_index(entry)
+        if not 0 <= idx < count:
+            raise BuildError(f"{where}: collision names {idx}, out of range "
+                             f"(0..{count - 1})")
+        if idx in out:
+            raise BuildError(f"{where}: {idx} has two collision entries")
+
+        type_name = entry.get("type")
+        if type_name not in COLLISION_NAMES:
+            raise BuildError(f"{where}: collision type {type_name!r} for {idx}, must be "
+                             f"one of {', '.join(sorted(COLLISION_NAMES))}")
+        mode = COLLISION_NAMES[type_name]
+
+        kind_name = entry.get("kind", "wall")
+        if kind_name not in COLLISION_KIND_NAMES:
+            raise BuildError(f"{where}: collision kind {kind_name!r} for {idx}, must be "
+                             f"one of {', '.join(sorted(COLLISION_KIND_NAMES))}")
+        kind = COLLISION_KIND_NAMES[kind_name]
+
+        w, h = shape_wh(idx)
+        extra = None
+        if mode == COLLISION_SCALED:
+            rect = entry.get("rect")
+            if (not isinstance(rect, (list, tuple)) or len(rect) != 4
+                   or not all(isinstance(v, int) and not isinstance(v, bool) for v in rect)):
+                raise BuildError(f"{where}: {idx} is scaled but `rect` is not four "
+                                 f"integers [x, y, w, h]")
+            rx, ry, rw, rh = rect
+            if rw <= 0 or rh <= 0 or rx < 0 or ry < 0 or rx + rw > w or ry + rh > h:
+                raise BuildError(f"{where}: {idx}'s rect {list(rect)} does not fit "
+                                 f"inside its {w}x{h} bounds")
+            extra = (rx, ry, rw, rh)
+        elif "rect" in entry:
+            raise BuildError(f"{where}: {idx} is {type_name}, not scaled -- `rect` only "
+                             f"means something there")
+
+        if mode == COLLISION_COMPLEX and "mask" in entry:
+            mask_text = entry["mask"]
+            if not isinstance(mask_text, str):
+                raise BuildError(f"{where}: {idx}'s mask must be a string of rows, not "
+                                 f"{mask_text!r}")
+            extra = parse_collision_mask_ascii(mask_text, w, h, where, idx)
+        elif "mask" in entry:
+            raise BuildError(f"{where}: {idx} is {type_name}, not complex -- `mask` "
+                             f"only means something there")
+
+        out[idx] = (mode, kind, extra)
+    return out
+
+
 def parse_atlas_collision(spec, atlas, roles):
-    """[[atlas.collision]] -> {local tile index: (COLLISION_*, extra)}.
+    """[[atlas.collision]] -> {local tile index: (COLLISION_*, COLLISION_KIND_*, extra)}.
 
     Collision is a property of the ART TILE (see COLLISION_NAMES' comment), so it is
-    declared here, on the atlas, keyed the same way `semantic` roles already are --
-    not on the legend, and not per map cell. `extra` is None for SOLID, an (x, y, w, h)
-    tile-local rect for SCALED, and for COMPLEX either None (the mask defaults to the
-    tile's own ink, computed once the atlas's pixels are finalised in finish_atlas -- not
-    here, since that pixel data is not settled yet) or already-packed mask bytes when the
-    entry authors one explicitly (`mask`, parse_collision_mask_ascii) -- an override, not
-    a description of the art, so it is parsed eagerly here rather than deferred.
+    declared here, on the atlas, keyed the same way `semantic` roles already are -- not on
+    the legend, and not per map cell.
     """
     T = atlas["tile_px"]
-    out = {}
-    for entry in spec.get("collision", []):
+
+    def resolve(entry):
         tile = entry.get("tile")
         if isinstance(tile, str):
             if tile not in roles:
                 raise BuildError(f"atlas {atlas['name']!r}: collision names role "
                                  f"{tile!r}, which this atlas does not define. It "
                                  f"provides: {', '.join(sorted(roles)) or '(none)'}")
-            idx = roles[tile]
-        elif isinstance(tile, int) and not isinstance(tile, bool):
-            idx = tile
-        else:
-            raise BuildError(f"atlas {atlas['name']!r}: collision entry `tile` must be "
-                             f"a role name or a tile index, not {tile!r}")
-        if not 0 <= idx < len(atlas["tiles"]):
-            raise BuildError(f"atlas {atlas['name']!r}: collision names tile {idx}, "
-                             f"out of range (0..{len(atlas['tiles'])-1})")
-        if idx in out:
-            raise BuildError(f"atlas {atlas['name']!r}: tile {idx} has two "
-                             f"[[atlas.collision]] entries")
+            return roles[tile]
+        if isinstance(tile, int) and not isinstance(tile, bool):
+            return tile
+        raise BuildError(f"atlas {atlas['name']!r}: collision entry `tile` must be a "
+                         f"role name or a tile index, not {tile!r}")
 
-        kind = entry.get("type")
-        if kind not in COLLISION_NAMES:
-            raise BuildError(f"atlas {atlas['name']!r}: collision type {kind!r} for "
-                             f"tile {idx}, must be one of "
-                             f"{', '.join(sorted(COLLISION_NAMES))}")
-        mode = COLLISION_NAMES[kind]
-
-        extra = None
-        if mode == COLLISION_SCALED:
-            rect = entry.get("rect")
-            if (not isinstance(rect, (list, tuple)) or len(rect) != 4
-                   or not all(isinstance(v, int) and not isinstance(v, bool) for v in rect)):
-                raise BuildError(f"atlas {atlas['name']!r}: tile {idx} is scaled but "
-                                 f"`rect` is not four integers [x, y, w, h]")
-            rx, ry, rw, rh = rect
-            if rw <= 0 or rh <= 0 or rx < 0 or ry < 0 or rx + rw > T or ry + rh > T:
-                raise BuildError(f"atlas {atlas['name']!r}: tile {idx}'s rect "
-                                 f"{list(rect)} does not fit inside its {T}x{T} tile")
-            extra = (rx, ry, rw, rh)
-        elif "rect" in entry:
-            raise BuildError(f"atlas {atlas['name']!r}: tile {idx} is {kind}, not "
-                             f"scaled -- `rect` only means something there")
-
-        if mode == COLLISION_COMPLEX and "mask" in entry:
-            mask_text = entry["mask"]
-            if not isinstance(mask_text, str):
-                raise BuildError(f"atlas {atlas['name']!r}: tile {idx}'s mask must be "
-                                 f"a string of rows, not {mask_text!r}")
-            extra = parse_collision_mask_ascii(mask_text, T, atlas["name"], idx)
-        elif "mask" in entry:
-            raise BuildError(f"atlas {atlas['name']!r}: tile {idx} is {kind}, not "
-                             f"complex -- `mask` only means something there")
-
-        out[idx] = (mode, extra)
-    return out
+    return parse_shape_collision(spec.get("collision", []), resolve, len(atlas["tiles"]),
+                                 lambda i: (T, T), f"atlas {atlas['name']!r}")
 
 
 # --------------------------------------------------------------------------- sprite
 
-def pack_sprite(root, spec, orient=ORIENT_BUTTONS_RIGHT):
-    """Frames are validated in the author's frame and stored in the framebuffer's.
+def parse_sprite_anim(anim_spec, frame_count, name):
+    """[sprite.anim] -> validated {name: value}. TOML already distinguishes the three
+    forms an entry can take, so there is no parsing here, only validating and defaulting:
 
-    Everything that can complain -- mismatched frame sizes, a rect running off the sheet,
-    an anim naming a frame that does not exist -- runs before the rotation, so the numbers
-    in a message are the numbers in the manifest. Only the pixels and the two dimensions
-    turn over, at the end.
+        stand = 0                                    a single pose (int), unchanged
+        walk = [1, 2, 1, 0]                          a clip (list): default fps/loop
+        attack = { frames = [4, 5, 6], fps = 12,      a clip (table): explicit fps/loop/
+                   loop = false, durations = [1,2,1] }  durations
+
+    A clip value normalises to {"frames": [...], "fps": int, "loop": bool, "durations":
+    [...] or None} regardless of which of the two clip forms it came from -- codegen
+    branches on whether a name's value is `int` (pose) or `dict` (clip), never on which
+    TOML form authored it.
+    """
+    out = {}
+    for anim_name, value in anim_spec.items():
+        if isinstance(value, bool):
+            raise BuildError(f"sprite {name!r}: anim {anim_name!r} must be a frame "
+                             f"index, a list of frame indices, or a table, not a bool")
+        if isinstance(value, int):
+            if not 0 <= value < frame_count:
+                raise BuildError(f"sprite {name!r}: anim {anim_name!r} points at frame "
+                                 f"{value}, but there are only {frame_count}")
+            out[anim_name] = value
+            continue
+
+        if isinstance(value, list):
+            clip_frames, fps, loop, durations = value, ANIM_DEFAULT_FPS, True, None
+        elif isinstance(value, dict):
+            unknown = set(value) - {"frames", "fps", "loop", "durations"}
+            if unknown:
+                raise BuildError(f"sprite {name!r}: anim {anim_name!r} has unknown "
+                                 f"key(s) {sorted(unknown)}")
+            if "frames" not in value:
+                raise BuildError(f"sprite {name!r}: anim {anim_name!r} needs `frames`")
+            clip_frames = value["frames"]
+            fps = value.get("fps", ANIM_DEFAULT_FPS)
+            loop = value.get("loop", True)
+            durations = value.get("durations")
+        else:
+            raise BuildError(f"sprite {name!r}: anim {anim_name!r} must be a frame "
+                             f"index, a list of frame indices, or a table, not "
+                             f"{value!r}")
+
+        if not isinstance(clip_frames, list) or not clip_frames or len(clip_frames) > 255:
+            raise BuildError(f"sprite {name!r}: anim {anim_name!r} needs 1..255 frame "
+                             f"indices, got {clip_frames!r}")
+        for fi in clip_frames:
+            if not isinstance(fi, int) or isinstance(fi, bool) or not 0 <= fi < frame_count:
+                raise BuildError(f"sprite {name!r}: anim {anim_name!r} names frame "
+                                 f"{fi!r}, but there are only {frame_count}")
+        if not isinstance(fps, int) or isinstance(fps, bool) or not 1 <= fps <= 255:
+            raise BuildError(f"sprite {name!r}: anim {anim_name!r} fps must be an "
+                             f"integer 1..255, not {fps!r}")
+        if not isinstance(loop, bool):
+            raise BuildError(f"sprite {name!r}: anim {anim_name!r} loop must be "
+                             f"true/false, not {loop!r}")
+        if durations is not None:
+            if not isinstance(durations, list) or len(durations) != len(clip_frames):
+                raise BuildError(f"sprite {name!r}: anim {anim_name!r} durations must "
+                                 f"be a list of exactly {len(clip_frames)} integers, "
+                                 f"one per frame")
+            for d in durations:
+                if not isinstance(d, int) or isinstance(d, bool) or not 1 <= d <= 255:
+                    raise BuildError(f"sprite {name!r}: anim {anim_name!r} duration "
+                                     f"{d!r} must be an integer 1..255")
+
+        out[anim_name] = {"frames": list(clip_frames), "fps": fps, "loop": loop,
+                          "durations": list(durations) if durations is not None else None}
+    return out
+
+
+def pack_sprite(root, spec, orient=ORIENT_BUTTONS_RIGHT):
+    """Frames, their origins and their collision are all validated and parsed in the
+    author's frame, then rotated into the framebuffer's together with the pixels -- so
+    the numbers in an error message are the numbers in the manifest, and only this
+    function's own return turns over.
+
+    A tightly packed sheet's frames are not one uniform size (unlike an atlas's tiles):
+    each `frames` entry stands on its own, `[x, y, w, h]` or `[x, y, w, h, ox, oy]` --
+    the trailing pair is this frame's own ROOT (pnx_sprite_draw's anchor point),
+    defaulting to `w/2, h` (centred, feet at the bottom) when omitted, which reproduces
+    the old fixed-anchor behaviour for any sprite that does not need per-frame control.
     """
     name = spec["name"]
     im = load_sheet(root, spec["sheet"])
@@ -1443,38 +1610,78 @@ def pack_sprite(root, spec, orient=ORIENT_BUTTONS_RIGHT):
     key = parse_colorkey(spec, f"sprite {name!r}")
     sheet_w, sheet_h = im.size
 
-    frames, fw, fh = [], None, None
-    for idx, rect in enumerate(spec["frames"]):
-        x, y, w, h = rect
-        if fw is None:
-            fw, fh = w, h
-        elif (w, h) != (fw, fh):
-            raise BuildError(f"sprite {name!r}: frame {idx} is {w}x{h}, but frame 0 is "
-                             f"{fw}x{fh} -- all frames must match")
+    frames, dims, origins = [], [], []
+    for idx, entry in enumerate(spec["frames"]):
+        if len(entry) == 4:
+            x, y, w, h = entry
+            ox, oy = w // 2, h
+        elif len(entry) == 6:
+            x, y, w, h, ox, oy = entry
+        else:
+            raise BuildError(f"sprite {name!r}: frame {idx} must be [x, y, w, h] or "
+                             f"[x, y, w, h, ox, oy] (with an explicit origin), got "
+                             f"{len(entry)} values")
+        if not (0 <= ox <= w and 0 <= oy <= h):
+            raise BuildError(f"sprite {name!r}: frame {idx}'s origin {ox},{oy} must "
+                             f"fall within its own {w}x{h} bounds")
         if x + w > sheet_w or y + h > sheet_h:
             raise BuildError(f"sprite {name!r}: frame {idx} at {x},{y} {w}x{h} runs "
                              f"past the sheet ({sheet_w}x{sheet_h})")
+        # A frame's PIXEL COUNT has to be even, not its width: 4bpp packing is a flat
+        # stream, two pixels to a byte, with no per-row padding. Rotation swaps the
+        # dimensions and leaves the product alone, so this holds in either orientation --
+        # a 15x20 frame is legal portrait and stays legal at 20x15. Checked per-frame,
+        # not once for the whole sprite: frames are not uniform size any more.
+        if (w * h) % 2:
+            raise BuildError(f"sprite {name!r}: frame {idx} is {w}x{h}, an odd pixel "
+                             f"count, which cannot pack two-per-byte at 4bpp")
         buf = bytearray(w * h)
         for j in range(h):
             for i in range(w):
                 buf[j * w + i] = to_gcolor8(px[x + i, y + j], key)
         frames.append(bytes(buf))
+        dims.append((w, h))
+        origins.append((ox, oy))
 
-    for anim_name, frame_idx in spec.get("anim", {}).items():
-        if not 0 <= frame_idx < len(frames):
-            raise BuildError(f"sprite {name!r}: anim {anim_name!r} points at frame "
-                             f"{frame_idx}, but there are only {len(frames)}")
+    anim = parse_sprite_anim(spec.get("anim", {}), len(frames), name)
 
-    # A frame's PIXEL COUNT has to be even, not its width: 4bpp packing is a flat stream,
-    # two pixels to a byte, with no per-row padding. Rotation swaps the dimensions and
-    # leaves the product alone, so this holds in either orientation -- a 15x20 frame is
-    # legal portrait and stays legal at 20x15.
-    if (fw * fh) % 2:
-        raise BuildError(f"sprite {name!r}: {fw}x{fh} has an odd pixel count, which "
-                         f"cannot pack two-per-byte at 4bpp")
+    def resolve_frame(entry):
+        frame = entry.get("frame")
+        if not isinstance(frame, int) or isinstance(frame, bool):
+            raise BuildError(f"sprite {name!r}: collision entry `frame` must be an "
+                             f"integer, not {frame!r}")
+        return frame
 
-    frames = [rotate_grid(f, fw, fh, orient)[0] for f in frames]
+    collision = parse_shape_collision(spec.get("collision", []), resolve_frame,
+                                      len(frames), lambda i: dims[i], f"sprite {name!r}")
 
+    # Rotate pixels, origin and any AUTHORED collision shape together -- see
+    # rotate_origin's/rotate_rect's own comments for why an origin/rect needs its own
+    # (boundary, not pixel-index) transform. An auto-derived COMPLEX mask (extra is None)
+    # needs no rotation here: it is computed later, in build_sprite_shapes, straight from
+    # the already-rotated pixels finish_sprite hands it.
+    rotated_frames, rotated_dims = [], []
+    for buf, (w, h) in zip(frames, dims):
+        rbuf, nw, nh = rotate_grid(buf, w, h, orient)
+        rotated_frames.append(rbuf)
+        rotated_dims.append((nw, nh))
+    rotated_origins = [rotate_origin(ox, oy, w, h, orient)
+                       for (ox, oy), (w, h) in zip(origins, dims)]
+
+    for i, (mode, kind, extra) in list(collision.items()):
+        w, h = dims[i]
+        if mode == COLLISION_SCALED:
+            rx, ry, rw, rh = extra
+            collision[i] = (mode, kind, rotate_rect(rx, ry, rw, rh, w, h, orient))
+        elif mode == COLLISION_COMPLEX and extra is not None:
+            unpacked = bytearray(w * h)
+            for j, row in enumerate(unpack_collision_mask(extra, w, h)):
+                for c, ch in enumerate(row):
+                    unpacked[j * w + c] = OPAQUE if ch == "#" else TRANSPARENT
+            rbuf, nw, nh = rotate_grid(bytes(unpacked), w, h, orient)
+            collision[i] = (mode, kind, pack_collision_mask(rbuf, nw, nh))
+
+    frames = rotated_frames
     repaired = 0
     fixed = []
     for f in frames:
@@ -1483,9 +1690,10 @@ def pack_sprite(root, spec, orient=ORIENT_BUTTONS_RIGHT):
             repaired += 1
         fixed.append(f2)
 
-    sw, sh = rotate_dims(fw, fh, orient)
-    print(f"  sprite {name}: {len(fixed)} frames of {fw}x{fh}"
-          + (f", stored {sw}x{sh}" if (sw, sh) != (fw, fh) else ""))
+    sizes = sorted(set(rotated_dims))
+    size_note = f"{sizes[0][0]}x{sizes[0][1]}" if len(sizes) == 1 else \
+        f"{len(sizes)} distinct sizes"
+    print(f"  sprite {name}: {len(fixed)} frames, {size_note}")
     if repaired:
         print(f"    NOTE {repaired} frame(s) exceeded {PALETTE_USABLE} colours and were "
               f"reduced -- edit the art to avoid this")
@@ -1502,7 +1710,8 @@ def pack_sprite(root, spec, orient=ORIENT_BUTTONS_RIGHT):
                              f"{vim.size[1]} but the base sheet is {sheet_w}x{sheet_h} -- "
                              f"variants must share the base's layout exactly")
         vframes = []
-        for (x, y, w, h) in spec["frames"]:
+        for entry in spec["frames"]:
+            x, y, w, h = entry[:4]
             buf = bytearray(w * h)
             for j in range(h):
                 for i in range(w):
@@ -1529,9 +1738,53 @@ def pack_sprite(root, spec, orient=ORIENT_BUTTONS_RIGHT):
             f"sprite {name!r}: bw_variant = {bw_variant!r} is not one of its variants "
             f"({', '.join(v['name'] for v in variants) or '(none declared)'})")
 
-    return {"name": name, "w": sw, "h": sh, "frames": fixed, "variants": variants,
-            "bw_variant": bw_variant,
-            "out": spec["out"], "anim": spec.get("anim", {}), "repaired": repaired}
+    return {"name": name, "frames": fixed, "dims": rotated_dims, "origins": rotated_origins,
+            "variants": variants, "bw_variant": bw_variant, "out": spec["out"],
+            "anim": anim, "collision": collision, "repaired": repaired}
+
+
+def build_sprite_frame_meta(dims, origins, collision, frame_byte_lens):
+    """The frame_meta table PnxSprite.frame_meta loads (PNX_SPRITE_FRAME_BYTES=8 per
+    frame: u16 offset, u8 w, u8 h, u8 origin_x, u8 origin_y, u8 flags, u8 pad) -- the same
+    role pack_font's glyph-offset loop plays for PnxGlyph. `frame_byte_lens` is the
+    caller's own per-frame PIXEL byte length, which differs between the 4bpp blob and the
+    2bpp ~bw one (see PnxSprite's own comment), so this is called once per encoding.
+    """
+    meta = bytearray()
+    offset = 0
+    for i, ((w, h), (ox, oy)) in enumerate(zip(dims, origins)):
+        mode, kind, extra = collision.get(i, (COLLISION_NONE, COLLISION_KIND_WALL, None))
+        flags = (kind << 2) | mode
+        meta += offset.to_bytes(2, "little") + bytes([w, h, ox, oy, flags, 0])
+        offset += frame_byte_lens[i]
+    return bytes(meta)
+
+
+def build_sprite_shapes(collision, dims, fixed):
+    """SCALED rects / COMPLEX masks, sparse, keyed by FRAME -- identical shape to
+    finish_atlas's own tail tables, keyed by tile there. A COMPLEX record's mask_bytes is
+    computed from THAT frame's own (w, h), not one shared tile_px: frames are not uniform
+    size. A COMPLEX frame with no explicit mask defaults to its own opacity, the same
+    `pack_collision_mask` finish_atlas already falls back to -- computed here, against
+    `fixed[i]`, because this is the first point a frame's pixels are fully settled
+    (rotated, colour-reduced).
+    """
+    scaled = bytearray()
+    scaled_count = 0
+    complex_masks = bytearray()
+    complex_count = 0
+    for i, (mode, kind, extra) in sorted(collision.items()):
+        w, h = dims[i]
+        if mode == COLLISION_SCALED:
+            rx, ry, rw, rh = extra
+            scaled += i.to_bytes(2, "little") + bytes([rx, ry, rw, rh])
+            scaled_count += 1
+        elif mode == COLLISION_COMPLEX:
+            mask = extra if extra is not None else pack_collision_mask(fixed[i], w, h)
+            complex_masks += i.to_bytes(2, "little") + mask
+            complex_count += 1
+    return (scaled_count.to_bytes(2, "little") + bytes(scaled)
+           + complex_count.to_bytes(2, "little") + bytes(complex_masks))
 
 
 def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False):
@@ -1547,6 +1800,9 @@ def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pac
     """
     name = sprite["name"]
     frames = sprite["frames"]
+    dims = sprite["dims"]
+    origins = sprite["origins"]
+    collision = sprite["collision"]
     base_order = colour_order(frames)
 
     if len(base_order) > PALETTE_USABLE:
@@ -1564,8 +1820,11 @@ def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pac
         return len(shared) - 1
 
     base_slot = slot(base_order)
+    pixel_lens = [w * h // 2 for (w, h) in dims]
+    frame_meta = build_sprite_frame_meta(dims, origins, collision, pixel_lens)
     pixels = b"".join(pack_unit_4bpp(f, shared[base_slot]) for f in frames)
     assign = [base_slot] * len(frames)
+    shapes = build_sprite_shapes(collision, dims, frames)
 
     variant_slots = {}
     for v in sprite["variants"]:
@@ -1578,8 +1837,8 @@ def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pac
                 f"share a bitmap. Recolour without merging colours.")
         variant_slots[v["name"]] = slot(order)
 
-    sprite["blob"] = blob_header(MAGIC_SPRITE, sprite["w"], sprite["h"], len(frames),
-                                 orient=orient) + pad4(bytes(assign)) + pixels
+    sprite["blob"] = (blob_header(MAGIC_SPRITE, len(frames), orient=orient)
+                      + frame_meta + pad4(bytes(assign)) + pixels + shapes)
     sprite["palettes"] = [shared[base_slot]]
     sprite["assign"] = assign
     sprite["variant_slots"] = variant_slots
@@ -1596,11 +1855,13 @@ def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pac
         if sprite.get("bw_variant"):
             bw_frames = next(v["frames"] for v in sprite["variants"]
                              if v["name"] == sprite["bw_variant"])
+        pixel_lens_bw = [w * h // 4 for (w, h) in dims]
+        frame_meta_bw = build_sprite_frame_meta(dims, origins, collision, pixel_lens_bw)
         pixels_bw = b"".join(pack_unit_2bpp(f) for f in bw_frames)
-        sprite["blob_bw"] = (blob_header(MAGIC_SPRITE, sprite["w"], sprite["h"], len(frames),
-                                        orient=orient) + pad4(bytes(assign)) + pixels_bw)
+        sprite["blob_bw"] = (blob_header(MAGIC_SPRITE, len(frames), orient=orient)
+                             + frame_meta_bw + pad4(bytes(assign)) + pixels_bw + shapes)
 
-    frame_bytes = sprite["w"] * sprite["h"] // 2 * len(frames)
+    frame_bytes = sum(w * h // 2 for (w, h) in dims)
     saved = frame_bytes * len(sprite["variants"])
     print(f"    {name}: 1 shared palette, {len(sprite['variants'])} variant(s) collapsed "
           f"({saved:,} B saved, {len(variant_slots) * PALETTE_BYTES} B of palettes)")
@@ -1609,6 +1870,9 @@ def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pac
 
 def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False):
     frames = sprite["frames"]
+    dims = sprite["dims"]
+    origins = sprite["origins"]
+    collision = sprite["collision"]
 
     if sprite.get("variants"):
         return finish_sprite_with_variants(sprite, shared, orient, pack_2bit)
@@ -1623,18 +1887,22 @@ def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False):
         raise BuildError(f"sprite {sprite['name']!r}: a frame still exceeds "
                          f"{PALETTE_USABLE} colours after reduction")
 
+    pixel_lens = [w * h // 2 for (w, h) in dims]
+    frame_meta = build_sprite_frame_meta(dims, origins, collision, pixel_lens)
     pixels = b"".join(pack_unit_4bpp(f, palettes[a]) for f, a in zip(frames, assign))
-    body = pad4(bytes(assign)) + pixels
+    shapes = build_sprite_shapes(collision, dims, frames)
+    body = frame_meta + pad4(bytes(assign)) + pixels + shapes
 
-    sprite["blob"] = blob_header(MAGIC_SPRITE, sprite["w"], sprite["h"], len(frames),
-                                 orient=orient) + body
+    sprite["blob"] = blob_header(MAGIC_SPRITE, len(frames), orient=orient) + body
     sprite["palettes"] = palettes
     sprite["assign"] = assign
 
     if pack_2bit:
+        pixel_lens_bw = [w * h // 4 for (w, h) in dims]
+        frame_meta_bw = build_sprite_frame_meta(dims, origins, collision, pixel_lens_bw)
         pixels_bw = b"".join(pack_unit_2bpp(f) for f in frames)
-        sprite["blob_bw"] = (blob_header(MAGIC_SPRITE, sprite["w"], sprite["h"], len(frames),
-                                        orient=orient) + pad4(bytes(assign)) + pixels_bw)
+        sprite["blob_bw"] = (blob_header(MAGIC_SPRITE, len(frames), orient=orient)
+                             + frame_meta_bw + pad4(bytes(assign)) + pixels_bw + shapes)
 
     print(f"    {sprite['name']}: uses {len(set(assign))} palette(s), "
           f"{len(palettes) - before} new to the project")
@@ -2066,7 +2334,8 @@ def tile_collision_mode(atlas_table, collision_by_atlas, tile):
     """
     for name, first, count in atlas_table:
         if first <= tile < first + count:
-            return collision_by_atlas.get(name, {}).get(tile - first, (COLLISION_NONE, None))[0]
+            return collision_by_atlas.get(name, {}).get(
+                tile - first, (COLLISION_NONE, COLLISION_KIND_WALL, None))[0]
     return COLLISION_NONE
 
 
@@ -3711,6 +3980,9 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
         "#pragma once",
         "",
         "#include <stdint.h>",
+        "#include <stddef.h>  // NULL -- a sprite clip with no authored per-frame",
+        "                    // durations emits its _DURATIONS symbol as this, not an",
+        "                    // array (see the sprite loop below)",
         "",
         f"// Built for orientation {ORIENT_NAMES[orient]}. Every dimension and coordinate",
         "// below is in the FRAMEBUFFER's frame, already rotated -- a map that reads 32",
@@ -3821,11 +4093,30 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
 
     for s in sprites:
         n = c_ident(s["name"])
-        L += [f"#define {n}_W {s['w']}", f"#define {n}_H {s['h']}",
-              f"#define {n}_FRAME_BYTES {s['w'] * s['h'] // 2}",
-              f"#define {n}_FRAME_COUNT {len(s['frames'])}"]
-        for anim_name, idx in sorted(s["anim"].items()):
-            L.append(f"#define {n}_{c_ident(anim_name)} {idx}")
+        # No sprite-wide _W/_H/_FRAME_BYTES any more: frames are not uniform size (a
+        # tightly packed sheet's poses rarely are), so there is no single width/height to
+        # name. pnx_sprite_frame_get reads a frame's own w/h/origin at runtime instead.
+        L.append(f"#define {n}_FRAME_COUNT {len(s['frames'])}")
+        for anim_name, value in sorted(s["anim"].items()):
+            an = c_ident(anim_name)
+            if isinstance(value, int):
+                L.append(f"#define {n}_{an} {value}")
+                continue
+            # A clip: a generated frame-index array plus its playback constants, fed
+            # straight to pnx_anim_play/pnx_anim_frame (gfx/pnx_sprite.h). `durations`
+            # is a real array when authored, else the bare literal NULL, so game code
+            # always passes `{n}_{an}_DURATIONS` without needing to know which case it is.
+            frame_list = ", ".join(str(f) for f in value["frames"])
+            L.append(f"static const uint8_t {n}_{an}_FRAMES[] = {{ {frame_list} }};")
+            L.append(f"#define {n}_{an}_COUNT {len(value['frames'])}")
+            L.append(f"#define {n}_{an}_FPS {value['fps']}")
+            L.append(f"#define {n}_{an}_LOOP {1 if value['loop'] else 0}")
+            if value["durations"] is not None:
+                dur_list = ", ".join(str(d) for d in value["durations"])
+                L.append(f"static const uint8_t {n}_{an}_DURATIONS[] = "
+                         f"{{ {dur_list} }};")
+            else:
+                L.append(f"#define {n}_{an}_DURATIONS NULL")
         L.append("")
 
     for ns in (nine_slices or []):

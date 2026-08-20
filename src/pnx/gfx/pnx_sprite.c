@@ -14,10 +14,13 @@ void pnx_sprite_draw(const PnxSprite* sprite, PnxTarget* target, const PnxCamera
 	if (!palette)
 		palette = pnx_sprite_frame_palette(sprite, frame);
 
-	// Feet anchor: y names the ground line, so the art extends upward from it.
-	pnx_blit_4bpp(target, pnx_sprite_frame(sprite, frame), palette,
-				  wx - camera->x - sprite->w / 2, wy - camera->y - sprite->h, sprite->w,
-				  sprite->h, mirror);
+	// Frames are not all one size (a tightly packed sheet's poses rarely are), so the
+	// anchor is per-frame too: origin_x/origin_y name where THIS frame's own root sits,
+	// rather than every frame sharing one w/2,h.
+	PnxSpriteFrame f;
+	pnx_sprite_frame_get(sprite, frame, &f);
+	pnx_blit_4bpp(target, f.pixels, palette, wx - camera->x - f.origin_x,
+				  wy - camera->y - f.origin_y, f.w, f.h, mirror);
 }
 
 // Builds `order` from every visible instance (every visible instance on `layer`, if
@@ -91,6 +94,54 @@ void pnx_sprites_draw_layer(const PnxSpriteInstance* instances, uint8_t count, u
 
 	const uint8_t n = sprites_sort_by_y(instances, count, order, true, layer);
 	sprites_draw_ordered(instances, order, n, target, camera);
+}
+
+void pnx_anim_play(PnxAnimState* state, const uint8_t* frames, uint8_t count, uint32_t now_ms)
+{
+	if (!state || state->frames == frames)
+		return;
+	state->frames	= frames;
+	state->count	= count;
+	state->start_ms = now_ms;
+}
+
+uint8_t pnx_anim_frame(const PnxAnimState* state, uint8_t fps, const uint8_t* durations,
+					   bool loop, uint32_t now_ms)
+{
+	if (!state || !state->frames || !state->count || !fps)
+		return state && state->frames ? state->frames[0] : 0;
+
+	// Elapsed wall-clock time, in whole base-ticks at `fps` -- durations are counted in
+	// units of this tick (PnxAnimState's own comment), not milliseconds directly.
+	const uint32_t elapsed = now_ms - state->start_ms;
+	uint32_t tick		   = (elapsed * fps) / 1000u;
+
+	// Total tick length of the clip. Summed fresh each call rather than cached anywhere:
+	// count is always small (an animation clip is a handful of frames), the same "n is
+	// small" tradeoff sprites_sort_by_y's own comment already makes for this file.
+	uint32_t total = 0;
+	for (uint8_t i = 0; i < state->count; i++)
+		total += durations ? durations[i] : 1;
+	if (total == 0)
+		return state->frames[0];
+
+	if (loop)
+	{
+		tick %= total;
+	}
+	else if (tick >= total)
+	{
+		return state->frames[state->count - 1];
+	}
+
+	uint32_t acc = 0;
+	for (uint8_t i = 0; i < state->count; i++)
+	{
+		acc += durations ? durations[i] : 1;
+		if (tick < acc)
+			return state->frames[i];
+	}
+	return state->frames[state->count - 1];
 }
 
 #endif // PNX_USE_SPRITES

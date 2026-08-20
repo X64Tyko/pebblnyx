@@ -255,6 +255,18 @@ def read_blob(out_dir, name):
         return f.read()
 
 
+def sprite_frame(blob, frame):
+    """One frame's (w, h, origin_x, origin_y, flags) read straight out of a built "PS"
+    blob -- mirrors PnxSprite.frame_meta's own 8-byte record (pnx_assets.h) byte for
+    byte. There is no header #define for a sprite's own dimensions any more (frames are
+    not uniform size), so a test that wants a frame's built size reads the blob directly,
+    the same way check_orientation already reads a map's cell plane instead of trusting a
+    number someone typed in.
+    """
+    e = blob[pnx_assets.HEADER_BYTES + frame * 8: pnx_assets.HEADER_BYTES + frame * 8 + 8]
+    return e[2], e[3], e[4], e[5], e[6]
+
+
 def defines(out_dir):
     """The generated header as a dict, so a test can name a symbol rather than a line."""
     found = {}
@@ -771,10 +783,10 @@ def check_orientation():
                   (rd["MAP_A_W"], rd["MAP_A_H"])
                   == ((fd["MAP_A_H"], fd["MAP_A_W"]) if swaps
                       else (fd["MAP_A_W"], fd["MAP_A_H"])))
-            check(f"{name}: header sprite dims {'swap' if swaps else 'hold'}",
-                  (rd["GUY_W"], rd["GUY_H"])
-                  == ((fd["GUY_H"], fd["GUY_W"]) if swaps
-                      else (fd["GUY_W"], fd["GUY_H"])))
+            fgw, fgh, _, _, _ = sprite_frame(read_blob(flat, "guy.bin"), 0)
+            rgw, rgh, _, _, _ = sprite_frame(read_blob(out, "guy.bin"), 0)
+            check(f"{name}: sprite frame dims {'swap' if swaps else 'hold'}",
+                  (rgw, rgh) == ((fgh, fgw) if swaps else (fgw, fgh)))
             check(f"{name}: orientation reaches the header",
                   rd["PNX_ORIENTATION"] == orient)
 
@@ -1678,14 +1690,15 @@ def check_complex_mask_authoring():
         mask_text = "#..#\n.##.\n.##.\n#..#"
         entry = {"tile": 0, "type": "complex", "mask": mask_text}
         collision = pnx_assets.parse_atlas_collision({"collision": [entry]}, atlas, {})
-        mode, extra = collision[0]
+        mode, kind, extra = collision[0]
         check("an authored mask parses as COMPLEX", mode == pnx_assets.COLLISION_COMPLEX)
+        check("with the default kind (wall)", kind == pnx_assets.COLLISION_KIND_WALL)
 
         expected = pnx_assets.pack_collision_mask(
-            bytearray(0xC0 if c == "#" else 0x00 for c in mask_text.replace("\n", "")), 4)
+            bytearray(0xC0 if c == "#" else 0x00 for c in mask_text.replace("\n", "")), 4, 4)
         check("the authored mask packs to the X shape, not the tile's own full opacity",
               extra == expected)
-        full_opacity = pnx_assets.pack_collision_mask(bytearray([0xC0] * 16), 4)
+        full_opacity = pnx_assets.pack_collision_mask(bytearray([0xC0] * 16), 4, 4)
         check("...and that differs from what auto-derivation would have produced",
               extra != full_opacity)
 
@@ -1693,7 +1706,7 @@ def check_complex_mask_authoring():
         # mask as text before repainting it) -- pack then unpack must reproduce exactly
         # what was authored, or the editor would silently mutate a mask just by opening it.
         check("unpack_collision_mask round-trips an authored mask",
-              pnx_assets.unpack_collision_mask(extra, 4) == mask_text.split("\n"))
+              pnx_assets.unpack_collision_mask(extra, 4, 4) == mask_text.split("\n"))
 
         expect_fail("a mask of the wrong shape", "must be exactly",
                     atlas=FLIP_ATLAS.replace(
@@ -2246,6 +2259,210 @@ def check_editor_new_map_scene():
         check("and the new map builds", builds(proj.path, root, "out_nm"))
 
 
+def check_variable_frame_sprites():
+    """Variable-size frames, per-frame origin, a named clip with per-frame durations, and
+    per-frame collision (one auto-derived COMPLEX mask, one hand-authored SCALED rect) --
+    the whole surface pack_sprite/finish_sprite gained together, built through the real
+    pipeline and read back off the actual blob and generated header, not just unit-level
+    pieces in isolation.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))  # 32x32, opaque throughout
+
+        sprite_toml = '''
+            [[sprite]]
+            name = "hero"
+            sheet = "sheet.png"
+            frames = [[0, 0, 16, 16], [16, 0, 8, 16, 2, 8]]
+            out = "hero.bin"
+
+            [sprite.anim]
+            stand = 0
+            walk = { frames = [0, 1, 0, 1], fps = 8, loop = true, durations = [1, 2, 1, 2] }
+            idle_loop = [0, 1]
+
+            [[sprite.collision]]
+            frame = 0
+            type = "complex"
+            kind = "hurt"
+
+            [[sprite.collision]]
+            frame = 1
+            type = "scaled"
+            kind = "wall"
+            rect = [0, 0, 4, 8]
+        '''
+        err = run(root, sprite=sprite_toml)
+        check("a sprite with differently sized frames builds", err is None)
+        if err:
+            print(f"    (build error: {err})")
+            return
+
+        out = os.path.join(root, "out")
+        blob = read_blob(out, "hero.bin")
+        f0 = sprite_frame(blob, 0)
+        f1 = sprite_frame(blob, 1)
+        check("frame 0 keeps its own 16x16", (f0[0], f0[1]) == (16, 16))
+        check("frame 0's origin defaults to centred, feet at the bottom",
+              (f0[2], f0[3]) == (8, 16))
+        check("frame 1 keeps its own, DIFFERENT, 8x16", (f1[0], f1[1]) == (8, 16))
+        check("frame 1's origin is the authored one, not the default",
+              (f1[2], f1[3]) == (2, 8))
+
+        # flags = (kind << 2) | mode -- PNX_COLLISION_KIND/MODE, pnx_assets.h.
+        check("frame 0's flags pack COMPLEX + hurt",
+              f0[4] == (pnx_assets.COLLISION_KIND_HURT << 2) | pnx_assets.COLLISION_COMPLEX)
+        check("frame 1's flags pack SCALED + wall (the default kind)",
+              f1[4] == (pnx_assets.COLLISION_KIND_WALL << 2) | pnx_assets.COLLISION_SCALED)
+
+        rd = defines(out)
+        check("a single-int anim is still a bare #define", rd["HERO_STAND"] == 0)
+        check("a clip emits its frame array length as _COUNT", rd["HERO_WALK_COUNT"] == 4)
+        check("...and its authored fps", rd["HERO_WALK_FPS"] == 8)
+        check("...and its authored loop", rd["HERO_WALK_LOOP"] == 1)
+        header = open(os.path.join(out, "gen.h")).read()
+        check("...and a real FRAMES array, not just the count",
+              "HERO_WALK_FRAMES[] = { 0, 1, 0, 1 }" in header)
+        check("...and a real DURATIONS array when durations were authored",
+              "HERO_WALK_DURATIONS[] = { 1, 2, 1, 2 }" in header)
+        check("a list-form clip defaults to ANIM_DEFAULT_FPS",
+              rd["HERO_IDLE_LOOP_FPS"] == pnx_assets.ANIM_DEFAULT_FPS)
+        check("...and its default loop is true", rd["HERO_IDLE_LOOP_LOOP"] == 1)
+        check("...and, with no authored durations, DURATIONS is the literal NULL",
+              "#define HERO_IDLE_LOOP_DURATIONS NULL" in header)
+        check("a single-frame pose gets no _DURATIONS symbol at all",
+              "HERO_STAND_DURATIONS" not in header)
+
+        # --- validation: each new failure mode raises through the real pipeline
+        expect_fail("a clip whose fps is out of range", "fps",
+                    sprite='''
+                        [[sprite]]
+                        name = "bad"
+                        sheet = "sheet.png"
+                        frames = [[0, 0, 16, 16]]
+                        out = "bad.bin"
+                        [sprite.anim]
+                        walk = { frames = [0], fps = 0 }
+                    ''')
+        expect_fail("a clip's durations not matching its frame count", "durations",
+                    sprite='''
+                        [[sprite]]
+                        name = "bad"
+                        sheet = "sheet.png"
+                        frames = [[0, 0, 16, 16]]
+                        out = "bad.bin"
+                        [sprite.anim]
+                        walk = { frames = [0, 0], durations = [1] }
+                    ''')
+        expect_fail("a collision entry naming an out-of-range frame", "collision",
+                    sprite='''
+                        [[sprite]]
+                        name = "bad"
+                        sheet = "sheet.png"
+                        frames = [[0, 0, 16, 16]]
+                        out = "bad.bin"
+                        [[sprite.collision]]
+                        frame = 4
+                        type = "solid"
+                    ''')
+        expect_fail("a collision kind that is not one of the four", "kind",
+                    sprite='''
+                        [[sprite]]
+                        name = "bad"
+                        sheet = "sheet.png"
+                        frames = [[0, 0, 16, 16]]
+                        out = "bad.bin"
+                        [[sprite.collision]]
+                        frame = 0
+                        type = "solid"
+                        kind = "nonsense"
+                    ''')
+
+
+def check_editor_sprite_frame_collision():
+    """sprite_frames' per-frame collision info, and save/remove_sprite_collision -- the
+    backend the Sprites tab's per-frame collision editor is built on. Mirrors
+    check_editor_atlas_tiles_and_collision's own shape closely: same claims, sprite frame
+    instead of atlas tile.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        # 16 wide, 32 tall: two stacked 16x16 frames -- frame 0 fully opaque (blue),
+        # frame 1 also opaque but a different colour, so their auto-derived masks are
+        # both "fully solid" and easy to reason about by hand.
+        Image.new("RGBA", (16, 32), (30, 90, 200, 255)).save(
+            os.path.join(root, "hero.png"))
+        proj = editor_project(root, sprite='''
+            [[sprite]]
+            name = "hero"
+            sheet = "hero.png"
+            frames = [[0, 0, 16, 16], [0, 16, 16, 16]]
+            out = "hero.bin"
+        ''')
+
+        info = proj.sprite_frames("hero")
+        check("a fresh sprite's frames start with no collision entry at all",
+              info["cells"][0]["collision"]["mode"] == pnx_assets.COLLISION_NONE
+              and info["cells"][1]["collision"]["mode"] == pnx_assets.COLLISION_NONE)
+        check("a fully opaque frame's auto_mask is fully ink",
+              all(c == "#" * 16 for c in info["cells"][0]["collision"]["auto_mask"]))
+
+        proj.save_sprite_collision("hero", 0, pnx_assets.COLLISION_SCALED,
+                                   kind=pnx_assets.COLLISION_KIND_HURT, rect=[0, 8, 16, 8])
+        info2 = proj.sprite_frames("hero")
+        f0 = info2["cells"][0]["collision"]
+        check("a saved SCALED rect + kind round-trips through sprite_frames",
+              f0["mode"] == pnx_assets.COLLISION_SCALED and f0["rect"] == [0, 8, 16, 8]
+              and f0["kind"] == pnx_assets.COLLISION_KIND_HURT)
+        check("frame 1 is untouched by editing frame 0",
+              info2["cells"][1]["collision"]["mode"] == pnx_assets.COLLISION_NONE)
+        check("the manifest still builds after a SCALED save",
+              builds(proj.path, root, "out_sfc1"))
+
+        # Re-editing the SAME frame must REPLACE its entry, not add a second one --
+        # parse_shape_collision refuses two entries for one frame, so a duplicate would
+        # fail the very next build silently until Build was pressed.
+        mask_rows = ["#" * 16] * 16
+        proj.save_sprite_collision("hero", 0, pnx_assets.COLLISION_COMPLEX,
+                                   mask_rows=mask_rows)
+        info3 = proj.sprite_frames("hero")
+        f0b = info3["cells"][0]["collision"]
+        check("re-saving replaces the previous entry rather than duplicating it",
+              f0b["mode"] == pnx_assets.COLLISION_COMPLEX)
+        check("an authored mask is flagged as authored, not auto-derived",
+              f0b["authored"] is True)
+        check("kind reverts to the default (wall) when not re-specified",
+              f0b["kind"] == pnx_assets.COLLISION_KIND_WALL)
+        check("the manifest still builds after replacing SCALED with COMPLEX",
+              builds(proj.path, root, "out_sfc2"))
+
+        proj.remove_sprite_collision("hero", 0)
+        info4 = proj.sprite_frames("hero")
+        check("removing the entry reverts the frame to NONE",
+              info4["cells"][0]["collision"]["mode"] == pnx_assets.COLLISION_NONE)
+        check("the manifest still builds after remove",
+              builds(proj.path, root, "out_sfc3"))
+
+        try:
+            proj.remove_sprite_collision("hero", 0)
+            check("removing a frame with no collision entry is refused", False)
+        except ValueError:
+            check("removing a frame with no collision entry is refused", True)
+
+        try:
+            proj.save_sprite_collision("hero", 0, pnx_assets.COLLISION_SCALED,
+                                       rect=[0, 0, 999, 999])
+            check("a rect that does not fit the frame is refused", False)
+        except ValueError:
+            check("a rect that does not fit the frame is refused", True)
+
+        try:
+            proj.save_sprite_collision("hero", 99, pnx_assets.COLLISION_SOLID)
+            check("collision on an out-of-range frame is refused", False)
+        except ValueError:
+            check("collision on an out-of-range frame is refused", True)
+
+
 def check_editor_sprites():
     """Declaring a sprite, which the Sprites tab could not do -- it painted PNGs and
     stopped, so the art existed and nothing could load it."""
@@ -2287,10 +2504,12 @@ out = "npc.bin"
               {s["name"]: s for s in proj.sprites()}["npc"]["anim"] == {})
         check("and still builds", builds(proj.path, root, "out_sp2"))
 
+        # Frames disagreeing on size is no longer refused -- a tightly packed sheet's
+        # frames are not required to share one size any more (pack_sprite's own comment).
+        # A same-shaped smoke check lives in check_variable_frame_sprites() instead.
         for label, call in (
-            ("frames that disagree on size",
-             lambda: proj.save_sprite("bad", "hero.png",
-                                      [[0, 0, 16, 16], [0, 16, 8, 16]])),
+            ("an origin outside its own frame",
+             lambda: proj.save_sprite("bad", "hero.png", [[0, 0, 16, 16, 99, 99]])),
             ("a frame running off the sheet",
              lambda: proj.save_sprite("bad", "hero.png", [[0, 0, 16, 99]])),
             ("an odd pixel count",
@@ -3946,6 +4165,8 @@ def main():
     check_editor_new_map_scene()
     check_editor_map_lifecycle()
     check_editor_sprites()
+    check_variable_frame_sprites()
+    check_editor_sprite_frame_collision()
     check_nine_slice_preview_compose()
     check_editor_nine_slice()
     check_mapfile_format()

@@ -286,7 +286,7 @@ function drawCrop(sheetTiles){
 // endpoints save_atlas_collision/save_role already are for other callers -- this is a
 // new client, not a new authority.
 
-const TE={index:null,tile:null,mode:0,rect:null,mask:null};
+const TE={index:null,tile:null,mode:0,kind:0,rect:null,mask:null};
 const clamp=(v,a,b)=>v<a?a:v>b?b:v;
 
 // Toggles the Slice grid's selection highlight without a full drawSlice() -- that
@@ -326,6 +326,7 @@ function renderTileEditor(){
   const t=CARVE.tiles[TE.index];
   TE.tile=t;
   TE.mode=t.collision.mode;
+  TE.kind=t.collision.kind||0;
   TE.rect=t.collision.rect?t.collision.rect.slice():[0,0,CARVE.tile_px,CARVE.tile_px];
   TE.mask=t.collision.mask?t.collision.mask.slice():t.collision.auto_mask.slice();
 
@@ -334,9 +335,12 @@ function renderTileEditor(){
   $('#teimg').src=t.img;
   $('#terole').value=t.role||'';
   $('#temode').value=String(TE.mode);
+  $('#tekind').value=String(TE.kind);
   $('#telog').textContent='';
   updateModeSections();
 }
+
+$('#tekind').addEventListener('change',()=>{ TE.kind=+$('#tekind').value; });
 
 $('#temode').addEventListener('change',()=>{
   TE.mode=+$('#temode').value;
@@ -474,7 +478,7 @@ async function teSave(){
       if(!r.ok){ $('#telog').textContent=r.error; return }
     }
   } else {
-    const body={atlas,tile:tileRef,mode:TE.mode};
+    const body={atlas,tile:tileRef,mode:TE.mode,kind:TE.kind};
     if(TE.mode===2) body.rect=TE.rect;
     if(TE.mode===3) body.mask=TE.mask;
     const r=await post('/api/atlas/collision',body);

@@ -1,0 +1,15 @@
+# Build output
+build/
+*.pbw
+.lock-waf_*
+
+# The pebblnyx engine, staged here from the editor before each build. A build artefact,
+# not project source -- committing it would pin a copy that the editor then silently
+# disagrees with.
+src/c/pnx/
+
+# Generated from assets.toml by the pipeline. Derived, so not committed: a stale blob
+# outliving the manifest that describes it is exactly what the blob version field exists
+# to catch.
+resources/*.bin
+src/c/assets_gen.h
