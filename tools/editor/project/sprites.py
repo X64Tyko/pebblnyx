@@ -542,12 +542,9 @@ class SpritesMixin:
 
     @staticmethod
     def _anim_toml_line(key, value):
-        """One [sprite.anim] entry, formatted by shape: an int is a pose, unchanged; a
-        list or dict is a clip (pnx_assets.parse_sprite_anim's own three forms) -- neither
-        of which the simple `#spanim` field can author yet, so a clip surviving into this
-        formatter only ever got there by being PRESERVED from a hand-authored entry
-        save_sprite's own UI-facing `anim` dict never named (see save_sprite's own
-        comment on merging).
+        """One [sprite.anim] entry, formatted by shape: an int is a pose (the `#spanim`
+        field), a list or dict is a clip (the clip builder, sprites.js) -- the three forms
+        pnx_assets.parse_sprite_anim itself accepts.
         """
         if isinstance(value, list):
             return f"{key} = [" + ", ".join(str(int(v)) for v in value) + "]"
@@ -567,31 +564,25 @@ class SpritesMixin:
                     bw_variant=None):
         """Create or rewrite one [[sprite]] block, validated the way the build will.
 
-        `anim` here is POSE-only: the sprite tab's `#spanim` field can only ever author
-        one name per frame position (app.js's `anim[n]=i`), so this is that dict, name ->
-        int. A CLIP -- a list or table, which only exists today by hand-editing the
-        manifest, since there is no visual clip builder yet -- is never something this
-        call is asked to WRITE, only something it must not DESTROY: any existing clip-form
-        entry this call's `anim` dict does not itself name survives untouched, merged in
-        before writing. Same reasoning for `[[sprite.collision]]`: this call has no
-        parameter for it at all yet, so whatever is already there is left exactly alone
-        (`_sprite_block` now treats it as part of the sprite's own block, not a boundary).
+        `anim` is the WHOLE [sprite.anim] table, poses and clips alike: an int is a pose
+        (app.js's `#spanim` field, one name per frame position), a list or table is a clip
+        (pnx_assets.py's parse_sprite_anim, the sprite tab's own clip builder in
+        sprites.js). Both halves round-trip through the editor now -- loaded from the
+        manifest into their own UI on open, merged back into one dict here on save -- so
+        this is a full replace, not a merge with what's on disk: anything this call's
+        `anim` does not name is gone, which is what makes deleting a clip in the builder
+        actually take effect. `[[sprite.collision]]` has no parameter here at all, so
+        whatever is already there is left exactly alone (`_sprite_block` treats it as part
+        of the sprite's own block, not a boundary).
         """
         if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
             raise ValueError("name must be lowercase letters, digits and underscores")
 
-        anim = dict(anim or {})
-        for a in anim:
+        anim_to_write = dict(anim or {})
+        for a in anim_to_write:
             if not re.fullmatch(r"[a-z][a-z0-9_]*", a):
                 raise ValueError(f"anim name {a!r} must be lowercase letters, digits and "
                                  f"underscores -- it becomes a C identifier")
-
-        existing_spec = next((sp for sp in self.man.get("sprite", [])
-                              if sp.get("name") == name), None)
-        existing_anim = dict(existing_spec.get("anim", {})) if existing_spec else {}
-        preserved = {k: v for k, v in existing_anim.items()
-                    if not isinstance(v, int) and k not in anim}
-        anim_to_write = {**anim, **preserved}
 
         check = self.validate_sprite(name, sheet, frames, anim_to_write, variants,
                                      colorkey, bw_variant)
@@ -676,8 +667,8 @@ class SpritesMixin:
         # The anim subtable is replaced wholesale rather than key by key: an anim name is
         # a bare `name = index` (or, for a clip, `name = [...]`/`name = {...}`) pair with
         # nothing to explain, and the set of them changes as a set when frames are added
-        # or removed. `anim_to_write` already has any preserved clip merged in (this
-        # function's own comment), so this is the one and only place anim gets written.
+        # or removed -- `anim_to_write` is the editor's complete, current picture (poses
+        # and clips both), so this is the one and only place anim gets written.
         if anim_at is not None:
             stop = next((j for j in range(anim_at + 1, end)
                          if lines[j].lstrip().startswith("[")), end)

@@ -18,6 +18,46 @@
 
 const SH={sheet:null, cells:null, frames:[], mode:'grid', imgW:0, imgH:0};
 
+// Mask colour: the background a Pebble sprite draws transparent (tools/pnx_assets.py's
+// to_gcolor8/colorkey), same job and same picked-off-the-sheet-not-typed reasoning as
+// atlas.js's own KEY -- the value that matters is the one actually in the file, and the
+// declared sprite's save/validate calls already accept it (project/sprites.py's
+// save_sprite), only the editor never had a way to set it. Set by #spsel's onchange
+// (app.js) from the sprite's own manifest entry, reset there when nothing is selected.
+let SPKEY=null;
+
+function spKeyLabel(){
+  const sw=$('#spkeyswatch');
+  sw.classList.toggle('none', !SPKEY);
+  sw.style.background=SPKEY?`rgb(${SPKEY[0]},${SPKEY[1]},${SPKEY[2]})`:'';
+  $('#spkeyval').textContent=SPKEY?`${SPKEY[0]}, ${SPKEY[1]}, ${SPKEY[2]}`:'none';
+}
+
+$('#spkeypick').onclick=()=>{
+  $('#shimgwrap').classList.toggle('picking');
+};
+$('#spkeynone').onclick=()=>{
+  SPKEY=null; spKeyLabel(); shLoadGrid(); shDrawOverlay();
+};
+// Sampling the sheet's OWN pixels, at natural resolution, regardless of how #shimg is
+// scaled up for display (shSetDisplaySize) -- the same client-rect-vs-naturalWidth ratio
+// atlas.js's own #sheetimg click handler uses.
+$('#shimg').addEventListener('click',e=>{
+  if(!$('#shimgwrap').classList.contains('picking')) return;
+  const img=e.target, r=img.getBoundingClientRect();
+  const x=Math.floor((e.clientX-r.left)/r.width*img.naturalWidth);
+  const y=Math.floor((e.clientY-r.top)/r.height*img.naturalHeight);
+  const c=document.createElement('canvas');
+  c.width=img.naturalWidth; c.height=img.naturalHeight;
+  const g=c.getContext('2d', {willReadFrequently:true});
+  g.imageSmoothingEnabled=false;
+  g.drawImage(img,0,0);
+  const p=g.getImageData(Math.max(0,x),Math.max(0,y),1,1).data;
+  SPKEY=[p[0],p[1],p[2]];
+  $('#shimgwrap').classList.remove('picking');
+  spKeyLabel(); shLoadGrid(); shDrawOverlay();
+});
+
 function shLog(msg,bad){
   const el=$('#shlog');
   el.className=bad===false?'ok':(bad?'bad':'');
@@ -63,7 +103,7 @@ async function shLoadGrid(){
   if(!SH.sheet) return;
   const r=await post('/api/sheet/frames',{sheet:SH.sheet, fw:+$('#shfw').value,
     fh:+$('#shfh').value, ox:+$('#shox').value, oy:+$('#shoy').value,
-    gx:+$('#shgx').value, gy:+$('#shgy').value});
+    gx:+$('#shgx').value, gy:+$('#shgy').value, colorkey:SPKEY});
   if(r.error){ shLog(r.error,true); SH.cells=null; return }
   SH.cells=r.cells;
   shLog(`${r.cols}x${r.rows} grid of ${$('#shfw').value}x${$('#shfh').value}`
@@ -181,8 +221,18 @@ function shDrawPicked(){
   SH.frames.forEach((f,i)=>{
     const b=document.createElement('button');
     b.className='tile';
-    b.title=`${f.x},${f.y} ${f.w}x${f.h} — click to remove, double-click to edit`;
+    b.title=`${f.x},${f.y} ${f.w}x${f.h} — click to remove, double-click to edit, `
+      +`drag into a clip below`;
     b.innerHTML=`<b>${i}: ${f.w}×${f.h}</b>`;
+    // A clip drop target (below, in Declare) reads this frame's index the same way
+    // #spframes cells do (app.js's spShowFrames) -- both name a position in the SAME
+    // ordered frame list spFrames() produces, so a clip built from either drags in the
+    // index that will actually be this frame once Save sprite writes it.
+    b.draggable=true;
+    b.addEventListener('dragstart',ev=>{
+      ev.dataTransfer.setData('text/plain', JSON.stringify({frame:i}));
+      ev.dataTransfer.effectAllowed='copy';
+    });
     b.onclick=()=>{
       SH.frames.splice(i,1);
       shDrawOverlay(); shDrawPicked();
@@ -230,6 +280,7 @@ window.addEventListener('resize',shDrawOverlay);
 
 $('#shimgwrap').addEventListener('mousedown',e=>{
   if(!SH.sheet) return;
+  if($('#shimgwrap').classList.contains('picking')) return; // mask-colour pick, not a frame drag
   if(SH.mode==='grid'&&!SH.cells) return;
   const [sx,sy]=shPointerXY(e);
   shDrag={sx,sy,cx:sx,cy:sy};
@@ -457,4 +508,203 @@ $('#sfclearcol').onclick=async()=>{
   $('#sfmode').value='0';
   sfUpdateModeSections();
   await sfSave();
+};
+
+// --------------------------------------------------------------------- anim clip builder
+//
+// pnx_assets.py's parse_sprite_anim recognises three [sprite.anim] entry shapes: a bare
+// int (a POSE, what #spanim above authors), a bare list (a CLIP at default fps/loop), or
+// a table (a CLIP with explicit fps/loop/durations). Only the pose form had a UI; a clip
+// existed only if someone hand-edited the manifest. This builds the other two, staged in
+// CLIPS client-side exactly the way #spanim's names and SH.frames' picks already are --
+// nothing reaches disk until Save sprite (app.js's #spsave) merges CLIPS into the same
+// `anim` dict poses go into and calls /api/sprite/save.
+//
+// Frames are ADDED by dragging a chip in from #shpicked (this file) or #spframes
+// (app.js's spShowFrames) -- both name a position in the ordered list spFrames()
+// produces, which is the same index space a clip's `frames` array indexes into. Existing
+// chips are draggable too, for reordering within the clip -- order is the animation.
+
+let CLIPS={};                                    // name -> {frames, fps, loop, durations}
+let CLIP={name:null, frames:[], durations:null};  // the one being edited right now
+
+function clipLog(msg,bad){
+  const el=$('#cliplog');
+  el.className=bad===false?'ok':(bad?'bad':'');
+  el.textContent=msg;
+}
+
+// Loaded fresh by app.js's #spsel handler, from the very same `s.anim` map #spanim's
+// byIndex loader reads -- an entry is a clip here iff it is NOT a plain int (a pose).
+function spLoadClips(anim){
+  CLIPS={};
+  for(const [k,v] of Object.entries(anim||{})){
+    if(typeof v==='number') continue;
+    if(Array.isArray(v)) CLIPS[k]={frames:v.slice(), fps:8, loop:true, durations:null};
+    else CLIPS[k]={frames:(v.frames||[]).slice(), fps:v.fps||8, loop:v.loop!==false,
+                   durations:v.durations?v.durations.slice():null};
+  }
+  drawClipSelect();
+  clipReset();
+}
+
+function drawClipSelect(){
+  const sel=$('#clipsel'), cur=sel.value;
+  sel.innerHTML='<option value="">— new —</option>'
+    +Object.keys(CLIPS).map(n=>`<option${n===cur?' selected':''}>${n}</option>`).join('');
+}
+
+function clipReset(){
+  CLIP={name:null, frames:[], durations:null};
+  $('#clipsel').value='';
+  $('#clipname').value='';
+  $('#clipfps').value=8;
+  $('#cliploop').checked=true;
+  $('#clipdur').checked=false;
+  renderClipFrames();
+  clipLog(Object.keys(CLIPS).length
+    ?`${Object.keys(CLIPS).length} clip(s) declared. Drag frames in to start a new one, `
+     +`or pick one above to edit it.`
+    :'Drag frames in from the sheet picks or the frames grid to build a clip.');
+}
+
+$('#clipsel').addEventListener('change',()=>{
+  const name=$('#clipsel').value;
+  if(!name){ clipReset(); return }
+  const c=CLIPS[name];
+  CLIP={name, frames:c.frames.slice(), durations:c.durations?c.durations.slice():null};
+  $('#clipname').value=name;
+  $('#clipfps').value=c.fps;
+  $('#cliploop').checked=c.loop;
+  $('#clipdur').checked=!!c.durations;
+  renderClipFrames();
+  clipLog(`Editing "${name}" — ${c.frames.length} frame(s).`,false);
+});
+
+// One frame's thumbnail, from wherever it can be found: the saved sprite's own render
+// (SF.cells, once #spframes has loaded it) if there is one, otherwise cropped live off
+// the sheet image at natural resolution -- drawImage's source rect always reads the
+// image's intrinsic pixels, so this is exact regardless of how #shimg is scaled up for
+// display (shSetDisplaySize).
+function spFrameThumb(fi){
+  if(SF.cells&&SF.cells[fi]) return SF.cells[fi].img;
+  const f=SH.frames[fi];
+  if(f&&SH.sheet){
+    const c=document.createElement('canvas'); c.width=f.w; c.height=f.h;
+    const g=c.getContext('2d'); g.imageSmoothingEnabled=false;
+    g.drawImage($('#shimg'), f.x,f.y,f.w,f.h, 0,0,f.w,f.h);
+    return c.toDataURL();
+  }
+  return '';
+}
+
+function renderClipFrames(){
+  const box=$('#clipframes'), withDur=$('#clipdur').checked;
+  box.innerHTML='';
+  if(!CLIP.frames.length){
+    box.innerHTML='<small class="dim">No frames yet.</small>';
+    return;
+  }
+  if(withDur&&!CLIP.durations) CLIP.durations=CLIP.frames.map(()=>1);
+  CLIP.frames.forEach((fi,pos)=>{
+    const chip=document.createElement('div');
+    chip.className='clipchip';
+    chip.draggable=true;
+    chip.title=`frame ${fi} — drag to reorder`;
+    chip.innerHTML=`<img src="${spFrameThumb(fi)}" alt=""><b>${fi}</b>`
+      +(withDur?`<input type="number" class="clipdurinput" min="1" max="255"
+                  value="${CLIP.durations[pos]}">`:'')
+      +`<i class="clipx" title="remove">×</i>`;
+    // Reordering an existing chip and dropping a new frame in both land here -- the
+    // payload tells them apart (`reorder`: a position already in CLIP.frames, `frame`:
+    // a frame index arriving for the first time).
+    chip.addEventListener('dragstart',ev=>{
+      ev.dataTransfer.setData('text/plain', JSON.stringify({reorder:pos}));
+      ev.dataTransfer.effectAllowed='move';
+    });
+    chip.addEventListener('dragover',ev=>ev.preventDefault());
+    chip.addEventListener('drop',ev=>{
+      ev.preventDefault(); ev.stopPropagation();
+      clipDropAt(ev,pos);
+    });
+    chip.querySelector('.clipx').onclick=()=>{
+      CLIP.frames.splice(pos,1);
+      if(CLIP.durations) CLIP.durations.splice(pos,1);
+      renderClipFrames();
+    };
+    const durInput=chip.querySelector('.clipdurinput');
+    if(durInput) durInput.addEventListener('change',()=>{
+      CLIP.durations[pos]=Math.max(1,Math.min(255,+durInput.value||1));
+    });
+    box.appendChild(chip);
+  });
+}
+
+function clipDropAt(ev,pos){
+  const raw=ev.dataTransfer.getData('text/plain');
+  if(!raw) return;
+  let payload;
+  try{ payload=JSON.parse(raw) }catch{ return }
+  if(payload.reorder!=null){
+    if(payload.reorder===pos) return;
+    const [moved]=CLIP.frames.splice(payload.reorder,1);
+    let dest=pos; if(payload.reorder<pos) dest-=1;
+    CLIP.frames.splice(dest,0,moved);
+    if(CLIP.durations){
+      const [d]=CLIP.durations.splice(payload.reorder,1);
+      CLIP.durations.splice(dest,0,d);
+    }
+  }else if(payload.frame!=null){
+    CLIP.frames.splice(pos,0,payload.frame);
+    if(CLIP.durations) CLIP.durations.splice(pos,0,1);
+  }
+  renderClipFrames();
+}
+
+$('#clipdrop').addEventListener('dragover',ev=>{
+  ev.preventDefault();
+  $('#clipdrop').classList.add('over');
+});
+$('#clipdrop').addEventListener('dragleave',()=>$('#clipdrop').classList.remove('over'));
+$('#clipdrop').addEventListener('drop',ev=>{
+  ev.preventDefault();
+  $('#clipdrop').classList.remove('over');
+  clipDropAt(ev, CLIP.frames.length);          // dropped on empty space -- append
+});
+
+$('#clipdur').addEventListener('change',()=>{
+  if($('#clipdur').checked&&!CLIP.durations) CLIP.durations=CLIP.frames.map(()=>1);
+  if(!$('#clipdur').checked) CLIP.durations=null;
+  renderClipFrames();
+});
+
+$('#clipsave').onclick=()=>{
+  const name=$('#clipname').value.trim();
+  if(!name){ clipLog('Name the clip first.',true); return }
+  if(!/^[a-z][a-z0-9_]*$/.test(name)){
+    clipLog('Clip name must be lowercase letters, digits and underscores.',true); return;
+  }
+  if(!CLIP.frames.length){ clipLog('Drag at least one frame in first.',true); return }
+  const poseNames=$('#spanim').value.split(',').map(s=>s.trim()).filter(Boolean);
+  if(poseNames.includes(name)){
+    clipLog(`"${name}" is already a pose name in Anim above.`,true); return;
+  }
+  if(CLIP.name&&CLIP.name!==name) delete CLIPS[CLIP.name];  // renamed: drop the old key
+  CLIPS[name]={frames:CLIP.frames.slice(), fps:Math.max(1,Math.min(255,+$('#clipfps').value||8)),
+              loop:$('#cliploop').checked,
+              durations:$('#clipdur').checked?CLIP.durations.slice():null};
+  CLIP.name=name;
+  drawClipSelect();
+  $('#clipsel').value=name;
+  clipLog(`"${name}" staged — ${CLIPS[name].frames.length} frame(s). `
+    +`Press Save sprite to write it.`,false);
+};
+
+$('#clipdel').onclick=()=>{
+  const name=$('#clipsel').value||CLIP.name;
+  if(!name||!CLIPS[name]){ clipLog('Pick a clip to delete.',true); return }
+  delete CLIPS[name];
+  drawClipSelect();
+  clipReset();
+  clipLog(`"${name}" removed. Press Save sprite to write it.`,false);
 };

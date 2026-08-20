@@ -363,12 +363,18 @@ kbd{font:11px ui-monospace,monospace;background:var(--soft);color:var(--accent);
 .stats div.warn b{color:var(--bad)}
 .plate{background:var(--surface);border:1px solid var(--line);border-radius:6px;
   padding:.85rem;overflow:auto}
-/* Fonts tab. Controls left, device canvas right and sticky, so the preview stays in
-   view while a slider is dragged -- the one interaction this tab exists for. */
+/* Fonts tab (and Sprites, which shares the same shape). Controls left, device canvas
+   right and sticky, so the preview stays in view while a slider is dragged -- the one
+   interaction these tabs exist for. `position:sticky` is the actual mechanism: the
+   comment above used to claim this and nothing delivered it, so a tall left column (the
+   Sprites tab routinely has one -- Open/From sheet/Canvas/Tool/Colour/File/Declare/Anim
+   clips/Frame collision/9-slice, stacked) scrolled the working canvas away with it. Top
+   0 pins .fontview to the scrolling ancestor's own top edge (#pixel/#fonts, both
+   `overflow:auto`) for as long as .fontctl still has scroll room below it. */
 .fontgrid{display:grid;grid-template-columns:minmax(260px,320px) 1fr;gap:1.25rem;
   align-items:start}
 .fontctl section{margin-bottom:1rem}
-.fontview{display:grid;gap:1rem}
+.fontview{display:grid;gap:1rem;position:sticky;top:0}
 .fields.col{display:grid;grid-template-columns:1fr;gap:.5rem}
 .fields.col label{display:grid;grid-template-columns:5.5rem 1fr;align-items:center;
   gap:.5rem;font-size:.78rem;color:var(--dim)}
@@ -444,6 +450,34 @@ select.sw{font:11px ui-monospace,monospace}
 #keyval{font:11px ui-monospace,Menlo,monospace;color:var(--dim);min-width:6.5rem}
 #sheetwrap.picking{cursor:crosshair}
 #sheetwrap.picking img{outline:2px dashed var(--accent);outline-offset:2px}
+/* Sprites' own mask colour key -- same swatch/pick/clear shape as #keyswatch above, on
+   the sheet-import image (#shimgwrap) instead of the atlas one (#sheetwrap). */
+#spkeyswatch{width:1.1rem;height:1.1rem;border-radius:3px;border:1px solid var(--line);
+  display:inline-block}
+#spkeyswatch.none{background:repeating-conic-gradient(var(--line) 0 25%,transparent 0 50%)
+  50%/8px 8px}
+#spkeyval{font:11px ui-monospace,Menlo,monospace;color:var(--dim);min-width:6.5rem}
+#shimgwrap.picking{cursor:crosshair}
+#shimgwrap.picking img{outline:2px dashed var(--accent);outline-offset:2px}
+
+/* Anim clips: frames dragged in from #shpicked or #spframes (both draggable) land here
+   in play order. A drop zone rather than a picker list -- order IS the thing being
+   authored, and dragging is the one gesture that expresses "this order" directly. */
+.clipdrop{border:1px dashed var(--line);border-radius:6px;padding:.5rem;
+  min-height:3.4rem;transition:border-color .12s,background .12s}
+.clipdrop.over{border-color:var(--accent);background:rgba(255,255,255,.05)}
+.clipchips{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.3rem}
+.clipchip{display:flex;flex-direction:column;align-items:center;gap:2px;
+  padding:3px;border:1px solid var(--line);border-radius:4px;background:var(--surface);
+  cursor:grab;position:relative}
+.clipchip img{display:block;width:2rem;height:2rem;object-fit:contain;
+  image-rendering:pixelated;
+  background:repeating-conic-gradient(var(--soft) 0% 25%,transparent 0% 50%) 50%/6px 6px}
+.clipchip b{font-size:.62rem;color:var(--dim);font-weight:500}
+.clipchip .clipdurinput{width:2.6rem;font-size:.62rem;padding:1px 2px}
+.clipchip .clipx{position:absolute;top:-4px;right:-4px;width:14px;height:14px;
+  border-radius:50%;background:var(--bad);color:#fff;font:11px/14px ui-monospace,monospace;
+  text-align:center;cursor:pointer;box-shadow:0 0 0 1px var(--surface)}
 /* Capped and independently scrollable, in the atlas-tiles pane alongside "Tiles kept"
    and the tile editor -- a big carve should never make you scroll PAST the grid to
    reach the editor a click on it just opened. */

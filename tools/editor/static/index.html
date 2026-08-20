@@ -683,6 +683,17 @@
           <small id="shimplog" class="dim"></small>
           <label>Sheet<select id="shsheet"></select></label>
 
+          <!-- Mask colour -- the background a Pebble sprite draws transparent, same
+               job atlas's own #keypick does (colorkey, tools/pnx_assets.py's
+               to_gcolor8). Picked off the sheet rather than typed, and for the same
+               reason: the value that matters is the one actually in the file. -->
+          <label class="keypick">Mask colour
+            <button id="spkeypick" title="click, then click the sheet">⌖ pick</button>
+            <i id="spkeyswatch" class="none"></i>
+            <span id="spkeyval">none</span>
+            <button id="spkeynone" title="no colour key">clear</button>
+          </label>
+
           <div class="row" style="margin:.5rem 0">
             <button id="shmodegrid" class="act on" title="the sheet IS laid out on a grid"
               ><em>Grid</em></button>
@@ -815,6 +826,32 @@
                These rects come from the declaration, so every layout opens alike. -->
           <div id="spframes" class="cells" style="margin-top:.5rem"></div>
           <small id="spframelog" class="dim">Pick a sprite to open its frames.</small>
+        </section>
+
+        <!-- Anim clips: pnx_assets.py's parse_sprite_anim second and third anim forms
+             (a bare `name = [...]` list, or a `name = { frames=..., fps=..., loop=...,
+             durations=... }` table) -- previously authorable only by hand-editing the
+             manifest, since #spanim above can only ever name one pose per frame
+             position. Built and staged here client-side, the same way #spanim and the
+             sheet picks above are: nothing is written until Save sprite is pressed. -->
+        <section><h2>Anim clips</h2>
+          <div class="fields col">
+            <label>Clip<select id="clipsel"><option value="">— new —</option></select></label>
+            <label>Name<input id="clipname" placeholder="walk" size="10"></label>
+            <label>FPS<input id="clipfps" type="number" value="8" min="1" max="255"></label>
+            <label class="check"><input id="cliploop" type="checkbox" checked> Loop</label>
+            <label class="check"><input id="clipdur" type="checkbox"> Per-frame timing</label>
+          </div>
+          <small class="dim">Drag frames in from the sheet picks above or the frames
+            grid above, in play order. Drag a frame already here to reorder it.</small>
+          <div id="clipdrop" class="clipdrop">
+            <div id="clipframes" class="clipchips"></div>
+          </div>
+          <div class="row" style="margin-top:.4rem">
+            <button id="clipsave" class="primary">Save clip</button>
+            <button id="clipdel">Delete clip</button>
+          </div>
+          <small id="cliplog" class="dim">—</small>
         </section>
 
         <!-- Per-frame collision -- a frame's own SCALED rect or COMPLEX mask, the same

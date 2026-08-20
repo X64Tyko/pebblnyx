@@ -1449,7 +1449,12 @@ function spVariantName(path){
 
 $('#spsel').onchange=()=>{
   const name=$('#spsel').value;
-  if(!name){ spLog(''); return }
+  if(!name){
+    spLog('');
+    SPKEY=null; spKeyLabel();
+    spLoadClips({});
+    return;
+  }
   const s=(S.data.sprites||[]).find(x=>x.name===name);
   if(!s) return;
   $('#spname').value=s.name;
@@ -1457,9 +1462,11 @@ $('#spsel').onchange=()=>{
   const f=s.frames||[];
   $('#spfw').value=s.w||16; $('#spfh').value=s.h||24; $('#spn').value=f.length||1;
   const stacked=f.every((r,i)=>r[0]===0&&r[1]===i*(s.h||0)&&r[2]===s.w&&r[3]===s.h);
-  // The anim map is name -> frame index; the box takes them in frame order.
+  // The anim map mixes poses (name -> int) and clips (name -> list/table,
+  // pnx_assets.py's parse_sprite_anim); the box above takes only the poses, in frame
+  // order, and the clip builder (sprites.js) takes the rest.
   const byIndex=[];
-  for(const [k,v] of Object.entries(s.anim||{})) byIndex[v]=k;
+  for(const [k,v] of Object.entries(s.anim||{})) if(typeof v==='number') byIndex[v]=k;
   $('#spanim').value=byIndex.filter(Boolean).join(',');
   spLog(stacked?'':'frames are not a vertical stack — saving will rewrite them as one',
         stacked?null:true);
@@ -1467,6 +1474,8 @@ $('#spsel').onchange=()=>{
   bw.innerHTML='<option value="">— base —</option>'
     +names.map(n=>`<option${n===s.bw_variant?' selected':''}>${n}</option>`).join('');
   bw.disabled=!names.length;
+  SPKEY=s.colorkey||null; spKeyLabel();
+  spLoadClips(s.anim);
   spShowFrames(name);
 };
 
@@ -1492,7 +1501,16 @@ async function spShowFrames(name){
     const b=document.createElement('button');
     b.className='cell'+(c.blank?' blank':'');
     b.style.position='relative';
-    b.title=`frame ${c.i} — ${c.w}x${c.h} at ${c.x},${c.y}\nclick to edit it`;
+    b.title=`frame ${c.i} — ${c.w}x${c.h} at ${c.x},${c.y}\nclick to edit it, `
+      +`drag into a clip below`;
+    // A clip drop target (sprites.js) reads this the same way #shpicked's own tiles do
+    // -- this sprite's already-saved frame order IS the index space a clip's `frames`
+    // array indexes into.
+    b.draggable=true;
+    b.addEventListener('dragstart',ev=>{
+      ev.dataTransfer.setData('text/plain', JSON.stringify({frame:c.i}));
+      ev.dataTransfer.effectAllowed='copy';
+    });
     const col=c.collision||{mode:0};
     // A small badge, not part of the button's own click target -- clicking the frame
     // still opens it for pixel editing; the badge is the separate door into its
@@ -1548,20 +1566,36 @@ $('#spsave').onclick=async()=>{
   if(!sheet){ spLog('No PNG in the project to point at. Paint and save one first.',true);
               return }
   const names=$('#spanim').value.split(',').map(s=>s.trim()).filter(Boolean);
+  // A clip built in the builder below (sprites.js's CLIPS) is staged client-side exactly
+  // like these pose names are, so both land in the SAME `anim` dict here -- the one and
+  // only place project/sprites.py's save_sprite writes [sprite.anim] from, poses and
+  // clips alike (no more silently "preserving" hand-authored clips behind the editor's
+  // back: it can now represent every shape parse_sprite_anim accepts, so whatever it
+  // sends IS the full, intended set).
+  const overlap=names.filter(n=>CLIPS[n]);
+  if(overlap.length){
+    spLog(`"${overlap[0]}" is named as both a pose (Anim, above) and a clip (Anim `
+      +`clips, below) -- rename one.`,true);
+    return;
+  }
   const anim={};
   names.forEach((n,i)=>{ anim[n]=i });
+  for(const [k,v] of Object.entries(CLIPS))
+    anim[k]={frames:v.frames.slice(), fps:v.fps, loop:v.loop,
+             durations:v.durations?v.durations.slice():null};
 
   const frames=spFrames();
   // Frames picked off the sheet win over the vertical stack, and they carry their own
   // sheet with them: picking poses out of one file and declaring them against another
   // would validate and then draw the wrong art.
   const useSheet=SH.frames.length?SH.sheet:sheet;
-  // variants/colorkey have no edit control of their own in this panel -- carried through
-  // from what is already declared so saving a name/frame change does not silently drop
-  // them. bw_variant DOES have a control (#spbw), and depends on variants surviving this.
+  // variants has no edit control of its own in this panel -- carried through from what
+  // is already declared so saving a name/frame change does not silently drop it.
+  // bw_variant DOES have a control (#spbw), and depends on variants surviving this.
+  // colorkey DOES have a control now too (#spkeypick, sprites.js's SPKEY).
   const existing=(S.data.sprites||[]).find(x=>x.name===$('#spsel').value)||{};
   const variants=existing.variants||[];
-  const colorkey=existing.colorkey||null;
+  const colorkey=SPKEY;
   const bwVariant=$('#spbw').value||null;
   // Validated through the real pack_sprite before anything is written, the same way an
   // atlas carve is: a frame running off the sheet used to go into the manifest and only
