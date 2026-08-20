@@ -112,6 +112,16 @@
   </div>
 <main>
   <aside id="side">
+    <!-- Which WorldTile plane a click paints into. Background-to-foreground, file
+         order -- the same order the manifest's [[map.layer]] entries compile in. The one
+         a click lands on stays full-strength on the canvas; the rest dim, so their shape
+         is still there to line up against without being mistaken for what's active. -->
+    <section><h2>Layers</h2><div id="layers"></div>
+      <div class="mini">
+        <button id="addlayer" title="add a new, blank layer above this map's others"
+                >+ Layer</button>
+      </div>
+    </section>
     <section><h2>Paint</h2><div class="tiles" id="legend"></div>
       <small id="painthint">Click to paint. <kbd>W</kbd> sets a warp, <kbd>S</kbd> the
       start.</small>
@@ -455,8 +465,16 @@
                (Web Audio, not the device's own synth), not exact -- see
                audio-preview.js's own comment for what it doesn't reproduce. -->
           <button id="mplay" title="play this pattern through the approximate preview synth">▶ Play pattern</button>
+          <!-- Same pattern data, two views: the grid is a cell per row/channel typed as
+               text, the roll is note blocks on a pitch/time canvas -- better for
+               melodic entry. Toggling never touches what gets saved. -->
+          <span class="viewtoggle">
+            <button id="mviewgrid" class="on" title="tracker grid">Grid</button>
+            <button id="mviewpiano" title="piano roll">Piano</button>
+          </span>
         </div>
         <div id="mrows" class="tracker"></div>
+        <div id="mrollwrap" style="display:none"><canvas id="mroll"></canvas></div>
         <div class="mini"><span id="mpatlog" class="dim"></span></div>
         <small class="dim" style="display:block;max-width:34ch;margin:.5rem 0 1.2rem">
           Type on the piano row to enter notes — <kbd>z</kbd>…<kbd>m</kbd> naturals,

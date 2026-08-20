@@ -2868,6 +2868,154 @@ source = "maps/gone.pnxmap"
               not builds(missing, root, "out_s12"))
 
 
+def check_map_layers():
+    """Multi-layer map authoring: `[[map.layer]]` sub-tables compile to the PnxMapLayer
+    plumbing the runtime has carried since M13, wired through the pipeline for the first
+    time (finish_map/parse_map used to hard-refuse anything but layer_count == 1). The
+    claim worth testing is not "it builds" -- it is that both layers round-trip
+    independently (own cells, own parallax/wrap) while start/warps/reachability stay a
+    PRIMARY-layer-only concept, exactly as PnxMapLayer's own comment states, and that a
+    manifest with no `[[map.layer]]` at all still builds byte-shape-identical to before.
+    """
+    global checks, failures
+
+    layered_maps = f'''
+        [[map]]
+        name = "a"
+        out = "a.bin"
+
+        [[map.layer]]
+        primary = true
+        start = [2, 1]
+        warps = [{{ at = [1, 2], to = ["b", 1, 1] }}]
+        rows = """{BASE_MAP}"""
+
+        [[map.layer]]
+        parallax_pct = 128
+        wrap = true
+        rows = """{BASE_MAP}"""
+
+        [[map]]
+        name = "b"
+        out = "b.bin"
+        start = [1, 1]
+        warps = []
+        rows = """{BASE_MAP}"""
+    '''
+
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        built = build_maps(root, maps=layered_maps)
+        mp = built["a.bin"]
+
+        checks += 1
+        if mp["layer_count"] != 2 or mp["primary_layer"] != 0 or len(mp["layers"]) != 2:
+            print(f"  FAIL map a: expected 2 layers, primary 0, got layer_count="
+                  f"{mp['layer_count']} primary={mp['primary_layer']} "
+                  f"len(layers)={len(mp['layers'])}")
+            failures += 1
+
+        # Both layers were painted from the SAME rows, so their cell planes should match
+        # -- a real check that the second layer's own cells were sliced and reassembled
+        # at all, not a coincidence of one layer's data leaking into the other's slot.
+        checks += 1
+        if mp["layers"][0]["cells"] != mp["layers"][1]["cells"]:
+            print("  FAIL map a: both layers painted from the same rows should match")
+            failures += 1
+
+        checks += 1
+        got = (mp["layers"][1]["parallax_pct"], mp["layers"][1]["wrap"])
+        if got != (128, True):
+            print(f"  FAIL map a: layer 1 parallax/wrap did not round-trip, got {got}")
+            failures += 1
+
+        checks += 1
+        got = (mp["layers"][0]["parallax_pct"], mp["layers"][0]["wrap"])
+        if got != (255, False):
+            print(f"  FAIL map a: layer 0 (primary) should default to world parallax, "
+                  f"no wrap, got {got}")
+            failures += 1
+
+        # Top-level mirror: everything a caller written before multi-layer maps existed
+        # reads is the PRIMARY layer's own data, unchanged in shape.
+        checks += 1
+        if mp["cells"] != mp["layers"][0]["cells"] or mp["w"] != mp["layers"][0]["w"]:
+            print("  FAIL map a: top-level w/cells should mirror the primary layer")
+            failures += 1
+
+    # No [[map.layer]] at all must still build layer_count 1 -- the whole back-compat
+    # promise for every manifest that predates this.
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        built = build_maps(root)
+        mp = built["a.bin"]
+        checks += 1
+        if mp["layer_count"] != 1 or mp["primary_layer"] != 0 or len(mp["layers"]) != 1:
+            print(f"  FAIL default manifest: expected layer_count=1, got "
+                  f"{mp['layer_count']}")
+            failures += 1
+
+    # Rotation touches every layer, not just the primary -- both must come out actually
+    # turned, and independently (a bug that rotated only the primary, or copied one
+    # layer's rotated cells onto the other, would still pass a check that only looked at
+    # layer 0).
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        portrait = build_maps(root, maps=layered_maps)["a.bin"]
+        out = build_at(root, "buttons_top", maps=layered_maps)
+        blob = read_blob(out, "a.bin")
+        banks, i = [], 0
+        while os.path.exists(os.path.join(out, f"a_b{i}.bin")):
+            banks.append(read_blob(out, f"a_b{i}.bin"))
+            i += 1
+        rotated = pnx_assets.parse_map(blob, banks)
+
+        checks += 1
+        if len(rotated["layers"]) != 2:
+            print(f"  FAIL rotated map a: expected 2 layers, got {len(rotated['layers'])}")
+            failures += 1
+
+        checks += 1
+        if (rotated["layers"][0]["cells"] == portrait["layers"][0]["cells"]
+                or rotated["layers"][1]["cells"] == portrait["layers"][1]["cells"]):
+            print("  FAIL rotated map a: cells look unrotated")
+            failures += 1
+
+        checks += 1
+        if rotated["layers"][0]["cells"] != rotated["layers"][1]["cells"]:
+            print("  FAIL rotated map a: both layers painted identically should still "
+                  "match after rotation")
+            failures += 1
+
+    expect_fail(
+        "a map declaring both [[map.layer]] and a top-level rows",
+        "belong on a layer",
+        maps=f'''
+            [[map]]
+            name = "a"
+            out = "a.bin"
+            rows = """{BASE_MAP}"""
+            [[map.layer]]
+            primary = true
+            start = [2, 1]
+            warps = []
+            rows = """{BASE_MAP}"""
+        ''')
+
+    expect_fail(
+        "a [[map.layer]] with neither rows nor source",
+        "no cells",
+        maps='''
+            [[map]]
+            name = "a"
+            out = "a.bin"
+            [[map.layer]]
+            primary = true
+            start = [2, 1]
+            warps = []
+        ''')
+
+
 def check_editor_map_migration():
     """Moving a `rows` map into its own file, through the editor."""
     with tempfile.TemporaryDirectory() as root:
@@ -2939,6 +3087,92 @@ rows = """
         check("a new map is authored as a file", got["fresh"]["format"] == "source")
         check("and text is still available", got["oldstyle"]["format"] == "rows")
         check("both build", builds(proj.path, root, "out_mig2"))
+
+
+def check_editor_map_layers():
+    """Adding, painting, and removing layers through the editor -- the UI surface for
+    what check_map_layers already proved the pipeline can build. The claim worth testing
+    is the round trip: add a layer, paint each format it can be authored in, remove one,
+    and the manifest still builds at every step.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root, maps=f'''
+            [[map]]
+            name = "a"
+            out = "a.bin"
+            start = [2, 1]
+            warps = [{{ at = [1, 2], to = ["b", 1, 1] }}]
+            rows = """{BASE_MAP}"""
+
+            [[map]]
+            name = "b"
+            out = "b.bin"
+            start = [1, 1]
+            warps = []
+            rows = """{BASE_MAP}"""
+        ''')
+
+        before = {m["name"]: m for m in proj.maps()}["a"]
+        check("a fresh map has one layer", len(before["layers"]) == 1)
+
+        proj.add_map_layer("a")
+        got = {m["name"]: m for m in proj.maps()}["a"]
+        check("adding a layer makes the plane explicit and adds one",
+              len(got["layers"]) == 2)
+        check("the primary layer kept its cells", got["layers"][got["primary"]]["cells"]
+              == before["cells"])
+        check("the primary layer kept start/warps",
+              (got["layers"][got["primary"]]["start"],
+               [w["to"][0] for w in got["layers"][got["primary"]]["warps"]])
+              == (before["start"], ["b"]))
+        check("the new layer is .pnxmap-backed", got["layers"][1]["format"] == "source")
+        check("the new layer is blank floor",
+              set(got["layers"][1]["cells"]) == {0})
+        check("still builds with 2 layers", builds(proj.path, root, "out_lay1"))
+
+        proj.add_map_layer("a")
+        got = {m["name"]: m for m in proj.maps()}["a"]
+        check("adding a second layer makes 3", len(got["layers"]) == 3)
+        check("still builds with 3 layers", builds(proj.path, root, "out_lay2"))
+
+        # Paint the primary (rows-backed) layer: a save through its own [[map.layer]]
+        # sub-table, not the map-level rows this map no longer has.
+        new_rows = ["####", "#DD#", "#..#", "####"]
+        proj.save_map_layer_rows("a", got["primary"], new_rows, [1, 2], [])
+        got2 = {m["name"]: m for m in proj.maps()}["a"]
+        check("painting the primary rows layer changes its cells",
+              got2["layers"][got2["primary"]]["cells"] != got["layers"][got["primary"]]["cells"])
+        check("and start moved with it", got2["layers"][got2["primary"]]["start"] == [1, 2])
+
+        # Paint a non-primary (.pnxmap-backed) layer directly.
+        layer1 = got2["layers"][1]
+        cells = list(layer1["cells"])
+        cells[0] = 0
+        proj.save_map_layer_source("a", 1, layer1["w"], layer1["h"], cells,
+                                   layer1["tiles"])
+        got3 = {m["name"]: m for m in proj.maps()}["a"]
+        check("painting a non-primary source layer changes its file",
+              got3["layers"][1]["cells"] == cells)
+        check("still builds after painting both formats", builds(proj.path, root, "out_lay3"))
+
+        try:
+            proj.remove_map_layer("a", got3["primary"])
+            check("removing the primary layer is refused", False)
+        except ValueError:
+            check("removing the primary layer is refused", True)
+
+        proj.remove_map_layer("a", 2)
+        got4 = {m["name"]: m for m in proj.maps()}["a"]
+        check("removing a non-primary layer drops it", len(got4["layers"]) == 2)
+        check("still builds after removing a layer", builds(proj.path, root, "out_lay4"))
+
+        try:
+            proj.remove_map_layer("a", 1)
+            proj.remove_map_layer("a", 0)
+            check("removing a map's last layer is refused", False)
+        except ValueError:
+            check("removing a map's last layer is refused", True)
 
 
 def check_editor_sheet_frames():
@@ -4171,7 +4405,9 @@ def main():
     check_editor_nine_slice()
     check_mapfile_format()
     check_source_maps()
+    check_map_layers()
     check_editor_map_migration()
+    check_editor_map_layers()
     check_editor_sheet_frames()
     check_editor_dialog()
     check_editor_map_props()

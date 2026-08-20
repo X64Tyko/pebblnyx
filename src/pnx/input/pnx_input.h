@@ -96,4 +96,33 @@ int8_t pnx_input_axis(void);
 // frame at either end wins over a button merely still held at the other.
 int8_t pnx_input_axis_pressed(void);
 
+// --------------------------------------------------------------------------- touch
+//
+// Every game that reads PNX_EVENT_TOUCH_* itself ends up hand-rolling one of two things:
+// a bare "tap to confirm" (title/menu screens) or a tap-vs-drag state machine with a dead
+// zone (resonant/src/c/field.c, before this existed). Both live here now, built on the
+// same edge/level shapes pnx_input already uses for buttons.
+//
+// A touch is a DRAG once it has moved PNX_INPUT_DRAG_DEAD screen pixels from where it
+// went down (pnx_config.h), and a TAP if it comes back up before that -- never both, so a
+// screen that only wants confirm-on-tap does not also have to filter out drag releases.
+
+bool pnx_input_touch_held(void); // a finger is down right now
+
+// Went down and came back up again THIS FRAME without leaving the dead zone. Cleared at
+// the top of the next pnx_input_frame(), same as pnx_input_pressed/released.
+bool pnx_input_touch_tapped(void);
+
+// Last known touch position -- wherever it currently is while held, or where it was last
+// seen once released. Meaningless before the first touch of a session.
+int16_t pnx_input_touch_x(void);
+int16_t pnx_input_touch_y(void);
+
+// -1, 0 or +1 along whichever axis the drag is dominant on, live for as long as the touch
+// stays down past the dead zone -- the touch counterpart of pnx_input_axis(), and what
+// field.c's own dx/dy-sign logic collapsed into once it moved here. Both read 0 before the
+// dead zone is crossed and the instant the touch releases.
+int8_t pnx_input_drag_dx(void);
+int8_t pnx_input_drag_dy(void);
+
 #endif // PNX_USE_INPUT

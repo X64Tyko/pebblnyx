@@ -19,10 +19,12 @@ function say(text,bad){
 // the palette shows a tile the manifest does not have.
 async function reload(){
   const keep=S.map&&S.map.name, dirty=S.dirty;
-  // Cells, not rows: painting writes the cell grid now, so preserving `rows` across a
-  // reload would restore the state the map had before the last brush stroke.
-  const cells=S.map&&S.map.cells, tiles=S.map&&S.map.tiles;
-  const start=S.map&&S.map.start, warps=S.map&&S.map.warps;
+  // Layers, not rows: painting writes the cell grid now, so preserving `rows` across a
+  // reload would restore the state the map had before the last brush stroke. Preserved
+  // per LAYER, not only the active one -- painting one, switching to another and
+  // painting that too, all before Save, has to survive a reload the same way a single
+  // layer's edit always did.
+  const layers=S.map&&S.map.layers, activeLayer=S.activeLayer;
   const sets=S.map&&S.map.atlases;
   S.data=await (await fetch('/api/state')).json();
   const i=Math.max(0,S.data.maps.findIndex(m=>m.name===keep));
@@ -31,16 +33,25 @@ async function reload(){
   // Unsaved painting survives the round trip. Reloading state to pick up one new legend
   // character would otherwise throw away every edit made since the last save, which is
   // the kind of loss that teaches people not to touch a feature.
-  if(dirty&&cells&&haveMap()){
-    // The tile table is merged rather than replaced: a character just minted through the
-    // picker arrives from the server as a NEW entry, and dropping the server's copy would
-    // throw the new tile away the moment it was added.
-    if(tiles&&S.map.tiles&&S.map.tiles.length>=tiles.length) {
-      tiles.forEach((old,i)=>{ if(S.map.tiles[i]) Object.assign(S.map.tiles[i],old) });
-    }
-    S.map.cells=cells; S.map.start=start; S.map.warps=warps;
+  if(dirty&&layers&&haveMap()&&layers.length===S.map.layers.length){
+    layers.forEach((old,li)=>{
+      const cur=S.map.layers[li];
+      if(!cur) return;
+      // The tile table is merged rather than replaced: a character just minted through
+      // the picker arrives from the server as a NEW entry, and dropping the server's
+      // copy would throw the new tile away the moment it was added.
+      if(old.tiles&&cur.tiles&&cur.tiles.length>=old.tiles.length){
+        old.tiles.forEach((ot,ti)=>{ if(cur.tiles[ti]) Object.assign(cur.tiles[ti],ot) });
+      }
+      cur.cells=old.cells;
+      if(old.start) cur.start=old.start;
+      if(old.warps) cur.warps=old.warps;
+    });
+    const primary=S.map.layers[S.map.primary];
+    S.map.cells=primary.cells; S.map.start=primary.start; S.map.warps=primary.warps;
     if(sets){ S.map.atlases=sets; S.map.atlas=sets[0] }
-    S.dirty=true; mark(); drawLegend(); draw(); info();
+    S.activeLayer=(activeLayer!=null&&S.map.layers[activeLayer])?activeLayer:S.map.primary;
+    S.dirty=true; mark(); drawLegend(); draw(); info(); drawLayers();
   }
 }
 
@@ -151,19 +162,39 @@ function flipCss(flip,rotate){
   return `transform:scale(${sx},${sy})${rotate?' matrix(0,1,1,0,0,0)':''}`;
 }
 
+// Loaded per LAYER, not once per map: every layer has its own tile table, so the same
+// numeric index means different art in each -- S.img[li][ti]. Called for every layer at
+// select time (draw() composites all of them) and again for the active one whenever
+// drawLegend rebuilds its palette; already-loading entries are left alone.
+function loadLayerImages(li){
+  const layer=S.map&&S.map.layers&&S.map.layers[li];
+  if(!layer) return;
+  S.img=S.img||[];
+  if(!S.img[li]) S.img[li]={};
+  (layer.tiles||[]).forEach((t,i)=>{
+    if(S.img[li][i]) return;
+    const r=resolveTile(t);
+    if(!r) return;
+    const img=new Image(); img.src=r.uri; S.img[li][i]=img;
+    img.onload=draw;
+  });
+}
+
 function drawLegend(){
-  const el=$('#legend'); el.innerHTML=''; S.img={};
+  const el=$('#legend'); el.innerHTML='';
+  const li=S.activeLayer, layer=AL();
+  S.img=S.img||[]; S.img[li]={};
   const list=mapAtlases();
   if(!list.length){ el.innerHTML='<small>No atlas built yet — press Build.</small>'; return }
 
-  // The palette is the map's TILE TABLE, not the project legend -- which is what lets one
-  // canvas draw both authoring formats. A `rows` map's entries carry the character they
-  // came from and show it; a `.pnxmap`'s show their index, because there is no character
-  // and above ~90 tiles there could not be one.
+  // The palette is the ACTIVE LAYER's tile table, not the project legend -- which is what
+  // lets one canvas draw both authoring formats. A `rows` layer's entries carry the
+  // character they came from and show it; a `.pnxmap`'s show their index, because there
+  // is no character and above ~90 tiles there could not be one.
   //
   // Grouped by atlas, because with several tilesets in one map an ungrouped strip is just
   // a pile: which tileset a tile came from is the thing you are choosing between.
-  const tiles=(S.map&&S.map.tiles)||[];
+  const tiles=(layer&&layer.tiles)||[];
   const usable=[], missing=[];
   tiles.forEach((t,i)=>{ (resolveTile(t)?usable:missing).push(i) });
   const groups=new Map(list.map(a=>[a.name,[]]));
@@ -185,7 +216,7 @@ function drawLegend(){
     }
     for(const i of members){
       const t=tiles[i], r=resolveTile(t);
-      const img=new Image(); img.src=r.uri; S.img[i]=img;
+      const img=new Image(); img.src=r.uri; S.img[li][i]=img;
       img.onload=draw;
 
       const label=t.ch!==undefined?t.ch:String(i);
@@ -206,7 +237,7 @@ function drawLegend(){
   // across a change that makes `ch` wrong -- converting a map to a file keeps index 1 and
   // takes its character away -- and a leftover `ch` sends the tile panel down the legend
   // path for a map that has no legend.
-  if(!usable.length||S.img[S.ti]===undefined) selectTile(usable.length?usable[0]:null,true);
+  if(!usable.length||S.img[li][S.ti]===undefined) selectTile(usable.length?usable[0]:null,true);
   else selectTile(S.ti,true);
 
   $('#painthint').innerHTML = missing.length
@@ -222,7 +253,8 @@ function drawLegend(){
 // selected.
 function selectTile(i,quiet){
   S.ti=i;
-  const t=(S.map&&S.map.tiles&&i!=null)?S.map.tiles[i]:null;
+  const layer=AL();
+  const t=(layer&&layer.tiles&&i!=null)?layer.tiles[i]:null;
   S.ch=(t&&t.ch!==undefined)?t.ch:null;
   if(quiet) return;
   S.mode='paint'; drawLegend(); tool(); tileInfo();
@@ -272,7 +304,7 @@ function flagMark(flags){
 // character to run out of.
 function tileInfoSource(){
   const box=$('#tileinfo');
-  const t=S.map.tiles[S.ti], r=resolveTile(t);
+  const t=AL().tiles[S.ti], r=resolveTile(t);
   if(!r){ box.innerHTML='<small class="dim">no tile selected</small>'; return }
   const known=S.data.flags||{solid:1,warp:2};
   box.innerHTML='';
@@ -335,16 +367,17 @@ function tileInfoSource(){
 
   const foot=document.createElement('small');
   foot.className='dim';
-  foot.textContent='this map only — saved into '+(S.map.source||'its map file');
+  foot.textContent='this layer only — saved into '+(AL().source||'its map file');
   box.appendChild(foot);
 }
 
 function tileInfo(){
   const box=$('#tileinfo'), ch=S.ch;
   // A `.pnxmap` has no legend characters, so its tiles are edited on the table entry
-  // itself and saved with the map. A `rows` map keeps going through the legend, because
-  // there the character IS the thing and it is shared with other maps.
-  if(S.ti!=null && !ch && S.map && S.map.format==='source'){ tileInfoSource(); return }
+  // itself and saved with the map. A `rows` layer keeps going through the legend,
+  // because there the character IS the thing and it is shared with other maps. Format is
+  // the ACTIVE LAYER's own -- a map can mix a `rows` primary with a `.pnxmap` overlay.
+  if(S.ti!=null && !ch && AL() && AL().format==='source'){ tileInfoSource(); return }
 
   const r=ch?resolve(ch):null;
   if(!r){ box.innerHTML='<small class="dim">no tile selected</small>'; return }
@@ -468,7 +501,7 @@ async function writeLegend(ch,changes){
   const res=await post('/api/legend',body);
   if(!res.ok){ say(res.error); tileInfo(); return }
   await reload();
-  const at=(S.map.tiles||[]).findIndex(t=>t.ch===ch);
+  const at=((AL()&&AL().tiles)||[]).findIndex(t=>t.ch===ch);
   selectTile(at>=0?at:S.ti, true);
   drawLegend(); draw();
 }
@@ -627,7 +660,7 @@ async function bindTile(name,index,flip,rotate,bound){
   if(bound){
     // Already in this map's table: select it rather than adding a second entry for the
     // same tile, which would paint identically and read as a duplicate in the palette.
-    const at=(S.map.tiles||[]).findIndex(t=>t.ch===bound);
+    const at=((AL()&&AL().tiles)||[]).findIndex(t=>t.ch===bound);
     selectTile(at>=0?at:S.ti); drawTilePicker(); return;
   }
 
@@ -647,8 +680,9 @@ async function bindTile(name,index,flip,rotate,bound){
      map:S.map.name});
   if(!r.ok){ say(r.error); return }
   await reload();
-  // The new character arrives in the map's tile table via reload(); select it there.
-  const at=(S.map.tiles||[]).findIndex(t=>t.ch===ch);
+  // The new character arrives in the active layer's tile table via reload(); select it
+  // there.
+  const at=((AL()&&AL().tiles)||[]).findIndex(t=>t.ch===ch);
   selectTile(at>=0?at:null);
   drawTilePicker();
   say(`${ch} now paints tile ${index} of ${name}.`);
@@ -868,8 +902,9 @@ function paintBudget(e){
     (worst.warn?'#a8701f':'var(--accent)');
 }
 function tool(){
-  const lbl=(S.map&&S.map.tiles&&S.ti!=null&&S.map.tiles[S.ti])
-    ?(S.map.tiles[S.ti].ch!==undefined?S.map.tiles[S.ti].ch:'#'+S.ti):'—';
+  const layer=AL();
+  const lbl=(layer&&layer.tiles&&S.ti!=null&&layer.tiles[S.ti])
+    ?(layer.tiles[S.ti].ch!==undefined?layer.tiles[S.ti].ch:'#'+S.ti):'—';
   $('#tool').innerHTML=S.mode==='paint'?`painting <kbd>${lbl}</kbd>`:
     S.mode==='warp'?'<kbd>click a door to add/remove a warp</kbd>':'<kbd>click to set start</kbd>';
 }
@@ -885,15 +920,35 @@ function selectMap(i){
   // are the same key spelled for one tileset or many.
   if(!S.map.atlases||!S.map.atlases.length)
     S.map.atlases=S.map.atlas?[S.map.atlas]:[];
+  // Same normalisation for `layers`: a map from before multi-layer maps existed still
+  // sends the flat shape only, so it is wrapped as a single-entry list here rather than
+  // every downstream reader having to special-case "no layers". `visible` is client-only
+  // -- a paint-time convenience, never sent back to the server.
+  if(!S.map.layers||!S.map.layers.length)
+    S.map.layers=[{w:S.map.w,h:S.map.h,cells:S.map.cells,tiles:S.map.tiles,
+                  format:S.map.format,source:S.map.source,start:S.map.start,
+                  warps:S.map.warps,parallax_pct:255,wrap:false}];
+  if(S.map.primary==null) S.map.primary=0;
+  for(const layer of S.map.layers) if(layer.visible===undefined) layer.visible=true;
+  S.activeLayer=S.map.primary;
+  // Aliased, not copied: warpForm/renderWarps push/splice S.map.warps directly, and that
+  // has to land on the SAME array save() reads off the primary layer, not a JSON-cloned
+  // twin of it that quietly stops being what gets saved.
+  S.map.start=S.map.layers[S.map.primary].start;
+  S.map.warps=S.map.layers[S.map.primary].warps;
+  // Every layer's images, not just the active one -- draw() composites all of them at
+  // once. drawLegend() (below) covers the active layer's own load a second time, which
+  // is fine: an Image whose src is already set is a no-op re-assignment.
+  S.map.layers.forEach((_,li)=>loadLayerImages(li));
   // The frame starts where the player does, which is the section an author is most
   // likely to want to look at first.
   if(!S.cam) S.cam={on:$('#camon').checked, x:0, y:0};
   const r=camRect();
   S.cam.x=Math.max(0,(S.map.start[0]+0.5)*S.T-r.w/2);
   S.cam.y=Math.max(0,(S.map.start[1]+0.5)*S.T-r.h/2);
-  for(const id of ['#tilesets','#pick','#save']) $(id).disabled=false;
+  for(const id of ['#tilesets','#pick','#save','#addlayer']) $(id).disabled=false;
   S.dirty=false; mark(); drawLegend(); renderWarps(); warpForm(null); info(); draw();
-  camInfo(); drawMapProps();
+  camInfo(); drawMapProps(); drawLayers();
 }
 // What the Maps view shows when there is nothing to show. Says which of the two things is
 // missing, because "add a map" is useless advice to a project with no tileset to draw one
@@ -903,6 +958,7 @@ function noMaps(){
   S.map=null; S.ch=null; S.ti=null; S.dirty=false; mark();
   const cv=$('#cv'); cv.width=cv.height=0;
   $('#legend').innerHTML='';
+  $('#layers').innerHTML='';
   $('#warps').innerHTML='<small>—</small>';
   $('#tileinfo').innerHTML='<small class="dim">—</small>';
   $('#mapinfo').innerHTML='<small class="dim">no maps yet</small>';
@@ -911,7 +967,7 @@ function noMaps(){
     ? 'This project has no maps. Name one below and press <b>＋ Map</b>.'
     : 'This project has no tilesets yet. Import a sheet on the <b>Atlas</b> tab, press '
       +'<b>Build</b>, then come back and add a map.';
-  for(const id of ['#tilesets','#pick','#save']) $(id).disabled=true;
+  for(const id of ['#tilesets','#pick','#save','#addlayer']) $(id).disabled=true;
   $('#tool').textContent='';
 }
 
@@ -921,6 +977,12 @@ function noMaps(){
 // `.pnxmap` has no rows at all, so testing for them would have declared every source map
 // missing and greyed out the whole tab.
 function haveMap(){ return !!(S.map && S.map.cells && S.map.cells.length) }
+
+// The layer currently being painted -- what the tile picker shows, what a click writes
+// into, what S.ti indexes. `start`/`warps` stay a PRIMARY-layer-only concept (matching
+// the pipeline's own rule, finish_compile_layer's comment in pnx_assets.py) and are read
+// off S.map.layers[S.map.primary] directly wherever they are needed, not through this.
+function AL(){ return S.map&&S.map.layers&&S.map.layers[S.activeLayer]; }
 
 $('#camon').onchange=e=>{
   if(!S.cam) S.cam={on:true,x:0,y:0};
@@ -982,6 +1044,62 @@ function info(){
     (m.warps.length?m.warps.map(w=>`warp (${w.at}) → ${w.to[0]} (${w.to[1]},${w.to[2]})`).join('<br>'):'no warps')+'</small>';
 }
 
+// The layer list: which plane a click paints into, background-to-foreground in file
+// order (the same order [[map.layer]] entries compile in). Rebuilt on every map select,
+// reload, add and remove -- it is cheap and the alternative is a stale row.
+function drawLayers(){
+  const el=$('#layers');
+  if(!el) return;
+  if(!haveMap()){ el.innerHTML=''; return }
+  const m=S.map;
+  el.innerHTML=m.layers.map((layer,li)=>{
+    const active=li===S.activeLayer;
+    const label=li===m.primary?`layer ${li} · primary`:`layer ${li}`;
+    const canRemove=m.layers.length>1&&li!==m.primary;
+    return `<div class="layerrow${active?' active':''}" data-i="${li}">
+      <label class="mini" title="show while painting another layer">
+        <input type="checkbox" class="lvis" data-i="${li}" ${layer.visible!==false?'checked':''}>
+      </label>
+      <span class="lname">${label}</span>
+      <span class="ldim dim">${layer.w}×${layer.h} · ${layer.format}</span>
+      ${canRemove?`<button class="lrm" data-i="${li}" title="remove this layer">✕</button>`:''}
+    </div>`;
+  }).join('');
+  for(const row of el.querySelectorAll('.layerrow')){
+    row.onclick=e=>{
+      if(e.target.closest('.lvis')||e.target.closest('.lrm')) return;
+      S.activeLayer=+row.dataset.i;
+      drawLegend(); draw(); tool(); drawLayers();
+    };
+  }
+  for(const cb of el.querySelectorAll('.lvis')){
+    cb.onclick=e=>e.stopPropagation();
+    cb.onchange=e=>{ m.layers[+cb.dataset.i].visible=e.target.checked; draw(); };
+  }
+  for(const b of el.querySelectorAll('.lrm')){
+    b.onclick=async e=>{
+      e.stopPropagation();
+      if(S.dirty&&!confirm('This map has unsaved changes, which removing a layer '
+        +'discards (the map reloads from what is already saved). Continue?')) return;
+      const r=await post('/api/map/layer/remove',{name:m.name,layer:+b.dataset.i});
+      if(!r.ok){ say(r.error); return }
+      S.dirty=false;
+      await reload();
+      say('Layer removed.',false);
+    };
+  }
+}
+$('#addlayer').onclick=async()=>{
+  if(!haveMap()) return;
+  if(S.dirty&&!confirm('This map has unsaved changes, which adding a layer discards '
+    +'(the map reloads from what is already saved). Continue?')) return;
+  const r=await post('/api/map/layer/add',{name:S.map.name});
+  if(!r.ok){ say(r.error); return }
+  S.dirty=false;
+  await reload();
+  say('Added a new layer.',false);
+};
+
 function draw(){
   // Tile images call this from onload, which can land after the view has moved to a
   // project or a state with no map.
@@ -990,34 +1108,49 @@ function draw(){
   cv.width=m.w*T; cv.height=m.h*T;
   g.imageSmoothingEnabled=false;
   g.fillStyle='#000'; g.fillRect(0,0,cv.width,cv.height);
-  for(let y=0;y<m.h;y++)for(let x=0;x<m.w;x++){
-    const ti=m.cells[y*m.w+x], im=S.img[ti];
-    if(!im||!im.complete) continue;
-    // A flipped or rotated tile has to be drawn that way HERE too. The watch mirrors and
-    // transposes it from bits in the cell, so an editor that drew it upright would be
-    // showing a map that does not exist -- and a turned tile is placed precisely because
-    // the turn is what you are looking at.
-    const tt=m.tiles[ti]||{}, flip=[...(tt.flip||'')], rotate=!!tt.rotate;
-    if(!flip.length&&!rotate){ g.drawImage(im,x*T,y*T,T,T); continue }
-    const fx=flip.includes('x'), fy=flip.includes('y');
-    // Once rotate is on, FLIP_X mirrors what is now the vertical axis and FLIP_Y the
-    // horizontal -- see flipCss's own comment (and pack_atlas's transpose() in
-    // tools/pnx_assets.py) for why the axes swap once the tile is transposed.
-    const sx=(rotate?fy:fx)?-1:1, sy=(rotate?fx:fy)?-1:1;
-    g.save();
-    g.translate(x*T+(sx<0?T:0), y*T+(sy<0?T:0));
-    g.scale(sx,sy);
-    // Transpose LAST, so it is the first thing applied to the drawn image -- matching
-    // pnx_gfx.c's rotate branch, which swaps rows/columns BEFORE flip_x/flip_y.
-    if(rotate) g.transform(0,1,1,0,0,0);
-    g.drawImage(im,0,0,T,T);
-    g.restore();
-  }
-  // start marker and warps, drawn over the map so placement is checkable at a glance
+
+  // Every VISIBLE layer, back to front -- array order is composite order (PnxLayer's own
+  // convention, pnx_layer.h). `visible` is a client-only paint-time convenience and never
+  // touches what gets saved. The layer NOT being painted is dimmed rather than hidden, so
+  // its shape stays a reference for lining up whatever is on top of it.
+  m.layers.forEach((layer,li)=>{
+    if(layer.visible===false) return;
+    const lw=layer.w, lh=layer.h, imgs=(S.img&&S.img[li])||{};
+    const dim=li===S.activeLayer?1:0.55;
+    if(dim<1) g.globalAlpha=dim;
+    for(let y=0;y<lh;y++)for(let x=0;x<lw;x++){
+      const ti=layer.cells[y*lw+x], im=imgs[ti];
+      if(!im||!im.complete) continue;
+      // A flipped or rotated tile has to be drawn that way HERE too. The watch mirrors
+      // and transposes it from bits in the cell, so an editor that drew it upright would
+      // be showing a map that does not exist -- and a turned tile is placed precisely
+      // because the turn is what you are looking at.
+      const tt=layer.tiles[ti]||{}, flip=[...(tt.flip||'')], rotate=!!tt.rotate;
+      if(!flip.length&&!rotate){ g.drawImage(im,x*T,y*T,T,T); continue }
+      const fx=flip.includes('x'), fy=flip.includes('y');
+      // Once rotate is on, FLIP_X mirrors what is now the vertical axis and FLIP_Y the
+      // horizontal -- see flipCss's own comment (and pack_atlas's transpose() in
+      // tools/pnx_assets.py) for why the axes swap once the tile is transposed.
+      const sx=(rotate?fy:fx)?-1:1, sy=(rotate?fx:fy)?-1:1;
+      g.save();
+      g.translate(x*T+(sx<0?T:0), y*T+(sy<0?T:0));
+      g.scale(sx,sy);
+      // Transpose LAST, so it is the first thing applied to the drawn image -- matching
+      // pnx_gfx.c's rotate branch, which swaps rows/columns BEFORE flip_x/flip_y.
+      if(rotate) g.transform(0,1,1,0,0,0);
+      g.drawImage(im,0,0,T,T);
+      g.restore();
+    }
+    if(dim<1) g.globalAlpha=1;
+  });
+
+  // start marker and warps, drawn over the map so placement is checkable at a glance --
+  // always the PRIMARY layer's, regardless of which layer is active for painting.
+  const primary=m.layers[m.primary];
   g.strokeStyle='#55aaff'; g.lineWidth=2;
-  g.strokeRect(m.start[0]*T+1,m.start[1]*T+1,T-2,T-2);
+  g.strokeRect(primary.start[0]*T+1,primary.start[1]*T+1,T-2,T-2);
   g.strokeStyle='#e0913f';
-  for(const w of m.warps) g.strokeRect(w.at[0]*T+1,w.at[1]*T+1,T-2,T-2);
+  for(const w of primary.warps) g.strokeRect(w.at[0]*T+1,w.at[1]*T+1,T-2,T-2);
   drawCamera(g,cv);
 }
 
@@ -1098,20 +1231,31 @@ function paint(e,click){
   const r=e.target.getBoundingClientRect();
   const x=Math.floor((e.clientX-r.left)/S.T), y=Math.floor((e.clientY-r.top)/S.T);
   const m=S.map;
-  if(x<0||y<0||y>=m.h||x>=m.w) return;
 
-  if(S.mode==='start'){ if(!click)return; m.start=[x,y]; S.mode='paint'; }
-  else if(S.mode==='warp'){
-    if(!click)return;
-    const i=m.warps.findIndex(w=>w.at[0]===x&&w.at[1]===y);
-    if(i>=0){ m.warps.splice(i,1); S.mode='paint'; warpForm(null); }
-    else warpForm([x,y]);
+  if(S.mode==='start'||S.mode==='warp'){
+    // start/warps are a PRIMARY-layer-only concept (finish_compile_layer's own comment,
+    // pnx_assets.py) -- always the primary's own grid, regardless of which layer is
+    // active for painting.
+    const primary=m.layers[m.primary];
+    if(x<0||y<0||y>=primary.h||x>=primary.w) return;
+    if(S.mode==='start'){
+      if(!click)return;
+      primary.start=[x,y]; m.start=primary.start; S.mode='paint';
+    } else {
+      if(!click)return;
+      const i=primary.warps.findIndex(w=>w.at[0]===x&&w.at[1]===y);
+      if(i>=0){ primary.warps.splice(i,1); S.mode='paint'; warpForm(null); }
+      else warpForm([x,y]);
+    }
   } else {
-    // A cell is an index into the map's tile table, which is what both authoring formats
-    // reduce to -- so painting is the same operation whether the map is text or a file.
-    const at=y*m.w+x;
-    if(m.cells[at]===S.ti) return;
-    m.cells[at]=S.ti;
+    const layer=AL();
+    if(x<0||y<0||y>=layer.h||x>=layer.w) return;
+    // A cell is an index into the active layer's tile table, which is what both
+    // authoring formats reduce to -- so painting is the same operation whether that
+    // layer is text or a file.
+    const at=y*layer.w+x;
+    if(layer.cells[at]===S.ti) return;
+    layer.cells[at]=S.ti;
   }
   S.dirty=true; mark(); info(); tool(); draw(); budget();
 }
@@ -1138,31 +1282,49 @@ $('#mapsel').onchange=e=>{
 };
 $('#save').onclick=async()=>{
   if(!haveMap()) return;
-  const body=JSON.parse(JSON.stringify(S.map));
-  if(body.format!=='source'){
-    // A text map is stored as characters, so the cell grid is rendered back through each
-    // tile's own character -- which is why the table carries it. Reassigning characters
-    // here instead would churn the whole map's diff every time it was opened.
-    const missing=body.tiles.findIndex(t=>t.ch===undefined);
-    if(missing>=0){
-      say(`tile #${missing} has no legend character, so this map cannot be saved as text.`);
+  const m=S.map, log=$('#log');
+  // One layer at a time, through the one layer-aware endpoint -- which is also what a
+  // single-layer map goes through now (layer 0, the same shape /api/map used to take):
+  // one code path rather than two that have to keep agreeing about the format.
+  for(let li=0; li<m.layers.length; li++){
+    const layer=m.layers[li];
+    const body={name:m.name, layer:li, format:layer.format};
+    if(layer.format==='source'){
+      body.w=layer.w; body.h=layer.h; body.cells=layer.cells; body.tiles=layer.tiles;
+    } else {
+      // A text layer is stored as characters, so the cell grid is rendered back through
+      // each tile's own character -- which is why the table carries it. Reassigning
+      // characters here instead would churn the whole map's diff every time it was
+      // opened.
+      const missing=layer.tiles.findIndex(t=>t.ch===undefined);
+      if(missing>=0){
+        log.className='bad';
+        log.textContent=(m.layers.length>1?`layer ${li}: `:'')
+          +`tile #${missing} has no legend character, so this map cannot be saved as `
+          +`text.`;
+        return;
+      }
+      const rows=[];
+      for(let y=0;y<layer.h;y++){
+        let row='';
+        for(let x=0;x<layer.w;x++) row+=layer.tiles[layer.cells[y*layer.w+x]].ch;
+        rows.push(row);
+      }
+      body.rows=rows;
+    }
+    if(li===m.primary){ body.start=layer.start; body.warps=layer.warps; }
+    const r=await (await fetch('/api/map/layer',{method:'POST',
+      headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
+    if(!r.ok){
+      log.className='bad';
+      log.textContent=(m.layers.length>1?`layer ${li}: `:'')+r.error;
       return;
     }
-    body.rows=[];
-    for(let y=0;y<body.h;y++){
-      let row='';
-      for(let x=0;x<body.w;x++) row+=body.tiles[body.cells[y*body.w+x]].ch;
-      body.rows.push(row);
-    }
   }
-  const r=await (await fetch('/api/map',{method:'POST',
-    headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
-  const log=$('#log');
-  log.className=r.ok?'ok':'bad';
-  log.textContent=r.ok
-    ?`Saved ${S.map.name} to ${S.map.format==='source'?S.map.source:'the manifest'}.`
-    :r.error;
-  if(r.ok){S.dirty=false;mark()}
+  log.className='ok';
+  log.textContent=`Saved ${m.name}`
+    +(m.layers.length>1?` (${m.layers.length} layers).`:'.');
+  S.dirty=false; mark();
 };
 $('#newmap').onclick=async()=>{
   const name=$('#nmname').value.trim();
@@ -1815,7 +1977,7 @@ $('#prsave').onclick=async()=>{
 // `NOTE:INSTRUMENT`, '.' to hold, '-' to release -- rather than a prettier one invented
 // here, because a song half-edited by hand and half in this tool has to stay one song.
 
-const MU = { song: 0, pattern: 0, inst: 0, rows: null, octave: 4, row: 0 };
+const MU = { song: 0, pattern: 0, inst: 0, rows: null, octave: 4, row: 0, view: 'grid' };
 
 function muSong(){ return ((S.data && S.data.songs) || [])[MU.song] || null; }
 
@@ -1868,10 +2030,24 @@ function drawMusic(){
   if(MU.inst >= s.instruments.length) MU.inst = 0;
   inst.value = String(MU.inst);
 
-  drawTracker();
+  showMusicView();
+  if(MU.view === 'piano') drawPianoRoll(); else drawTracker();
   drawInstrument();
   drawSamples();
 }
+
+// Which of the two views over the SAME pattern data is on screen. Toggling never touches
+// what gets saved -- both read/write through muCells/muRow/splitCell/joinCell and
+// muSavePattern exactly alike.
+function showMusicView(){
+  const grid = MU.view === 'grid';
+  $('#mrows').style.display = grid ? '' : 'none';
+  $('#mrollwrap').style.display = grid ? 'none' : 'inline-block';
+  $('#mviewgrid').className = grid ? 'on' : '';
+  $('#mviewpiano').className = grid ? '' : 'on';
+}
+$('#mviewgrid').onclick = () => { MU.view = 'grid'; showMusicView(); drawTracker(); };
+$('#mviewpiano').onclick = () => { MU.view = 'piano'; showMusicView(); drawPianoRoll(); };
 
 // Note names both ways. A tracker shows `C-4`; the manifest writes `C4`. The dash is the
 // tracker's own device for keeping a sharp and a natural the same width so columns line up,
@@ -2026,6 +2202,209 @@ function drawTracker(){
     box.appendChild(row);
   });
 }
+
+// -------------------------------------------------------------------- piano roll
+//
+// A second VIEW over drawTracker's own model, not a second representation -- MU.rows,
+// muCells/muRow/splitCell/joinCell and muSavePattern are exactly the same ones, so the
+// manifest cell spelling and the save endpoint need no changes at all here. Time runs
+// down the row axis, matching the tracker's own row-per-step convention; pitch runs
+// across, one lane per channel, with black-key columns tinted for reference the way a
+// keyboard reads. A note's sustain is a forward scan through trailing '.' cells -- '.'
+// already means both "hold" and "unset" in this model (muCells pads gaps with it too),
+// so there is no separate duration to track, only to render.
+
+const ROLL_ROWH = 16, ROLL_COLW = 10, ROLL_LANE_GAP = 14, ROLL_OCTAVES = 3, ROLL_GUTTER = 30;
+const ROLL_BLACK_KEY = new Set([1, 3, 6, 8, 10]); // semitone offsets that are black keys
+
+// Three octaves centered on the octave the piano-row keyboard entry already targets
+// (MU.octave, the #moct select) -- one below it, the selected one, one above.
+function rollRange(){
+  const lo = Math.max(0, (MU.octave) * 12);
+  return { lo, hi: lo + ROLL_OCTAVES * 12 };
+}
+
+// 'C-4' -> 60, or null. The inverse of midiToTracker, matching its own C4=60 -- floor(n/12)
+// MINUS ONE for the octave -- exactly, since getting that wrong here would place every
+// clicked note an octave off from where the keyboard-entry path in drawTracker puts it.
+function trackerToMidi(note){
+  const m = /^([A-G])([-#])(-?\d+)$/.exec(note);
+  if(!m) return null;
+  const idx = NOTE_NAMES.indexOf(m[1] + m[2]);
+  if(idx < 0) return null;
+  return idx + (parseInt(m[3], 10) + 1) * 12;
+}
+
+// Every note-on in one channel of the CURRENT MU.rows, as {row, len, note, inst} -- len
+// counts the trailing '.' run right after it, which is this model's whole idea of
+// sustain (see the section comment above).
+function rollNotes(channel){
+  const out = [];
+  for(let r = 0; r < MU.rows.length; r++){
+    const parts = splitCell(MU.rows[r][channel]);
+    if(!parts.note || parts.note === 'off') continue;
+    let len = 1;
+    while(r + len < MU.rows.length && MU.rows[r + len][channel] === '.') len++;
+    out.push({ row: r, len, note: parts.note, inst: parts.inst });
+  }
+  return out;
+}
+
+function rollLaneX(ci, laneW){
+  return ROLL_GUTTER + ci * (laneW + ROLL_LANE_GAP);
+}
+
+function drawPianoRoll(){
+  const s = muSong();
+  const cv = $('#mroll');
+  if(!s){ cv.width = cv.height = 0; return }
+  MU.rows = s.patterns[MU.pattern].map(r => muCells(r, s.channels));
+
+  const { lo, hi } = rollRange(), pitches = hi - lo;
+  const laneW = pitches * ROLL_COLW;
+  cv.width = ROLL_GUTTER + s.channels * laneW + (s.channels - 1) * ROLL_LANE_GAP;
+  cv.height = 20 + MU.rows.length * ROLL_ROWH;
+  const g = cv.getContext('2d');
+  g.imageSmoothingEnabled = false;
+
+  const css = getComputedStyle(document.documentElement);
+  const bg = css.getPropertyValue('--ink').trim() || '#111';
+  const line = css.getPropertyValue('--line').trim() || '#333';
+  const dim = css.getPropertyValue('--dim').trim() || '#888';
+  const fg = css.getPropertyValue('--fg').trim() || '#eee';
+  const accent = css.getPropertyValue('--accent').trim() || '#4af';
+
+  g.fillStyle = bg; g.fillRect(0, 0, cv.width, cv.height);
+
+  for(let ci = 0; ci < s.channels; ci++){
+    const x0 = rollLaneX(ci, laneW);
+    for(let p = 0; p < pitches; p++){
+      if(ROLL_BLACK_KEY.has((lo + p) % 12)){
+        g.fillStyle = 'rgba(0,0,0,.25)';
+        g.fillRect(x0 + p * ROLL_COLW, 20, ROLL_COLW, cv.height - 20);
+      }
+      // A tick under every C, the one landmark a keyboard reader needs to place the rest.
+      if((lo + p) % 12 === 0){
+        g.fillStyle = dim; g.font = '9px ui-monospace,Menlo,monospace'; g.textAlign = 'center';
+        g.fillText('C' + ((lo + p) / 12 - 1), x0 + p * ROLL_COLW + ROLL_COLW / 2, 12);
+      }
+    }
+    g.strokeStyle = line; g.lineWidth = 1;
+    g.strokeRect(x0 + .5, 20.5, laneW, cv.height - 20);
+  }
+
+  // Row lines, every 4th (a beat) brighter -- the same convention drawTracker's own
+  // `.beat` class marks.
+  for(let r = 0; r <= MU.rows.length; r++){
+    const y = 20 + r * ROLL_ROWH;
+    g.strokeStyle = (r % 4 === 0) ? line : 'rgba(128,128,128,.15)';
+    g.beginPath(); g.moveTo(ROLL_GUTTER, y); g.lineTo(cv.width, y); g.stroke();
+    if(r < MU.rows.length){
+      g.fillStyle = dim; g.font = '9px ui-monospace,Menlo,monospace'; g.textAlign = 'right';
+      g.fillText(String(r).padStart(2, '0'), ROLL_GUTTER - 4, y + ROLL_ROWH - 5);
+    }
+  }
+
+  for(let ci = 0; ci < s.channels; ci++){
+    const x0 = rollLaneX(ci, laneW);
+    for(const n of rollNotes(ci)){
+      const midi = trackerToMidi(n.note);
+      if(midi == null || midi < lo || midi >= hi) continue;
+      const x = x0 + (midi - lo) * ROLL_COLW, y = 20 + n.row * ROLL_ROWH;
+      g.fillStyle = n.inst ? accent : dim;
+      g.fillRect(x + 1, y + 1, ROLL_COLW - 2, n.len * ROLL_ROWH - 2);
+      g.strokeStyle = fg; g.lineWidth = 1;
+      g.strokeRect(x + 1.5, y + 1.5, ROLL_COLW - 3, n.len * ROLL_ROWH - 3);
+    }
+  }
+}
+
+// Which (channel, row, midi) a canvas-relative point falls on, or null when it lands in
+// the gutter or past the last channel's lane.
+function rollHit(mx, my){
+  const s = muSong();
+  if(!s || my < 20) return null;
+  const row = Math.floor((my - 20) / ROLL_ROWH);
+  if(row < 0 || row >= MU.rows.length) return null;
+  const { lo, hi } = rollRange(), pitches = hi - lo, laneW = pitches * ROLL_COLW;
+  for(let ci = 0; ci < s.channels; ci++){
+    const x0 = rollLaneX(ci, laneW);
+    if(mx < x0 || mx >= x0 + laneW) continue;
+    const p = Math.floor((mx - x0) / ROLL_COLW);
+    if(p < 0 || p >= pitches) continue;
+    return { channel: ci, row, midi: lo + p };
+  }
+  return null;
+}
+
+// Writes MU.rows through to the cached song and saves -- the exact same two calls
+// drawTracker's own commit() makes, so a click here and a keystroke there are
+// indistinguishable once they land.
+function rollCommit(){
+  const s = muSong(); if(!s) return;
+  s.patterns[MU.pattern] = MU.rows.map(muRow);
+  muSavePattern();
+  drawPianoRoll();
+}
+
+let rollDrag = null; // {channel, startRow, oldEnd, lastEnd} while resizing a note's tail
+
+$('#mroll').addEventListener('mousedown', e => {
+  const r = e.target.getBoundingClientRect();
+  const hit = rollHit(e.clientX - r.left, e.clientY - r.top);
+  if(!hit) return;
+
+  const notes = rollNotes(hit.channel);
+  const covering = notes.find(n => hit.row >= n.row && hit.row < n.row + n.len);
+  if(covering){
+    const bottomRow = covering.row + covering.len - 1;
+    if(hit.row === bottomRow){
+      // The bottom edge of an existing note: drag it to resize the sustain instead of
+      // deleting on release.
+      rollDrag = { channel: hit.channel, startRow: covering.row, oldEnd: bottomRow,
+                  lastEnd: bottomRow };
+      return;
+    }
+    // Anywhere else in its body: delete the whole note.
+    for(let r2 = covering.row; r2 < covering.row + covering.len; r2++)
+      MU.rows[r2][hit.channel] = '.';
+    rollCommit();
+    return;
+  }
+
+  // An empty cell: place a one-row note at this pitch, the same way clicking a PIANO key
+  // while a grid cell is focused does.
+  MU.rows[hit.row][hit.channel] = joinCell(midiToTracker(hit.midi), String(MU.inst));
+  rollCommit();
+});
+
+addEventListener('mousemove', e => {
+  if(!rollDrag) return;
+  const cv = $('#mroll'), r = cv.getBoundingClientRect();
+  const hit = rollHit(e.clientX - r.left, e.clientY - r.top);
+  if(!hit || hit.channel !== rollDrag.channel) return;
+  const { channel, startRow, oldEnd } = rollDrag;
+  const newEnd = Math.max(startRow, hit.row);
+  if(newEnd === rollDrag.lastEnd) return;
+  rollDrag.lastEnd = newEnd;
+
+  if(newEnd >= oldEnd){
+    for(let r2 = startRow + 1; r2 <= newEnd && r2 < MU.rows.length; r2++)
+      MU.rows[r2][channel] = '.';
+  } else {
+    // A hold run is ambiguous with "nothing here" (see the section comment above), so
+    // ending the note early needs an explicit release -- the same '-' typing one in the
+    // grid view writes.
+    for(let r2 = startRow + 1; r2 <= newEnd; r2++) MU.rows[r2][channel] = '.';
+    if(newEnd + 1 < MU.rows.length) MU.rows[newEnd + 1][channel] = '-';
+  }
+  drawPianoRoll();
+});
+addEventListener('mouseup', () => {
+  if(!rollDrag) return;
+  rollDrag = null;
+  rollCommit();
+});
 
 
 // ---------------------------------------------------------------- panel controls
@@ -2509,7 +2888,10 @@ function muSettle(){
 $('#msong').onchange = () => { muSettle(); MU.song = +$('#msong').value; MU.pattern = 0; MU.inst = 0; drawMusic() };
 $('#mpat').onchange  = () => { MU.pattern = +$('#mpat').value; drawTracker(); muSay('#mpatlog','') };
 $('#minst').onchange = () => { muSettle(); MU.inst = +$('#minst').value; drawInstrument() };
-$('#moct').onchange  = () => { MU.octave = +$('#moct').value };
+$('#moct').onchange  = () => {
+  MU.octave = +$('#moct').value;
+  if(MU.view === 'piano') drawPianoRoll();
+};
 
 // A new pattern is empty; a clone is this one. Both are additive -- nothing here removes a
 // pattern, because the order list names patterns by index and deleting one silently

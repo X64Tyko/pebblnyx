@@ -18,6 +18,30 @@ def handle_post_api_map(self, session, raw):
                               m.get("atlases"))
     self._send(200, json.dumps({"ok": True}))
 
+def handle_post_api_map_layer(self, session, raw):
+    m = json.loads(raw)
+    # Same two-format dispatch as /api/map, scoped to one layer by index (map_doc's
+    # file-order `layers` list -- see its own comment for why file order, not
+    # primary-first, is what a layer edit addresses).
+    if m.get("format") == "source":
+        session.proj.save_map_layer_source(
+            m["name"], m["layer"], m["w"], m["h"], m["cells"], m["tiles"],
+            m.get("start"), m.get("warps"))
+    else:
+        session.proj.save_map_layer_rows(
+            m["name"], m["layer"], m["rows"], m.get("start"), m.get("warps"))
+    self._send(200, json.dumps({"ok": True}))
+
+def handle_post_api_map_layer_add(self, session, raw):
+    d = json.loads(raw)
+    self._send(200, json.dumps(
+        {"ok": True, **session.proj.add_map_layer(d["name"])}))
+
+def handle_post_api_map_layer_remove(self, session, raw):
+    d = json.loads(raw)
+    session.proj.remove_map_layer(d["name"], d["layer"])
+    self._send(200, json.dumps({"ok": True}))
+
 def handle_post_api_map_migrate(self, session, raw):
     d = json.loads(raw)
     self._send(200, json.dumps(
@@ -85,6 +109,9 @@ GET_PREFIX = [
 ]
 POST_EXACT = {
     '/api/map': handle_post_api_map,
+    '/api/map/layer': handle_post_api_map_layer,
+    '/api/map/layer/add': handle_post_api_map_layer_add,
+    '/api/map/layer/remove': handle_post_api_map_layer_remove,
     '/api/map/migrate': handle_post_api_map_migrate,
     '/api/legend': handle_post_api_legend,
     '/api/legend/remove': handle_post_api_legend_remove,

@@ -238,3 +238,11 @@
 #ifndef PNX_FRAME_MS
 #define PNX_FRAME_MS 40
 #endif
+
+// How far a touch has to travel, in screen pixels, before pnx_input treats it as a drag
+// rather than a tap -- see input/pnx_input.h's touch section. 10px is what
+// resonant/src/c/field.c's own DRAG_DEAD used before that logic moved into the framework;
+// kept as the default rather than picked fresh.
+#ifndef PNX_INPUT_DRAG_DEAD
+#define PNX_INPUT_DRAG_DEAD 10
+#endif

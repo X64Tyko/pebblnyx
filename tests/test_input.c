@@ -45,6 +45,12 @@ static void feed(PnxEventType type, uint8_t button, uint32_t time_ms)
 	pnx_input_event(&ev);
 }
 
+static void feed_touch(PnxEventType type, int16_t x, int16_t y, uint32_t time_ms)
+{
+	PnxEvent ev = { type, time_ms, x, y, 0 };
+	pnx_input_event(&ev);
+}
+
 void test_input(void)
 {
 	printf("input\n");
@@ -91,6 +97,58 @@ void test_input(void)
 	}
 	I_CHECK(!pnx_input_pressed(PNX_BUTTON_BACK));
 	I_CHECK(!pnx_input_held(PNX_BUTTON_BACK));
+
+	// --- touch: tap vs drag, edge vs level
+	//
+	// A tap is down-then-up without leaving the dead zone; a drag is a live dominant-axis
+	// sign for as long as the touch stays down past it. Never both for the same touch.
+	pnx_input_init(PNX_ORIENT_BUTTONS_RIGHT);
+	pnx_input_frame();
+	feed_touch(PNX_EVENT_TOUCH_DOWN, 40, 60, 100);
+	I_CHECK(pnx_input_touch_held());
+	I_CHECK(!pnx_input_touch_tapped()); // not resolved until release
+	I_CHECK_EQ(pnx_input_drag_dx(), 0);
+	I_CHECK_EQ(pnx_input_drag_dy(), 0);
+
+	feed_touch(PNX_EVENT_TOUCH_UP, 42, 61, 120); // 2,1px -- inside the dead zone
+	I_CHECK(pnx_input_touch_tapped());
+	I_CHECK(!pnx_input_touch_held());
+	I_CHECK_EQ(pnx_input_touch_x(), 42);
+	I_CHECK_EQ(pnx_input_touch_y(), 61);
+
+	pnx_input_frame(); // the tap edge belongs to the frame it happened in
+	I_CHECK(!pnx_input_touch_tapped());
+
+	// A drag past the dead zone reports a live axis and does NOT tap on release.
+	pnx_input_frame();
+	feed_touch(PNX_EVENT_TOUCH_DOWN, 0, 0, 200);
+	feed_touch(PNX_EVENT_TOUCH_MOVE, 20, 2, 210); // horizontal dominant
+	I_CHECK_EQ(pnx_input_drag_dx(), 1);
+	I_CHECK_EQ(pnx_input_drag_dy(), 0);
+	I_CHECK(pnx_input_touch_held());
+
+	feed_touch(PNX_EVENT_TOUCH_UP, 20, 2, 220);
+	I_CHECK(!pnx_input_touch_tapped()); // it was a drag, not a tap
+	I_CHECK(!pnx_input_touch_held());
+	I_CHECK_EQ(pnx_input_drag_dx(), 0); // cleared on release
+	I_CHECK_EQ(pnx_input_drag_dy(), 0);
+
+	// The other axis, and the negative direction.
+	pnx_input_frame();
+	feed_touch(PNX_EVENT_TOUCH_DOWN, 50, 50, 300);
+	feed_touch(PNX_EVENT_TOUCH_MOVE, 48, 30, 310); // vertical dominant, moving up
+	I_CHECK_EQ(pnx_input_drag_dx(), 0);
+	I_CHECK_EQ(pnx_input_drag_dy(), -1);
+	feed_touch(PNX_EVENT_TOUCH_UP, 48, 30, 320);
+
+	// A tie between axes favours vertical, matching field.c's own ax > ay comparison
+	// before this logic moved into the framework.
+	pnx_input_frame();
+	feed_touch(PNX_EVENT_TOUCH_DOWN, 0, 0, 400);
+	feed_touch(PNX_EVENT_TOUCH_MOVE, 15, 15, 410);
+	I_CHECK_EQ(pnx_input_drag_dx(), 0);
+	I_CHECK_EQ(pnx_input_drag_dy(), 1);
+	feed_touch(PNX_EVENT_TOUCH_UP, 15, 15, 420);
 
 	// --- the cluster, per orientation
 	//

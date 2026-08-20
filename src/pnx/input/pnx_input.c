@@ -26,6 +26,12 @@ static bool s_pressed[PNX_BUTTON_COUNT];
 static bool s_released[PNX_BUTTON_COUNT];
 static uint32_t s_since[PNX_BUTTON_COUNT]; // delivery stamp of the press
 
+static bool s_touch_held;
+static bool s_touch_tapped;
+static int16_t s_touch_x0, s_touch_y0; // where this touch went down
+static int16_t s_touch_x, s_touch_y;   // last known position
+static int8_t s_drag_dx, s_drag_dy;
+
 void pnx_input_init(uint8_t orientation)
 {
 	s_orientation = orientation < PNX_ORIENT_COUNT ? orientation : PNX_ORIENT_BUTTONS_RIGHT;
@@ -33,17 +39,83 @@ void pnx_input_init(uint8_t orientation)
 	memset(s_pressed, 0, sizeof(s_pressed));
 	memset(s_released, 0, sizeof(s_released));
 	memset(s_since, 0, sizeof(s_since));
+
+	s_touch_held   = false;
+	s_touch_tapped = false;
+	s_touch_x0 = s_touch_y0 = s_touch_x = s_touch_y = 0;
+	s_drag_dx = s_drag_dy = 0;
 }
 
 void pnx_input_frame(void)
 {
 	memset(s_pressed, 0, sizeof(s_pressed));
 	memset(s_released, 0, sizeof(s_released));
+	s_touch_tapped = false;
+}
+
+// Dominant-axis sign of how far (dx, dy) has moved from the touch's origin, once that
+// exceeds the dead zone -- field.c's own ax/ay comparison before this moved into the
+// framework. Ties (a diagonal drag) favour the vertical axis, same as field.c did.
+static void update_drag(int16_t dx, int16_t dy)
+{
+	const int16_t ax = (int16_t)(dx < 0 ? -dx : dx);
+	const int16_t ay = (int16_t)(dy < 0 ? -dy : dy);
+	if (ax < PNX_INPUT_DRAG_DEAD && ay < PNX_INPUT_DRAG_DEAD)
+		return;
+	if (ax > ay)
+	{
+		s_drag_dx = dx > 0 ? 1 : -1;
+		s_drag_dy = 0;
+	}
+	else
+	{
+		s_drag_dx = 0;
+		s_drag_dy = dy > 0 ? 1 : -1;
+	}
+}
+
+static void touch_event(const PnxEvent* ev)
+{
+	if (ev->type == PNX_EVENT_TOUCH_DOWN)
+	{
+		s_touch_held = true;
+		s_touch_x0 = s_touch_x = ev->x;
+		s_touch_y0 = s_touch_y = ev->y;
+		s_drag_dx = s_drag_dy = 0;
+		return;
+	}
+	if (ev->type != PNX_EVENT_TOUCH_MOVE && ev->type != PNX_EVENT_TOUCH_UP)
+		return;
+	if (!s_touch_held)
+		return;
+
+	s_touch_x = ev->x;
+	s_touch_y = ev->y;
+	update_drag((int16_t)(s_touch_x - s_touch_x0), (int16_t)(s_touch_y - s_touch_y0));
+
+	if (ev->type == PNX_EVENT_TOUCH_UP)
+	{
+		// Still within the dead zone at release: a tap, not a drag that happened to end.
+		if (s_drag_dx == 0 && s_drag_dy == 0)
+			s_touch_tapped = true;
+		s_touch_held = false;
+		s_drag_dx = s_drag_dy = 0;
+	}
 }
 
 void pnx_input_event(const PnxEvent* ev)
 {
-	if (!ev || ev->button >= PNX_BUTTON_COUNT)
+	if (!ev)
+		return;
+
+	if (ev->type == PNX_EVENT_TOUCH_DOWN || ev->type == PNX_EVENT_TOUCH_MOVE ||
+		ev->type == PNX_EVENT_TOUCH_UP)
+	{
+		touch_event(ev);
+		return;
+	}
+
+	if (ev->button >= PNX_BUTTON_COUNT)
 		return;
 
 	if (ev->type == PNX_EVENT_BUTTON_DOWN)
@@ -108,6 +180,36 @@ int8_t pnx_input_axis_pressed(void)
 	const bool low	= pnx_input_pressed(pnx_input_cluster(0));
 	const bool high = pnx_input_pressed(pnx_input_cluster(2));
 	return (int8_t)((high ? 1 : 0) - (low ? 1 : 0));
+}
+
+bool pnx_input_touch_held(void)
+{
+	return s_touch_held;
+}
+
+bool pnx_input_touch_tapped(void)
+{
+	return s_touch_tapped;
+}
+
+int16_t pnx_input_touch_x(void)
+{
+	return s_touch_x;
+}
+
+int16_t pnx_input_touch_y(void)
+{
+	return s_touch_y;
+}
+
+int8_t pnx_input_drag_dx(void)
+{
+	return s_drag_dx;
+}
+
+int8_t pnx_input_drag_dy(void)
+{
+	return s_drag_dy;
 }
 
 #endif // PNX_USE_INPUT

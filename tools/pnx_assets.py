@@ -2133,12 +2133,17 @@ def map_tile_bases(name, atlas_names, tile_counts, tile_px):
     return table, base
 
 
-def compile_map(spec, legend, roles_by_atlas, atlas_table, map_names, collision_by_atlas):
+def compile_map(spec, legend, roles_by_atlas, atlas_table, map_names, collision_by_atlas,
+                primary=True):
     """ASCII rows -> a compiled map, ready for finish_map to slice and pack.
 
     `atlas_table` is this map's [(atlas, first_tile, tile_count)] partition, so a legend
     char resolves to a map-global tile id here and nothing downstream has to know which
     tileset a cell came from.
+
+    `primary=False` compiles a non-primary `[[map.layer]]`: pure decorative tile art with
+    no `start`, no `warps`, and none of finish_compile's gameplay checks -- see
+    finish_compile_layer's own comment for why those are a primary-layer-only concept.
     """
     name = spec["name"]
     rows = [r for r in spec["rows"].strip("\n").split("\n") if r.strip()]
@@ -2226,14 +2231,17 @@ def compile_map(spec, legend, roles_by_atlas, atlas_table, map_names, collision_
             flags[y * w + x] = flag
             extended[y * w + x] = ext_val
 
+    flipped = {a: [c for c in chars if c in painted]
+              for a, chars in flipped.items() if any(c in painted for c in chars)}
+    if not primary:
+        return finish_compile_layer(name, w, h, tiles, flags, extended, atlas_table,
+                                    flipped=flipped)
     return finish_compile(name, spec, w, h, tiles, flags, extended, atlas_table, map_names,
-                          spec.get("warps", []), collision_by_atlas,
-                          flipped={a: [c for c in chars if c in painted]
-                                   for a, chars in flipped.items()
-                                   if any(c in painted for c in chars)})
+                          spec.get("warps", []), collision_by_atlas, flipped=flipped)
 
 
-def compile_source_map(spec, root, roles_by_atlas, atlas_table, map_names, collision_by_atlas):
+def compile_source_map(spec, root, roles_by_atlas, atlas_table, map_names, collision_by_atlas,
+                       primary=True):
     """Compile a map whose cells live in a `.pnxmap` file rather than in the manifest.
 
     The tile table is the legend, indexed by number instead of by character -- so this
@@ -2244,6 +2252,14 @@ def compile_source_map(spec, root, roles_by_atlas, atlas_table, map_names, colli
     Why a file at all is argued in tools/pnx_mapfile.py; the short version is that one
     character per cell capped a map at ~90 distinct tiles against the runtime's 1024, and
     a 255x255 map is 65KB of text sitting in the middle of a manifest.
+
+    `primary=False` compiles a non-primary `[[map.layer]]` -- see compile_map's own
+    `primary` for what that skips. `spec["source"]` is always read as ONE WorldTile plane
+    here: `doc["w"]`/`["h"]`/`["cells"]` already mirror the file's own primary layer
+    (`mapfile.loads`'s back-compat shape) whether the file is single-layer or declares
+    several of its own -- if it declares several, only its own primary is used. A
+    `[[map.layer]]` nesting layers-of-layers inside its own source file is not a
+    combination this format needs to support; point each manifest layer at its own file.
     """
     name = spec["name"]
     path = os.path.join(root, spec["source"])
@@ -2312,6 +2328,12 @@ def compile_source_map(spec, root, roles_by_atlas, atlas_table, map_names, colli
         flags[i] = flag
         extended[i] = ext_val
 
+    flipped = {a: [c for c in labels if int(c) in used]
+              for a, labels in flipped.items() if any(int(c) in used for c in labels)}
+    if not primary:
+        return finish_compile_layer(name, w, h, tiles, flags, extended, atlas_table,
+                                    flipped=flipped)
+
     # `start` and `warps` come from the FILE, not the manifest: they are positions in a
     # grid the file owns, and a manifest that could disagree with it would be a second
     # place to look when a warp lands in the wrong room.
@@ -2319,10 +2341,7 @@ def compile_source_map(spec, root, roles_by_atlas, atlas_table, map_names, colli
     spec["start"] = doc["start"]
 
     return finish_compile(name, spec, w, h, tiles, flags, extended, atlas_table, map_names,
-                          doc["warps"], collision_by_atlas,
-                          flipped={a: [c for c in labels if int(c) in used]
-                                   for a, labels in flipped.items()
-                                   if any(int(c) in used for c in labels)})
+                          doc["warps"], collision_by_atlas, flipped=flipped)
 
 
 def tile_collision_mode(atlas_table, collision_by_atlas, tile):
@@ -2459,6 +2478,24 @@ def finish_compile(name, spec, w, h, tiles, flags, extended, atlas_table, map_na
             "atlases": [a for a, _, _ in atlas_table]}
 
 
+def finish_compile_layer(name, w, h, tiles, flags, extended, atlas_table, flipped=None):
+    """A non-primary map layer: background/overlay art with no gameplay checks.
+
+    Warps land on the PRIMARY layer only (PnxMapLayer's own comment, pnx_assets.h), so a
+    layer that is not primary skips the flood fill, the start-inside-a-wall check, and
+    every warp check finish_compile runs for whichever layer IS primary -- there is no
+    start here and nothing for a warp to test. `solid`/`reachable` are likewise never
+    computed: the only consumer of either is check_warp_destinations, which only ever asks
+    about a warp's PRIMARY-layer landing tile.
+    """
+    flipped = flipped or {}
+    print(f"    layer {name!r}: {w}x{h}"
+          + (f", {len(atlas_table)} atlases" if len(atlas_table) > 1 else ""))
+    return {"name": name, "w": w, "h": h, "tiles": bytes(tiles),
+            "flags": flags, "extended": extended, "atlas_table": atlas_table,
+            "flipped": flipped, "atlases": [a for a, _, _ in atlas_table]}
+
+
 def check_flip_metatiles(maps, atlases):
     """Refuse a flipped OR rotated legend character drawn from a metatiled atlas.
 
@@ -2480,15 +2517,20 @@ def check_flip_metatiles(maps, atlases):
     """
     meta = {a["name"] for a in atlases if a.get("subtiles")}
     for m in maps:
-        for atlas_name, chars in sorted(m.get("flipped", {}).items()):
-            if atlas_name not in meta:
-                continue
-            raise BuildError(
-                f"map {m['name']!r}: legend {', '.join(repr(c) for c in sorted(chars))} "
-                f"paints a FLIPPED or ROTATED tile from atlas {atlas_name!r}, which was "
-                f"packed as metatiles -- and the runtime does not transform those, so it "
-                f"would draw untransformed. Either drop the flip/rotate, or put "
-                f"`metatiles = false` on that atlas and pay the flat tile cost.")
+        # Every layer, not just the primary (which `m` itself mirrors) -- a background or
+        # overlay layer paints from the same shared atlas table and is exactly as subject
+        # to this as the layer gameplay happens on.
+        for layer in m.get("layers", [m]):
+            for atlas_name, chars in sorted(layer.get("flipped", {}).items()):
+                if atlas_name not in meta:
+                    continue
+                raise BuildError(
+                    f"map {m['name']!r} layer {layer['name']!r}: legend "
+                    f"{', '.join(repr(c) for c in sorted(chars))} paints a FLIPPED or "
+                    f"ROTATED tile from atlas {atlas_name!r}, which was packed as "
+                    f"metatiles -- and the runtime does not transform those, so it would "
+                    f"draw untransformed. Either drop the flip/rotate, or put "
+                    f"`metatiles = false` on that atlas and pay the flat tile cost.")
 
 
 def swap_flip_bits(cells):
@@ -2515,34 +2557,49 @@ def rotate_maps(maps, orient):
     dimensions, so a 32x24 map becomes 24x32; buttons_left does not, since a half-turn
     leaves width and height alone. Either way the runtime, which only ever reads w and h
     from the blob, is none the wiser.
+
+    Runs on every LAYER a map declares, not just the primary -- a background or overlay
+    layer is drawn in the framebuffer's frame exactly as much as the one gameplay happens
+    on. `m` itself IS `m["layers"][0]` (the primary, always layer 0 -- see the manifest
+    driver's own comment for why), so rotating `m["tiles"]`/`w`/`h` inside the loop below
+    already rotates the primary layer's own entry; only `start`/`warps`/`reachable`, which
+    exist on the primary alone, need handling outside it.
     """
     if orient == ORIENT_BUTTONS_RIGHT:
         return
 
     # Captured before anything moves: a warp's destination is a coordinate in ANOTHER
-    # map, and it has to be rotated by that map's dimensions, not by this one's.
+    # map, and it has to be rotated by that map's PRIMARY layer's dimensions, not by this
+    # one's -- a warp always lands on a primary layer (PnxMapLayer's own comment).
     author_dims = [(m["w"], m["h"]) for m in maps]
 
     for m in maps:
-        w, h = m["w"], m["h"]
-        m["tiles"], nw, nh = rotate_grid(m["tiles"], w, h, orient, stride=2)
-        # Moving the cell is not the whole job for a FLIPPED cell. Each tile's art was
-        # rotated as it was carved, so the axes turned with it: a quarter turn makes the
-        # author's horizontal mirror the framebuffer's vertical one, so both landscape
-        # orientations swap the pair. A half-turn (buttons_left) does not -- a horizontal
-        # mirror composed with a point reflection is still a horizontal mirror -- so this
-        # would silently cross a map's flip bits for that orientation if it ran unguarded.
-        if orient in LANDSCAPE_ORIENTS:
-            m["tiles"] = swap_flip_bits(m["tiles"])
-        m["flags"], _, _ = rotate_grid(m["flags"], w, h, orient)
-        m["extended"], _, _ = rotate_grid(m["extended"], w, h, orient)
-        m["start"] = rotate_point(*m["start"], w, h, orient)
-        m["reachable"] = {rotate_point(x, y, w, h, orient) for x, y in m["reachable"]}
-        m["warps"] = [rotate_point(tx, ty, w, h, orient)
+        # The primary's PRE-rotation dims: captured before the per-layer loop below
+        # rotates `m` itself (== layers[0]) in place and overwrites m["w"]/m["h"].
+        pw, ph = m["w"], m["h"]
+
+        for layer in m["layers"]:
+            w, h = layer["w"], layer["h"]
+            layer["tiles"], nw, nh = rotate_grid(layer["tiles"], w, h, orient, stride=2)
+            # Moving the cell is not the whole job for a FLIPPED cell. Each tile's art was
+            # rotated as it was carved, so the axes turned with it: a quarter turn makes
+            # the author's horizontal mirror the framebuffer's vertical one, so both
+            # landscape orientations swap the pair. A half-turn (buttons_left) does not --
+            # a horizontal mirror composed with a point reflection is still a horizontal
+            # mirror -- so this would silently cross a layer's flip bits for that
+            # orientation if it ran unguarded.
+            if orient in LANDSCAPE_ORIENTS:
+                layer["tiles"] = swap_flip_bits(layer["tiles"])
+            layer["flags"], _, _ = rotate_grid(layer["flags"], w, h, orient)
+            layer["extended"], _, _ = rotate_grid(layer["extended"], w, h, orient)
+            layer["w"], layer["h"] = nw, nh
+
+        m["start"] = rotate_point(*m["start"], pw, ph, orient)
+        m["reachable"] = {rotate_point(x, y, pw, ph, orient) for x, y in m["reachable"]}
+        m["warps"] = [rotate_point(tx, ty, pw, ph, orient)
                       + (dest,)
                       + rotate_point(dtx, dty, *author_dims[dest], orient)
                       for (tx, ty, dest, dtx, dty) in m["warps"]]
-        m["w"], m["h"] = nw, nh
 
 
 def lzss_compress(data, window=4096, min_match=3, max_match=18):
@@ -2786,25 +2843,43 @@ def bank_shift_for(slot_bytes, bank_bytes):
 
 
 def prepare_map(m, worldtile=WORLDTILE_DEFAULT, bank_bytes=WORLDTILE_BANK_BYTES):
-    """Slice a map into WorldTiles and work out how many bank resources it needs.
+    """Slice every one of a map's layers into WorldTiles and work out how many bank
+    resources each needs.
 
     Split out of finish_map because of an ordering knot: a map's banks are resources, so
     they need asset ids, so they have to exist before the id table is built -- and the id
     table has to exist before finish_map, which writes atlas ids into the blob. Slicing is
     the only part that answers "how many banks", and it depends on nothing but the map, so
     it moves here and runs first.
-    """
-    cell_dict, index_of, idx_width = build_cell_dictionary(m["tiles"])
-    cols, rows, tiles = slice_worldtiles(m, worldtile, index_of, idx_width)
-    slot_bytes = (max(len(t["payload"]) for t in tiles) + 3) & ~3
-    shift = bank_shift_for(slot_bytes, bank_bytes)
 
-    m["wt"] = (cols, rows, tiles)
+    The cell dictionary is built ONCE, from every layer's tiles together -- a map's tile id
+    space is one shared thing (PnxMap's own comment), so its distinct cell entries are one
+    shared table too, the same way the atlas table itself is shared rather than duplicated
+    per layer. `worldtile`/`bank_bytes` are the map's defaults; a layer whose own spec named
+    either overrides it (`m["layers"][i]["worldtile"]`/`["bank_bytes"]`, set by the manifest
+    driver before this runs), which is what lets a screen-sized parallax background pick a
+    smaller WorldTile than the ground layer beneath it without every layer paying for one
+    setting that only suits the biggest.
+    """
+    combined = b"".join(layer["tiles"] for layer in m["layers"])
+    cell_dict, index_of, idx_width = build_cell_dictionary(combined)
     m["cell_dict"] = cell_dict
     m["idx_width"] = idx_width
-    m["slot_bytes"] = slot_bytes
-    m["bank_shift"] = shift
-    m["bank_count"] = (cols * rows + (1 << shift) - 1) >> shift
+
+    for layer in m["layers"]:
+        lw = layer.get("worldtile", worldtile)
+        lb = layer.get("bank_bytes", bank_bytes)
+        cols, rows, tiles = slice_worldtiles(layer, lw, index_of, idx_width)
+        slot_bytes = (max(len(t["payload"]) for t in tiles) + 3) & ~3
+        shift = bank_shift_for(slot_bytes, lb)
+
+        layer["wt"] = (cols, rows, tiles)
+        layer["worldtile"] = lw
+        layer["slot_bytes"] = slot_bytes
+        layer["bank_shift"] = shift
+        layer["bank_count"] = (cols * rows + (1 << shift) - 1) >> shift
+
+    m["bank_count"] = sum(layer["bank_count"] for layer in m["layers"])
     return m
 
 
@@ -2848,7 +2923,7 @@ def finish_map(m, atlas_assets, atlas_bytes, pal_table=b"",
           u16 tile_total;  u16 dict_count;  u32 atlas_pool_bytes
           atlas table    atlas_count * (u16 asset id, u16 first_tile)
           atlas slots    (atlas_slots + 1) * u32, offsets into the atlas pool
-        PER LAYER, layer_count times (this function always emits exactly one, layer 0):
+        PER LAYER, layer_count times:
           u8  w, h, worldtile, wt_cols, wt_rows, bank_shift, want_slots
           u16 slot_bytes;  u16 first_bank_asset
           u8  parallax_pct, wrap
@@ -2865,57 +2940,98 @@ def finish_map(m, atlas_assets, atlas_bytes, pal_table=b"",
     having read the very thing it is trying to size. See pnx_map_load's own comment
     (pnx_assets.c) for the reader this has to match exactly.
 
-    Returns the map with `banks` set to the payload blobs the caller writes beside it.
+    `worldtile`/`atlas_slots`/`resident`/`bank_bytes` are the map's defaults, applied to
+    every layer unless that layer's own spec overrode one (prepare_map already resolved
+    `worldtile`/`bank_bytes` per layer; `atlas_slots`/`resident` are resolved here the
+    same way). `first_bank_asset` is layer 0's; each later layer's own run starts right
+    after the previous layer's own banks, so the whole map's bank asset ids stay one
+    contiguous range even though each layer addresses its own with a fresh
+    `first_bank_asset` (PnxMapLayer's own field) -- see the manifest driver's asset
+    ordering loop, which allocates them in this same layer-then-bank-index order.
+
+    Returns the map with `banks` set to the FLAT, layer-then-bank-index-ordered list of
+    every layer's payload blobs, which is the order the caller must write them out in for
+    `first_bank_asset` to mean what each layer's directory entry says it does.
     """
-    w, h = m["w"], m["h"]
-    cols, rows, tiles = m["wt"]
-    n = cols * rows
-
     tile_total = sum(count for _, _, count in m["atlas_table"])
+    atlas_pool_slots = len(m["atlas_table"])
 
-    # The window is what the SCREEN can reach, so a map smaller than one window is fully
-    # resident and never streams -- the adaptive half of "one format, one code path".
-    window = worldtile_window(m["tile_px"], worldtile)
-    wt_slots = n if resident else min(n, window[0] * window[1])
-    if wt_slots > 255:
-        raise BuildError(
-            f"map {m['name']!r}: `resident = true` wants a slot for each of its {n} "
-            f"WorldTiles, past the 255 the format can address. A map this size is one "
-            f"that has to stream -- which is the answer the comparison was going to give.")
-
-    needed = check_worldtile_windows(m, cols, rows, tiles, window,
-                                     atlas_slots if atlas_slots else len(m["atlas_table"]))
+    # The atlas pool is shared by the WHOLE map (PnxMap's own comment) -- every layer draws
+    # from the same table and the same pool -- so the auto-picked budget has to cover
+    # whichever layer needs the most of it. This checks each layer's own worst window
+    # independently and takes the largest; it does not attempt the joint "two different
+    # layers on screen at once, needing two different atlases each" case, which needs
+    # `atlas_slots` set explicitly if a project's layers are that far apart.
+    needed = 0
+    for layer in m["layers"]:
+        cols, rows, tiles = layer["wt"]
+        window = worldtile_window(m["tile_px"], layer["worldtile"])
+        needed = max(needed, check_worldtile_windows(
+            layer, cols, rows, tiles, window,
+            atlas_slots if atlas_slots else atlas_pool_slots))
     if atlas_slots is None:
         atlas_slots = needed
 
-    slot_bytes = m["slot_bytes"]
-
     pool = atlas_pool_layout([atlas_bytes[n] for n, _, _ in m["atlas_table"]], atlas_slots)
 
-    # Banks. Payloads are packed in WorldTile index order, `1 << bank_shift` of them per
-    # bank, and each tile's recorded offset is relative to the start of its own bank --
-    # which is the whole point: the runtime's ranged read then seeks at most one bank in
-    # rather than most of the map.
-    shift = m["bank_shift"]
-    per_bank = 1 << shift
     banks = []
-    for start in range(0, n, per_bank):
-        body = bytearray()
-        for t in tiles[start:start + per_bank]:
-            body += t["payload"].ljust(slot_bytes, b"\0")
-        # LZSS-compressed under `compress_maps` (M12): the BODY only, never the header --
-        # every bank is still validated by a header-only read before any body is touched
-        # (pnx_map_load), and that check has to work whether or not the body past it is
-        # compressed. Runtime decode reads the whole compressed body in one call and treats
-        # the bank as an atomic streaming unit -- see pnx_lzss.h's own comment for why that
-        # is the accepted trade.
-        stored = lzss_compress(bytes(body)) if compress else bytes(body)
-        # Stamped like every other blob, so a bank left over from a build in the other
-        # orientation is refused rather than drawn sideways. The header is why a tile's
-        # offset within its bank starts at HEADER_BYTES rather than at zero.
-        banks.append(blob_header(MAGIC_BANK, len(tiles[start:start + per_bank]),
-                                 slot_bytes & 0xFF, slot_bytes >> 8, 0, orient=orient)
-                     + stored)
+    layer_dirs = bytearray()
+    layer_masks = bytearray()
+    bank_asset = first_bank_asset
+    worldtiles_total = 0
+    for layer in m["layers"]:
+        cols, rows, tiles = layer["wt"]
+        n = cols * rows
+        worldtiles_total += n
+
+        # The window is what the SCREEN can reach, so a layer smaller than one window is
+        # fully resident and never streams -- the adaptive half of "one format, one code
+        # path". `resident` defaults from the map; a layer may force its own.
+        window = worldtile_window(m["tile_px"], layer["worldtile"])
+        layer_resident = layer.get("resident", resident)
+        wt_slots = n if layer_resident else min(n, window[0] * window[1])
+        if wt_slots > 255:
+            raise BuildError(
+                f"map {m['name']!r}: `resident = true` wants a slot for each of its {n} "
+                f"WorldTiles, past the 255 the format can address. A layer this size is "
+                f"one that has to stream -- which is the answer the comparison was going "
+                f"to give.")
+
+        slot_bytes = layer["slot_bytes"]
+        shift = layer["bank_shift"]
+        per_bank = 1 << shift
+        layer_banks = []
+        for start in range(0, n, per_bank):
+            body = bytearray()
+            for t in tiles[start:start + per_bank]:
+                body += t["payload"].ljust(slot_bytes, b"\0")
+            # LZSS-compressed under `compress_maps` (M12): the BODY only, never the header
+            # -- every bank is still validated by a header-only read before any body is
+            # touched (pnx_map_load), and that check has to work whether or not the body
+            # past it is compressed. Runtime decode reads the whole compressed body in one
+            # call and treats the bank as an atomic streaming unit -- see pnx_lzss.h's own
+            # comment for why that is the accepted trade.
+            stored = lzss_compress(bytes(body)) if compress else bytes(body)
+            # Stamped like every other blob, so a bank left over from a build in the other
+            # orientation is refused rather than drawn sideways. The header is why a
+            # tile's offset within its bank starts at HEADER_BYTES rather than at zero.
+            layer_banks.append(blob_header(MAGIC_BANK, len(tiles[start:start + per_bank]),
+                                           slot_bytes & 0xFF, slot_bytes >> 8, 0,
+                                           orient=orient) + stored)
+
+        layer["first_bank_asset"] = bank_asset
+        layer["wt_slots"] = wt_slots
+        layer["bank_shift"] = shift
+        bank_asset += len(layer_banks)
+        banks += layer_banks
+
+        layer_dirs += bytes([layer["w"], layer["h"], layer["worldtile"], cols, rows,
+                             shift, wt_slots])
+        layer_dirs += slot_bytes.to_bytes(2, "little")
+        layer_dirs += layer["first_bank_asset"].to_bytes(2, "little")
+        layer_dirs += bytes([layer.get("parallax_pct", 255),
+                             1 if layer.get("wrap") else 0])
+        layer_masks += bytes(t["mask"] for t in tiles)
 
     cell_dict = m["cell_dict"]
 
@@ -2932,15 +3048,11 @@ def finish_map(m, atlas_assets, atlas_bytes, pal_table=b"",
         preamble += atlas_assets[name].to_bytes(2, "little") + first.to_bytes(2, "little")
     preamble += b"".join(o.to_bytes(4, "little") for o in pool)
 
-    # One layer (index 0, primary): this pass emits exactly one, always -- see
-    # BLOB_VERSION's own v14 comment for why. `parallax_pct = 255` (PNX_LAYER_PARALLAX_
-    # WORLD) and `wrap = 0` are what every layer this pipeline writes today means:
-    # ordinary 1:1 world motion, no repeat.
-    preamble += bytes([w, h, worldtile, cols, rows, shift, wt_slots])
-    preamble += slot_bytes.to_bytes(2, "little")
-    preamble += first_bank_asset.to_bytes(2, "little")
-    preamble += bytes([255, 0])
-    preamble += pad4(bytes(t["mask"] for t in tiles))
+    # Every layer's fixed 13 bytes, contiguously, THEN every layer's wt_mask,
+    # contiguously -- see the layout comment above for why these are two zones rather
+    # than interleaved even when layer_count is 1.
+    preamble += layer_dirs
+    preamble += pad4(bytes(layer_masks))
 
     # Shared again, after every layer.
     preamble += pad4(bytes(pal_table)) if pal_table else b""
@@ -2948,25 +3060,33 @@ def finish_map(m, atlas_assets, atlas_bytes, pal_table=b"",
     preamble += pad4(b"".join(v.to_bytes(2, "little") for v in cell_dict))
 
     base = HEADER_BYTES + len(preamble)
+    layer_count = len(m["layers"])
     # Header's four generic bytes (v14): layer_count, primary_layer, warp_count, pad.
-    m["blob"] = blob_header(MAGIC_MAP, 1, 0, len(m["warps"]), 0,
+    # primary_layer is always 0 -- compile_map_layers already reorders so the primary is
+    # first, which is what lets every other layer-aware reader (this function, parse_map,
+    # the editor) treat "layers[0]" and "the primary" as the same thing unconditionally.
+    m["blob"] = blob_header(MAGIC_MAP, layer_count, 0, len(m["warps"]), 0,
                             orient=orient) + bytes(preamble)
     m["banks"] = banks
-    m["bank_shift"] = shift
-    m["resident_bytes"] = base + wt_slots * slot_bytes + pool[-1]
-    m["worldtiles"] = n
-    m["wt_slots"] = wt_slots
+    m["resident_bytes"] = (base + sum(layer["wt_slots"] * layer["slot_bytes"]
+                                      for layer in m["layers"]) + pool[-1])
+    m["worldtiles"] = worldtiles_total
+    m["wt_slots"] = sum(layer["wt_slots"] for layer in m["layers"])
     m["atlas_slots"] = atlas_slots
     m["atlas_pool_bytes"] = pool[-1]
 
-    held = "all resident" if wt_slots == n else f"{wt_slots} of {n} resident"
-    print(f"  map {m['name']}: {cols}x{rows} WorldTiles of {worldtile} ({held})")
+    primary = m["layers"][0]
+    pcols, prows, ptiles = primary["wt"]
+    held = ("all resident" if primary["wt_slots"] == pcols * prows
+            else f"{primary['wt_slots']} of {pcols * prows} resident")
+    print(f"  map {m['name']}: {pcols}x{prows} WorldTiles of {primary['worldtile']} "
+          f"({held})" + (f", {layer_count} layers" if layer_count > 1 else ""))
     if m.get("worldtile_note"):
         print(f"    worldtile {m['worldtile_note']}")
     if len(banks) > 1:
         biggest = max(len(b) for b in banks)
-        print(f"    {len(banks)} banks of {per_bank} WorldTiles, largest {biggest:,} B "
-              f"-- a ranged read seeks at most that, not {sum(len(b) for b in banks):,}")
+        print(f"    {len(banks)} banks total, largest {biggest:,} B -- a ranged read "
+              f"seeks at most that, not {sum(len(b) for b in banks):,}")
     if len(m["atlas_table"]) > 1:
         whole = sum(atlas_bytes[n_] for n_, _, _ in m["atlas_table"])
         note = ("every atlas resident" if atlas_slots >= len(m["atlas_table"])
@@ -2979,26 +3099,39 @@ def finish_map(m, atlas_assets, atlas_bytes, pal_table=b"",
     # it is being compared against -- so the pipeline states both rather than leaving
     # "smaller than what?" to the reader. A map that holds everything anyway has no
     # counterfactual and gets no line.
-    if wt_slots < n or atlas_slots < len(m["atlas_table"]):
-        whole = base + n * slot_bytes + sum(atlas_bytes[a] for a, _, _ in m["atlas_table"])
+    if m["wt_slots"] < worldtiles_total or atlas_slots < len(m["atlas_table"]):
+        whole = (base + sum((cols * rows) * layer["slot_bytes"]
+                            for layer in m["layers"] for cols, rows, _ in [layer["wt"]])
+                 + sum(atlas_bytes[a] for a, _, _ in m["atlas_table"]))
         print(f"    resident {m['resident_bytes']:,} B against {whole:,} B held whole "
               f"-- {100 - 100 * m['resident_bytes'] // whole}% less")
     return m
 
 
 def parse_map(blob, banks=()):
-    """Read a packed map back into its parts, including a reassembled cell plane.
+    """Read a packed map back into its parts, including a reassembled cell plane per layer.
 
     The inverse of finish_map, and the only place outside it that knows the layout. Tests
     assert on the plane rather than on byte offsets, and the editor reads a built map
     without re-deriving the slicing -- both of which used to mean a second copy of the
     format that could drift from this one.
 
-    `banks` is the map's WorldTile bank blobs in order. Without them everything resident is
-    still readable -- dimensions, atlases, flags, warps -- and `cells`/`extended` come back
+    `banks` is the map's WorldTile bank blobs, ALL layers, in the flat order finish_map
+    wrote them (layer 0's banks, then layer 1's, ...) -- the same order `build`'s asset
+    ids were handed out in, so a caller gathering them by `PNX_ASSET_BANK_<map>_<i>` needs
+    no layer-awareness of its own. Without them everything resident is still readable --
+    dimensions, atlases, flags, warps -- and every layer's `cells`/`extended` come back
     empty, which is the honest answer for a caller that only has the map's own resource:
     EXTENDED tags live inside each WorldTile's own payload (see slice_worldtiles), same as
     cells, so both need the banks to be readable at all.
+
+    Returns a dict with `layers` (one entry per declared layer, each shaped the way this
+    function's single-layer return always was: w/h/worldtile/cols/rows/bank_shift/
+    bank_count/first_bank_asset/parallax_pct/wrap/masks/cells/extended/wt_slots/
+    wt_slot_bytes) plus every one of the PRIMARY layer's own fields mirrored at the TOP
+    level too, so `mp["cells"]`/`mp["w"]` etc. keep meaning exactly what they meant before
+    multi-layer maps existed -- every caller that predates this (tests, the editor,
+    cell_warp/cell_extended below) reads a single-layer map without any changes of its own.
     """
     if blob[:2] != MAGIC_MAP:
         raise BuildError(f"not a map blob: magic {blob[:2]!r}")
@@ -3006,16 +3139,9 @@ def parse_map(blob, banks=()):
         raise BuildError(f"map blob is v{blob[2]}, this pipeline writes v{BLOB_VERSION}")
 
     # v14 (M13): header's four generic bytes are layer_count/primary_layer/warp_count/pad.
-    # This reader only handles the single-layer case (layer_count == 1) every manifest
-    # this pipeline builds today produces -- see finish_map's own v14 comment. A blob with
-    # more than one layer is not yet something anything downstream of parse_map (tests,
-    # the editor) knows how to consume.
     layer_count, primary_layer, warp_count = blob[3], blob[4], blob[5]
-    if layer_count != 1 or primary_layer != 0:
-        raise BuildError(
-            f"map blob has {layer_count} layers (primary {primary_layer}) -- parse_map "
-            f"only reads the single-layer case; multi-layer authoring is not wired into "
-            f"the manifest yet (BLOB_VERSION's own v14 comment)")
+    if layer_count == 0:
+        raise BuildError("map blob declares 0 layers")
 
     p = HEADER_BYTES
     atlas_count, tile_px, flags, atlas_slots = blob[p:p + 4]
@@ -3035,12 +3161,20 @@ def parse_map(blob, banks=()):
             for i in range(atlas_slots + 1)]
     at += (atlas_slots + 1) * 4
 
-    # The one layer's own fixed 13 bytes, then its wt_mask -- see finish_map's own layout
-    # comment for why those are two separate zones rather than one, even for one layer.
-    w, h, worldtile, cols, rows, bank_shift, wt_slots = blob[at:at + 7]
-    slot_bytes = int.from_bytes(blob[at + 7:at + 9], "little")
-    first_bank_asset = int.from_bytes(blob[at + 9:at + 11], "little")
-    at += 13
+    # Every layer's own fixed 13 bytes, contiguously, THEN every layer's wt_mask,
+    # contiguously -- see finish_map's own layout comment for why those are two separate
+    # zones rather than interleaved, even when layer_count is 1.
+    dirs = []
+    for _ in range(layer_count):
+        w, h, worldtile, cols, rows, bank_shift, wt_slots = blob[at:at + 7]
+        slot_bytes = int.from_bytes(blob[at + 7:at + 9], "little")
+        first_bank_asset = int.from_bytes(blob[at + 9:at + 11], "little")
+        parallax_pct, wrap = blob[at + 11], blob[at + 12]
+        at += 13
+        dirs.append({"w": w, "h": h, "worldtile": worldtile, "cols": cols, "rows": rows,
+                     "bank_shift": bank_shift, "wt_slots": wt_slots,
+                     "slot_bytes": slot_bytes, "first_bank_asset": first_bank_asset,
+                     "parallax_pct": parallax_pct, "wrap": bool(wrap)})
 
     def take(n):
         nonlocal at
@@ -3048,77 +3182,95 @@ def parse_map(blob, banks=()):
         at += (n + 3) & ~3
         return chunk
 
-    masks = take(cols * rows)
+    masks_all = take(sum(d["cols"] * d["rows"] for d in dirs))
     remap = take(tile_total) if flags & 1 else b""
     warps = take(warp_count * 5)
     dict_bytes = take(dict_count * 2)
     cell_dict = [int.from_bytes(dict_bytes[i * 2:i * 2 + 2], "little")
                 for i in range(dict_count)]
 
-    n = cols * rows
-    per_bank = 1 << bank_shift
     compressed = bool(flags & 2)
 
-    # A WorldTile's home is arithmetic, not a lookup: payloads are padded to the slot
-    # stride, so bank and offset both fall out of the index. A compressed bank (M12) is
-    # decoded once per bank and cached here rather than per WorldTile -- the atomic-unit
-    # cost the runtime accepts too (pnx_lzss.h's own comment).
-    decoded_banks = {}
+    mo = 0
+    bank_offset = 0
+    layers = []
+    for d in dirs:
+        w, h, worldtile = d["w"], d["h"], d["worldtile"]
+        cols, rows, bank_shift, slot_bytes = d["cols"], d["rows"], d["bank_shift"], d["slot_bytes"]
+        n = cols * rows
+        per_bank = 1 << bank_shift
+        bank_count = (n + per_bank - 1) >> bank_shift if n else 0
+        masks = masks_all[mo:mo + n]
+        mo += n
+        layer_banks = banks[bank_offset:bank_offset + bank_count] if banks else ()
+        bank_offset += bank_count
 
-    def bank_body(bank_index):
-        raw = banks[bank_index]
-        if not compressed:
-            return raw
-        if bank_index not in decoded_banks:
-            tiles_in_bank = min(per_bank, n - bank_index * per_bank)
-            decoded_banks[bank_index] = lzss_decompress(
-                raw[HEADER_BYTES:], tiles_in_bank * slot_bytes)
-        return decoded_banks[bank_index]
+        # A WorldTile's home is arithmetic, not a lookup: payloads are padded to the slot
+        # stride, so bank and offset both fall out of the index. A compressed bank (M12)
+        # is decoded once per bank and cached here rather than per WorldTile -- the
+        # atomic-unit cost the runtime accepts too (pnx_lzss.h's own comment).
+        decoded_banks = {}
 
-    cells = bytearray(w * h * 2) if banks else bytearray()
-    extended = {}
-    for i in range(n if banks else 0):
-        wx, wy = i % cols, i // cols
-        bank_index = i >> bank_shift
-        body_all = bank_body(bank_index)
-        off = (0 if compressed else HEADER_BYTES) + (i & (per_bank - 1)) * slot_bytes
-        body = body_all[off:off + slot_bytes]
-        cw, ch = body[0], body[1]
-        # Stored as dictionary indices (v13), decoded back to the raw entry word here so
-        # every reader downstream of parse_map (cell_warp/cell_extended, tests, the editor)
-        # keeps seeing the same `cells` shape it always has -- the index is this format's
-        # concern, not theirs.
-        for ly in range(ch):
-            src = 2 + ly * cw * idx_width
-            dst = ((wy * worldtile + ly) * w + wx * worldtile) * 2
-            for lx in range(cw):
-                if idx_width == 1:
-                    index = body[src + lx]
-                else:
-                    index = int.from_bytes(body[src + lx * 2:src + lx * 2 + 2], "little")
-                entry = cell_dict[index]
-                cells[dst + lx * 2] = entry & 0xFF
-                cells[dst + lx * 2 + 1] = entry >> 8
+        def bank_body(bank_index, _banks=layer_banks, _per_bank=per_bank, _n=n,
+                      _slot_bytes=slot_bytes, _decoded=decoded_banks):
+            raw = _banks[bank_index]
+            if not compressed:
+                return raw
+            if bank_index not in _decoded:
+                tiles_in_bank = min(_per_bank, _n - bank_index * _per_bank)
+                _decoded[bank_index] = lzss_decompress(
+                    raw[HEADER_BYTES:], tiles_in_bank * _slot_bytes)
+            return _decoded[bank_index]
 
-        ext_at = 2 + cw * ch * idx_width
-        ext_count = int.from_bytes(body[ext_at:ext_at + 2], "little")
-        ext_at += 2
-        for _ in range(ext_count):
-            lx, ly, val = body[ext_at], body[ext_at + 1], body[ext_at + 2]
-            extended[(wx * worldtile + lx, wy * worldtile + ly)] = val
-            ext_at += 3
+        cells = bytearray(w * h * 2) if layer_banks else bytearray()
+        extended = {}
+        for i in range(n if layer_banks else 0):
+            wx, wy = i % cols, i // cols
+            bank_index = i >> bank_shift
+            body_all = bank_body(bank_index)
+            off = (0 if compressed else HEADER_BYTES) + (i & (per_bank - 1)) * slot_bytes
+            body = body_all[off:off + slot_bytes]
+            cw, ch = body[0], body[1]
+            # Stored as dictionary indices (v13), decoded back to the raw entry word here
+            # so every reader downstream of parse_map (cell_warp/cell_extended, tests, the
+            # editor) keeps seeing the same `cells` shape it always has -- the index is
+            # this format's concern, not theirs.
+            for ly in range(ch):
+                src = 2 + ly * cw * idx_width
+                dst = ((wy * worldtile + ly) * w + wx * worldtile) * 2
+                for lx in range(cw):
+                    if idx_width == 1:
+                        index = body[src + lx]
+                    else:
+                        index = int.from_bytes(body[src + lx * 2:src + lx * 2 + 2],
+                                              "little")
+                    entry = cell_dict[index]
+                    cells[dst + lx * 2] = entry & 0xFF
+                    cells[dst + lx * 2 + 1] = entry >> 8
 
-    return {"w": w, "h": h, "worldtile": worldtile, "tile_px": tile_px,
-            "cols": cols, "rows": rows, "bank_shift": bank_shift,
-            "bank_count": (n + per_bank - 1) >> bank_shift,
-            "first_bank_asset": first_bank_asset,
-            "atlas_table": atlas_table, "palette": remap,
+            ext_at = 2 + cw * ch * idx_width
+            ext_count = int.from_bytes(body[ext_at:ext_at + 2], "little")
+            ext_at += 2
+            for _ in range(ext_count):
+                lx, ly, val = body[ext_at], body[ext_at + 1], body[ext_at + 2]
+                extended[(wx * worldtile + lx, wy * worldtile + ly)] = val
+                ext_at += 3
+
+        layers.append({"w": w, "h": h, "worldtile": worldtile,
+                       "cols": cols, "rows": rows, "bank_shift": bank_shift,
+                       "bank_count": bank_count, "first_bank_asset": d["first_bank_asset"],
+                       "parallax_pct": d["parallax_pct"], "wrap": d["wrap"],
+                       "masks": masks, "cells": bytes(cells), "extended": extended,
+                       "wt_slots": d["wt_slots"], "wt_slot_bytes": slot_bytes})
+
+    primary = layers[primary_layer] if primary_layer < len(layers) else layers[0]
+    return {**primary,
+            "tile_px": tile_px, "atlas_table": atlas_table, "palette": remap,
             "warps": [tuple(warps[i * 5:i * 5 + 5]) for i in range(warp_count)],
-            "masks": masks, "cells": bytes(cells), "extended": extended,
             "cell_dict": cell_dict, "dict_count": dict_count, "idx_width": idx_width,
-            "wt_slots": wt_slots, "wt_slot_bytes": slot_bytes,
             "atlas_slots": atlas_slots, "atlas_pool": pool,
-            "atlas_pool_bytes": atlas_pool_bytes}
+            "atlas_pool_bytes": atlas_pool_bytes,
+            "layers": layers, "layer_count": layer_count, "primary_layer": primary_layer}
 
 
 def cell_warp(mp, x, y):
@@ -4350,24 +4502,75 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
             map_legend = dict(legend)
             map_legend.update(parse_legend(own, flag_names))
 
-        # `source` and `rows` are the two authoring formats, and a map may not have both:
-        # they would be two descriptions of the same grid with nothing keeping them in
-        # step, and the build would silently pick one.
-        has_source, has_rows = "source" in spec, "rows" in spec
-        if has_source and has_rows:
-            raise BuildError(
-                f"map {spec['name']!r} has both `source` and `rows`. A map is authored in "
-                f"one or the other -- delete whichever is not the real one.")
-        if not (has_source or has_rows):
-            raise BuildError(
-                f"map {spec['name']!r} has neither `rows` nor `source`, so it has no cells")
+        def compile_layer(layer_spec, primary, _legend=map_legend, _table=table):
+            """One WorldTile plane -- `rows` or `source`, same rule a bare `[[map]]`
+            already enforces, applied identically to a `[[map.layer]]` sub-table."""
+            own_l = layer_spec.get("legend")
+            legend_l = _legend
+            if own_l:
+                legend_l = dict(_legend)
+                legend_l.update(parse_legend(own_l, flag_names))
 
-        if has_source:
-            m = compile_source_map(spec, root, roles_by_atlas, table, map_names,
-                                   collision_by_atlas)
+            has_source, has_rows = "source" in layer_spec, "rows" in layer_spec
+            if has_source and has_rows:
+                raise BuildError(
+                    f"map {spec['name']!r}: has both `source` and `rows`. A layer is "
+                    f"authored in one or the other -- delete whichever is not the real "
+                    f"one.")
+            if not (has_source or has_rows):
+                raise BuildError(
+                    f"map {spec['name']!r}: has neither `rows` nor `source`, so it has "
+                    f"no cells")
+            if has_source:
+                return compile_source_map(layer_spec, root, roles_by_atlas, _table,
+                                          map_names, collision_by_atlas, primary=primary)
+            return compile_map(layer_spec, legend_l, roles_by_atlas, _table, map_names,
+                               collision_by_atlas, primary=primary)
+
+        # A map is either the ORIGINAL shape -- one `rows` or `source` right on the
+        # `[[map]]` table, unchanged since before layers existed -- or declares its planes
+        # explicitly as `[[map.layer]]` sub-tables, background-to-foreground in the order
+        # written. One of those may set `primary = true` (default: the first) to say which
+        # plane `start`/`warps`/`out` belong to; it is always moved to index 0 before
+        # compiling, so the compiled blob's primary_layer byte is always 0 -- which is what
+        # lets every other layer-aware reader (finish_map, parse_map, the editor) treat
+        # "layers[0]" and "the primary" as the same thing unconditionally, without
+        # threading an arbitrary index through all of them.
+        layer_specs = spec.get("layer")
+        if layer_specs and ("rows" in spec or "source" in spec):
+            raise BuildError(
+                f"map {spec['name']!r} declares `[[map.layer]]` AND a top-level "
+                f"`rows`/`source`. Once a map's planes are explicit, cells belong on a "
+                f"layer -- move the top-level one into its own `[[map.layer]]` entry.")
+        if layer_specs:
+            primary_i = next((i for i, ls in enumerate(layer_specs)
+                              if ls.get("primary")), 0)
+            ordered = [layer_specs[primary_i]] + [ls for i, ls in enumerate(layer_specs)
+                                                  if i != primary_i]
+
+            primary_spec = dict(ordered[0])
+            primary_spec["out"] = spec["out"]
+            primary_spec["name"] = spec["name"]
+            m = compile_layer(primary_spec, primary=True)
+
+            layers = [m]
+            for i, ls in enumerate(ordered[1:], start=1):
+                ls2 = dict(ls)
+                ls2["name"] = f"{spec['name']}.{i}"
+                layer_m = compile_layer(ls2, primary=False)
+                # Consumed by finish_map's per-layer directory entry; not a general
+                # per-layer worldtile/residency override (see prepare_map's own comment --
+                # every layer of one map shares the map's worldtile/atlas_slots/resident/
+                # bank_bytes, which is a project-level performance knob this format leaves
+                # at one setting per map rather than one per layer).
+                layer_m["parallax_pct"] = max(0, min(255, int(ls.get("parallax_pct", 255))))
+                layer_m["wrap"] = bool(ls.get("wrap", False))
+                layers.append(layer_m)
+            m["layers"] = layers
         else:
-            m = compile_map(spec, map_legend, roles_by_atlas, table, map_names,
-                           collision_by_atlas)
+            m = compile_layer(spec, primary=True)
+            m["layers"] = [m]
+        m["primary_layer"] = 0
         m["palette"] = spec.get("palette")
         m["tile_px"] = tile_px[names[0]]
 

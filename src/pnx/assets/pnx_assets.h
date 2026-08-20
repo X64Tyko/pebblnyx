@@ -94,8 +94,12 @@
 							// its preamble carries one directory block per layer
 							// (its own w/h/worldtile/bank range/parallax/wrap)
 							// after the shared atlas table, ahead of the shared
-							// palette/warp/cell-dictionary tables. Bank asset ids
-							// are now per-layer (PNX_ASSET_BANK_<map>_<layer>_<i>).
+							// palette/warp/cell-dictionary tables. Bank asset ids stay
+							// one flat, consecutive run per map (PNX_ASSET_BANK_<map>_<i>)
+							// -- each layer's own slice of it is just wherever its own
+							// `first_bank_asset` says it starts; nothing reads the
+							// generated constant's NAME to find a layer boundary, so the
+							// pipeline never needed to spell one into it.
 							// v13: map preamble carries a cell dictionary
 							// (PnxMap.cell_dict/dict_count/idx_width) -- a
 							// WorldTile's cells are stored as 1- or 2-byte
@@ -416,9 +420,12 @@ typedef struct
 	// how far in it starts -- see docs/MEASUREMENTS.md. A tile's home needs no lookup:
 	// bank `index >> bank_shift`, offset `(index & mask) * slot_bytes`, since payloads are
 	// padded to the slot stride. Which also makes a run of consecutive tiles one read.
-	// Every layer owns its OWN run -- `PNX_ASSET_BANK_<map>_<layer>_<i>` in the generated
-	// header -- because two layers rarely share a WorldTile size, and so never share a
-	// bank stride.
+	// Every layer owns its OWN run, starting at its own `first_bank_asset` -- because two
+	// layers rarely share a WorldTile size, and so never share a bank stride -- but the
+	// generated header numbers every map's banks in one flat, consecutive sequence
+	// (PNX_ASSET_BANK_<map>_<i>) rather than naming the layer boundary in the constant:
+	// nothing reads that name to find where one layer's run ends and the next begins,
+	// only the numeric id and each layer's own recorded `first_bank_asset`.
 	uint16_t first_bank_asset;
 	uint8_t bank_shift;
 

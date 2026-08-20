@@ -42,42 +42,51 @@ class MapsMixin:
                      "rotate": bool(e.get("rotate", False))}
                 for ch, e in raw.items()}
 
-    def map_doc(self, m):
-        """One map as cells + a tile table, whatever it was authored in.
+    def _plane_doc(self, spec, legend, default, primary):
+        """One WorldTile plane -- cells + a tile table -- whatever it was authored in.
+
+        Shared by every layer a map declares: the implicit single one when there is no
+        `[[map.layer]]` at all, and each explicit sub-table when there is. `primary`
+        gates whether `start`/`warps` are read -- the same primary-layer-only rule the
+        pipeline enforces (finish_compile_layer's own comment, pnx_assets.py) -- so a
+        background or overlay layer's doc simply has neither.
 
         The page used to hold a map as an array of STRINGS and index it by legend
         character, which cannot represent a `.pnxmap` at all -- a binary map has no
         characters, and above ~90 tiles there are not enough to invent. So both formats
         are normalised to the same shape here and the canvas only knows one.
 
-        For a `rows` map each table entry carries the character it came from, so saving
+        For a `rows` plane each table entry carries the character it came from, so saving
         writes back the author's own glyphs rather than reassigning them -- a map whose
         diff churned every time it was opened would not be worth keeping in text.
         """
-        names = self.map_atlases(m)
-        default = names[0] if names else None
-
-        if "source" in m:
-            path = self._safe(m["source"])
+        if "source" in spec:
+            path = self._safe(spec["source"])
             doc = mf.read(path)
             for t in doc["tiles"]:
                 t.setdefault("flags", 0)
-            return {"format": "source", "source": m["source"],
-                    "w": doc["w"], "h": doc["h"], "cells": doc["cells"],
-                    "tiles": doc["tiles"], "start": doc["start"],
-                    "warps": [{"at": wp["at"], "to": wp["to"], "gated": wp["gated"]}
-                              for wp in doc["warps"]]}
+            out = {"format": "source", "source": spec["source"],
+                  "w": doc["w"], "h": doc["h"], "cells": doc["cells"],
+                  "tiles": doc["tiles"]}
+            if primary:
+                out["start"] = doc["start"]
+                out["warps"] = [{"at": wp["at"], "to": wp["to"], "gated": wp["gated"]}
+                               for wp in doc["warps"]]
+            return out
 
-        rows = [r for r in m.get("rows", "").strip("\n").split("\n") if r.strip()]
-        legend = dict(self.man.get("legend", {}))
-        legend.update(m.get("legend", {}))
+        rows = [r for r in spec.get("rows", "").strip("\n").split("\n") if r.strip()]
+        plane_legend = legend
+        own = spec.get("legend")
+        if own:
+            plane_legend = dict(legend)
+            plane_legend.update(own)
 
         tiles, seen, cells = [], {}, []
         h = len(rows)
         w = len(rows[0]) if rows else 0
         for row in rows:
             for ch in row:
-                e = legend.get(ch)
+                e = plane_legend.get(ch)
                 if e is None:
                     # An unknown character is carried as a placeholder rather than
                     # refused: the page has to be able to OPEN a broken map to fix it,
@@ -105,9 +114,55 @@ class MapsMixin:
                                   "ch": ch})
                 cells.append(seen[key])
 
-        return {"format": "rows", "w": w, "h": h, "cells": cells, "tiles": tiles,
-                "start": list(m.get("start", [1, 1])),
-                "warps": [dict(wp) for wp in m.get("warps", [])]}
+        out = {"format": "rows", "w": w, "h": h, "cells": cells, "tiles": tiles}
+        if primary:
+            out["start"] = list(spec.get("start", [1, 1]))
+            out["warps"] = [dict(wp) for wp in spec.get("warps", [])]
+        return out
+
+    def map_doc(self, m):
+        """A map as one or more WorldTile planes: `layers`, in the order the manifest
+        declares them, and `primary` -- the index INTO that same list of whichever one
+        `start`/`warps` belong to -- plus every key `map_doc` returned before multi-layer
+        maps existed, mirroring `layers[primary]` at the top level, so any caller that
+        only ever knew a flat map keeps working unchanged (`doc["cells"]`/`doc["w"]`/etc.
+        still mean exactly what they meant).
+
+        `layers` is deliberately kept in FILE order rather than reordered primary-first:
+        `add_map_layer`/`remove_map_layer`/`save_map_layer` all address a layer by its
+        index into this same list, and that index has to be stable against the manifest
+        text those write, not against a view-only reordering. (The pipeline's OWN
+        primary-first reordering, inside `compile_map`'s manifest driver, is a build-time
+        concern of the compiled blob and is unrelated to this list's order.)
+
+        `m["layer"]` -- `[[map.layer]]` sub-tables -- declares the planes explicitly,
+        background-to-foreground in the order written, one of which may set
+        `primary = true` (default: the first). No `[[map.layer]]` at all is the ORIGINAL
+        shape: one implicit layer built from the map's own `rows`/`source`.
+        """
+        names = self.map_atlases(m)
+        default = names[0] if names else None
+        legend = dict(self.man.get("legend", {}))
+        legend.update(m.get("legend", {}))
+
+        layer_specs = m.get("layer")
+        if layer_specs:
+            primary_i = next((i for i, ls in enumerate(layer_specs)
+                              if ls.get("primary")), 0)
+            layers = []
+            for i, ls in enumerate(layer_specs):
+                d = self._plane_doc(ls, legend, default, primary=(i == primary_i))
+                d["parallax_pct"] = max(0, min(255, int(ls.get("parallax_pct", 255))))
+                d["wrap"] = bool(ls.get("wrap", False))
+                layers.append(d)
+        else:
+            d = self._plane_doc(m, legend, default, primary=True)
+            d["parallax_pct"] = 255
+            d["wrap"] = False
+            layers = [d]
+            primary_i = 0
+
+        return {**layers[primary_i], "layers": layers, "primary": primary_i}
 
     def _flag_byte(self, names):
         known = self.flag_names()
@@ -124,11 +179,15 @@ class MapsMixin:
             names = self.map_atlases(m)
             out.append({"name": m["name"], "rows": rows,
                         # The normalised form the canvas actually draws: cells indexing a
-                        # tile table, for a `rows` map and a `.pnxmap` alike.
+                        # tile table, for a `rows` map and a `.pnxmap` alike. `layers` is
+                        # every plane the map declares, PRIMARY first -- the flat
+                        # format/source/w/h/cells/tiles/start/warps fields alongside it
+                        # mirror layers[0], unchanged in shape from before layers existed.
                         "format": doc["format"],
                         "source": doc.get("source"),
                         "w": doc["w"], "h": doc["h"],
                         "cells": doc["cells"], "tiles": doc["tiles"],
+                        "layers": doc["layers"], "primary": doc["primary"],
                         # A source map owns its own start and warps -- they are positions
                         # in a grid the file holds, so the manifest does not get a second,
                         # disagreeing copy.
@@ -170,7 +229,9 @@ class MapsMixin:
         `end` steps over the map's OWN subtables -- `[map.legend."x"]` binds to the most
         recent [[map]] in TOML, so a subtable is part of the block even though it opens
         with a bracket. Stopping at the first bracket instead would put anything appended
-        here in front of the map's own legend, i.e. in the wrong table.
+        here in front of the map's own legend, i.e. in the wrong table. `[[map.layer]]`
+        sub-tables are the same story: an array-of-tables nested inside this [[map]],
+        not a sibling of it, even though `[[...]]` looks like a top-level header too.
         """
         lines = open(self.path).read().split("\n")
         start = None
@@ -189,10 +250,39 @@ class MapsMixin:
         end = len(lines)
         for j in range(start + 1, len(lines)):
             s = lines[j].lstrip()
-            if s.startswith("[") and not s.startswith("[map."):
+            if (s.startswith("[") and not s.startswith("[map.")
+                    and s.strip() != "[[map.layer]]"):
                 end = j
                 break
         return lines, start, end
+
+    def _map_layer_blocks(self, name):
+        """(lines, map_start, map_end, [(layer_start, layer_end), ...]) -- every
+        `[[map.layer]]` sub-table inside map `name`'s own block, in FILE order (see
+        map_doc's own comment for why file order, not primary-first, is what every layer
+        edit addresses). Each `(layer_start, layer_end)` spans that one sub-table's own
+        `[[map.layer]]` header through whatever precedes the next boundary -- another
+        `[[map.layer]]`, or the end of the map's block.
+        """
+        found = self._map_block(name)
+        if not found:
+            return None
+        lines, mstart, mend = found
+        blocks = []
+        i = mstart + 1
+        while i < mend:
+            if lines[i].strip() == "[[map.layer]]":
+                j = i + 1
+                while j < mend:
+                    s = lines[j].lstrip()
+                    if s.startswith("[") and not s.startswith("[map.layer."):
+                        break
+                    j += 1
+                blocks.append((i, j))
+                i = j
+            else:
+                i += 1
+        return lines, mstart, mend, blocks
 
     def _legend_block(self, ch, map_name=None):
         """(lines, start, end) for one legend block, or None if it has none.
@@ -891,6 +981,255 @@ rows = """
         self.reload()
         return {"source": source, "tiles": len(doc["tiles"]),
                 "bytes": os.path.getsize(path)}
+
+    @staticmethod
+    def _layer_lines(primary=False, source=None, rows=None, start=None, warps=None,
+                     parallax_pct=None, wrap=None):
+        """The body lines of one `[[map.layer]]` sub-table."""
+        body = ["[[map.layer]]"]
+        if primary:
+            body.append("primary = true")
+        if source is not None:
+            body.append(f'source = "{source}"')
+        if parallax_pct is not None and parallax_pct != 255:
+            body.append(f"parallax_pct = {parallax_pct}")
+        if wrap:
+            body.append("wrap = true")
+        if start is not None:
+            body.append(f"start = [{start[0]}, {start[1]}]")
+        if warps is not None:
+            warp_src = ", ".join(
+                '{{ at = [{}, {}], to = ["{}", {}, {}] }}'.format(
+                    w["at"][0], w["at"][1], w["to"][0], w["to"][1], w["to"][2])
+                for w in warps)
+            body.append(f"warps = [{warp_src}]")
+        if rows is not None:
+            clean = rows.strip("\n")
+            body.append(f'rows = """\n{clean}\n"""')
+        return body
+
+    def add_map_layer(self, name):
+        """Add a new, blank layer above every layer this map already has.
+
+        The map's first layer is not a new concept -- it is whatever `rows`/`source` the
+        map already had, made explicit as `primary = true` the first time a SECOND layer
+        is added, in whichever format it already used (no forced conversion to `.pnxmap`
+        the way `migrate_map` does -- that is a separate, deliberate choice). A map
+        already declaring `[[map.layer]]` just gets one more appended.
+
+        The new layer is always `.pnxmap`-backed regardless of the primary's own format:
+        a blank layer has no existing rows to preserve, and a binary file means painting
+        it never needs TOML surgery, only a rewrite of that one file.
+        """
+        spec = next((m for m in self.man.get("map", []) if m["name"] == name), None)
+        if not spec:
+            raise ValueError(f"no map named {name!r}")
+
+        doc = self.map_doc(spec)
+        primary_doc = doc["layers"][doc["primary"]]
+        w, h = primary_doc["w"], primary_doc["h"]
+        if not w or not h:
+            raise ValueError(f"map {name!r} has no cells yet -- paint it before adding "
+                             f"a layer")
+
+        names = self.map_atlases(spec)
+        atlas = names[0] if names else None
+        if not atlas:
+            raise ValueError(f"map {name!r} has no atlas to draw a new layer with")
+
+        lines, mstart, mend = self._map_block(name)
+        layer_specs = spec.get("layer")
+
+        if not layer_specs:
+            # Explode the map's own plane into an explicit primary [[map.layer]]: drop
+            # rows/source/start/warps from the [[map]] table (consumed to their real end,
+            # same as migrate_map's own key-dropping scan -- `rows` is triple-quoted and
+            # `warps` is routinely multi-line, so dropping only the line the key sits on
+            # would leave continuation lines behind as bare TOML), then re-add them,
+            # UNCHANGED, as the new sub-table's own keys.
+            body, depth, in_rows = [], 0, False
+            for line in lines[mstart + 1:mend]:
+                if in_rows:
+                    if '"""' in line:
+                        in_rows = False
+                    continue
+                if depth:
+                    depth += line.count("[") - line.count("]")
+                    continue
+                key = (re.match(r"\s*([a-z_]+)\s*=", line) or [None, None])[1]
+                if key in ("rows", "source", "start", "warps"):
+                    value = line.split("=", 1)[1]
+                    if key == "rows":
+                        in_rows = '"""' not in value.strip()[3:]
+                    else:
+                        depth = value.count("[") - value.count("]")
+                    continue
+                body.append(line)
+
+            primary_block = self._layer_lines(
+                primary=True, source=spec.get("source"), rows=spec.get("rows"),
+                start=spec.get("start", [1, 1]), warps=spec.get("warps", []))
+            insert_at = next((i for i, l in enumerate(body)
+                              if l.lstrip().startswith("[")), len(body))
+            body[insert_at:insert_at] = [""] + primary_block
+            lines[mstart + 1:mend] = body
+            mend = mstart + 1 + len(body)
+            layer_specs = [dict(spec)]  # for the filename-collision scan below only
+
+        source = f"maps/{name}_layer{len(layer_specs) + 1}.pnxmap"
+        n = len(layer_specs) + 1
+        while os.path.exists(self._safe(source)):
+            n += 1
+            source = f"maps/{name}_layer{n}.pnxmap"
+        path = self._safe(source)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tiles = [{"atlas": atlas, "index": "floor", "flip": "", "flags": 0}]
+        mf.write(path, w, h, [0, 0], tiles, [0] * (w * h), [])
+
+        new_block = self._layer_lines(primary=False, source=source)
+        lines[mend:mend] = [""] + new_block
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+        return {"source": source}
+
+    def remove_map_layer(self, name, layer_index):
+        """Remove one declared layer by its position in `map_doc`'s (file-order) `layers`
+        list. Refuses to remove a map's last layer -- there is always at least one plane
+        -- and refuses to remove the primary while another layer remains, since that
+        would leave nothing owning start/warps; mark a different layer `primary` first.
+        """
+        found = self._map_layer_blocks(name)
+        if not found:
+            raise ValueError(f"map {name!r} has no [[map.layer]] entries to remove")
+        lines, mstart, mend, blocks = found
+        if not 0 <= layer_index < len(blocks):
+            raise ValueError(f"map {name!r} has {len(blocks)} layers, no index "
+                             f"{layer_index}")
+        if len(blocks) == 1:
+            raise ValueError("a map needs at least one layer -- remove the map instead")
+
+        spec = next((m for m in self.man.get("map", []) if m["name"] == name), None)
+        layer_specs = spec.get("layer", [])
+        primary_i = next((i for i, ls in enumerate(layer_specs) if ls.get("primary")), 0)
+        if layer_index == primary_i:
+            raise ValueError("cannot remove the primary layer -- mark another layer "
+                             "`primary` first")
+
+        lstart, lend = blocks[layer_index]
+        while lend < mend and lines[lend].strip() == "":
+            lend += 1
+        while lstart > mstart and lines[lstart - 1].strip() == "":
+            lstart -= 1
+        del lines[lstart:lend]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def save_map_layer_source(self, name, layer_index, w, h, cells, tiles, start=None,
+                              warps=None):
+        """Save one `.pnxmap`-backed layer's painted cells back to its own file.
+
+        Layer index is into `map_doc`'s file-order `layers` list. `start`/`warps` only
+        apply when this layer is the primary; passed through unchanged (defaulting to
+        keeping whatever the file already has via [0, 0]/[] otherwise) when it is not.
+        """
+        spec = next((m for m in self.man.get("map", []) if m["name"] == name), None)
+        if not spec:
+            raise ValueError(f"no map named {name!r}")
+
+        layer_specs = spec.get("layer")
+        if not layer_specs:
+            if layer_index != 0:
+                raise ValueError(f"map {name!r} has only one layer")
+            return self.save_source_map(
+                name, w, h, cells, tiles,
+                start if start is not None else spec.get("start", [1, 1]),
+                warps if warps is not None else spec.get("warps", []))
+
+        if not 0 <= layer_index < len(layer_specs):
+            raise ValueError(f"map {name!r} has {len(layer_specs)} layers, no index "
+                             f"{layer_index}")
+        ls = layer_specs[layer_index]
+        if "source" not in ls:
+            raise ValueError(f"layer {layer_index} of map {name!r} is authored as "
+                             f"`rows`, not `source`")
+        primary_i = next((i for i, l2 in enumerate(layer_specs) if l2.get("primary")), 0)
+        is_primary = layer_index == primary_i
+
+        path = self._safe(ls["source"])
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            mf.write(path, w, h,
+                    start if is_primary and start is not None else [0, 0],
+                    tiles, cells,
+                    warps if is_primary and warps is not None else [])
+        except mf.MapFileError as e:
+            raise ValueError(str(e)) from None
+        self.reload()
+
+    def save_map_layer_rows(self, name, layer_index, rows, start=None, warps=None):
+        """Save one `rows`-backed layer's painted cells back to its own `[[map.layer]]`
+        sub-table -- the same regex-substitution `save_map` already uses for the
+        implicit single-layer case, scoped to one layer's own line range instead of the
+        whole `[[map]]` block.
+        """
+        spec = next((m for m in self.man.get("map", []) if m["name"] == name), None)
+        if not spec:
+            raise ValueError(f"no map named {name!r}")
+
+        layer_specs = spec.get("layer")
+        if not layer_specs:
+            if layer_index != 0:
+                raise ValueError(f"map {name!r} has only one layer")
+            return self.save_map(
+                name, rows, start if start is not None else spec.get("start", [1, 1]),
+                warps if warps is not None else spec.get("warps", []))
+
+        if not 0 <= layer_index < len(layer_specs):
+            raise ValueError(f"map {name!r} has {len(layer_specs)} layers, no index "
+                             f"{layer_index}")
+        if "rows" not in layer_specs[layer_index]:
+            raise ValueError(f"layer {layer_index} of map {name!r} is authored as "
+                             f"`source`, not `rows`")
+        primary_i = next((i for i, l2 in enumerate(layer_specs) if l2.get("primary")), 0)
+        is_primary = layer_index == primary_i
+
+        lines, mstart, mend, blocks = self._map_layer_blocks(name)
+        lstart, lend = blocks[layer_index]
+        chunk = "\n".join(lines[lstart:lend])
+
+        body = "\n".join(rows)
+        chunk = re.sub(r'rows\s*=\s*""".*?"""', f'rows = """\n{body}\n"""', chunk,
+                       flags=re.S)
+
+        if is_primary and start is not None:
+            if re.search(r"^start\s*=", chunk, re.M):
+                chunk = re.sub(r"^start\s*=\s*\[.*?\]$",
+                               f"start = [{start[0]}, {start[1]}]", chunk, flags=re.M)
+            else:
+                chunk = re.sub(r"(^\[\[map\.layer\]\]$)",
+                               rf"\1\nstart = [{start[0]}, {start[1]}]", chunk,
+                               count=1, flags=re.M)
+        if is_primary and warps is not None:
+            warp_src = ", ".join(
+                '{{ at = [{}, {}], to = ["{}", {}, {}] }}'.format(
+                    w["at"][0], w["at"][1], w["to"][0], w["to"][1], w["to"][2])
+                for w in warps)
+            if re.search(r"^warps\s*=", chunk, re.M):
+                chunk = re.sub(r"^warps\s*=\s*\[.*?\]$", f"warps = [{warp_src}]", chunk,
+                               flags=re.M | re.S)
+            elif re.search(r"^start\s*=", chunk, re.M):
+                chunk = re.sub(r"(^start\s*=.*$)", rf"\1\nwarps = [{warp_src}]", chunk,
+                               count=1, flags=re.M)
+            else:
+                chunk = re.sub(r"(^\[\[map\.layer\]\]$)", rf"\1\nwarps = [{warp_src}]",
+                               chunk, count=1, flags=re.M)
+
+        lines[lstart:lend] = chunk.split("\n")
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
 
     def save_map(self, name, rows, start, warps, atlas=None, atlases=None):
         """Rewrite one map's rows/start/warps in place, touching nothing else.

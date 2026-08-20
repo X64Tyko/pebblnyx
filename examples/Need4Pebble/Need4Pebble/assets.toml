@@ -30,3 +30,154 @@ budget_bytes = 262144
 # and give a legend character an `atlas` key to say which one its role resolves against.
 # A scene must NOT list a map's atlases: the map owns them, sizes its own pool and streams
 # them by WorldTile, so naming one in a scene loads a second resident copy.
+
+# ---------------------------------------------------------------- touring car
+
+[[sprite]]
+name = "touring_normal"
+sheet = "art/NES_Touring_Car_Sprite_Sheet.png"
+# 6 distance tiers (closest, row 0 -> farthest, row 5) x 9 steering angles (full left
+# -> full right), row-major: frame = tier * 9 + angle. This is the traffic/opponent car
+# at every depth a pseudo-3D road scales it to; the player's own car does not need the
+# depth axis and can just hold tier 0.
+frames = [
+    [35, 177, 44, 23], [79, 177, 40, 23], [119, 177, 40, 23], [161, 177, 38, 23], [200, 177, 40, 23], [241, 177, 38, 23], [280, 177, 40, 23], [320, 177, 42, 23], [361, 177, 44, 23],
+    [38, 204, 37, 18], [83, 204, 32, 18], [124, 204, 32, 18], [165, 204, 31, 18], [204, 204, 32, 18], [244, 204, 31, 18], [284, 204, 32, 18], [325, 204, 32, 18], [365, 204, 37, 18],
+    [36, 228, 38, 17], [85, 228, 30, 17], [125, 228, 30, 17], [166, 228, 28, 17], [206, 228, 28, 17], [246, 228, 28, 17], [285, 228, 30, 17], [325, 228, 30, 17], [366, 228, 34, 17],
+    [44, 250, 28, 14], [88, 250, 24, 14], [128, 250, 25, 14], [168, 250, 24, 14], [208, 250, 24, 14], [248, 250, 24, 14], [287, 250, 25, 14], [328, 250, 24, 14], [368, 250, 28, 14],
+    [50, 270, 20, 10], [93, 270, 16, 10], [132, 270, 17, 10], [172, 270, 17, 10], [211, 270, 18, 10], [251, 270, 17, 10], [291, 270, 17, 10], [331, 270, 16, 10], [372, 270, 20, 10],
+    [54, 288, 12, 7], [95, 288, 12, 7], [136, 288, 10, 7], [176, 288, 10, 7], [215, 288, 10, 7], [255, 288, 10, 7], [294, 288, 10, 7], [334, 288, 12, 7], [374, 288, 12, 7],
+]
+out = "touring_normal.bin"
+
+[[sprite]]
+name = "touring_slope"
+sheet = "art/NES_Touring_Car_Sprite_Sheet.png"
+# Same scheme as touring_normal, but the sheet only drew 5 distance tiers on a slope.
+frames = [
+    [36, 304, 43, 24], [79, 304, 42, 24], [121, 304, 38, 24], [161, 304, 38, 24], [200, 304, 40, 24], [241, 304, 38, 24], [280, 304, 39, 24], [319, 304, 41, 24], [360, 304, 44, 24],
+    [39, 337, 36, 19], [84, 337, 34, 19], [125, 337, 34, 19], [165, 337, 32, 19], [204, 337, 32, 19], [244, 337, 32, 19], [283, 337, 32, 19], [323, 337, 34, 19], [365, 337, 36, 19],
+    [44, 363, 28, 15], [88, 363, 26, 15], [130, 363, 26, 15], [169, 363, 24, 15], [208, 363, 24, 15], [247, 363, 24, 15], [285, 363, 26, 15], [326, 363, 26, 15], [368, 363, 28, 15],
+    [48, 388, 20, 11], [93, 388, 18, 11], [133, 388, 18, 11], [173, 388, 18, 11], [211, 388, 18, 11], [250, 388, 18, 11], [290, 388, 18, 11], [329, 388, 18, 11], [373, 388, 20, 11],
+    [54, 408, 12, 7], [95, 408, 12, 7], [136, 408, 10, 7], [176, 408, 10, 7], [215, 408, 10, 7], [255, 408, 10, 7], [294, 408, 10, 7], [334, 408, 12, 7], [374, 408, 12, 7],
+]
+out = "touring_slope.bin"
+
+[[sprite]]
+name = "touring_crash"
+sheet = "art/NES_Touring_Car_Sprite_Sheet.png"
+# 0 impact flash, 1 spin, 2 side-on tumble, 3 final wreck.
+frames = [
+    [24, 432, 197, 24], [228, 432, 52, 23], [278, 434, 48, 18], [369, 434, 34, 19],
+]
+out = "touring_crash.bin"
+
+[sprite.anim]
+crash = { frames = [0, 1, 2, 3], fps = 8, loop = false }
+
+[[sprite]]
+name = "touring_title"
+sheet = "art/NES_Touring_Car_Sprite_Sheet.png"
+frames = [
+    [123, 35, 92, 60], [323, 35, 92, 60],
+]
+out = "touring_title.bin"
+
+[[sprite]]
+name = "touring_avatar"
+sheet = "art/NES_Touring_Car_Sprite_Sheet.png"
+frames = [
+    [40, 123, 46, 28], [98, 123, 46, 28],
+]
+out = "touring_avatar.bin"
+
+
+# ---------------------------------------------------------------- police car
+
+[[sprite]]
+name = "police_normal"
+sheet = "art/NES_Touring_police_Car_Sprite_Sheet.png"
+# 6 distance tiers (closest, row 0 -> farthest, row 5) x 9 steering angles (full left
+# -> full right), row-major: frame = tier * 9 + angle. This is the traffic/opponent car
+# at every depth a pseudo-3D road scales it to; the player's own car does not need the
+# depth axis and can just hold tier 0.
+frames = [
+    [35, 177, 44, 23], [79, 177, 40, 23], [119, 177, 40, 23], [161, 177, 38, 23], [200, 177, 40, 23], [241, 177, 38, 23], [280, 177, 40, 23], [320, 177, 42, 23], [361, 177, 44, 23],
+    [38, 204, 37, 18], [83, 204, 32, 18], [124, 204, 32, 18], [165, 204, 31, 18], [204, 204, 32, 18], [244, 204, 31, 18], [284, 204, 32, 18], [325, 204, 32, 18], [365, 204, 37, 18],
+    [36, 228, 38, 17], [85, 228, 30, 17], [125, 228, 30, 17], [166, 228, 28, 17], [206, 228, 28, 17], [246, 228, 28, 17], [285, 228, 30, 17], [325, 228, 30, 17], [366, 228, 34, 17],
+    [44, 250, 28, 14], [88, 250, 24, 14], [128, 250, 25, 14], [168, 250, 24, 14], [208, 250, 24, 14], [248, 250, 24, 14], [287, 250, 25, 14], [328, 250, 24, 14], [368, 250, 28, 14],
+    [50, 270, 20, 10], [93, 270, 16, 10], [132, 270, 17, 10], [172, 270, 17, 10], [211, 270, 18, 10], [251, 270, 17, 10], [291, 270, 17, 10], [331, 270, 16, 10], [370, 270, 20, 10],
+    [54, 288, 12, 7], [95, 288, 12, 7], [136, 288, 10, 7], [176, 288, 10, 7], [215, 288, 10, 7], [255, 288, 10, 7], [294, 288, 10, 7], [334, 288, 12, 7], [374, 288, 12, 7],
+]
+out = "police_normal.bin"
+
+[[sprite]]
+name = "police_slope"
+sheet = "art/NES_Touring_police_Car_Sprite_Sheet.png"
+# Same scheme as police_normal, but the sheet only drew 5 distance tiers on a slope.
+frames = [
+    [36, 304, 43, 24], [79, 304, 42, 24], [121, 304, 38, 24], [161, 304, 38, 24], [200, 304, 42, 24], [242, 304, 37, 24], [281, 304, 40, 24], [321, 304, 41, 24], [362, 304, 42, 24],
+    [39, 337, 36, 19], [84, 337, 34, 19], [125, 337, 34, 19], [165, 337, 32, 19], [204, 337, 34, 19], [246, 337, 32, 19], [284, 337, 34, 19], [325, 337, 34, 19], [367, 337, 36, 19],
+    [44, 363, 28, 15], [88, 363, 26, 15], [130, 363, 26, 15], [169, 363, 24, 15], [208, 363, 24, 15], [247, 363, 24, 15], [285, 363, 26, 15], [326, 363, 26, 15], [368, 363, 28, 15],
+    [48, 388, 20, 11], [93, 388, 18, 11], [133, 388, 18, 11], [173, 388, 18, 11], [211, 388, 18, 11], [250, 388, 18, 11], [290, 388, 18, 11], [329, 388, 18, 11], [373, 388, 20, 11],
+    [54, 408, 12, 7], [95, 408, 12, 7], [136, 408, 10, 7], [176, 408, 10, 7], [215, 408, 10, 7], [255, 408, 10, 7], [294, 408, 10, 7], [334, 408, 12, 7], [374, 408, 12, 7],
+]
+out = "police_slope.bin"
+
+[[sprite]]
+name = "police_crash"
+sheet = "art/NES_Touring_police_Car_Sprite_Sheet.png"
+# 0 impact flash, 1 spin, 2 side-on tumble, 3 final wreck.
+frames = [
+    [24, 432, 197, 24], [228, 432, 52, 23], [278, 433, 48, 19], [369, 433, 33, 20],
+]
+out = "police_crash.bin"
+
+[sprite.anim]
+crash = { frames = [0, 1, 2, 3], fps = 8, loop = false }
+
+[[sprite]]
+name = "police_title"
+sheet = "art/NES_Touring_police_Car_Sprite_Sheet.png"
+frames = [
+    [123, 36, 92, 59], [323, 35, 92, 60],
+]
+out = "police_title.bin"
+
+[[sprite]]
+name = "police_avatar"
+sheet = "art/NES_Touring_police_Car_Sprite_Sheet.png"
+frames = [
+    [40, 120, 48, 32], [96, 120, 48, 32], [152, 122, 46, 28], [210, 122, 46, 28],
+]
+out = "police_avatar.bin"
+
+
+# ---------------------------------------------------------------------- hang-on bike
+
+[[sprite]]
+name = "hangon_bike"
+sheet = "art/Sega Genesis - Super Hang-On - Miscellaneous - Arcade Mode.png"
+# Ripped on a flat magenta card, not a real alpha channel -- see parse_colorkey's own
+# comment for why that needs naming rather than leaving transparency to guesswork.
+colorkey = [255, 0, 204]
+# 4 rows x 8 lean poses (upright -> full lean), row-major: accelerating, braking, and
+# two recolours (green/yellow) of the same pose set. Recoloured as flat frames rather
+# than the `variants` mechanism because the source card never split them into separate
+# files -- worth revisiting if this bike sees real use, since three quarters of the
+# pixel data here is a duplicate shape under a different palette.
+frames = [
+
+    [91, 280, 32, 72], [129, 280, 32, 72], [168, 282, 35, 70], [206, 282, 35, 70], [244, 290, 45, 62], [295, 290, 45, 62], [345, 298, 62, 54], [410, 298, 62, 54],
+    [91, 360, 32, 72], [129, 360, 32, 72], [168, 362, 35, 70], [206, 362, 35, 70], [244, 370, 45, 62], [295, 370, 45, 62], [345, 378, 62, 54], [410, 378, 62, 54],
+    [91, 440, 32, 72], [129, 440, 32, 72], [168, 442, 35, 70], [206, 442, 35, 70], [244, 450, 45, 62], [295, 450, 45, 62], [345, 458, 62, 54], [410, 458, 62, 54],
+    [91, 520, 32, 72], [129, 520, 32, 72], [168, 522, 35, 70], [206, 522, 35, 70], [244, 530, 45, 62], [295, 530, 45, 62], [345, 538, 62, 54], [410, 538, 62, 54],
+
+]
+out = "hangon_bike.bin"
+
+[sprite.anim]
+accelerating = [0, 1, 2, 3, 4, 5, 6, 7]
+braking = [8, 9, 10, 11, 12, 13, 14, 15]
+green = [16, 17, 18, 19, 20, 21, 22, 23]
+yellow = [24, 25, 26, 27, 28, 29, 30, 31]
