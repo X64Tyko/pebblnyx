@@ -7,6 +7,17 @@ const post=async(url,body)=>(await fetch(url,{method:'POST',
   headers:{'content-type':'application/json'},
   body:JSON.stringify(body||{})})).json();
 
+// "Pick an existing X" -- #spsel/#nssel/#hwsel/#pxopen each hand-rolled this same
+// "<option> per item, keep whatever was already selected" shape once. One helper
+// instead; each call site still owns its OWN onchange/refresh logic, only the option
+// list itself is shared.
+function bindSelectOptions(sel,items,{placeholder='— new —',label=x=>x,current}={}){
+  const cur=current!==undefined?current:sel.value;
+  sel.innerHTML=`<option value="">${placeholder}</option>`
+    +items.map(it=>{const v=label(it); return `<option${v===cur?' selected':''}>${v}</option>`})
+      .join('');
+}
+
 function say(text,bad){
   const log=$('#log');
   log.className=bad===false?'ok':(bad===undefined?'':'bad');
@@ -60,7 +71,7 @@ async function load(){
 
   // Launched with no project -- from a dock, say. Go straight to Project, which is
   // where opening and creating actually live, rather than showing empty authoring tabs.
-  const authoring=['tabmaps','tabimport','tabfonts','tabpixel','tabcode'];
+  const authoring=['tabmaps','tabimport','tabfonts','tabpixel','tabcode','tabhudwin'];
   if(S.data.no_project){
     for(const id of authoring) $('#'+id).disabled=true;
     showTab('project');
@@ -1519,7 +1530,7 @@ function showTab(which){
   const imp=which==='import', fnt=which==='fonts', maps=which==='maps',
         sdk=which==='sdk', pix=which==='pixel', cod=which==='code',
         scn=which==='scenes', dlg=which==='dialog', mus=which==='music',
-        dev=which==='device', proj=which==='project';
+        dev=which==='device', proj=which==='project', hwn=which==='hudwin';
   $('#import').style.display=imp?'block':'none';
   $('#fonts').style.display=fnt?'block':'none';
   $('#sdk').style.display=sdk?'block':'none';
@@ -1530,6 +1541,8 @@ function showTab(which){
   $('#dialog').style.display=dlg?'block':'none';
   $('#music').style.display=mus?'block':'none';
   $('#device').style.display=dev?'block':'none';
+  $('#hudwin').style.display=hwn?'block':'none';
+  if(hwn) drawHudWindowForm();
   if(mus) drawMusic();
   // Leaving the tab with a pattern still playing would keep the audio going against a
   // grid nobody can see any more -- stopped rather than left to run out on its own.
@@ -1563,7 +1576,8 @@ function showTab(which){
     b.classList.toggle('on', b.dataset.t===which);
   $('#ctxtitle').textContent={maps:'Maps',import:'Atlas',fonts:'Fonts',
     pixel:'Sprites',code:'Code',sdk:'Settings',scenes:'Scenes',
-    dialog:'Dialog',music:'Music',device:'Device',project:'Project'}[which]||'';
+    dialog:'Dialog',music:'Music',device:'Device',project:'Project',
+    hudwin:'HUD'}[which]||'';
 }
 
 // ------------------------------------------------------- declaring a sprite
@@ -1587,13 +1601,14 @@ function spLog(msg,bad){
 }
 
 function drawSpriteForm(){
-  const sel=$('#spsel'), cur=sel.value;
-  const list=(S.data&&S.data.sprites)||[];
-  sel.innerHTML='<option value="">— new —</option>'
-    +list.map(s=>`<option${s.name===cur?' selected':''}>${s.name}</option>`).join('');
-  const sheets=$('#spsheet');
-  const arts=(S.art||[]).map(a=>a.path);
-  sheets.innerHTML=arts.map(p=>`<option>${p}</option>`).join('');
+  const sel=$('#spsel');
+  bindSelectOptions(sel,(S.data&&S.data.sprites)||[],{label:s=>s.name});
+  // "— paint new —" first: without a blank option this always defaulted to the first
+  // art file, so #spsave's "is a sheet actually picked" check (fresh canvas art vs an
+  // existing PNG) could never see "none" -- painting from scratch silently declared
+  // against whatever file happened to sort first.
+  bindSelectOptions($('#spsheet'),(S.art||[]),
+    {placeholder:'— paint new —', label:a=>a.path});
   // The strip follows the selection through a reload, so saving a declaration does not
   // silently leave the frames of the sprite that was selected before it.
   if(typeof spShowFrames==='function') spShowFrames(sel.value);
@@ -1658,7 +1673,7 @@ async function spShowFrames(name){
   const r=await post('/api/sprite/frames',{name});
   if(r.error){ log.className='bad'; log.textContent=r.error; return }
 
-  SF.cells=r.cells; SF.sprite=name;
+  SF.cells=r.cells; SF.sprite=name; SF.sheet=r.sheet;
   r.cells.forEach(c=>{
     const b=document.createElement('button');
     b.className='cell'+(c.blank?' blank':'');
@@ -1690,17 +1705,11 @@ async function spShowFrames(name){
       openSpriteFrameEditor(c.i);
     });
     b.onclick=async()=>{
-      const f=await post('/api/frame/read',{sheet:r.sheet,x:c.x,y:c.y,w:c.w,h:c.h});
-      if(f.error){ log.className='bad'; log.textContent=f.error; return }
-      PX.w=f.w; PX.h=f.h; PX.frames=1; PX.frame=0;
-      PX.data=Uint8Array.from(f.pixels); PX.undo=[]; PX.redo=[];
-      PX.origin={sheet:r.sheet, x:c.x, y:c.y};
-      $('#pxw').value=f.w; $('#pxh').value=f.h;
-      $('#pxtitle').textContent=`Canvas — ${name} frame ${c.i}`;
-      $('#pxnote').textContent='Editing one frame. Save writes it back into the sheet.';
-      pxDraw();
+      const f=await pxOpenFrame(r.sheet,c.x,c.y,c.w,c.h,`${name} frame ${c.i}`);
+      if(f&&f.error){ log.className='bad'; log.textContent=f.error; return }
       log.className='dim';
-      log.textContent=`Editing ${name} frame ${c.i} (${c.w}x${c.h} at ${c.x},${c.y}).`;
+      log.textContent=`Editing ${name} frame ${c.i} (${c.w}x${c.h} at ${c.x},${c.y}). `
+        +`Save sprite writes it back into the sheet.`;
       // The canvas is above the fold on a watch-sized window; scrolling to it is the
       // difference between "nothing happened" and "it opened".
       $('#pxcv').scrollIntoView({block:'nearest'});
@@ -1724,9 +1733,33 @@ async function spShowFrames(name){
 $('#spsave').onclick=async()=>{
   const name=$('#spname').value.trim();
   if(!name){ spLog('Name the sprite first.',true); return }
-  const sheet=$('#spsheet').value;
-  if(!sheet){ spLog('No PNG in the project to point at. Paint and save one first.',true);
-              return }
+  let sheet=$('#spsheet').value;
+
+  // One save, not two: painting a frame open for repaint writes it back into its own
+  // sheet; painting fresh art with no sheet picked yet writes a new art/{name}.png --
+  // either way, what used to be a separate "Save PNG" click now happens right here,
+  // before the declaration below reads `sheet`.
+  if(PX.origin){
+    const o=PX.origin;
+    const wr=await post('/api/frame/write',
+      {sheet:o.sheet, x:o.x, y:o.y, w:PX.w, h:PX.h, pixels:Array.from(PX.data)});
+    if(wr.error){ spLog(wr.error,true); return }
+    if(SH.sheet===o.sheet) await shReloadSheet();
+    sheet=o.sheet;
+  }else if(!sheet&&PX.data){
+    const path=`art/${name}.png`;
+    const wr=await (await fetch('/api/sprite/write',{method:'POST',
+      headers:{'content-type':'application/json'},
+      body:JSON.stringify({path,w:PX.w,h:pxTotalH(),pixels:Array.from(PX.data)})})).json();
+    if(wr.error){ spLog(wr.error,true); return }
+    sheet=wr.path;
+    await pxLoadList();
+    $('#spsheet').value=sheet;
+    $('#spfw').value=PX.w; $('#spfh').value=PX.h; $('#spn').value=PX.frames;
+  }
+  if(!sheet){ spLog('No PNG in the project to point at. Paint one on the canvas first.',
+                    true); return }
+
   const names=$('#spanim').value.split(',').map(s=>s.trim()).filter(Boolean);
   // A clip built in the builder below (sprites.js's CLIPS) is staged client-side exactly
   // like these pose names are, so both land in the SAME `anim` dict here -- the one and
@@ -1811,13 +1844,11 @@ function nsLog(msg,bad){
 }
 
 function drawNineSliceForm(){
-  const sel=$('#nssel'), cur=sel.value;
-  const list=(S.data&&S.data.nine_slices)||[];
-  sel.innerHTML='<option value="">— new —</option>'
-    +list.map(n=>`<option${n.name===cur?' selected':''}>${n.name}</option>`).join('');
-  const sheets=$('#nssheet');
-  const arts=(S.art||[]).map(a=>a.path);
-  sheets.innerHTML=arts.map(p=>`<option>${p}</option>`).join('');
+  bindSelectOptions($('#nssel'),(S.data&&S.data.nine_slices)||[],{label:n=>n.name});
+  // "— paint new —" first, same reason drawSpriteForm's own comment gives: #nsedit's
+  // "no sheet picked -> blank canvas" branch needs a real "none" to check for.
+  bindSelectOptions($('#nssheet'),(S.art||[]),
+    {placeholder:'— paint new —', label:a=>a.path});
   nsPreview();
 }
 
@@ -1870,10 +1901,55 @@ for(const id of ['nssheet','nsrx','nsry','nsrw','nsrh','nsbl','nsbt','nsbr','nsb
   $('#'+id).addEventListener('input', nsPreview);
 }
 
+// Edit on canvas: an EXISTING panel's own rect, opened at whatever it already is (0
+// meaning "the sheet's own full size", same as nsRect()'s own convention -- resolved
+// against the sheet's real dimensions here since there is no crop to read otherwise);
+// or, with no sheet picked at all, a blank canvas to paint fresh panel art on, the same
+// "paint first, declare after" shape sprites already get.
+$('#nsedit').onclick=async()=>{
+  const sheet=$('#nssheet').value;
+  if(!sheet){
+    pxInit(+$('#pxw').value||32, +$('#pxh').value||32, 1);
+    PX.panel=true;
+    $('#pxtitle').textContent='Canvas — new panel';
+    $('#nsguidenote').textContent='Painting fresh panel art. Save panel writes it as a '
+      +'new PNG, then adjust the borders here.';
+    pxDraw();
+    return;
+  }
+  const info=await post('/api/sheet/image',{sheet});
+  if(info.error){ $('#nsguidenote').textContent=info.error; return }
+  const x=+$('#nsrx').value||0, y=+$('#nsry').value||0;
+  const w=+$('#nsrw').value||info.w, h=+$('#nsrh').value||info.h;
+  await pxOpenPanel(sheet,x,y,w,h);
+};
+
 $('#nssave').onclick=async()=>{
   const name=$('#nsname').value.trim();
   if(!name){ nsLog('Name the panel first.',true); return }
-  const sheet=$('#nssheet').value;
+  let sheet=$('#nssheet').value;
+
+  // One save here too (see #spsave's own comment on the same bargain for sprites): fresh
+  // panel art painted with no sheet picked writes a new PNG first; an existing panel's
+  // own art, repainted in place, writes back into it.
+  if(PX.panel&&!PX.origin&&!sheet){
+    const path=`art/${name}.png`;
+    const wr=await (await fetch('/api/sprite/write',{method:'POST',
+      headers:{'content-type':'application/json'},
+      body:JSON.stringify({path,w:PX.w,h:PX.h,pixels:Array.from(PX.data)})})).json();
+    if(wr.error){ nsLog(wr.error,true); return }
+    sheet=wr.path;
+    await pxLoadList();
+    $('#nssheet').value=sheet;
+    $('#nsrx').value=0; $('#nsry').value=0; $('#nsrw').value=0; $('#nsrh').value=0;
+    PX.origin={sheet,x:0,y:0};
+  }else if(PX.panel&&PX.origin&&sheet&&PX.origin.sheet===sheet){
+    const o=PX.origin;
+    const wr=await post('/api/frame/write',
+      {sheet:o.sheet, x:o.x, y:o.y, w:PX.w, h:PX.h, pixels:Array.from(PX.data)});
+    if(wr.error){ nsLog(wr.error,true); return }
+  }
+
   if(!sheet){ nsLog('No PNG in the project to point at.',true); return }
   const border=nsBorder(), rect=nsRect();
   const existing=(S.data.nine_slices||[]).find(x=>x.name===$('#nssel').value)||{};
@@ -1904,6 +1980,58 @@ $('#nsdel').onclick=async()=>{
   if(!r.ok){ nsLog(r.error,true); return }
   await load(); drawNineSliceForm(); $('#nssel').value='';
   nsLog(`Removed "${name}". Press Build.`,false);
+  budget(true);
+};
+
+// ----------------------------------------------------------------- HUD variables
+//
+// A named, typed runtime slot (src/pnx/gfx/pnx_hud_vars.h) game code writes to each tick
+// and a HUD draw call reads back. No placement or animation yet -- this only declares the
+// id and its type (int/text), generated as PNX_HUD_VAR_* constants. Form mirrors the
+// 9-slice one, minus the preview: there is nothing to render for a bare declaration.
+
+function hvLog(msg,bad){
+  const el=$('#hvlog');
+  el.className=bad===false?'ok':(bad?'bad':'');
+  el.textContent=msg||'—';
+}
+
+function drawHudVarForm(){
+  const sel=$('#hvsel'), cur=sel.value;
+  const list=(S.data&&S.data.hud_vars)||[];
+  sel.innerHTML='<option value="">— new —</option>'
+    +list.map(v=>`<option${v.name===cur?' selected':''}>${v.name}</option>`).join('');
+}
+
+$('#hvsel').onchange=()=>{
+  const name=$('#hvsel').value;
+  if(!name){ hvLog(''); return }
+  const v=(S.data.hud_vars||[]).find(x=>x.name===name);
+  if(!v) return;
+  $('#hvname').value=v.name;
+  $('#hvtype').value=v.type;
+  hvLog('');
+};
+
+$('#hvsave').onclick=async()=>{
+  const name=$('#hvname').value.trim();
+  if(!name){ hvLog('Name the variable first.',true); return }
+  const type=$('#hvtype').value;
+  const r=await post('/api/hud_var/save',{name,type});
+  if(!r.ok){ hvLog(r.error,true); return }
+  await load(); drawHudVarForm(); $('#hvsel').value=name;
+  hvLog(`Saved "${name}" (${type}). Press Build.`,false);
+  budget(true);
+};
+
+$('#hvdel').onclick=async()=>{
+  const name=$('#hvsel').value||$('#hvname').value.trim();
+  if(!name){ hvLog('Pick a variable to remove.',true); return }
+  if(!confirm(`Remove HUD variable "${name}" from the manifest?`)) return;
+  const r=await post('/api/hud_var/remove',{name});
+  if(!r.ok){ hvLog(r.error,true); return }
+  await load(); drawHudVarForm(); $('#hvsel').value='';
+  hvLog(`Removed "${name}". Press Build.`,false);
   budget(true);
 };
 
@@ -3231,6 +3359,7 @@ $('#tabsdk').onclick=()=>showTab('sdk');
 $('#tabpixel').onclick=()=>showTab('pixel');
 $('#tabcode').onclick=()=>showTab('code');
 $('#tabdevice').onclick=()=>showTab('device');
+$('#tabhudwin').onclick=()=>showTab('hudwin');
 
 // ------------------------------------------------------------------- fonts view
 //
@@ -3976,21 +4105,80 @@ window.addEventListener('keyup',e=>{
 // concatenated -- the same layout the sprite sheet is saved as on disk. Only what's
 // drawn and addressed changes; PX.frame (0-based) says which w*h slice of it is the
 // one currently on screen.
+// `mode`: 'paint' or 'collision' -- which gesture #pxcv's own pointer handlers dispatch
+// to (pxPaint below, or the collision rect/mask editing ported from sprites.js). `panel`
+// is not a mode: true whenever the canvas holds a 9-slice panel's own art, which draws
+// its border guides as an overlay OVER paint mode rather than replacing it (see
+// index.html's own comment on why panels need no toggle of their own).
 const PX={w:16,h:24,frames:1,frame:0,zoom:12,data:null,colour:0xFF,tool:'pen',
-          undo:[],redo:[],origin:null};
+          undo:[],redo:[],origin:null,mode:'paint',panel:false};
 
 function pxPer(){ return PX.w*PX.h }
 function pxTotalH(){ return PX.h*PX.frames }
 
+// Paint is always available; Collision only once a frame has been opened for it (the
+// small badge on an #spframes cell, sprites.js's openSpriteFrameEditor) -- there is no
+// collision context to edit otherwise. Called on every context switch (a fresh canvas,
+// a different frame opened, a panel opened) so the toggle never offers a mode with
+// nothing behind it.
+function pxSetMode(m){
+  if(m==='collision'&&$('#pxmodecollision').disabled) return;
+  PX.mode=m;
+  $('#pxmodepaint').classList.toggle('on',m==='paint');
+  $('#pxmodecollision').classList.toggle('on',m==='collision');
+  pxDraw();
+}
+function pxSetCollisionAvailable(on){
+  $('#pxmodecollision').disabled=!on;
+  if(!on&&PX.mode==='collision') pxSetMode('paint'); else pxSetMode(PX.mode);
+}
+$('#pxmodepaint').onclick=()=>pxSetMode('paint');
+$('#pxmodecollision').onclick=()=>pxSetMode('collision');
+
 function pxInit(w,h,frames){
   // A fresh canvas is not a frame of anything, so the sheet it came from stops applying.
   // Leaving it set is how Save would composite an unrelated drawing into someone's sheet.
-  PX.origin=null;
+  PX.origin=null; PX.panel=false;
   if($('#pxtitle')) $('#pxtitle').textContent='Canvas';
   PX.w=w; PX.h=h; PX.frames=frames; PX.frame=0;
   PX.data=new Uint8Array(w*pxTotalH());   // 0 is transparent, as everywhere else
   PX.undo=[]; PX.redo=[];
+  pxSetCollisionAvailable(false);
   pxDraw();
+}
+
+// The one place a frame's pixels come from a sheet at a known rect -- sprite frame
+// clicks (spShowFrames), the sheet dblclick picker (shDrawPicked), and 9-slice panels
+// (pxOpenPanel) all read a frame into PX the same way, so there is one implementation of
+// "load these pixels, remember where they came from" instead of three.
+async function pxOpenFrame(sheet,x,y,w,h,title){
+  const r=await post('/api/frame/read',{sheet,x,y,w,h});
+  if(r.error) return r;
+  PX.w=w; PX.h=h; PX.frames=1; PX.frame=0;
+  PX.data=Uint8Array.from(r.pixels); PX.undo=[]; PX.redo=[];
+  PX.origin={sheet,x,y}; PX.panel=false;
+  $('#pxw').value=w; $('#pxh').value=h;
+  $('#pxtitle').textContent=title?`Canvas — ${title}`:'Canvas';
+  pxSetCollisionAvailable(false);
+  pxDraw();
+  return r;
+}
+
+// A 9-slice panel opened onto the SAME canvas sprites paint on -- PX.panel=true is what
+// tells pxDrawOverlay/pxGuideHit to draw and drag the border guides instead of doing
+// nothing, since a panel gets no paint/collision toggle of its own (index.html's own
+// comment on why). The four rect fields' values ARE what got loaded (this frame's own
+// crop), so guide drags need only ever touch the four border fields -- rect is fixed once
+// the source is open.
+async function pxOpenPanel(sheet,x,y,w,h){
+  const r=await pxOpenFrame(sheet,x,y,w,h,`panel ${sheet} @ ${x},${y}`);
+  if(r&&r.error){ $('#nsguidenote').textContent=r.error; return r }
+  PX.panel=true;
+  pxDraw();
+  $('#nsguidenote').textContent=
+    'Drag the orange guide lines on the canvas to adjust the borders.';
+  $('#pxcv').scrollIntoView({block:'nearest'});
+  return r;
 }
 
 // Snapshots frames and frame count alongside the pixels, not just PX.data on its own --
@@ -4037,10 +4225,42 @@ function pxDraw(){
       for(let x=0;x<=PX.w;x++){g.beginPath();g.moveTo(x*scale+.5,0);g.lineTo(x*scale+.5,PX.h*scale);g.stroke()}
       for(let y=0;y<=PX.h;y++){g.beginPath();g.moveTo(0,y*scale+.5);g.lineTo(PX.w*scale,y*scale+.5);g.stroke()}
     }
+    if(id==='pxcv') pxDrawOverlay(g,scale);
   }
   $('#pxundo').disabled=!PX.undo.length;
   $('#pxredo').disabled=!PX.redo.length;
   pxDrawFilmstrip();
+}
+
+// Collision (rect/mask, ported from sprites.js's old separate mini-editor) or a panel's
+// border guides -- whichever context is active -- drawn OVER the pixel grid, on #pxcv
+// only. Never on #pxcv1 ("Actual size"): that canvas shows exactly what ships, nothing
+// authoring-only drawn on top of it.
+function pxDrawOverlay(g,scale){
+  if(PX.mode==='collision'&&SF.cell){
+    if(SF.mode===2&&SF.rect){
+      const [x,y,w,h]=SF.rect;
+      g.fillStyle='rgba(127,209,255,.25)';
+      g.fillRect(x*scale,y*scale,w*scale,h*scale);
+      g.strokeStyle='#7fd1ff'; g.lineWidth=2;
+      g.strokeRect(x*scale+1,y*scale+1,w*scale-2,h*scale-2);
+    }else if(SF.mode===3&&SF.mask){
+      g.fillStyle='rgba(127,209,255,.45)';
+      for(let y=0;y<PX.h;y++)for(let x=0;x<PX.w;x++)
+        if(SF.mask[y]&&SF.mask[y][x]==='#') g.fillRect(x*scale,y*scale,scale,scale);
+    }
+    return;
+  }
+  if(PX.panel){
+    const bl=+$('#nsbl').value, bt=+$('#nsbt').value, br=+$('#nsbr').value, bb=+$('#nsbb').value;
+    g.strokeStyle='#ffb454'; g.lineWidth=2;
+    for(const [axis,pos] of [['v',bl],['v',PX.w-br],['h',bt],['h',PX.h-bb]]){
+      g.beginPath();
+      if(axis==='v'){ g.moveTo(pos*scale,0); g.lineTo(pos*scale,PX.h*scale) }
+      else { g.moveTo(0,pos*scale); g.lineTo(PX.w*scale,pos*scale) }
+      g.stroke();
+    }
+  }
 }
 
 // The filmstrip. Each thumbnail is its own tiny canvas at the sprite's native
@@ -4104,49 +4324,56 @@ function argbCss(v){
   return `rgb(${r},${g},${b})`;
 }
 
-// A multi-frame sprite could only be inspected here before -- the full stack in
-// pxcv1, one pose at a time -- never actually seen playing, which is the one thing a
-// walk cycle is drawn to look right doing. Reads PX.data live on every tick rather
-// than snapshotting it, so painting a frame while the loop runs shows up in the very
-// next pass instead of needing Stop/Play to notice the edit.
-let pxAnimTimer=null, pxAnimFrame=0;
+// Play advances PX.frame directly and calls pxDraw(), which already renders #pxcv AND
+// #pxcv1 ("Actual size") from PX.frame and already highlights the active frame in the
+// filmstrip (pxDrawFilmstrip) -- so all three move together with no second scaled
+// mini-canvas or frame counter to keep in sync, unlike the old #pxanim/pxAnimFrame this
+// replaces. If a clip is selected in the sequencer (#clipsel/CLIPS, below the filmstrip),
+// plays THAT clip's own frames/fps/loop/durations -- the same shape pnx_anim_frame
+// resolves on device -- else cycles the raw frame list at a fixed preview rate.
+let pxAnimTimer=null, pxAnimStep=0;
 const PX_ANIM_FPS=12;   // a typical Pebble game-loop cadence, not the device's own limit
 
-function pxDrawAnimFrame(){
-  const scale=Math.max(4,PX.zoom), cv=$('#pxanim');
-  cv.width=PX.w*scale; cv.height=PX.h*scale;
-  const g=cv.getContext('2d'); g.imageSmoothingEnabled=false;
-  g.clearRect(0,0,cv.width,cv.height);
-  const rowOffset=(pxAnimFrame%Math.max(1,PX.frames))*PX.h;
-  for(let y=0;y<PX.h;y++)for(let x=0;x<PX.w;x++){
-    const v=PX.data[(rowOffset+y)*PX.w+x];
-    if(!v) continue;
-    g.fillStyle=argbCss(v);
-    g.fillRect(x*scale,y*scale,scale,scale);
-  }
+function pxAnimSeq(){
+  const name=$('#clipsel')&&$('#clipsel').value;
+  const c=name&&CLIPS[name];
+  if(c) return {frames:c.frames, fps:c.fps||PX_ANIM_FPS, loop:c.loop!==false,
+                durations:c.durations};
+  return {frames:Array.from({length:PX.frames},(_,i)=>i), fps:PX_ANIM_FPS, loop:true,
+          durations:null};
 }
 
 function pxAnimStop(){
-  if(pxAnimTimer){ clearInterval(pxAnimTimer); pxAnimTimer=null }
+  if(pxAnimTimer){ clearTimeout(pxAnimTimer); pxAnimTimer=null }
   $('#pxplay').textContent='▶ Play animation';
-  $('#pxanimwrap').style.display='none';
+}
+
+function pxAnimTick(){
+  const seq=pxAnimSeq();
+  if(!seq.frames.length){ pxAnimStop(); return }
+  if(pxAnimStep>=seq.frames.length){
+    if(!seq.loop){ pxAnimStop(); return }
+    pxAnimStep=0;
+  }
+  PX.frame=Math.min(seq.frames[pxAnimStep], PX.frames-1);
+  pxDraw();
+  const hold=seq.durations?Math.max(1,seq.durations[pxAnimStep]||1):1;
+  pxAnimStep++;
+  pxAnimTimer=setTimeout(pxAnimTick, hold*1000/seq.fps);
 }
 
 $('#pxplay').onclick=()=>{
   if(pxAnimTimer){ pxAnimStop(); return }
-  if(PX.frames<=1){
-    $('#pxplaynote').textContent='Single frame -- nothing to animate. Add one with + Frame.';
+  const seq=pxAnimSeq();
+  if(seq.frames.length<=1){
+    $('#pxplaynote').textContent='Single frame -- nothing to animate.';
     return;
   }
-  $('#pxplaynote').textContent='';
-  pxAnimFrame=0;
-  $('#pxanimwrap').style.display='';
+  const clip=$('#clipsel')&&$('#clipsel').value;
+  $('#pxplaynote').textContent=clip?`Playing "${clip}".`:'';
   $('#pxplay').textContent='■ Stop';
-  pxDrawAnimFrame();
-  pxAnimTimer=setInterval(()=>{
-    pxAnimFrame=(pxAnimFrame+1)%Math.max(1,PX.frames);
-    pxDrawAnimFrame();
-  },1000/PX_ANIM_FPS);
+  pxAnimStep=0;
+  pxAnimTick();
 };
 
 function pxFill(x,y,target){
@@ -4185,9 +4412,89 @@ function pxPaint(e,first){
   else PX.data[i]= PX.tool==='erase' ? 0 : PX.colour;
   pxDraw();
 }
-$('#pxcv').addEventListener('mousedown',e=>{pxDown=true; pxPaint(e,true)});
-$('#pxcv').addEventListener('mousemove',e=>{if(pxDown&&PX.tool!=='fill')pxPaint(e,false)});
-addEventListener('mouseup',()=>{pxDown=false});
+
+// Collision mask toggle, ported from sprites.js's old sfMaskSetCell (a DOM-cell version
+// of the exact same {SF.mask[y][x] = ink} write) -- now against a PX-space (x, y) pair
+// instead of a grid `<i>` element, since the mask grid it used to toggle is gone.
+function pxMaskSetCell(x,y,ink){
+  if(!SF.mask||!SF.mask[y]) return;
+  const row=SF.mask[y].split(''); row[x]=ink?'#':'.'; SF.mask[y]=row.join('');
+}
+
+// Which panel border guide (if any) a PX-space point is close enough to grab -- within 1
+// PX pixel of the line itself, which is comfortably clickable at the zoom levels this
+// canvas actually uses. Near a corner, two guides can both be "close"; the nearer one
+// (by its own perpendicular distance) wins rather than whichever the if-chain checks
+// first.
+function pxGuideHit(x,y){
+  if(!PX.panel) return null;
+  const bl=+$('#nsbl').value, bt=+$('#nsbt').value, br=+$('#nsbr').value, bb=+$('#nsbb').value;
+  const tol=1;
+  const cands=[];
+  if(Math.abs(x-bl)<=tol) cands.push(['l',Math.abs(x-bl)]);
+  if(Math.abs(x-(PX.w-br))<=tol) cands.push(['r',Math.abs(x-(PX.w-br))]);
+  if(Math.abs(y-bt)<=tol) cands.push(['t',Math.abs(y-bt)]);
+  if(Math.abs(y-(PX.h-bb))<=tol) cands.push(['b',Math.abs(y-(PX.h-bb))]);
+  cands.sort((a,b)=>a[1]-b[1]);
+  return cands.length?cands[0][0]:null;
+}
+// Writes a dragged guide's new position into the SAME #nsbl/#nsbt/#nsbr/#nsbb inputs
+// save_nine_slice already reads, dispatching 'input' so the existing debounced
+// nsPreview() (app.js's own 9-slice section) refreshes exactly as if it had been typed.
+function pxGuideMove(side,x,y){
+  const bl=+$('#nsbl').value, bt=+$('#nsbt').value, br=+$('#nsbr').value, bb=+$('#nsbb').value;
+  const cx=sfClamp(x,0,PX.w-1), cy=sfClamp(y,0,PX.h-1);
+  const id={l:'nsbl',t:'nsbt',r:'nsbr',b:'nsbb'}[side];
+  let v;
+  if(side==='l') v=sfClamp(cx,0,PX.w-br-1);
+  else if(side==='r') v=sfClamp(PX.w-1-cx,0,PX.w-bl-1);
+  else if(side==='t') v=sfClamp(cy,0,PX.h-bb-1);
+  else v=sfClamp(PX.h-1-cy,0,PX.h-bt-1);
+  $('#'+id).value=v;
+  $('#'+id).dispatchEvent(new Event('input'));
+}
+
+let pxGuideDrag=null, sfRectDrag=null, sfMaskPaint=null;
+
+$('#pxcv').addEventListener('mousedown',e=>{
+  const [x,y]=pxAt(e);
+  if(PX.mode==='collision'&&SF.cell){
+    if(SF.mode===2){
+      sfRectDrag={sx:sfClamp(x,0,PX.w-1), sy:sfClamp(y,0,PX.h-1)};
+      e.preventDefault(); return;
+    }
+    if(SF.mode===3&&SF.mask){
+      const cx=sfClamp(x,0,PX.w-1), cy=sfClamp(y,0,PX.h-1);
+      sfMaskPaint=!(SF.mask[cy]&&SF.mask[cy][cx]==='#');
+      pxMaskSetCell(cx,cy,sfMaskPaint);
+      pxDraw();
+      e.preventDefault(); return;
+    }
+    return; // mode 0/1 (none/solid): no shape to drag
+  }
+  const g=pxGuideHit(x,y);
+  if(g){ pxGuideDrag=g; e.preventDefault(); return }
+  pxDown=true; pxPaint(e,true);
+});
+$('#pxcv').addEventListener('mousemove',e=>{
+  const [x,y]=pxAt(e);
+  if(pxGuideDrag){ pxGuideMove(pxGuideDrag,x,y); pxDraw(); return }
+  if(sfRectDrag){
+    const cx=sfClamp(x,0,PX.w-1), cy=sfClamp(y,0,PX.h-1);
+    const x0=Math.min(sfRectDrag.sx,cx), x1=Math.max(sfRectDrag.sx,cx);
+    const y0=Math.min(sfRectDrag.sy,cy), y1=Math.max(sfRectDrag.sy,cy);
+    SF.rect=[x0,y0,x1-x0+1,y1-y0+1];
+    $('#sfrectnote').textContent=`${SF.rect[2]}×${SF.rect[3]} at ${SF.rect[0]},${SF.rect[1]} `
+      +`(of ${PX.w}×${PX.h})`;
+    pxDraw(); return;
+  }
+  if(sfMaskPaint!==null){
+    pxMaskSetCell(sfClamp(x,0,PX.w-1), sfClamp(y,0,PX.h-1), sfMaskPaint);
+    pxDraw(); return;
+  }
+  if(pxDown&&PX.tool!=='fill') pxPaint(e,false);
+});
+addEventListener('mouseup',()=>{pxDown=false; pxGuideDrag=null; sfRectDrag=null; sfMaskPaint=null});
 
 function pxSetColour(v){
   PX.colour=v;
@@ -4249,8 +4556,7 @@ $('#pxgrid').addEventListener('change',pxDraw);
 
 async function pxLoadList(select){
   const files=await (await fetch('/api/art')).json();
-  $('#pxopen').innerHTML='<option value="">—</option>'+
-    files.map(f=>`<option value="${f.path}">${f.path}</option>`).join('');
+  bindSelectOptions($('#pxopen'),files,{placeholder:'—',label:f=>f.path});
   // Kept on S so the Declare panel can offer the same PNGs without a second request:
   // the sheet a sprite points at is nearly always the one just painted.
   S.art=files;
@@ -4265,6 +4571,7 @@ async function pxLoadList(select){
   }
   drawSpriteForm();
   drawNineSliceForm();
+  drawHudVarForm();
 }
 
 // Importing art. Files arrive either from the picker or from a drop, and both end here:
@@ -4353,58 +4660,26 @@ $('#pxopen').addEventListener('change',async()=>{
   const path=$('#pxopen').value; if(!path) return;
   const r=await (await fetch('/api/sprite/read',{method:'POST',
     headers:{'content-type':'application/json'},body:JSON.stringify({path})})).json();
-  if(r.error){ $('#pxnote').textContent=r.error; return }
+  if(r.error){ spLog(r.error,true); return }
   // Height is assumed to be whole frames of the current frame height where it divides
   // cleanly -- the importer's own convention -- and one frame otherwise.
   const frames=(PX.h && r.h % PX.h===0) ? r.h/PX.h : 1;
-  PX.origin=null;
+  PX.origin=null; PX.panel=false;
   if($('#pxtitle')) $('#pxtitle').textContent='Canvas';
   PX.w=r.w; PX.h=r.h/frames; PX.frames=frames; PX.frame=0;
   $('#pxw').value=PX.w; $('#pxh').value=PX.h;
   PX.data=Uint8Array.from(r.pixels); PX.undo=[]; PX.redo=[];
-  $('#pxname').value=path;
+  pxSetCollisionAvailable(false);
   pxDraw();
-  $('#pxnote').textContent=`Loaded ${r.w}x${r.h}${frames>1?` — ${frames} frame(s)`:''}.`;
+  // Painted-then-saved art already carries a name via the Declare form below; opened art
+  // is the one path that has never had a sprite name at all, so this is a courtesy
+  // default a real name (below) is expected to overwrite, not the sprite's true name.
+  if(!$('#spname').value.trim())
+    $('#spname').value=path.split('/').pop().replace(/\.[^.]*$/,'');
+  $('#spsheet').value=path;
+  spLog(`Loaded ${r.w}x${r.h}${frames>1?` — ${frames} frame(s)`:''}. Declare it below to `
+    +`save it as a sprite.`,false);
 });
-
-$('#pxsave').onclick=async()=>{
-  // A frame cut out of a sheet goes back where it came from. Falling through to the
-  // whole-file write would replace an eight-pose sheet with one 16x24 pose, which is a
-  // loss no undo in this editor reaches.
-  if(PX.origin){
-    const o=PX.origin;
-    const r=await post('/api/frame/write',{sheet:o.sheet, x:o.x, y:o.y,
-      w:PX.w, h:PX.h, pixels:Array.from(PX.data)});
-    if(r.error){ $('#pxnote').textContent=r.error; return }
-    $('#pxnote').textContent=`Wrote the frame back into ${o.sheet} at ${o.x},${o.y}.`;
-    // Reload the sheet image so the grid/freeform picker shows what was just painted
-    // rather than the stale one -- SH.frames (picked RECTS, not indices) survive this
-    // untouched, since a repaint changes pixels, not geometry.
-    if(SH.sheet===o.sheet) await shReloadSheet();
-    // And the declared-frame strip, for the same reason: it is the other view of the same
-    // pixels, and a thumbnail that still shows the pose you just repainted reads as a save
-    // that did not happen.
-    if($('#spsel') && $('#spsel').value) await spShowFrames($('#spsel').value);
-    return;
-  }
-
-  let path=$('#pxname').value.trim();
-  if(!path){ $('#pxnote').textContent='Give it a filename first.'; return }
-  if(!path.includes('/')) path='art/'+path;
-  const r=await (await fetch('/api/sprite/write',{method:'POST',
-    headers:{'content-type':'application/json'},
-    body:JSON.stringify({path,w:PX.w,h:pxTotalH(),pixels:Array.from(PX.data)})})).json();
-  $('#pxnote').textContent=r.error?r.error
-    :`Saved ${r.path} (${r.bytes} B). Declare it below, or import it as a tileset.`;
-  if(r.ok){
-    await pxLoadList();
-    // The sheet just saved, at the size just painted: the Declare panel underneath is
-    // almost always about this PNG, and retyping what the canvas already knows is the
-    // step that used to send people to the manifest.
-    $('#spsheet').value=r.path;
-    $('#spfw').value=PX.w; $('#spfh').value=PX.h; $('#spn').value=PX.frames;
-  }
-};
 
 // -------------------------------------------------------------------- code editor
 //

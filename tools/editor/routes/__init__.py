@@ -14,10 +14,10 @@ were two ~500-line `if/elif` chains doing this same dispatch by hand.
 """
 
 from editor.routes import atlas, maps, sprites, nine_slice, fonts, code, music, dialog, scenes
-from editor.routes import sdk, device, project
+from editor.routes import sdk, device, project, hud, hud_window
 
 _DOMAINS = (atlas, maps, sprites, nine_slice, fonts, code, music, dialog, scenes, sdk, device,
-           project)
+           project, hud, hud_window)
 
 GET_EXACT = {}
 GET_PREFIX = []

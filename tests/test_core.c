@@ -249,6 +249,8 @@ void test_sprite(void);
 void test_layer(void);
 void test_map_compress(void);
 void test_tween(void);
+void test_hud_vars(void);
+void test_hud_window(void);
 
 int main(void)
 {
@@ -271,6 +273,8 @@ int main(void)
 	test_layer();
 	test_map_compress();
 	test_tween();
+	test_hud_vars();
+	test_hud_window();
 
 	printf("\n%d checks, %d failures\n", s_checks, s_failures);
 	return s_failures == 0 ? 0 : 1;

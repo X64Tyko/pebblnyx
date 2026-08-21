@@ -243,16 +243,10 @@ function shDrawPicked(){
     // Editing one pose directly, the same door the old picker's double-click opened.
     b.ondblclick=async ev=>{
       ev.preventDefault();
-      const r=await post('/api/frame/read',{sheet:SH.sheet,x:f.x,y:f.y,w:f.w,h:f.h});
-      if(r.error){ shLog(r.error,true); return }
-      PX.w=r.w; PX.h=r.h; PX.frames=1; PX.frame=0;
-      PX.data=Uint8Array.from(r.pixels); PX.undo=[]; PX.redo=[];
-      PX.origin={sheet:SH.sheet,x:f.x,y:f.y};
-      $('#pxw').value=r.w; $('#pxh').value=r.h;
-      $('#pxtitle').textContent=`Canvas — ${SH.sheet} @ ${f.x},${f.y}`;
-      $('#pxnote').textContent='Editing one frame. Save writes it back into the sheet.';
-      pxDraw();
-      shLog(`Editing frame at ${f.x},${f.y}.`,false);
+      const r=await pxOpenFrame(SH.sheet,f.x,f.y,f.w,f.h,`${SH.sheet} @ ${f.x},${f.y}`);
+      if(r&&r.error){ shLog(r.error,true); return }
+      shLog(`Editing frame at ${f.x},${f.y}. Save sprite writes it back into the sheet.`,
+            false);
     };
     box.appendChild(b);
   });
@@ -332,6 +326,26 @@ $('#shaddframe').onclick=()=>{
   shFreeLog(`${SH.frames.length} frame(s) picked.`,false);
 };
 
+// Same freeform rect, a different destination: a sprite frame joins the ordered picks
+// above, a panel rect goes straight into the 9-slice section's own rect fields and opens
+// that crop on the canvas for border-guide editing (index.html's own comment on the
+// 9-slice section explains why panels need no separate picker of their own).
+$('#shaspanel').onclick=async()=>{
+  if(!SH.sheet){ shFreeLog('Pick a sheet first.',true); return }
+  const r=shFreePreviewRect();
+  if(r.x+r.w>SH.imgW||r.y+r.h>SH.imgH){
+    shFreeLog(`${r.w}x${r.h} at ${r.x},${r.y} runs past the sheet `
+              +`(${SH.imgW}x${SH.imgH}).`,true);
+    return;
+  }
+  $('#nssheet').value=SH.sheet;
+  $('#nsrx').value=r.x; $('#nsry').value=r.y; $('#nsrw').value=r.w; $('#nsrh').value=r.h;
+  for(const id of ['nsrx','nsry','nsrw','nsrh'])
+    $('#'+id).dispatchEvent(new Event('input'));
+  await pxOpenPanel(SH.sheet,r.x,r.y,r.w,r.h);
+  shFreeLog(`Set as panel rect: ${r.w}x${r.h} at ${r.x},${r.y}.`,false);
+};
+
 $('#shclear').onclick=()=>{
   SH.frames=[];
   shDrawOverlay(); shDrawPicked();
@@ -342,19 +356,29 @@ $('#shclear').onclick=()=>{
 //
 // A frame's own SCALED rect / COMPLEX mask -- the same two shapes an atlas tile authors
 // (#tileeditor, atlas.js), keyed by frame instead of tile id since frames are not one
-// uniform size (each frame's own w/h drives the zoom and the mask grid, where an atlas
-// tile editor has one shared tile_px for all of them). Opened via the small collision
-// badge on each #spframes cell (app.js's spShowFrames); that cell's own click still opens
-// pixel editing, unchanged -- this is a second, separate door into the same frame.
+// uniform size. Opened via the small collision badge on each #spframes cell (app.js's
+// spShowFrames); that cell's own click still opens pixel editing, unchanged -- this is a
+// second, separate door into the same frame.
+//
+// Drawn and dragged directly on #pxcv now (app.js's pxDrawOverlay/pxGuideHit and the
+// mousedown/mousemove handlers there) rather than in a separate zoomed-still editor --
+// this file keeps only the STATE (SF) and the mode/kind selects, which are shared no
+// matter which canvas draws them.
 
-const SF={sprite:null, cells:null, frame:null, cell:null, mode:0, kind:0, rect:null, mask:null};
+const SF={sprite:null, sheet:null, cells:null, frame:null, cell:null, mode:0, kind:0,
+          rect:null, mask:null};
 const sfClamp=(v,a,b)=>v<a?a:v>b?b:v;
 
-function openSpriteFrameEditor(frame){
+async function openSpriteFrameEditor(frame){
   if(!SF.cells||!SF.cells[frame]) return;
+  const c=SF.cells[frame];
+  const r=await pxOpenFrame(SF.sheet,c.x,c.y,c.w,c.h,`${SF.sprite} frame ${frame}`);
+  if(r&&r.error){ $('#sflog').textContent=r.error; return }
   SF.frame=frame;
   renderSpriteFrameEditor();
-  $('#sfsave').closest('section').scrollIntoView({behavior:'smooth',block:'nearest'});
+  pxSetCollisionAvailable(true);
+  pxSetMode('collision');
+  $('#pxcv').scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
 function renderSpriteFrameEditor(){
@@ -366,7 +390,6 @@ function renderSpriteFrameEditor(){
   SF.mask=col.mask?col.mask.slice():(col.auto_mask?col.auto_mask.slice():null);
 
   $('#sfnote').textContent=`frame ${SF.frame} — ${c.w}x${c.h}`;
-  $('#sfimg').src=c.img;
   $('#sfmode').value=String(SF.mode);
   $('#sfkind').value=String(SF.kind);
   $('#sflog').textContent='';
@@ -381,97 +404,18 @@ $('#sfmode').addEventListener('change',()=>{
 });
 
 function sfUpdateModeSections(){
-  $('#sfscaled').style.display=SF.mode===2?'':'none';
-  $('#sfcomplex').style.display=SF.mode===3?'':'none';
-  if(SF.mode===2) sfDrawRectEditor();
-  if(SF.mode===3) sfDrawMaskGrid();
+  $('#sfrectnote').textContent=
+    SF.mode===2&&SF.rect?`${SF.rect[2]}×${SF.rect[3]} at ${SF.rect[0]},${SF.rect[1]} `
+      +`(of ${SF.cell.w}×${SF.cell.h}) — drag on the canvas to redraw it`
+    :SF.mode===3?'Click or click-drag on the canvas to paint the solid pixels.'
+    :'';
+  pxDraw();
 }
 
-// --- SCALED: drag a rect over a zoomed still of the frame's own art.
-
-function sfDrawRectEditor(){
-  const c=SF.cell, zoom=Math.max(2,Math.floor(160/Math.max(c.w,c.h)));
-  const img=$('#sfrectimg');
-  img.src=c.img;
-  img.style.width=(c.w*zoom)+'px';
-  img.style.height=(c.h*zoom)+'px';
-  sfUpdateRectBox();
-}
-
-function sfUpdateRectBox(){
-  const c=SF.cell, img=$('#sfrectimg'), box=$('#sfrectbox');
-  const zoom=img.clientWidth/c.w;
-  const [x,y,w,h]=SF.rect;
-  box.style.left=(x*zoom)+'px'; box.style.top=(y*zoom)+'px';
-  box.style.width=(w*zoom)+'px'; box.style.height=(h*zoom)+'px';
-  box.style.display='';
-  $('#sfrectnote').textContent=`${w}×${h} at ${x},${y} (of ${c.w}×${c.h})`;
-}
-
-let sfRectDrag=null;
-$('#sfrectwrap').addEventListener('mousedown',ev=>{
-  if(SF.mode!==2||!SF.cell) return;
-  const c=SF.cell, rect=$('#sfrectimg').getBoundingClientRect(), zoom=rect.width/c.w;
-  sfRectDrag={sx:sfClamp(Math.floor((ev.clientX-rect.left)/zoom),0,c.w-1),
-              sy:sfClamp(Math.floor((ev.clientY-rect.top)/zoom),0,c.h-1)};
-  ev.preventDefault();
-});
-window.addEventListener('mousemove',ev=>{
-  if(!sfRectDrag||SF.mode!==2) return;
-  const c=SF.cell, rect=$('#sfrectimg').getBoundingClientRect(), zoom=rect.width/c.w;
-  const cx=sfClamp(Math.floor((ev.clientX-rect.left)/zoom),0,c.w-1);
-  const cy=sfClamp(Math.floor((ev.clientY-rect.top)/zoom),0,c.h-1);
-  const x0=Math.min(sfRectDrag.sx,cx), x1=Math.max(sfRectDrag.sx,cx);
-  const y0=Math.min(sfRectDrag.sy,cy), y1=Math.max(sfRectDrag.sy,cy);
-  SF.rect=[x0,y0,x1-x0+1,y1-y0+1];
-  sfUpdateRectBox();
-});
-window.addEventListener('mouseup',()=>{ sfRectDrag=null; sfMaskPaint=null });
-
-// --- COMPLEX: paint the mask a pixel at a time, directly on the frame's own art -- the
-// same zoomed-still-plus-overlay shape sfDrawRectEditor() uses for SCALED.
-
-function sfDrawMaskGrid(){
-  const c=SF.cell, zoom=Math.max(2,Math.floor(160/Math.max(c.w,c.h)));
-  const img=$('#sfmaskimg'), el=$('#sfmaskgrid');
-  img.src=c.img;
-  img.style.width=(c.w*zoom)+'px';
-  img.style.height=(c.h*zoom)+'px';
-  el.style.width=(c.w*zoom)+'px';
-  el.style.height=(c.h*zoom)+'px';
-  el.style.gridTemplateColumns=`repeat(${c.w}, ${zoom}px)`;
-  el.style.gridAutoRows=`${zoom}px`;
-  el.innerHTML='';
-  for(let y=0;y<c.h;y++)
-    for(let x=0;x<c.w;x++){
-      const i=document.createElement('i');
-      if(SF.mask&&SF.mask[y][x]==='#') i.className='ink';
-      i.dataset.x=x; i.dataset.y=y;
-      el.appendChild(i);
-    }
-}
-
-let sfMaskPaint=null;
-function sfMaskSetCell(cell,ink){
-  const x=+cell.dataset.x, y=+cell.dataset.y;
-  const row=SF.mask[y].split(''); row[x]=ink?'#':'.'; SF.mask[y]=row.join('');
-  cell.classList.toggle('ink',ink);
-}
-$('#sfmaskgrid').addEventListener('mousedown',ev=>{
-  const cell=ev.target.closest('i'); if(!cell) return;
-  sfMaskPaint=!cell.classList.contains('ink');
-  sfMaskSetCell(cell,sfMaskPaint);
-  ev.preventDefault();
-});
-$('#sfmaskgrid').addEventListener('mouseover',ev=>{
-  if(sfMaskPaint===null) return;
-  const cell=ev.target.closest('i'); if(!cell) return;
-  sfMaskSetCell(cell,sfMaskPaint);
-});
 $('#sfmaskreset').onclick=()=>{
   if(!SF.cell||!SF.cell.collision) return;
   SF.mask=(SF.cell.collision.auto_mask||[]).slice();
-  sfDrawMaskGrid();
+  pxDraw();
 };
 
 // --- Save/clear. Both write through the same real-pipeline-validated endpoints

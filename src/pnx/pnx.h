@@ -51,6 +51,8 @@
 
 #if PNX_USE_HUD
 #include "gfx/pnx_hud.h"
+#include "gfx/pnx_hud_vars.h"
+#include "gfx/pnx_hud_window.h"
 #endif
 
 #if PNX_USE_TEXT

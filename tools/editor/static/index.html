@@ -18,6 +18,10 @@
        pipeline's own checks exist to catch everywhere else. -->
   <button id="tabscenes" class="act" data-t="scenes"><i>◳</i><em>Scenes</em></button>
   <button id="tabpixel" class="act" data-t="pixel"><i>✎</i><em>Sprites</em></button>
+  <!-- Its own top-level tab, unlike the HUD variables section that lives under Sprites
+       (project/hud.py) -- a placed layout with an element list and a preview is a real
+       screen of its own, not a footnote under another tab. -->
+  <button id="tabhudwin" class="act" data-t="hudwin"><i>▭</i><em>HUD</em></button>
   <!-- Dialog sits with the content tabs rather than under Fonts, even though `charset =
        "auto"` derives a font's glyph set from it: what a character says is content, and
        which typeface says it is not. -->
@@ -743,6 +747,10 @@
             </div>
             <div class="row" style="margin-top:.4rem">
               <button id="shaddframe" class="primary">+ Frame</button>
+              <!-- Same drag, different target: a sprite frame joins the ordered list
+                   below, a panel rect goes straight to the 9-slice section's own rect
+                   fields and opens it on the canvas -- see that section's own comment. -->
+              <button id="shaspanel" title="use this rect as a 9-slice panel's source">Use as panel rect</button>
             </div>
             <small id="shfreelog">Drag on the sheet below to draw a frame, or type the
               rect directly, then + Frame.</small>
@@ -801,18 +809,12 @@
         </section>
 
         <div class="category">Save &amp; declare</div>
-        <section><h2>File</h2>
-          <div class="fields col">
-            <label>Save as<input id="pxname" placeholder="art/hero.png"></label>
-          </div>
-          <button id="pxsave" class="primary">Save PNG</button>
-          <small id="pxnote">Saved into the project, then importable as a sprite.</small>
-        </section>
-
-
-        <!-- The declaration half. Painting a PNG left the sprite undeclared, so nothing
-             could load it — the same dead end a map without a scene has. Frames come from
-             the picks above when there are any, and from the canvas size otherwise. -->
+        <!-- One save, not two: painting used to write a PNG (Save PNG) and leave the
+             sprite undeclared until a SEPARATE Save sprite click -- an artifact of the
+             canvas and the manifest form having grown as two different tools. #spsave
+             (app.js) now does both: write the pixels (a fresh art/{name}.png, or back
+             into the frame's own origin sheet if one is open), then validate+save the
+             [[sprite]] declaration, in one action. -->
         <section><h2>Declare</h2>
           <div class="fields col">
             <label>Name<input id="spname" placeholder="hero" size="10"></label>
@@ -846,42 +848,17 @@
           <small id="spframelog" class="dim">Pick a sprite to open its frames.</small>
         </section>
 
-        <!-- Anim clips: pnx_assets.py's parse_sprite_anim second and third anim forms
-             (a bare `name = [...]` list, or a `name = { frames=..., fps=..., loop=...,
-             durations=... }` table) -- previously authorable only by hand-editing the
-             manifest, since #spanim above can only ever name one pose per frame
-             position. Built and staged here client-side, the same way #spanim and the
-             sheet picks above are: nothing is written until Save sprite is pressed. -->
-        <section><h2>Anim clips</h2>
-          <div class="fields col">
-            <label>Clip<select id="clipsel"><option value="">— new —</option></select></label>
-            <label>Name<input id="clipname" placeholder="walk" size="10"></label>
-            <label>FPS<input id="clipfps" type="number" value="8" min="1" max="255"></label>
-            <label class="check"><input id="cliploop" type="checkbox" checked> Loop</label>
-            <label class="check"><input id="clipdur" type="checkbox"> Per-frame timing</label>
-          </div>
-          <small class="dim">Drag frames in from the sheet picks above or the frames
-            grid above, in play order. Drag a frame already here to reorder it.</small>
-          <div id="clipdrop" class="clipdrop">
-            <div id="clipframes" class="clipchips"></div>
-          </div>
-          <div class="row" style="margin-top:.4rem">
-            <button id="clipsave" class="primary">Save clip</button>
-            <button id="clipdel">Delete clip</button>
-          </div>
-          <small id="cliplog" class="dim">—</small>
-        </section>
+        <!-- Anim clips now live under the canvas, next to the filmstrip they share a
+             frame-order namespace with (see the .fontview column below). -->
 
         <!-- Per-frame collision -- a frame's own SCALED rect or COMPLEX mask, the same
              two shapes an atlas tile authors (#tileeditor), keyed by frame instead of
              tile id since frames are not one uniform size. Opened via the small badge on
-             each #spframes cell (its own click still opens the frame for pixel editing --
-             this is a separate action, not a second meaning for the same click). -->
+             each #spframes cell; that badge now flips the MAIN canvas into Collision mode
+             (the toggle above it) rather than opening a second, separate zoomed editor --
+             one canvas, one drawing surface, whichever mode is active. -->
         <section><h2>Frame collision <span id="sfnote" class="dim"></span></h2>
           <div class="mini">
-            <img id="sfimg" alt=""
-                 style="width:64px;height:64px;image-rendering:pixelated;
-                        border:1px solid var(--line);border-radius:3px">
             <label class="mini">Collision<select id="sfmode">
               <option value="0">none</option>
               <option value="1">solid</option>
@@ -895,60 +872,48 @@
               <option value="3">overlap</option>
             </select></label>
           </div>
-          <div id="sfscaled" style="display:none">
-            <small class="dim">Drag on the frame to draw the rect.</small>
-            <div id="sfrectwrap" style="position:relative;display:inline-block;
-                                        cursor:crosshair;margin-top:.4rem">
-              <img id="sfrectimg" alt="" draggable="false"
-                   style="image-rendering:pixelated;display:block;
-                          border:1px solid var(--line)">
-              <div id="sfrectbox" style="position:absolute;pointer-events:none;
-                                         display:none;border:2px solid var(--accent);
-                                         background:color-mix(in srgb, var(--accent) 25%,
-                                         transparent)"></div>
-            </div>
-            <div class="mini"><span id="sfrectnote" class="dim"></span></div>
-          </div>
-          <div id="sfcomplex" style="display:none">
-            <div class="row" style="margin-bottom:.4rem;margin-top:.4rem">
-              <small class="dim">Click, or click-drag, to paint the solid pixels.</small>
-              <button id="sfmaskreset"
-                title="discard any authored mask; use the art's own opacity">Reset to art</button>
-            </div>
-            <div id="sfmaskwrap" style="position:relative;display:inline-block">
-              <img id="sfmaskimg" alt="" draggable="false"
-                   style="image-rendering:pixelated;display:block;
-                          border:1px solid var(--line)">
-              <div id="sfmaskgrid" class="maskgrid"></div>
-            </div>
-          </div>
+          <small id="sfrectnote" class="dim"></small>
           <div class="row" style="margin-top:.7rem">
             <button id="sfsave" class="primary">Save frame</button>
             <button id="sfclearcol">Clear collision</button>
+            <button id="sfmaskreset"
+              title="discard any authored mask; use the art's own opacity">Reset to art</button>
           </div>
           <small id="sflog" class="dim">Pick a frame above (the small badge, not the
-            frame itself) to edit its collision.</small>
+            frame itself) to edit its collision on the canvas.</small>
         </section>
 
         <div class="category">Panels</div>
         <!-- A 9-slice panel is a sprite with exactly one frame plus four border insets
              (tools/pnx_assets.py's pack_nine_slice) -- corners drawn once, edges and
              centre tiled to fill any box. Declared here rather than in a tab of its own:
-             the source art is the same art/ PNGs sprites already draw from, and "does the
-             tiling look right" only answers itself at a size nobody drew art for, which
-             is what the live preview below renders. -->
+             the source art is the same art/ PNGs sprites already draw from.
+
+             Rect and border are no longer eight typed numbers: "Edit on canvas" loads the
+             panel's own pixels into the SAME #pxcv sprites paint on, with four draggable
+             guide lines over it (L/T/R/B) -- drag a guide, the border it names follows
+             live. Painting stays live underneath the whole time; a panel's regions are
+             just coordinate ranges of one flat image (pnx_nineslice.c's own draw-time
+             slicing), so there is nothing a guide overlay needs to restrict. The rect
+             itself comes from the freeform sheet picker (Import, above) -- "Use as
+             panel rect" there sets it the same way "+ Frame" sets a sprite's. The four
+             rect and four border fields below still hold the numbers save_nine_slice
+             reads; canvas dragging writes into them rather than replacing them. -->
         <section><h2>9-slice</h2>
           <div class="fields col">
             <label>Panel<select id="nssel"><option value="">— new —</option></select></label>
             <label>Name<input id="nsname" placeholder="panel" size="10"></label>
             <label>Sheet<select id="nssheet"></select></label>
-            <label>Rect x<input id="nsrx" type="number" value="0" min="0"
-              title="rect fields left at 0/0/0/0 use the sheet's own full size"></label>
+          </div>
+          <div class="row" style="margin:.4rem 0">
+            <button id="nsedit">✎ Edit on canvas</button>
+            <span id="nsguidenote" class="dim"></span>
+          </div>
+          <div class="fields col" style="display:none">
+            <label>Rect x<input id="nsrx" type="number" value="0" min="0"></label>
             <label>Rect y<input id="nsry" type="number" value="0" min="0"></label>
-            <label>Rect w<input id="nsrw" type="number" value="0" min="0"
-              title="0 uses the sheet's full width"></label>
-            <label>Rect h<input id="nsrh" type="number" value="0" min="0"
-              title="0 uses the sheet's full height"></label>
+            <label>Rect w<input id="nsrw" type="number" value="0" min="0"></label>
+            <label>Rect h<input id="nsrh" type="number" value="0" min="0"></label>
             <label>Border L<input id="nsbl" type="number" value="4" min="0"></label>
             <label>Border T<input id="nsbt" type="number" value="4" min="0"></label>
             <label>Border R<input id="nsbr" type="number" value="4" min="0"></label>
@@ -962,8 +927,10 @@
 
           <!-- Live, not just the numbers validate reports: tiled at an adjustable test
                box, so an author sees repeats look right before a device build rather than
-               trusting four border values alone. Runs the exact region math
-               pnx_gfx_draw_nine_slice (src/pnx/gfx/pnx_nineslice.c) does at draw time. -->
+               trusting four border values alone -- a different question from "where
+               exactly are my slice lines" (the canvas guides above), so both stay. Runs
+               the exact region math pnx_gfx_draw_nine_slice (src/pnx/gfx/pnx_nineslice.c)
+               does at draw time. -->
           <div class="fields col" style="margin-top:.5rem">
             <label>Preview w<input id="nstw" type="number" value="48" min="1" max="200"></label>
             <label>Preview h<input id="nsth" type="number" value="32" min="1" max="228"></label>
@@ -971,10 +938,54 @@
           <div id="nspreview" class="nspreview"><img id="nspreviewimg" alt=""></div>
           <small id="nsprevlog" class="dim">—</small>
         </section>
+
+        <div class="category">HUD</div>
+        <!-- A named, typed runtime slot (src/pnx/gfx/pnx_hud_vars.h) game code writes to
+             each tick -- speed, a timer, a dialog speaker's name -- and a HUD draw call
+             reads back. No placement or animation yet: this only declares the id and its
+             type, generated as PNX_HUD_VAR_* constants (tools/pnx_assets.py). -->
+        <section><h2>HUD variables</h2>
+          <div class="fields col">
+            <label>Variable<select id="hvsel"><option value="">— new —</option></select></label>
+            <label>Name<input id="hvname" placeholder="speed" size="10"></label>
+            <label>Type<select id="hvtype"><option value="int">int</option>
+              <option value="text">text</option></select></label>
+          </div>
+          <div class="row" style="margin-top:.4rem">
+            <button id="hvsave" class="primary">Save variable</button>
+            <button id="hvdel">Remove</button>
+          </div>
+          <small id="hvlog">—</small>
+        </section>
       </div>
 
       <div class="fontview">
+        <!-- Prominent and first, not buried under the canvas/filmstrip/clip stack: this
+             is what the watch actually shows, at actual size, and it doubles as the play
+             preview now (see #pxplay, app.js) -- it and the canvas below both render from
+             the same PX.data/PX.frame, so playback advancing PX.frame updates both without
+             a second scaled mini-canvas to keep in sync. -->
+        <div class="plate wide"><h3>Actual size</h3>
+          <div id="px1wrap"><canvas id="pxcv1"></canvas></div>
+          <small>What the watch shows. If it does not read here, it will not read there.</small>
+          <div class="row" style="margin-top:.6rem;align-items:center">
+            <button id="pxplay">▶ Play animation</button>
+            <span id="pxplaynote" class="dim"></span>
+          </div>
+        </div>
         <div class="plate wide"><h3 id="pxtitle">Canvas</h3>
+          <!-- Paint/Collision: which gesture #pxcv's own pointer handlers dispatch to.
+               Collision only enables once a frame is opened for it (the small badge on an
+               #spframes cell); Paint tools are inert while Collision is active, and vice
+               versa -- one canvas, one gesture at a time, never both reading the same
+               drag. Panels get no toggle: their border guides overlay paint mode directly
+               (project/nine_slice.py's own doc comment on why that needs no mode of its
+               own). -->
+          <div class="row" style="margin-bottom:.4rem">
+            <button id="pxmodepaint" class="act on" data-t="paint">Paint</button>
+            <button id="pxmodecollision" class="act" data-t="collision" disabled
+              title="open a frame's collision badge first">Collision</button>
+          </div>
           <div id="pxwrap"><canvas id="pxcv"></canvas></div>
           <!-- The filmstrip: click a thumbnail to work on that frame, or add/duplicate/
                remove one. Painting only ever touches the frame on screen -- switching
@@ -987,20 +998,128 @@
             <span id="pxframenote" class="dim"></span>
           </div>
           <div id="pxfilm"></div>
+
+          <!-- Anim clips, moved here from the sidebar: frame order (the filmstrip, just
+               above) and clip timing/sequencing are the same underlying question -- "what
+               order do frames play in" -- and belong in one place, under the canvas both
+               act on. The filmstrip still owns add/duplicate/delete on the raw frame
+               array; this is how those frames get named, ordered, and timed into
+               [sprite.anim] clips (pnx_assets.py's parse_sprite_anim). -->
+          <div class="fields col" style="margin-top:.8rem">
+            <label>Clip<select id="clipsel"><option value="">— new —</option></select></label>
+            <label>Name<input id="clipname" placeholder="walk" size="10"></label>
+            <label>FPS<input id="clipfps" type="number" value="8" min="1" max="255"></label>
+            <label class="check"><input id="cliploop" type="checkbox" checked> Loop</label>
+            <label class="check"><input id="clipdur" type="checkbox"> Per-frame timing</label>
+          </div>
+          <small class="dim">Drag frames in from the sheet picks or the frames grid,
+            in play order. Drag a frame already here to reorder it. Play animation
+            (above) plays the selected clip, if any, at its own fps/loop/timing.</small>
+          <div id="clipdrop" class="clipdrop">
+            <div id="clipframes" class="clipchips"></div>
+          </div>
+          <div class="row" style="margin-top:.4rem">
+            <button id="clipsave" class="primary">Save clip</button>
+            <button id="clipdel">Delete clip</button>
+          </div>
+          <small id="cliplog" class="dim">—</small>
         </div>
-        <div class="plate wide"><h3>Actual size</h3>
-          <div id="px1wrap"><canvas id="pxcv1"></canvas></div>
-          <small>What the watch shows. If it does not read here, it will not read there.</small>
-          <!-- A multi-frame sprite could only be INSPECTED here before, frame by frame
-               in the stack above -- never actually seen playing, which is the one thing
-               a walk cycle is drawn to look right doing. -->
-          <div class="row" style="margin-top:.6rem;align-items:center">
-            <button id="pxplay">▶ Play animation</button>
-            <span id="pxplaynote" class="dim"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- HUD windows: placed panels/sprites/bars/text, anchored per screen orientation,
+       bound to a [[hud_var]] (see the HUD variables section under Sprites), animated by
+       a show/hide slide. Phase 3 of the HUD-authoring plan -- Phase 1 (pnx_tween) and
+       Phase 2 (hud_var) already landed. Placement is form fields plus a static
+       server-rendered preview, not drag-and-drop (a later pass' own scope). -->
+  <div id="hudwin" style="display:none;flex:1;overflow:auto;padding:1.25rem">
+    <div class="fontgrid">
+      <div class="fontctl">
+        <section><h2>Window</h2>
+          <div class="fields col">
+            <label>Window<select id="hwsel"><option value="">— new —</option></select></label>
+            <label>Name<input id="hwname" placeholder="speed_hud" size="12"></label>
+            <label>Show ms<input id="hwshow" type="number" value="200" min="0" max="65535"></label>
+            <label>Hide ms<input id="hwhide" type="number" value="200" min="0" max="65535"></label>
+            <label>Ease<select id="hwease">
+              <option value="linear">linear</option>
+              <option value="in_quad">in_quad</option>
+              <option value="out_quad">out_quad</option>
+              <option value="in_out_quad">in_out_quad</option>
+              <option value="in_cubic">in_cubic</option>
+              <option value="out_cubic">out_cubic</option>
+              <option value="in_out_cubic">in_out_cubic</option>
+            </select></label>
+            <label>Slide x<input id="hwslidex" type="number" value="0"></label>
+            <label>Slide y<input id="hwslidey" type="number" value="0"></label>
           </div>
-          <div id="pxanimwrap" style="display:none;margin-top:.4rem">
-            <canvas id="pxanim"></canvas>
+          <div class="row" style="margin-top:.4rem">
+            <button id="hwsave" class="primary">Save window</button>
+            <button id="hwdel">Remove</button>
           </div>
+          <small id="hwlog">—</small>
+        </section>
+
+        <section><h2>Elements</h2>
+          <div id="hwelemlist" class="mini"></div>
+          <div class="fields col" style="margin-top:.6rem">
+            <label>Kind<select id="hweknd">
+              <option value="panel">panel</option>
+              <option value="sprite">sprite</option>
+              <option value="bar">bar</option>
+              <option value="text">text</option>
+            </select></label>
+            <label>Anchor<select id="hweanchor">
+              <option value="top_left">top_left</option>
+              <option value="top">top</option>
+              <option value="top_right">top_right</option>
+              <option value="left">left</option>
+              <option value="center">center</option>
+              <option value="right">right</option>
+              <option value="bottom_left">bottom_left</option>
+              <option value="bottom">bottom</option>
+              <option value="bottom_right">bottom_right</option>
+            </select></label>
+            <label>Offset x<input id="hweoffx" type="number" value="0"></label>
+            <label>Offset y<input id="hweoffy" type="number" value="0"></label>
+          </div>
+          <div id="hwefpanel" class="fields col">
+            <label>Panel<select id="hwepanel"></select></label>
+            <label>W<input id="hwepw" type="number" value="20" min="1"></label>
+            <label>H<input id="hweph" type="number" value="20" min="1"></label>
+          </div>
+          <div id="hwefsprite" class="fields col" style="display:none">
+            <label>Sprite<select id="hwesprite"></select></label>
+            <label>Frame<input id="hweframe" type="number" value="0" min="0"></label>
+          </div>
+          <div id="hwefbar" class="fields col" style="display:none">
+            <label>Value hud_var<select id="hwebarvar"></select></label>
+            <label>W<input id="hwebw" type="number" value="20" min="1"></label>
+            <label>H<input id="hwebh" type="number" value="8" min="1"></label>
+            <label>Max<input id="hwemax" type="number" value="100" min="1"></label>
+            <label>Border<input id="hweborder" type="number" value="192" min="0" max="255"></label>
+            <label>Track<input id="hwetrack" type="number" value="0" min="0" max="255"></label>
+            <label>Fill<input id="hwefill" type="number" value="255" min="0" max="255"></label>
+          </div>
+          <div id="hweftext" class="fields col" style="display:none">
+            <label>hud_var<select id="hwetextvar"></select></label>
+            <label>Font<select id="hwefont"></select></label>
+            <label>Colour<input id="hwecolour" type="number" value="255" min="0" max="255"></label>
+          </div>
+          <div class="row" style="margin-top:.4rem">
+            <button id="hwesave" class="primary">Save element</button>
+            <button id="hweclear">New element</button>
+          </div>
+          <small id="hwelog">—</small>
+        </section>
+      </div>
+
+      <div class="fontview">
+        <div class="plate wide"><h3>Preview</h3>
+          <div id="hwpreviewwrap"><img id="hwpreviewimg" alt=""
+            style="image-rendering:pixelated;max-width:100%;border:1px solid var(--line)"></div>
+          <small id="hwprevlog" class="dim">Save the window to preview it.</small>
         </div>
       </div>
     </div>
@@ -1330,4 +1449,5 @@
 <script src="/static/js/atlas.js"></script>
 <script src="/static/js/sprites.js"></script>
 <script src="/static/js/audio-preview.js"></script>
+<script src="/static/js/hud_window.js"></script>
 </body></html>

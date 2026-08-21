@@ -120,6 +120,8 @@ class CoreMixin:
             "nine_slices": self.nine_slices(),
             "nine_slice_names": [ns.get("name") for ns in self.man.get("nine_slice", [])
                                  if ns.get("name")],
+            "hud_vars": self.hud_vars(),
+            "hud_windows": self.hud_windows(),
             # The canvas the author is working on, which is the device's display turned
             # if the project is landscape. Sent as dimensions rather than as a flag so
             # the page never has to know which way round that is.

@@ -162,6 +162,11 @@ MAGIC_NINE_SLICE = b"N9"
 # from a build in the other orientation is a scrambled world rather than a stale sample,
 # and M4c's rule that every blob carries its orientation exists for exactly that.
 MAGIC_BANK = b"PK"
+# A HUD window: placed elements, anchored per orientation (see src/pnx/gfx/
+# pnx_hud_window.h's own top comment) -- not a picture, but still stamped with the build's
+# orientation like everything else, since anchor resolution assumes PNX_DISPLAY_WIDTH/
+# HEIGHT match the build this blob shipped with.
+MAGIC_HUD_WINDOW = b"HW"
 
 HEADER_BYTES = 8
 
@@ -4119,10 +4124,210 @@ def bw_variant_path(out):
     return f"{stem}~bw{ext}"
 
 
+def parse_hud_vars(specs):
+    """Validate `[[hud_var]]` and return it sorted by name -- the PNX_HUD_VAR_* index
+    order, deterministic the same way tile roles' own codegen already is, so reordering
+    entries in the manifest never renumbers a variable a game already refers to by name.
+    """
+    names = [hv.get("name") for hv in specs]
+    if len(set(names)) != len(names):
+        raise BuildError("duplicate hud_var names")
+    for hv in specs:
+        name = hv.get("name")
+        if not name or not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise BuildError(
+                f"hud_var {name!r}: name must be lowercase, start with a letter, and "
+                f"contain only letters, digits, and underscores")
+        if hv.get("type") not in ("int", "text"):
+            raise BuildError(
+                f"hud_var {name!r}: type must be \"int\" or \"text\", got "
+                f"{hv.get('type')!r}")
+    return sorted(specs, key=lambda hv: hv["name"])
+
+
+# HUD window elements: an ordered id table, same shape WAVEFORMS/LFO_TARGETS/FILTER_MODES
+# already use for a manifest string resolved to a small fixed byte -- the order IS the id,
+# on both the Python and the pnx_hud_window.c side (that file's own EASE_TABLE/switch
+# statements list them in this exact order).
+HUD_ELEMENT_KINDS = ["panel", "sprite", "bar", "text"]
+HUD_ANCHORS = ["top_left", "top", "top_right", "left", "center", "right", "bottom_left",
+              "bottom", "bottom_right"]
+HUD_EASES = ["linear", "in_quad", "out_quad", "in_out_quad", "in_cubic", "out_cubic",
+            "in_out_cubic"]
+
+
+def _hud_colour_byte(spec, key, window_name, default=0xC0):
+    v = spec.get(key, default)
+    if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 255:
+        raise BuildError(f"hud_window {window_name!r}: {key} must be a GColor8 byte "
+                         f"0-255 (e.g. 0xC0), got {v!r}")
+    return v
+
+
+def parse_hud_windows(specs, sprite_names, nine_slice_names, font_names, hud_var_types):
+    """Validate `[[hud_window]]` and its nested `[[hud_window.element]]` entries --
+    nested array-of-tables, the same shape `[[atlas.collision]]` already uses (confirmed
+    tomllib attaches it to the most recently opened `[[hud_window]]` the same way).
+
+    Returns windows unchanged (declaration order -- unlike hud_var, a window's PNX_ASSET_*
+    id comes from the shared `ordered` asset list, not from sorting here) but with every
+    element normalised: kind/anchor/ease as their table INDEX, not the manifest string.
+    """
+    names = [w.get("name") for w in specs]
+    if len(set(names)) != len(names):
+        raise BuildError("duplicate hud_window names")
+
+    out = []
+    for w in specs:
+        name = w.get("name")
+        if not name or not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise BuildError(
+                f"hud_window {name!r}: name must be lowercase, start with a letter, and "
+                f"contain only letters, digits, and underscores")
+
+        ease = w.get("ease", "linear")
+        if ease not in HUD_EASES:
+            raise BuildError(f"hud_window {name!r}: ease {ease!r} unknown "
+                             f"(known: {', '.join(HUD_EASES)})")
+        show_ms, hide_ms = w.get("show_ms", 200), w.get("hide_ms", 200)
+        for label, ms in (("show_ms", show_ms), ("hide_ms", hide_ms)):
+            if not isinstance(ms, int) or isinstance(ms, bool) or not 0 <= ms <= 0xFFFF:
+                raise BuildError(f"hud_window {name!r}: {label} must be 0-65535, "
+                                 f"got {ms!r}")
+        slide = w.get("slide", [0, 0])
+        if not (isinstance(slide, list) and len(slide) == 2
+                and all(isinstance(v, int) and not isinstance(v, bool) for v in slide)):
+            raise BuildError(f"hud_window {name!r}: slide must be [dx, dy]")
+
+        elements = []
+        for i, e in enumerate(w.get("element", [])):
+            label = f"hud_window {name!r} element {i}"
+            kind = e.get("kind")
+            if kind not in HUD_ELEMENT_KINDS:
+                raise BuildError(f"{label}: kind {kind!r} unknown "
+                                 f"(known: {', '.join(HUD_ELEMENT_KINDS)})")
+            anchor = e.get("anchor", "top_left")
+            if anchor not in HUD_ANCHORS:
+                raise BuildError(f"{label}: anchor {anchor!r} unknown "
+                                 f"(known: {', '.join(HUD_ANCHORS)})")
+            offset = e.get("offset", [0, 0])
+            if not (isinstance(offset, list) and len(offset) == 2
+                    and all(isinstance(v, int) and not isinstance(v, bool)
+                            for v in offset)):
+                raise BuildError(f"{label}: offset must be [dx, dy]")
+
+            out_e = {"kind": HUD_ELEMENT_KINDS.index(kind),
+                     "anchor": HUD_ANCHORS.index(anchor),
+                     "offset": offset, "hud_var": 0xFF, "asset": None, "w": 0, "h": 0,
+                     "p0": 0, "p1": 0, "p2": 0, "max": 0}
+
+            if kind == "panel":
+                panel = e.get("panel")
+                if panel not in nine_slice_names:
+                    raise BuildError(f"{label}: no nine_slice named {panel!r} "
+                                     f"(known: {', '.join(sorted(nine_slice_names)) or '(none)'})")
+                out_e["asset"] = ("NINE_SLICE", panel)
+                out_e["w"], out_e["h"] = _hud_wh(e, label)
+            elif kind == "sprite":
+                sprite = e.get("sprite")
+                if sprite not in sprite_names:
+                    raise BuildError(f"{label}: no sprite named {sprite!r} "
+                                     f"(known: {', '.join(sorted(sprite_names)) or '(none)'})")
+                out_e["asset"] = ("SPRITE", sprite)
+                frame = e.get("frame", 0)
+                if not isinstance(frame, int) or isinstance(frame, bool) or frame < 0:
+                    raise BuildError(f"{label}: frame must be a non-negative int, "
+                                     f"got {frame!r}")
+                out_e["p0"] = frame
+            elif kind == "bar":
+                hud_var = e.get("hud_var")
+                if hud_var_types.get(hud_var) != "int":
+                    raise BuildError(f"{label}: hud_var {hud_var!r} must name a "
+                                     f"declared [[hud_var]] of type \"int\"")
+                out_e["hud_var"] = hud_var  # resolved to an id by the caller
+                out_e["w"], out_e["h"] = _hud_wh(e, label)
+                bar_max = e.get("max")
+                if not isinstance(bar_max, int) or isinstance(bar_max, bool) or bar_max <= 0:
+                    raise BuildError(f"{label}: max must be a positive int, got {bar_max!r}")
+                out_e["max"] = bar_max
+                out_e["p0"] = _hud_colour_byte(e, "border", name)
+                out_e["p1"] = _hud_colour_byte(e, "track", name, default=0x00)
+                out_e["p2"] = _hud_colour_byte(e, "fill", name)
+            else:  # text
+                hud_var = e.get("hud_var")
+                if hud_var_types.get(hud_var) != "text":
+                    raise BuildError(f"{label}: hud_var {hud_var!r} must name a "
+                                     f"declared [[hud_var]] of type \"text\"")
+                out_e["hud_var"] = hud_var
+                font = e.get("font")
+                if font not in font_names:
+                    raise BuildError(f"{label}: no font named {font!r} "
+                                     f"(known: {', '.join(sorted(font_names)) or '(none)'})")
+                out_e["asset"] = ("FONT", font)
+                out_e["p0"] = _hud_colour_byte(e, "colour", name)
+
+            elements.append(out_e)
+
+        if not elements:
+            raise BuildError(f"hud_window {name!r}: has no elements")
+
+        out.append({"name": name, "show_ms": show_ms, "hide_ms": hide_ms,
+                   "ease": HUD_EASES.index(ease), "slide": slide, "elements": elements})
+
+    return out
+
+
+def _hud_wh(e, label):
+    w, h = e.get("w"), e.get("h")
+    for key, v in (("w", w), ("h", h)):
+        if not isinstance(v, int) or isinstance(v, bool) or v <= 0:
+            raise BuildError(f"{label}: {key} must be a positive int, got {v!r}")
+    return w, h
+
+
+def build_hud_windows(windows, asset_index, hud_var_index, orient=ORIENT_BUTTONS_RIGHT):
+    """[[hud_window]] -> one "HW" blob per window, elements referencing OTHER assets by
+    their already-resolved global id -- no scene involvement (pnx_hud_window.h's own top
+    comment explains why). Called after `asset_index` is complete, the same timing
+    build_scenes already relies on for its own cross-references.
+    """
+    blobs = []
+    for w in windows:
+        body = bytearray()
+        body += w["show_ms"].to_bytes(2, "little")
+        body += w["hide_ms"].to_bytes(2, "little")
+        body += int(w["slide"][0]).to_bytes(2, "little", signed=True)
+        body += int(w["slide"][1]).to_bytes(2, "little", signed=True)
+
+        for e in w["elements"]:
+            asset_id = 0xFFFF
+            if e["asset"] is not None:
+                kind, ref_name = e["asset"]
+                handle = f"PNX_ASSET_{kind}_{c_ident(ref_name)}"
+                asset_id = asset_index[handle]
+            hud_var_id = (hud_var_index[e["hud_var"]] if e["hud_var"] != 0xFF else 0xFF)
+
+            body += bytes([e["kind"], e["anchor"]])
+            body += int(e["offset"][0]).to_bytes(2, "little", signed=True)
+            body += int(e["offset"][1]).to_bytes(2, "little", signed=True)
+            body += asset_id.to_bytes(2, "little")
+            body += bytes([hud_var_id, e["p0"], e["p1"], e["p2"]])
+            body += e["w"].to_bytes(2, "little")
+            body += e["h"].to_bytes(2, "little")
+            body += int(e["max"]).to_bytes(2, "little", signed=True)
+
+        header = blob_header(MAGIC_HUD_WINDOW, len(w["elements"]), w["ease"], orient=orient)
+        blobs.append((w["name"], bytes(header) + bytes(body)))
+
+    print(f"  hud_window: {len(windows)} declared, "
+          f"{sum(len(w['elements']) for w in windows)} elements")
+    return blobs
+
+
 def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0,
                     scenes=None, songs=None, samples=None, fonts=None,
                     blob_files=None, orient=ORIENT_BUTTONS_RIGHT, flag_names=None,
-                    nine_slices=None):
+                    nine_slices=None, hud_vars=None, hud_windows=None):
     L = [
         "// GENERATED by tools/pnx_assets.py -- do not edit.",
         "//",
@@ -4160,6 +4365,9 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
               + [("MUSIC", sg["name"]) for sg in (songs or [])]
               + [("SAMPLE", sm["name"]) for sm in (samples or [])]
               + [("FONT", ft["name"]) for ft in (fonts or [])]
+              # Must stay in step with `ordered` in build(), which also appends
+              # hud_windows right after fonts and before scenes.
+              + [("HUD_WINDOW", w["name"]) for w in (hud_windows or [])]
               + ([("SCENES", "scenes")] if scenes else []))
 
     L += ["// Stable asset handles. Index into the runtime registry.",
@@ -4306,6 +4514,23 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
                   f"#define FONT_{n}_BASELINE {ft['baseline']}",
                   f"#define FONT_{n}_GLYPHS {len(ft['glyphs'])}",
                   f"#define FONT_{n}_DEPTH {ft['depth']}", ""]
+
+    if hud_vars:
+        L += ["// HUD variables: a named runtime table game code writes to each tick and",
+              "// a HUD draw call reads back (pnx_hud_vars.h). Not a resource -- these",
+              "// are ids into storage the game itself declares, sized by the COUNT",
+              "// below, and hands to pnx_hud_vars_init() at start-up."]
+        for i, hv in enumerate(hud_vars):
+            L.append(f"#define PNX_HUD_VAR_{c_ident(hv['name'])} {i}")
+        L += [f"#define PNX_HUD_VAR_COUNT {len(hud_vars)}", ""]
+
+    if hud_windows:
+        L += ["// HUD windows: each needs PnxHudElement storage the game declares and",
+              "// sizes by this count, handed to pnx_hud_window_load() (pnx_hud_window.h)."]
+        for w in hud_windows:
+            L.append(f"#define PNX_HUD_WINDOW_{c_ident(w['name'])}_ELEMENTS "
+                     f"{len(w['elements'])}")
+        L.append("")
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -4469,6 +4694,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
 
     sprites = [pack_sprite(root, sp, orient) for sp in man.get("sprite", [])]
     nine_slices = [pack_nine_slice(root, ns, orient) for ns in man.get("nine_slice", [])]
+    hud_vars = parse_hud_vars(man.get("hud_var", []))
 
     flag_names = parse_flag_names(man.get("tile_flags", {}))
     legend = parse_legend(man.get("legend", {}), flag_names)
@@ -4813,6 +5039,22 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
                         write_blob(os.path.join(out_dir, ft["out"]), ft["blob"])))
         blobs.append((ft["name"], ft["out"]))
 
+    # After fonts, before scenes -- must stay in step with generate_header's own `assets`
+    # list, which appends HUD_WINDOW at the identical point.
+    hud_var_index = {hv["name"]: i for i, hv in enumerate(hud_vars)}
+    hud_var_types = {hv["name"]: hv["type"] for hv in hud_vars}
+    hud_windows = parse_hud_windows(
+        man.get("hud_window", []), {sp["name"] for sp in sprites},
+        {ns["name"] for ns in nine_slices}, set(font_names), hud_var_types)
+    for hw_name, hw_blob in build_hud_windows(hud_windows, asset_index, hud_var_index,
+                                              orient):
+        out = f"{hw_name}.bin"
+        entries.append(("hud_window", hw_name,
+                        write_blob(os.path.join(out_dir, out), hw_blob)))
+        blobs.append((hw_name, out))
+        ordered.append(f"PNX_ASSET_HUD_WINDOW_{c_ident(hw_name)}")
+        asset_index[f"PNX_ASSET_HUD_WINDOW_{c_ident(hw_name)}"] = len(ordered) - 1
+
     scenes = build_scenes(man, asset_index, maps, orient)
     if scenes:
         scene_out = project.get("scenes_out", "scenes.bin")
@@ -4824,7 +5066,8 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
 
     generate_header(header_path, atlases, sprites, maps, dialog, roles_by_atlas,
                     len(shared), scenes, songs, samples, fonts,
-                    [out for _name, out in blobs], orient, flag_names, nine_slices)
+                    [out for _name, out in blobs], orient, flag_names, nine_slices,
+                    hud_vars, hud_windows)
     print(f"\nheader: {header_path}")
 
     if fonts:

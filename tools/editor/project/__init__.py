@@ -26,11 +26,13 @@ from editor.project.project_keys import ProjectKeysMixin
 from editor.project.music import MusicMixin
 from editor.project.dialog import DialogMixin
 from editor.project.scenes import ScenesMixin
+from editor.project.hud import HudMixin
+from editor.project.hud_window import HudWindowMixin
 
 
 class Project(CoreMixin, AtlasMixin, MapsMixin, SpritesMixin, NineSliceMixin, FontsMixin,
               CodeMixin, BuildMixin, ProjectKeysMixin, MusicMixin, DialogMixin,
-              ScenesMixin):
+              ScenesMixin, HudMixin, HudWindowMixin):
     """Everything the editor knows, reloaded from disk on demand."""
 
     PLATFORMS = {

@@ -139,7 +139,8 @@ def manifest(root, **overrides):
         body += textwrap.dedent(parts[key])
     # Dialog before font: `charset = "auto"` derives its glyph set from the pages, so a
     # font test that supplies dialog needs it to come first in the same manifest.
-    for key in ("sprite", "nine_slice", "dialog", "font", "scene", "tile_flags"):
+    for key in ("sprite", "nine_slice", "dialog", "font", "scene", "tile_flags", "hud_var",
+                "hud_window"):
         if key in parts:
             body += textwrap.dedent(parts[key])
 
@@ -629,6 +630,296 @@ def check_nine_slice():
               (d.get("PANEL_BORDER_L"), d.get("PANEL_BORDER_T"),
                d.get("PANEL_BORDER_R"), d.get("PANEL_BORDER_B")) == (2, 2, 2, 2))
         check("panel.bin was written", os.path.exists(os.path.join(root, "out", "panel.bin")))
+
+
+def check_hud_vars():
+    """[[hud_var]] declares a named id into the runtime table pnx_hud_vars.h reads/writes
+    (speed, a timer, a dialog speaker's name) -- not a resource, so build() only has to
+    validate the declarations and number them, never write a blob for this section.
+    """
+    expect_fail("hud_var: bad name (uppercase)", "name must be lowercase",
+                hud_var='''
+        [[hud_var]]
+        name = "Speed"
+        type = "int"
+    ''')
+    expect_fail("hud_var: bad name (leading digit)", "name must be lowercase",
+                hud_var='''
+        [[hud_var]]
+        name = "1speed"
+        type = "int"
+    ''')
+    expect_fail("hud_var: invalid type", 'type must be "int" or "text"',
+                hud_var='''
+        [[hud_var]]
+        name = "speed"
+        type = "float"
+    ''')
+    expect_fail("hud_var: duplicate name", "duplicate hud_var names",
+                hud_var='''
+        [[hud_var]]
+        name = "speed"
+        type = "int"
+        [[hud_var]]
+        name = "speed"
+        type = "text"
+    ''')
+
+    # --- end to end: declarations come back as PNX_HUD_VAR_* constants, numbered by
+    # sorted name (not declaration order) so reordering the manifest never renumbers a
+    # variable a game already refers to.
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            path = manifest(root, hud_var='''
+                [[hud_var]]
+                name = "timer"
+                type = "int"
+                [[hud_var]]
+                name = "radio_station"
+                type = "text"
+                [[hud_var]]
+                name = "speed"
+                type = "int"
+            ''')
+            pnx_assets.build(path, os.path.join(root, "out"),
+                             os.path.join(root, "out", "gen.h"))
+        d = defines(os.path.join(root, "out"))
+        # Sorted: radio_station, speed, timer.
+        check("header: PNX_HUD_VAR_RADIO_STATION == 0", d.get("PNX_HUD_VAR_RADIO_STATION") == 0)
+        check("header: PNX_HUD_VAR_SPEED == 1", d.get("PNX_HUD_VAR_SPEED") == 1)
+        check("header: PNX_HUD_VAR_TIMER == 2", d.get("PNX_HUD_VAR_TIMER") == 2)
+        check("header: PNX_HUD_VAR_COUNT == 3", d.get("PNX_HUD_VAR_COUNT") == 3)
+
+    # --- a manifest with no [[hud_var]] at all emits no constants (and, critically,
+    # does not crash generate_header on an empty/absent list).
+    expect_ok("hud_var: absent is fine")
+
+
+# A panel element's own [[nine_slice]], reused verbatim from check_nine_slice's own
+# end-to-end fixture -- proving hud_window's panel reference resolves against a REAL
+# packed nine_slice is more useful than a second, disconnected implementation of the
+# same box.
+HUD_PANEL_NS = '''
+    [[nine_slice]]
+    name = "panel"
+    sheet = "sheet.png"
+    rect = [0, 0, 8, 8]
+    border = [2, 2, 2, 2]
+    out = "panel.bin"
+'''
+HUD_SPEED_VAR = '''
+    [[hud_var]]
+    name = "speed"
+    type = "int"
+'''
+
+
+def check_hud_windows():
+    """[[hud_window]] and its nested [[hud_window.element]] -- unlike hud_var, a window
+    IS a resource (a real "HW" blob of placement/binding data, per
+    src/pnx/gfx/pnx_hud_window.h's own top comment), so build() both validates it and
+    writes it.
+    """
+    expect_fail("hud_window: bad name", "name must be lowercase",
+                nine_slice=HUD_PANEL_NS, hud_window='''
+        [[hud_window]]
+        name = "Speed HUD"
+        [[hud_window.element]]
+        kind = "panel"
+        panel = "panel"
+        w = 10
+        h = 10
+    ''')
+    expect_fail("hud_window: duplicate name", "duplicate hud_window names",
+                nine_slice=HUD_PANEL_NS, hud_window='''
+        [[hud_window]]
+        name = "hud"
+        [[hud_window.element]]
+        kind = "panel"
+        panel = "panel"
+        w = 10
+        h = 10
+        [[hud_window]]
+        name = "hud"
+        [[hud_window.element]]
+        kind = "panel"
+        panel = "panel"
+        w = 10
+        h = 10
+    ''')
+    expect_fail("hud_window: no elements", "has no elements",
+                hud_window='''
+        [[hud_window]]
+        name = "hud"
+    ''')
+    expect_fail("hud_window: unknown ease", "ease",
+                nine_slice=HUD_PANEL_NS, hud_window='''
+        [[hud_window]]
+        name = "hud"
+        ease = "bounce"
+        [[hud_window.element]]
+        kind = "panel"
+        panel = "panel"
+        w = 10
+        h = 10
+    ''')
+    expect_fail("hud_window: unknown element kind", "kind",
+                hud_window='''
+        [[hud_window]]
+        name = "hud"
+        [[hud_window.element]]
+        kind = "circle"
+    ''')
+    expect_fail("hud_window: unknown anchor", "anchor",
+                nine_slice=HUD_PANEL_NS, hud_window='''
+        [[hud_window]]
+        name = "hud"
+        [[hud_window.element]]
+        kind = "panel"
+        panel = "panel"
+        anchor = "dead_center"
+        w = 10
+        h = 10
+    ''')
+    expect_fail("hud_window: panel names an unknown nine_slice", "no nine_slice named",
+                hud_window='''
+        [[hud_window]]
+        name = "hud"
+        [[hud_window.element]]
+        kind = "panel"
+        panel = "nope"
+        w = 10
+        h = 10
+    ''')
+    expect_fail("hud_window: sprite names an unknown sprite", "no sprite named",
+                hud_window='''
+        [[hud_window]]
+        name = "hud"
+        [[hud_window.element]]
+        kind = "sprite"
+        sprite = "nope"
+    ''')
+    expect_fail("hud_window: bar names an unknown hud_var", "type \"int\"",
+                hud_window='''
+        [[hud_window]]
+        name = "hud"
+        [[hud_window.element]]
+        kind = "bar"
+        hud_var = "nope"
+        w = 10
+        h = 6
+        max = 100
+    ''')
+    expect_fail("hud_window: bar names a text-typed hud_var", "type \"int\"",
+                hud_var='''
+        [[hud_var]]
+        name = "label"
+        type = "text"
+    ''', hud_window='''
+        [[hud_window]]
+        name = "hud"
+        [[hud_window.element]]
+        kind = "bar"
+        hud_var = "label"
+        w = 10
+        h = 6
+        max = 100
+    ''')
+    expect_fail("hud_window: bar missing max", "max must be a positive int",
+                hud_var=HUD_SPEED_VAR, hud_window='''
+        [[hud_window]]
+        name = "hud"
+        [[hud_window.element]]
+        kind = "bar"
+        hud_var = "speed"
+        w = 10
+        h = 6
+    ''')
+    expect_fail("hud_window: text names an int-typed hud_var", "type \"text\"",
+                hud_var=HUD_SPEED_VAR, hud_window='''
+        [[hud_window]]
+        name = "hud"
+        [[hud_window.element]]
+        kind = "text"
+        hud_var = "speed"
+        font = "hud"
+    ''')
+    expect_fail("hud_window: text names an unknown font", "no font named",
+                hud_var='''
+        [[hud_var]]
+        name = "label"
+        type = "text"
+    ''', hud_window='''
+        [[hud_window]]
+        name = "hud"
+        [[hud_window.element]]
+        kind = "text"
+        hud_var = "label"
+        font = "nope"
+    ''')
+    expect_fail("hud_window: bad colour byte", "GColor8 byte",
+                hud_var=HUD_SPEED_VAR, hud_window='''
+        [[hud_window]]
+        name = "hud"
+        [[hud_window.element]]
+        kind = "bar"
+        hud_var = "speed"
+        w = 10
+        h = 6
+        max = 100
+        border = 999
+    ''')
+
+    # --- end to end: a panel + a bar, sorted asset ordering, header constants, a
+    # written blob.
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            path = manifest(root, nine_slice=HUD_PANEL_NS, hud_var=HUD_SPEED_VAR,
+                            hud_window='''
+                [[hud_window]]
+                name = "speed_hud"
+                show_ms = 250
+                hide_ms = 200
+                ease = "out_cubic"
+                slide = [0, 40]
+
+                [[hud_window.element]]
+                kind = "panel"
+                panel = "panel"
+                anchor = "bottom_left"
+                offset = [4, -4]
+                w = 60
+                h = 20
+
+                [[hud_window.element]]
+                kind = "bar"
+                hud_var = "speed"
+                anchor = "top_right"
+                offset = [-4, 4]
+                w = 50
+                h = 8
+                max = 200
+                border = 192
+                track = 0
+                fill = 255
+            ''')
+            pnx_assets.build(path, os.path.join(root, "out"),
+                             os.path.join(root, "out", "gen.h"))
+        d = defines(os.path.join(root, "out"))
+        with open(os.path.join(root, "out", "gen.h")) as f:
+            header_text = f.read()
+        check("header: PNX_ASSET_HUD_WINDOW_SPEED_HUD exists",
+              "PNX_ASSET_HUD_WINDOW_SPEED_HUD," in header_text)
+        check("header: PNX_HUD_WINDOW_SPEED_HUD_ELEMENTS == 2",
+              d.get("PNX_HUD_WINDOW_SPEED_HUD_ELEMENTS") == 2)
+        check("speed_hud.bin was written",
+              os.path.exists(os.path.join(root, "out", "speed_hud.bin")))
+        with open(os.path.join(root, "out", "speed_hud.bin"), "rb") as f:
+            blob = f.read()
+        check("blob: magic HW", blob[0:2] == b"HW")
+        check("blob: element count byte", blob[3] == 2)
 
 
 def check_atlas_rotation_dedup():
@@ -2655,6 +2946,136 @@ out = "old.bin"
         check("and the manifest still builds", builds(proj.path, root, "out_ns2"))
 
 
+def check_editor_hud_vars():
+    """Declaring, rewriting, and removing [[hud_var]] through the editor -- HudMixin's
+    own shape, mirrored against check_editor_nine_slice minus the preview/users pieces
+    that section has and this one does not yet (see HudMixin's own docstring)."""
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root, hud_var='''
+[[hud_var]]
+name = "old"
+type = "int"
+# A comment that has to survive a rewrite.
+''')
+
+        proj.save_hud_var("speed", "int")
+        proj.save_hud_var("radio_station", "text")
+        got = {hv["name"]: hv for hv in proj.hud_vars()}
+        check("a hud_var is declared", got["speed"]["type"] == "int")
+        check("a text hud_var is declared", got["radio_station"]["type"] == "text")
+        check("and the manifest builds", builds(proj.path, root, "out_hv"))
+
+        # Rewriting an existing variable keeps the comment inside its block.
+        proj.save_hud_var("old", "text")
+        check("rewriting a hud_var keeps its comments",
+              "has to survive a rewrite" in open(proj.path).read())
+        check("and updates its type",
+              {hv["name"]: hv for hv in proj.hud_vars()}["old"]["type"] == "text")
+
+        for label, call in (
+            ("a name that is not an identifier",
+             lambda: proj.save_hud_var("Bad Name", "int")),
+            ("an invalid type",
+             lambda: proj.save_hud_var("bad", "float")),
+        ):
+            try:
+                call()
+                check(f"a hud_var refuses {label}", False)
+            except ValueError:
+                check(f"a hud_var refuses {label}", True)
+
+        proj.remove_hud_var("old")
+        check("an unused hud_var is removed",
+              sorted(hv["name"] for hv in proj.hud_vars()) == ["radio_station", "speed"])
+        check("and the manifest still builds", builds(proj.path, root, "out_hv2"))
+
+        try:
+            proj.remove_hud_var("nope")
+            check("removing an unknown hud_var is refused", False)
+        except ValueError:
+            check("removing an unknown hud_var is refused", True)
+
+
+def check_editor_hud_windows():
+    """Declaring a window, adding/rewriting/removing its nested elements, previewing it,
+    and removing the whole thing -- HudWindowMixin's own shape, mirrored against
+    check_editor_hud_vars and check_editor_nine_slice's own [[atlas.collision]]-style
+    nested editing (see HudWindowMixin's own docstring)."""
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root, nine_slice=HUD_PANEL_NS, hud_var=HUD_SPEED_VAR)
+
+        proj.save_hud_window("speed_hud", show_ms=250, hide_ms=200, ease="out_cubic",
+                             slide=[0, 40])
+        got = {w["name"]: w for w in proj.hud_windows()}
+        check("a hud_window is declared", got["speed_hud"]["show_ms"] == 250)
+        check("with its ease", got["speed_hud"]["ease"] == "out_cubic")
+        check("and starts with no elements", got["speed_hud"]["elements"] == [])
+
+        proj.save_hud_window_element("speed_hud", None, "panel", anchor="bottom_left",
+                                     offset=[4, -4], panel="panel", w=60, h=20)
+        proj.save_hud_window_element("speed_hud", None, "bar", anchor="top_right",
+                                     offset=[-4, 4], hud_var="speed", w=50, h=8, max=200,
+                                     border=192, track=0, fill=255)
+        elements = {w["name"]: w for w in proj.hud_windows()}["speed_hud"]["elements"]
+        check("two elements are declared", len(elements) == 2)
+        check("the panel element", elements[0]["kind"] == "panel" and
+              elements[0]["panel"] == "panel")
+        check("the bar element", elements[1]["kind"] == "bar" and
+              elements[1]["hud_var"] == "speed" and elements[1]["max"] == 200)
+        check("and the manifest builds", builds(proj.path, root, "out_hw"))
+
+        # Rewriting an existing element (by position) updates it in place, not appends.
+        proj.save_hud_window_element("speed_hud", 0, "panel", anchor="bottom_left",
+                                     offset=[4, -4], panel="panel", w=70, h=25)
+        elements = {w["name"]: w for w in proj.hud_windows()}["speed_hud"]["elements"]
+        check("rewriting an element keeps the count at two", len(elements) == 2)
+        check("and updates its own fields", elements[0]["w"] == 70)
+
+        preview = proj.hud_window_preview("speed_hud")
+        check("preview reports the project's own screen size",
+              (preview["w"], preview["h"]) == (proj.SCREEN_W, proj.SCREEN_H))
+        check("preview renders an image", preview["img"].startswith("data:image"))
+
+        for label, call in (
+            ("a name that is not an identifier",
+             lambda: proj.save_hud_window("Bad Name")),
+            ("an unknown ease",
+             lambda: proj.save_hud_window("hud2", ease="bounce")),
+            ("a panel element naming an unknown nine_slice",
+             lambda: proj.save_hud_window_element("speed_hud", None, "panel",
+                                                   panel="nope", w=10, h=10)),
+            ("a bar element naming an unknown hud_var",
+             lambda: proj.save_hud_window_element("speed_hud", None, "bar",
+                                                   hud_var="nope", w=10, h=6, max=100)),
+            ("an element under an unknown window",
+             lambda: proj.save_hud_window_element("nope", None, "panel", panel="panel",
+                                                   w=10, h=10)),
+        ):
+            try:
+                call()
+                check(f"hud_window refuses {label}", False)
+            except ValueError:
+                check(f"hud_window refuses {label}", True)
+
+        proj.remove_hud_window_element("speed_hud", 1)
+        elements = {w["name"]: w for w in proj.hud_windows()}["speed_hud"]["elements"]
+        check("removing an element drops it", len(elements) == 1)
+        check("and the manifest still builds", builds(proj.path, root, "out_hw2"))
+
+        proj.remove_hud_window("speed_hud")
+        check("removing the window drops it entirely", proj.hud_windows() == [])
+        check("and the manifest still builds with none declared",
+              builds(proj.path, root, "out_hw3"))
+
+        try:
+            proj.remove_hud_window("nope")
+            check("removing an unknown hud_window is refused", False)
+        except ValueError:
+            check("removing an unknown hud_window is refused", True)
+
+
 def check_mapfile_format():
     """The `.pnxmap` container, on its own before anything builds with it."""
     import pnx_mapfile as mf
@@ -3776,6 +4197,8 @@ def main():
     check_cell_dictionary()
     check_colorkey()
     check_nine_slice()
+    check_hud_vars()
+    check_hud_windows()
     check_atlas_rotation_dedup()
     check_editor_analyse_dedup()
 
@@ -4343,7 +4766,7 @@ def main():
     # so every one of them shares ONE global scope with all the others -- the split is
     # files, not module boundaries. A name declared twice across this list is exactly as
     # broken as declaring it twice in one file used to be.
-    js_files = ["app.js", "atlas.js", "audio-preview.js"]
+    js_files = ["app.js", "atlas.js", "audio-preview.js", "hud_window.js", "sprites.js"]
     js_by_file = {}
     for name in js_files:
         with open(os.path.join(editor_dir, "js", name), encoding="utf-8") as f:
@@ -4403,6 +4826,8 @@ def main():
     check_editor_sprite_frame_collision()
     check_nine_slice_preview_compose()
     check_editor_nine_slice()
+    check_editor_hud_vars()
+    check_editor_hud_windows()
     check_mapfile_format()
     check_source_maps()
     check_map_layers()
