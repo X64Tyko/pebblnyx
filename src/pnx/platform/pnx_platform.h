@@ -277,6 +277,26 @@ bool pnx_platform_poll_event(PnxEvent* out);
 
 bool pnx_platform_has_touch(void);
 
+// ---------------------------------------------------------------- accelerometer
+
+// Raw milli-Gs, same shape as the SDK's own AccelData -- deliberately unopinionated
+// about which axis means what. That depends on how the watch is held (portrait vs
+// which landscape orientation, docs/PLATFORM.md), which is a GAME choice, not a
+// platform one; a game picks the axis/sign its own orientation needs.
+typedef struct
+{
+	int16_t x, y, z;
+} PnxAccel;
+
+// The latest sample, no subscription needed -- accel_service_peek reads it directly,
+// which fits pebblnyx's poll-once-a-frame model better than the SDK's own
+// subscribe-a-callback API would (same reasoning pnx_platform_poll_event's own comment
+// gives for events over callbacks). False (and `out` zeroed) if no reading is available
+// yet -- the host build always reports this, since there is no accelerometer to read.
+bool pnx_platform_accel_read(PnxAccel* out);
+
+bool pnx_platform_has_accel(void);
+
 // ------------------------------------------------------------------- screen lock
 //
 // Holds the backlight on. A dim room and a screen that goes dark mid-turn reads as a

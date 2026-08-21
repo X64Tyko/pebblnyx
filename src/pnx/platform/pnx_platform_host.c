@@ -337,6 +337,17 @@ bool pnx_platform_has_touch(void)
 	return true;
 }
 
+bool pnx_platform_accel_read(PnxAccel* out)
+{
+	out->x = out->y = out->z = 0;
+	return false; // no accelerometer to read on the host, unlike touch's synthetic events
+}
+
+bool pnx_platform_has_accel(void)
+{
+	return false;
+}
+
 void pnx_platform_run(PnxFrameFn frame, void* ctx)
 {
 	// Runs a bounded number of frames rather than forever, so a test that forgets to

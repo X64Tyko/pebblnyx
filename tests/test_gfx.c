@@ -69,6 +69,17 @@ static const uint8_t HALF[8] = {
 	0x00,
 };
 
+// A 3x2 image, packed as tools/pnx_assets.py's pack_sprite promises: "two pixels to a
+// byte, with no per-row padding". w=3 is odd -- legal, since only the total pixel count
+// (w*h=6) has to be even -- which means row 1 starts on a LOW nibble (nibble offset
+// row*w=3) rather than a fresh byte. Row-major values 1..6, so ODD_ROW[1] = 0x34 packs
+// {pixel 2 = 3 (high), pixel 3 = 4 (low)} -- pixel 3 is row 1's own first pixel. A blitter
+// that assumes every row starts byte-aligned (stride = w/2 = 1, so row 1 at src+1) reads
+// that byte's HIGH nibble (3, row 0's last pixel) instead of row 1's actual first pixel
+// (4, the byte's low nibble) -- exactly the bug landscape rotation exposed in Need4Pebble,
+// where an odd source height becomes an odd post-rotation frame width.
+static const uint8_t ODD_ROW[3] = { 0x12, 0x34, 0x56 };
+
 static uint8_t pixel_at(PnxTarget* t, int16_t x, int16_t y)
 {
 	PnxRow row = pnx_target_row(t, y);
@@ -94,6 +105,32 @@ void test_gfx(void)
 	G_CHECK_EQ(pixel_at(t, 11, 10), 0xFF);
 	G_CHECK_EQ(pixel_at(t, 12, 10), 0x40); // transparent half preserved
 	G_CHECK_EQ(pixel_at(t, 13, 10), 0x40);
+
+	// --- odd frame width: row 1 must read from its own nibble, not the row-0-and-a-half
+	// a byte-aligned stride would land on (see ODD_ROW's own comment)
+	{
+		PnxPalette odd_pal;
+		memset(&odd_pal, 0, sizeof(odd_pal));
+		for (int i = 1; i <= 6; i++)
+			odd_pal.entries[i] = (uint8_t)(i * 0x10);
+
+		pnx_gfx_clear(t, 0x00);
+		pnx_blit_4bpp(t, ODD_ROW, &odd_pal, 20, 20, 3, 2, 0);
+		G_CHECK_EQ(pixel_at(t, 20, 20), 0x10); // row 0: 1, 2, 3
+		G_CHECK_EQ(pixel_at(t, 21, 20), 0x20);
+		G_CHECK_EQ(pixel_at(t, 22, 20), 0x30);
+		G_CHECK_EQ(pixel_at(t, 20, 21), 0x40); // row 1: 4, 5, 6 -- the mid-byte start
+		G_CHECK_EQ(pixel_at(t, 21, 21), 0x50);
+		G_CHECK_EQ(pixel_at(t, 22, 21), 0x60);
+
+		// Mirrored, so the per-pixel FLIP_X path gets the same coverage: row 1 reads
+		// back to front (6, 5, 4) but must still start from its own nibble offset.
+		pnx_gfx_clear(t, 0x00);
+		pnx_blit_4bpp(t, ODD_ROW, &odd_pal, 20, 20, 3, 2, PNX_FLIP_X);
+		G_CHECK_EQ(pixel_at(t, 20, 21), 0x60);
+		G_CHECK_EQ(pixel_at(t, 21, 21), 0x50);
+		G_CHECK_EQ(pixel_at(t, 22, 21), 0x40);
+	}
 
 	// --- mirroring swaps which half is opaque
 	pnx_gfx_clear(t, 0x40);

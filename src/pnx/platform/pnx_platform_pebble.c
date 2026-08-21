@@ -303,6 +303,30 @@ bool pnx_platform_has_touch(void)
 	return touch_service_is_enabled();
 }
 
+// accel_service_peek reads the last recorded sample directly -- unlike most of the
+// accelerometer API it needs no accel_data_service_subscribe() call first, which is
+// exactly the poll-once-a-frame shape pnx_platform_poll_event already commits to.
+bool pnx_platform_accel_read(PnxAccel* out)
+{
+	AccelData d;
+	if (accel_service_peek(&d) != 0)
+	{
+		out->x = out->y = out->z = 0;
+		return false;
+	}
+	out->x = (int16_t)d.x;
+	out->y = (int16_t)d.y;
+	out->z = (int16_t)d.z;
+	return true;
+}
+
+// No PBL_* capability flag gates this the way PBL_TOUCH/PBL_SPEAKER do (docs/PORTING.md)
+// -- every Pebble platform has an accelerometer, so this is unconditionally true here.
+bool pnx_platform_has_accel(void)
+{
+	return true;
+}
+
 static uint8_t map_button(ButtonId id)
 {
 	switch (id)

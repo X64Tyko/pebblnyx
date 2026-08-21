@@ -20,7 +20,73 @@
     },
     "messageKeys": [],
     "resources": {
-      "media": []
+      "media": [
+        {
+          "type": "raw",
+          "name": "PALETTES",
+          "file": "palettes.bin"
+        },
+        {
+          "type": "raw",
+          "name": "TOURING_NORMAL",
+          "file": "touring_normal.bin"
+        },
+        {
+          "type": "raw",
+          "name": "TOURING_SLOPE",
+          "file": "touring_slope.bin"
+        },
+        {
+          "type": "raw",
+          "name": "TOURING_CRASH",
+          "file": "touring_crash.bin"
+        },
+        {
+          "type": "raw",
+          "name": "TOURING_TITLE",
+          "file": "touring_title.bin"
+        },
+        {
+          "type": "raw",
+          "name": "TOURING_AVATAR",
+          "file": "touring_avatar.bin"
+        },
+        {
+          "type": "raw",
+          "name": "POLICE_NORMAL",
+          "file": "police_normal.bin"
+        },
+        {
+          "type": "raw",
+          "name": "POLICE_SLOPE",
+          "file": "police_slope.bin"
+        },
+        {
+          "type": "raw",
+          "name": "POLICE_CRASH",
+          "file": "police_crash.bin"
+        },
+        {
+          "type": "raw",
+          "name": "POLICE_TITLE",
+          "file": "police_title.bin"
+        },
+        {
+          "type": "raw",
+          "name": "POLICE_AVATAR",
+          "file": "police_avatar.bin"
+        },
+        {
+          "type": "raw",
+          "name": "HANGON_BIKE",
+          "file": "hangon_bike.bin"
+        },
+        {
+          "type": "raw",
+          "name": "MENU",
+          "file": "font_menu.bin"
+        }
+      ]
     }
   }
 }

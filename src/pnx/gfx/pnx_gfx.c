@@ -179,14 +179,21 @@ void pnx_gfx_fill_rect(PnxTarget* t, int32_t x, int32_t y, int16_t w, int16_t h,
 // One horizontal run of 4bpp pixels into a row, clipped to [min_x, max_x].
 //
 // Reads each source byte once and unpacks both nibbles. The odd-pixel prologue exists
-// because clipping can start the run on a low nibble, where the pair loop cannot begin.
+// because clipping can start the run on a low nibble, where the pair loop cannot begin --
+// and, separately, because `nbase` itself can already be odd: tools/pnx_assets.py's
+// pack_sprite packs a frame as "two pixels to a byte, with no per-row padding" and only
+// requires the frame's total pixel count (w*h) to be even, not its width. A frame whose
+// OWN width is odd (legal, and what a landscape rotation produces from a source frame
+// whose height was odd -- see pnx_sprite_load's own comment) still starts every other row
+// on the low nibble of its first byte, so the parity that matters is `nbase + i`'s, not a
+// bare `i` counted from this row's own start.
 //
 // Colour-target only: a 1-bit build never calls this and never links it in, since a
 // build compiles the 4bpp path or the 1-bit one, never both (docs/PORTING.md, "the 1-bit
 // path and the 4bpp path never coexist").
 #if !PNX_DISPLAY_BW
-static void span_4bpp(uint8_t* row_base, int32_t x, const uint8_t* line, const uint8_t* pal,
-					  int32_t w, int16_t min_x, int16_t max_x)
+static void span_4bpp(uint8_t* row_base, int32_t x, const uint8_t* src, int32_t nbase,
+					  const uint8_t* pal, int32_t w, int16_t min_x, int16_t max_x)
 {
 	int32_t i0 = 0, i1 = w;
 	if (x + i0 < min_x)
@@ -199,16 +206,16 @@ static void span_4bpp(uint8_t* row_base, int32_t x, const uint8_t* line, const u
 	uint8_t* dst = row_base + x;
 	int32_t i	 = i0;
 
-	if (i & 1)
+	if ((nbase + i) & 1)
 	{
-		const uint8_t v = line[i >> 1] & 0x0F;
+		const uint8_t v = src[(nbase + i) >> 1] & 0x0F;
 		if (v != PNX_PALETTE_TRANSPARENT)
 			dst[i] = pal[v];
 		i++;
 	}
 	for (; i + 1 < i1; i += 2)
 	{
-		const uint8_t packed = line[i >> 1];
+		const uint8_t packed = src[(nbase + i) >> 1];
 		const uint8_t hi	 = (uint8_t)(packed >> 4);
 		const uint8_t lo	 = (uint8_t)(packed & 0x0F);
 		if (hi != PNX_PALETTE_TRANSPARENT)
@@ -218,7 +225,7 @@ static void span_4bpp(uint8_t* row_base, int32_t x, const uint8_t* line, const u
 	}
 	if (i < i1)
 	{
-		const uint8_t v = (uint8_t)(line[i >> 1] >> 4);
+		const uint8_t v = (uint8_t)(src[(nbase + i) >> 1] >> 4);
 		if (v != PNX_PALETTE_TRANSPARENT)
 			dst[i] = pal[v];
 	}
@@ -364,7 +371,10 @@ void pnx_blit_metatile_with(PnxTarget* t, const PnxAtlas* atlas, uint8_t tile,
 #if PNX_DISPLAY_BW
 			span_2bpp_packed(row.data, x + k * half, line, half, row.min_x, row.max_x, y + j);
 #else
-			span_4bpp(row.data, x + k * half, line, palette->entries, half, row.min_x,
+			// nbase=0: `line` already points at this row's own start (subtile rows are
+			// individually addressed, unlike a sprite frame's flat stream), so the parity
+			// span_4bpp checks against nbase+i reduces to plain i, same as before.
+			span_4bpp(row.data, x + k * half, line, 0, palette->entries, half, row.min_x,
 					  row.max_x);
 #endif
 		}
@@ -458,8 +468,15 @@ void pnx_blit_4bpp(PnxTarget* t, const uint8_t* src, const PnxPalette* palette, 
 
 		// Flip Y is free: read the source row from the other end. No second span writer, no
 		// per-pixel cost -- only this index changes.
-		const int32_t sj	= (flip & PNX_FLIP_Y) ? (h - 1 - j) : j;
+		const int32_t sj = (flip & PNX_FLIP_Y) ? (h - 1 - j) : j;
+#if PNX_DISPLAY_BW
 		const uint8_t* line = src + sj * stride;
+#else
+		// span_4bpp's own row start, in the frame's flat nibble stream rather than a
+		// byte offset -- a byte-aligned `line` pointer cannot stand in for it once w is
+		// odd (see that function's own comment).
+		const int32_t nbase = sj * w;
+#endif
 
 		// Two paths rather than a `mirror ?` per pixel. The forward one is the shared
 		// span; mirrored cannot use it because destination and source walk opposite ways.
@@ -468,7 +485,7 @@ void pnx_blit_4bpp(PnxTarget* t, const uint8_t* src, const PnxPalette* palette, 
 #if PNX_DISPLAY_BW
 			span_2bpp_packed(row.data, x, line, w, row.min_x, row.max_x, y + j);
 #else
-			span_4bpp(row.data, x, line, pal, w, row.min_x, row.max_x);
+			span_4bpp(row.data, x, src, nbase, pal, w, row.min_x, row.max_x);
 #endif
 		}
 		else
@@ -486,8 +503,11 @@ void pnx_blit_4bpp(PnxTarget* t, const uint8_t* src, const PnxPalette* palette, 
 				const bool ink = (state == 3) ? (((x + i + y + j) & 1) == 0) : (state == 2);
 				pnx_bw_set_pixel(row.data, x + i, ink);
 #else
-				const uint8_t packed = line[si >> 1];
-				const uint8_t v		 = (si & 1) ? (uint8_t)(packed & 0x0F) : (uint8_t)(packed >> 4);
+				// Same flat-nibble-stream addressing as span_4bpp, for the same reason:
+				// `si` is a column within this row, not a byte offset, once w is odd.
+				const int32_t n		 = nbase + si;
+				const uint8_t packed = src[n >> 1];
+				const uint8_t v		 = (n & 1) ? (uint8_t)(packed & 0x0F) : (uint8_t)(packed >> 4);
 				if (v != PNX_PALETTE_TRANSPARENT)
 					dst[i] = pal[v];
 #endif
