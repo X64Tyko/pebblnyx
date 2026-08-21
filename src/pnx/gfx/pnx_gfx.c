@@ -176,6 +176,43 @@ void pnx_gfx_fill_rect(PnxTarget* t, int32_t x, int32_t y, int16_t w, int16_t h,
 	}
 }
 
+void pnx_gfx_fill_rect_dither(PnxTarget* t, int32_t x, int32_t y, int16_t w, int16_t h,
+							  uint8_t colour_a, uint8_t colour_b)
+{
+	const int16_t th = pnx_target_height(t);
+#if PNX_DISPLAY_BW
+	const bool ink_a = pnx_bw_is_ink(colour_a);
+	const bool ink_b = pnx_bw_is_ink(colour_b);
+#endif
+	for (int32_t j = 0; j < h; j++)
+	{
+		const int32_t py = y + j;
+		if (py < 0 || py >= th)
+			continue;
+
+		PnxRow row = pnx_target_row(t, (int16_t)py);
+		if (!row.data)
+			continue;
+
+		int32_t x0 = x < row.min_x ? row.min_x : x;
+		int32_t x1 = x + w - 1;
+		if (x1 > row.max_x)
+			x1 = row.max_x;
+		if (x1 < x0)
+			continue;
+
+		for (int32_t px = x0; px <= x1; px++)
+		{
+			const bool b = ((px + py) & 1) != 0;
+#if PNX_DISPLAY_BW
+			pnx_bw_set_pixel(row.data, px, b ? ink_b : ink_a);
+#else
+			row.data[px] = b ? colour_b : colour_a;
+#endif
+		}
+	}
+}
+
 // One horizontal run of 4bpp pixels into a row, clipped to [min_x, max_x].
 //
 // Reads each source byte once and unpacks both nibbles. The odd-pixel prologue exists

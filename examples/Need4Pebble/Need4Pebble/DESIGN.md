@@ -109,6 +109,11 @@ frames instead specifically because that source sheet never split them into
 separate images (see that sprite's own manifest comment) -- `touring_normal`
 doesn't have that constraint, so a proper `variants` entry (one recolored sheet,
 or several) is the right approach here, not a repeat of the bike's workaround.
+`touring_normal` already has exactly this working, for traffic rather than
+player customisation -- see "Aesthetic"'s "Traffic recolour" for the real,
+built example this section describes (one variant sheet, one palette slot,
+`pnx_palette(SPRITE_..._PALETTE_...)` passed at draw time), still not built
+for the player's own choice of colour.
 
 ## Controls
 
@@ -147,12 +152,137 @@ the watch in, which is a game choice the platform layer shouldn't bake in.
 
 ## Aesthetic
 
-Neon synthwave. Existing sprite assets (`art/NES_Touring_Car_Sprite_Sheet.png`,
-the police variant, and the Hang-On bike sheet) are placeholder-grade NES/Genesis
-rips, not the target look -- fine for proving out the road and feel, but the road
-surface, horizon (sun/grid), and UI chrome should read as synthwave (magenta/cyan
-horizon gradient, grid-line horizon, high-contrast road/rumble) once the driving
-loop itself is worth dressing up.
+Neon synthwave. Sprite assets (`art/NES_Touring_Car_Sprite_Sheet.png`, the police
+variant, and the Hang-On bike sheet) are still placeholder-grade NES/Genesis
+rips -- out of scope for an art pass done entirely in code, since replacing them
+needs new source art this project doesn't have. Everything drawn from flat
+colour, though, is built: sky, horizon sun, and the ground grid all landed in one
+pass (`render.c`'s `draw_sky`/`draw_sun`, and the grid lines `draw_road` adds
+beyond the pavement edge).
+
+**Palette-resolution dithering, not flat bands.** `pnx_gfx`'s colour build is 2
+bits/channel -- 64 colours total -- so any gradient built purely from
+`pnx_gfx_fill_rect` steps reads as visible banding, not a smooth ramp. Added
+`pnx_gfx_fill_rect_dither` (engine-level, `src/pnx/gfx/pnx_gfx.c`/`.h`, host-tested
+in `tests/test_gfx.c`): an ordered 1-pixel checkerboard between two colours,
+keyed off absolute framebuffer `(x, y)` rather than rect-relative offsets so two
+calls covering adjacent areas tile as one continuous pattern instead of each
+restarting its own phase at its own corner. `draw_sky`/`draw_sun` dither the
+single row where a colour ramp's index changes rather than cutting hard between
+solid bands -- the same trick pixel art has always used to fake a bigger
+palette, applied at engine level rather than composed from many small
+`fill_rect` calls (which would have meant hundreds of extra draw calls a frame
+for a true per-pixel checkerboard, a real cost at this frame budget -- see
+`docs/MEASUREMENTS.md`'s PT2 frame-rate figures).
+
+- **Sky**: a 6-step ramp from near-black indigo at the top through purple and
+  magenta to an orange-pink glow at the horizon (`SKY_RAMP`, `render.c`).
+  Continuous in `y / horizon_y`, not a fixed row count, so it holds up as
+  `current_horizon_y` itself changes with the player's slope.
+- **Horizon sun**: a filled circle (`pnx_isqrt` per row for the half-width, no
+  libm), gradient-shaded core-to-rim with the same dithered-boundary
+  treatment, sliced by a few gap bands through the lower half -- the
+  sun-behind-venetian-blinds look every retrowave horizon uses. Both size
+  (`SUN_RADIUS`) and screen position (`SUN_TOP_OFFSET`/`SUN_START_X_OFFSET`,
+  anchored to the TOP of the screen) are fixed, independent of `horizon_y`.
+  This took two corrections to land: radius originally scaled with
+  `horizon_y` (shrinking the sun on a shortened uphill sky) and position was
+  computed from the horizon line, both of which visibly resized/bobbed the
+  sun with every hill and valley -- reported directly, twice ("the sun
+  changes sizes based on the horizon's size", then "the sun is definitely
+  still moving up and down based on hills and valleys" after only the size
+  had been fixed). `horizon_y` is still read for the one thing it should
+  affect -- the pixel-visibility bound (`y < horizon_y`) -- so a hill still
+  occludes the sun the way it occludes the real horizon; it just no longer
+  feeds back into the sun's own size or centre. Confirmed directly:
+  screenshotted the sun at the same fixed screen position across a flat
+  segment and a hill with a visibly different `horizon_y`.
+- **Ground grid**: magenta lines beyond the road edge, at fixed world-space
+  offsets from `ROAD_HALF_MAX`, scaled by `row.half_width` the same way
+  `draw_traffic`'s own `screen_x` scales anything off the road centre -- so a
+  line at a fixed world offset still converges toward the horizon correctly
+  through curves and hills, not just on a flat straight. Drawn every other row
+  only (cost: full coverage doesn't read differently at this resolution and
+  would double the `fill_rect` calls in the hottest loop in the renderer).
+
+**A slow day/night cycle, not a fixed look**: "that whole color gradient
+should happen over the length of a drive and the sun should move right to
+left and down as we progress. slowly." `sky_cycle_progress` (`render.c`) is a
+0..1000..0 triangle wave over `SKY_CYCLE_LENGTH` (300000 world units -- 7-8
+minutes each way even held at `MAX_SPEED` flat out, raised from an initial
+80000 that was "much" too fast per direct follow-up -- a background mood
+shift, not something to watch tick by) driven by `g->distance`. Both
+`SKY_RAMP_SUNSET`/`SKY_RAMP_NIGHT` and `SUN_RAMP_SUNSET`/`SUN_RAMP_NIGHT` are
+keyframe pairs; `pnx_tween_gcolor8` (the shared engine library, below) cross-
+fades every entry between them each frame (plain per-channel interpolation in
+this palette's own 2-bit/channel space, not dithering -- the two keyframes
+are close enough, and the cycle long enough, that consecutive frames rarely
+even land on a different integer channel value). The sun's own screen
+position starts at `SUN_START_X_OFFSET`/`SUN_TOP_OFFSET` (top-right, partly
+clipped by the top edge -- "farther off to the right top of the screen", then
+"start higher still") and drifts left (`SUN_DRIFT_X`) and down (`SUN_DROP_Y`)
+via `pnx_tween_i32` as progress advances, easing back over the second half of
+the cycle rather than snapping to a start position -- a triangle wave, not a
+sawtooth, specifically so driving forever never produces a jarring reset,
+just a continuous breathe between sunset and night and back. `sky_cycle_progress`
+itself (the triangle wave's own 0..1000 position, keyed off world distance)
+stays project-specific code, not a `PnxTween` -- that primitive is a one-shot
+run driven by elapsed real time, with no way to hand it a repeating,
+distance-keyed cycle that never "finishes"; see that function's own comment.
+Confirmed directly (temporarily shortened `SKY_CYCLE_LENGTH` for a fast test,
+reverted after): sky cools from the warm sunset ramp to pale moonlit blues,
+the sun visibly drifts left/down and turns into a dim moon-like disc at the
+cycle's midpoint, then both ease back.
+
+**Built on `pnx_tween` (`src/pnx/core/pnx_tween.h`), a shared engine library,
+not project-local math.** The sky/sun work above hand-rolled this same
+pattern -- a 0..1000 progress value, a per-channel colour lerp, a plain
+linear interpolation for the sun's own drift -- three separate times before
+it was pulled into a real, reusable, opt-in (`PNX_USE_TWEEN`, defaults on)
+module with its own host tests. `render.c` no longer defines its own
+`lerp_colour`; `pnx_tween_gcolor8` replaced it directly (identical values,
+confirmed by an unchanged screenshot before/after the swap), and the sun's
+own `cx`/`center_y` drift now goes through `pnx_tween_i32` instead of hand-
+written `(DELTA * t1000) / 1000` arithmetic at each call site.
+
+Confirmed on the `emery` emulator across a flat straight, a curve, a hill (sun
+visibly smaller), traffic, the BUSTED overlay, and a full shortened test cycle
+(sunset -> night -> sunset) -- no artifacts, and the police light-bar wash
+layers correctly over the new grid at any point in the cycle.
+
+**Road edge and lane markings, redone as a real road rather than a circuit.**
+Reported directly: "the white and red edges are more like a racetrack and the
+lane guides are too thick and need to be more like real road lane guides."
+The original rumble strip (`COLOUR_RUMBLE_A`/`B`, alternating bold white/red
+across the full `rumble_width` band) was OutRun's own circuit-kerb look, not a
+road shoulder. `draw_road` now draws that same band as a muted, alternating
+grey-tan paved shoulder (`COLOUR_SHOULDER_A`/`B`, the same close-shade motion
+cue `COLOUR_GROUND_A`/`B` already use) with a separate, thin solid-white edge
+line (`COLOUR_EDGE_LINE`, `EDGE_LINE_FRAC` = `half_width`/14) painted over the
+road/shoulder boundary -- a fog line, not a kerb. Lane dividers went from
+`half_width`/12 wide (a bold neon bar, roughly 8% of the road's own width) to
+`half_width`/`LANE_DASH_FRAC` (30) -- proportionally closer to how thin a real
+lane line reads against the road it's painted on. UI chrome and the road/
+ground surface colours themselves were already reasonably synthwave-adjacent
+from earlier work and were left as-is.
+
+**Traffic recolour, no new art required.** Traffic reuses the player's own
+`touring_normal` sprite handle at other tiers/angles (`draw_traffic`,
+`game.h`'s own comment on why that's not a second sprite load) -- which meant
+it rendered in the same green as the player's own car, hard to tell apart at
+a glance. Reported directly: "recolor the traffic cars so they stand out on
+the road." `assets.toml`'s `variants` mechanism is a palette swap, not a
+second copy of every frame -- exactly the tool the "Personalization: car
+recolor" section above already earmarked for this, so no new source art was
+needed: `art/traffic.png` is `touring_normal`'s own base sheet with its one
+body-green pixel value (85, 199, 83) programmatically remapped to orange
+(255, 170, 0) and nothing else touched (outline, brown accents, transparency
+untouched) -- a Python/PIL pixel remap, not hand-drawn art. The pipeline
+emits `SPRITE_TOURING_NORMAL_PALETTE_TRAFFIC` as a palette slot;
+`draw_traffic` passes `pnx_palette(SPRITE_TOURING_NORMAL_PALETTE_TRAFFIC)`
+where it used to pass `NULL`, so the exact same frame data draws recoloured
+without a second sprite load. Confirmed directly by the user in real play:
+"I verified that the traffic vehicles pop against the purple and blue road."
 
 ## Feature backlog
 
@@ -167,14 +297,16 @@ pre-baked tier, or a screen-space squash via `pnx_blit_4bpp`'s existing flip/
 transpose machinery) rather than runtime scaling.
 
 **Visual**
-- Sky gradient that shifts over a race (cyan -> orange -> purple) -- cheap, a
-  palette swap per section.
 - Layered roadside scenery (foreground/midground/background at different scroll
   rates) -- real fit for `PNX_USE_LAYERS`' `parallax_pct` (`pnx_layer.h`), which
   already exists for exactly this.
 - Turbo boost effect (colour shift, speed lines, faster scenery scroll) -- scale
   correction above applies to the "car stretches" part specifically.
-- Roadside billboards/signs, two-frame animated.
+- Roadside scenery -- trees and signs whipping past at the road's edge, two-frame
+  animated for signs. Explicitly asked for and explicitly deferred (not
+  brainstormed-only): needs real sprite art, which this project doesn't have: a
+  procedural/vector alternative (flat-shape silhouettes, no art dependency) was
+  offered and declined in favour of waiting for real art instead.
 - Car shadow, scaling with road perspective (a small filled ellipse/rect sized
   off the same `RoadRow.half_width` the road already computes per row).
 
@@ -313,6 +445,10 @@ Built (across this and the following session):
   strip, so gaps get stretched shut instead of left undrawn.
 - Police pursuit AI and the "BUSTED" game-over -- see "Police: chase, not
   traffic" above.
+- Synthwave sky gradient, horizon sun, ground grid, the slow sunset/night
+  drive-length cycle driving both, a real-road edge/lane redesign, and the
+  traffic recolour, plus the engine-level `pnx_gfx_fill_rect_dither`
+  primitive it's all built on -- see "Aesthetic" above.
 
 Not built yet, in roughly the order they'd naturally get added:
 - Checkpoints, race timer, time-added-on-checkpoint.

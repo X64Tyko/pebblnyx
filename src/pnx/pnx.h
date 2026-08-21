@@ -24,6 +24,10 @@
 #include "core/pnx_diag.h"
 #include "platform/pnx_platform.h"
 
+#if PNX_USE_TWEEN
+#include "core/pnx_tween.h"
+#endif
+
 #if PNX_USE_ASSETS
 #include "assets/pnx_assets.h"
 #include "gfx/pnx_gfx.h"

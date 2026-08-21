@@ -1,5 +1,6 @@
 #include "render.h"
 #include "track.h"
+#include "assets_gen.h" // SPRITE_TOURING_NORMAL_PALETTE_TRAFFIC, draw_traffic's own recolour
 
 // ------------------------------------------------------------------------- colour
 //
@@ -8,19 +9,117 @@
 // synthwave-adjacent values; DESIGN.md flags the actual art pass as not done yet.
 #define RGB(r, g, b) (uint8_t)(0xC0 | ((r) << 4) | ((g) << 2) | (b))
 
-#define COLOUR_SKY_FAR	   RGB(1, 0, 2) // deep purple
-#define COLOUR_SKY_NEAR	   RGB(2, 0, 3) // magenta glow toward the horizon
-#define COLOUR_GROUND_A	   RGB(0, 1, 2)
-#define COLOUR_GROUND_B	   RGB(0, 0, 1)
-#define COLOUR_ROAD_A	   RGB(1, 0, 2)
-#define COLOUR_ROAD_B	   RGB(0, 0, 1)
-#define COLOUR_RUMBLE_A	   RGB(3, 3, 3)
-#define COLOUR_RUMBLE_B	   RGB(3, 0, 1)
-#define COLOUR_LINE		   RGB(0, 3, 3) // cyan lane dividers
+#define COLOUR_GROUND_A RGB(0, 1, 2)
+#define COLOUR_GROUND_B RGB(0, 0, 1)
+#define COLOUR_ROAD_A	RGB(1, 0, 2)
+#define COLOUR_ROAD_B	RGB(0, 0, 1)
+// Paved shoulder, not a racetrack kerb -- a wide alternating white/red band (the
+// original rumble strip) read as circuit curbing, not a real road's edge, per direct
+// feedback. Two close, muted grey-tan shades (same alternating-band motion cue
+// COLOUR_GROUND_A/B already use) instead of a bold two-colour stripe; COLOUR_EDGE_LINE
+// (below) is the actual edge marking now, not the shoulder's own colour.
+#define COLOUR_SHOULDER_A RGB(1, 1, 1)
+#define COLOUR_SHOULDER_B RGB(1, 1, 0)
+#define COLOUR_EDGE_LINE  RGB(3, 3, 3)	// white fog line painted at the pavement edge
+#define EDGE_LINE_FRAC	  14			// edge line half-width = row.half_width/EDGE_LINE_FRAC
+#define COLOUR_LINE		  RGB(0, 3, 3)	// cyan lane dividers
+#define LANE_DASH_FRAC	  30			// dash half-width = row.half_width/LANE_DASH_FRAC -- a real
+										// lane line's width relative to the road, not a bold neon bar
+#define COLOUR_GRID		   RGB(3, 0, 3) // magenta ground grid, beyond the road edge
+#define GRID_SPACING	   40			// world units between each ground grid line, beyond ROAD_HALF_MAX
+#define GRID_LINE_COUNT	   3			// grid lines drawn per side
 #define COLOUR_MENU_BG	   RGB(0, 0, 0) // opaque black -- no alpha blending exists to dim with
 #define COLOUR_MENU_TEXT   RGB(3, 3, 3) // white
 #define COLOUR_POLICE_RED  RGB(3, 0, 0)
 #define COLOUR_POLICE_BLUE RGB(0, 0, 3)
+
+// Deep indigo at the top fading to a warm horizon glow (SUNSET), or cool blues fading
+// to a pale moonlit horizon (NIGHT) -- `sky_cycle_progress`, below, plus pnx_tween.h's
+// `pnx_tween_gcolor8` cross-fade every entry between the two over the length of a
+// drive, not just a fixed look.
+// A run of flat `pnx_gfx_fill_rect` bands (the original two-colour sky) reads as
+// visible steps at this palette's resolution (2 bits/channel, 64 colours total) --
+// draw_sky dithers the single row where the ramp index changes instead of cutting hard,
+// same trick pixel art has always used to fake a bigger palette.
+static const uint8_t SKY_RAMP_SUNSET[] = {
+	RGB(0, 0, 1), // top: near-black indigo
+	RGB(0, 0, 2), // deep blue
+	RGB(1, 0, 2), // purple
+	RGB(2, 0, 2), // magenta
+	RGB(3, 0, 1), // warm pink-red
+	RGB(3, 1, 0), // horizon: orange glow
+};
+static const uint8_t SKY_RAMP_NIGHT[] = {
+	RGB(0, 0, 1), // top: near-black blue (never pure black -- would blend into the road)
+	RGB(0, 0, 1),
+	RGB(0, 0, 2),
+	RGB(0, 1, 2), // teal-blue
+	RGB(0, 1, 3),
+	RGB(1, 1, 3), // horizon: pale moonlit blue, not warm
+};
+#define SKY_RAMP_LEN (int32_t)(sizeof(SKY_RAMP_SUNSET) / sizeof(SKY_RAMP_SUNSET[0]))
+_Static_assert(sizeof(SKY_RAMP_SUNSET) == sizeof(SKY_RAMP_NIGHT), "keyframes must match length");
+
+// The sun's own gradient, core to rim, same two keyframes / same reason.
+static const uint8_t SUN_RAMP_SUNSET[] = {
+	RGB(3, 3, 1), // near-white yellow core
+	RGB(3, 2, 0), // gold
+	RGB(3, 1, 0), // orange
+	RGB(3, 0, 1), // hot pink-red rim
+};
+static const uint8_t SUN_RAMP_NIGHT[] = {
+	RGB(2, 2, 3), // pale moon-white core
+	RGB(1, 1, 3),
+	RGB(1, 0, 2),
+	RGB(1, 0, 1), // dim maroon rim
+};
+#define SUN_RAMP_LEN (int32_t)(sizeof(SUN_RAMP_SUNSET) / sizeof(SUN_RAMP_SUNSET[0]))
+_Static_assert(sizeof(SUN_RAMP_SUNSET) == sizeof(SUN_RAMP_NIGHT), "keyframes must match length");
+
+// One full sunset -> night -> sunset breathe, in world units -- "much slower" than an
+// earlier 80000 (still visibly moving within one play session), per direct feedback.
+// 300000 is ~7-8 minutes each way even at MAX_SPEED held flat out -- a background mood
+// shift, not something to watch tick by. A triangle wave rather than a hard loop-reset:
+// driving forever never snaps the sky or sun back to a start position, it just keeps
+// breathing between the two ends.
+#define SKY_CYCLE_LENGTH 300000
+// Position is anchored to the TOP of the screen (y=0), not the horizon -- explicitly
+// asked for, after the horizon-relative version turned out to still move the sun with
+// every hill and valley (`horizon_y` itself changes with the player's slope; keying
+// position off it, even indirectly, brings that dependency back). `SUN_TOP_OFFSET` is
+// how far down from y=0 the sun's centre sits at the cycle's start (t=0, "farther off
+// to the right top of the screen"); `SUN_DROP_Y` carries it further down from there as
+// the cycle advances, easing back over the second half. `horizon_y` is still used
+// ONLY for the pixel-visibility bound below (`y < horizon_y`) -- a hill SHOULD occlude
+// the sun the way it occludes the real horizon, that just must never feed back into
+// where the sun's own centre is computed.
+#define SUN_RADIUS	   36	   // fixed -- see draw_sun's own comment for why not horizon_y-scaled
+#define SUN_TOP_OFFSET 12	   // px down from the top of the screen at t=0 (partly clipped
+							   // by the top edge at this point -- peeking in, not fully risen)
+#define SUN_START_X_OFFSET 80  // px right of screen centre at t=0
+#define SUN_DRIFT_X		   160 // total horizontal travel, t=0 -> t=1000 (right -> left of centre)
+#define SUN_DROP_Y		   70  // total vertical travel, t=0 -> t=1000 (down from its start height)
+
+// 0 at a cycle's start/end (sunset), 1000 at its midpoint (night) -- fixed-point
+// (x1000), not float; this build has no other use for libm either. Triangle, not
+// sawtooth: distance only ever increases, but the MOOD should ease back rather than
+// jump, so it rises for the first half of SKY_CYCLE_LENGTH and falls for the second.
+//
+// Deliberately NOT a PnxTween (pnx_tween.h): that primitive is a one-shot `from`..`to`
+// run driven by elapsed real time (`now_ms`); this is a REPEATING triangle wave driven
+// by world DISTANCE, which has no `now_ms` to hand it and never "finishes" -- forcing
+// it through PnxTween would mean re-`pnx_tween_start`ing two tweens back to back by
+// hand, which is no simpler than the three lines below. What DOES move to the shared
+// library is the actual per-channel/per-value LERP once this has produced a t1000 --
+// see `pnx_tween_gcolor8`/`pnx_tween_i32` at every call site below.
+static int32_t sky_cycle_progress(uint32_t distance)
+{
+	const uint32_t phase = distance % SKY_CYCLE_LENGTH;
+	const uint32_t half	 = SKY_CYCLE_LENGTH / 2;
+	if (phase < half)
+		return (int32_t)((phase * 1000) / half);			 // sunset -> night
+	return (int32_t)(1000 - ((phase - half) * 1000) / half); // night -> sunset
+}
 
 // Screen-space rect (author/logical frame) -> framebuffer rect, for BUTTONS_TOP.
 // Point form is fx = VIEW_H-1-ay, fy = ax (tools/pnx_assets.py rotate_point); extended
@@ -30,6 +129,13 @@ static void fb_rect(PnxTarget* target, int32_t ax, int32_t ay, int32_t aw, int32
 					uint8_t colour)
 {
 	pnx_gfx_fill_rect(target, VIEW_H - ay - ah, ax, ah, aw, colour);
+}
+
+// Same rotation as fb_rect, for pnx_gfx_fill_rect_dither.
+static void fb_rect_dither(PnxTarget* target, int32_t ax, int32_t ay, int32_t aw, int32_t ah,
+						   uint8_t colour_a, uint8_t colour_b)
+{
+	pnx_gfx_fill_rect_dither(target, VIEW_H - ay - ah, ax, ah, aw, colour_a, colour_b);
 }
 
 // Same point rotation, undecorated -- what pnx_text_draw's (x, y) wants directly. Text
@@ -43,12 +149,94 @@ static void fb_point(int32_t ax, int32_t ay, int32_t* fx, int32_t* fy)
 	*fy = ax;
 }
 
-static void draw_sky(PnxTarget* target, int32_t horizon_y)
+// y=0 is the top of the sky (farthest from the camera); y=horizon_y-1 is the row right
+// at the horizon. Ramp position is continuous in y/horizon_y rather than a fixed
+// row-count banding, so this still holds up as horizon_y itself changes with the
+// player's slope (current_horizon_y) -- a steep uphill's shorter sky still sees the
+// full ramp, just compressed into fewer rows.
+static int32_t sky_ramp_index(int32_t y, int32_t horizon_y, int32_t ramp_len)
 {
+	return pnx_clamp_i32((y * ramp_len) / horizon_y, 0, ramp_len - 1);
+}
+
+static void draw_sky(PnxTarget* target, uint32_t distance, int32_t horizon_y)
+{
+	const int32_t t1000 = sky_cycle_progress(distance);
+	uint8_t ramp[SKY_RAMP_LEN];
+	for (int32_t i = 0; i < SKY_RAMP_LEN; i++)
+		ramp[i] = pnx_tween_gcolor8(SKY_RAMP_SUNSET[i], SKY_RAMP_NIGHT[i], t1000);
+
 	for (int32_t y = 0; y < horizon_y; y++)
 	{
-		const uint8_t c = (y * 2 >= horizon_y) ? COLOUR_SKY_NEAR : COLOUR_SKY_FAR;
-		fb_rect(target, 0, y, LOGICAL_W, 1, c);
+		const int32_t idx	   = sky_ramp_index(y, horizon_y, SKY_RAMP_LEN);
+		const int32_t prev_idx = (y == 0) ? idx : sky_ramp_index(y - 1, horizon_y, SKY_RAMP_LEN);
+		if (idx != prev_idx)
+			fb_rect_dither(target, 0, y, LOGICAL_W, 1, ramp[prev_idx], ramp[idx]);
+		else
+			fb_rect(target, 0, y, LOGICAL_W, 1, ramp[idx]);
+	}
+}
+
+// A classic retrowave horizon sun: a filled circle (per-row half-width via
+// `pnx_isqrt`, since a build has no libm), sliced by a few gap bands through the lower
+// half -- the sun-behind-venetian-blinds look every retrowave horizon uses -- and
+// gradient-shaded core-to-rim with the same dithered-boundary idea `draw_sky` uses.
+//
+// Fixed size (SUN_RADIUS) AND fixed position, anchored to the top of the screen
+// (SUN_TOP_OFFSET) -- both used to track `horizon_y`, which changes every tick with
+// the player's own slope, so the sun visibly resized and bobbed with every hill and
+// valley instead of reading as a fixed background object. Reported directly, twice:
+// first the resizing, then ("the sun is definitely still moving up and down based on
+// hills and valleys") the position too, since only the size had been decoupled --
+// followed by an explicit request to anchor off the top of the screen rather than the
+// horizon at all, which is what SUN_TOP_OFFSET's own comment describes. `horizon_y` is
+// still used below for the actual pixel-visibility bound (`y < horizon_y`), which is
+// correct and wanted -- a hill SHOULD occlude the sun, the same way it occludes the
+// real horizon -- it just must never feed back into where the sun's own centre is.
+//
+// Drifts from its start position (SUN_START_X_OFFSET/SUN_TOP_OFFSET, top-right of the
+// screen) toward centre and down as `sky_cycle_progress` advances (the same cycle
+// driving the sky's own colour, so the two always move together), easing back over the
+// cycle's second half -- see SKY_CYCLE_LENGTH's own comment for why this breathes
+// rather than resets.
+static void draw_sun(PnxTarget* target, uint32_t distance, int32_t horizon_y)
+{
+	const int32_t radius = SUN_RADIUS;
+
+	const int32_t t1000 = sky_cycle_progress(distance);
+	uint8_t ramp[SUN_RAMP_LEN];
+	for (int32_t i = 0; i < SUN_RAMP_LEN; i++)
+		ramp[i] = pnx_tween_gcolor8(SUN_RAMP_SUNSET[i], SUN_RAMP_NIGHT[i], t1000);
+
+	const int32_t sun_x_start = LOGICAL_W / 2 + SUN_START_X_OFFSET;
+	const int32_t cx		  = pnx_tween_i32(sun_x_start, sun_x_start - SUN_DRIFT_X, t1000);
+	const int32_t center_y	  = pnx_tween_i32(SUN_TOP_OFFSET, SUN_TOP_OFFSET + SUN_DROP_Y, t1000);
+	const int32_t diameter	  = radius * 2;
+
+	for (int32_t dy = -radius; dy < radius; dy++)
+	{
+		const int32_t y = center_y + dy;
+		if (y < 0 || y >= horizon_y)
+			continue;
+
+		const int32_t hw = pnx_isqrt(radius * radius - dy * dy);
+		if (hw <= 0)
+			continue;
+
+		// Gap bands: every 4th 4px-tall band through the lower half is skipped
+		// entirely, letting the sky gradient behind the sun show through.
+		if (dy > 0 && (((dy / 4) & 3) == 3))
+			continue;
+
+		const int32_t idx	   = pnx_clamp_i32(((dy + radius) * SUN_RAMP_LEN) / diameter, 0,
+											   SUN_RAMP_LEN - 1);
+		const int32_t prev_dy  = dy - 1;
+		const int32_t prev_idx = pnx_clamp_i32(((prev_dy + radius) * SUN_RAMP_LEN) / diameter, 0,
+											   SUN_RAMP_LEN - 1);
+		if (dy > -radius && idx != prev_idx)
+			fb_rect_dither(target, cx - hw, y, hw * 2, 1, ramp[prev_idx], ramp[idx]);
+		else
+			fb_rect(target, cx - hw, y, hw * 2, 1, ramp[idx]);
 	}
 }
 
@@ -103,15 +291,23 @@ static void draw_road(PnxTarget* target, const Game* g, int32_t horizon_y)
 		const bool alt		= (band & 1) != 0;
 
 		fb_rect(target, cx - row.rumble_width, dy, row.rumble_width * 2, height,
-				alt ? COLOUR_RUMBLE_A : COLOUR_RUMBLE_B);
+				alt ? COLOUR_SHOULDER_A : COLOUR_SHOULDER_B);
 		fb_rect(target, cx - row.half_width, dy, row.half_width * 2, height,
 				alt ? COLOUR_ROAD_A : COLOUR_ROAD_B);
 
+		// Edge/fog line: thin, solid white, straddling the pavement edge -- a real
+		// road's edge marking, drawn over both the shoulder and road fills above so it
+		// reads crisply regardless of which alternating band either one is on.
+		const int32_t edge_hw = pnx_max_i32(1, row.half_width / EDGE_LINE_FRAC);
+		fb_rect(target, cx - row.half_width - edge_hw, dy, edge_hw * 2, height, COLOUR_EDGE_LINE);
+		fb_rect(target, cx + row.half_width - edge_hw, dy, edge_hw * 2, height, COLOUR_EDGE_LINE);
+
 		// Lane dividers: LANES-1 dashed lines splitting the road width evenly. Alternate
-		// bands only, and narrow, so they read as broken lines rather than filled strips.
+		// bands only, and narrow (LANE_DASH_FRAC, not the old bar-width RUMBLE_FRAC-scale
+		// value), so they read as broken lines rather than filled strips.
 		if (!alt)
 		{
-			const int32_t dash_hw = pnx_max_i32(1, row.half_width / 12);
+			const int32_t dash_hw = pnx_max_i32(1, row.half_width / LANE_DASH_FRAC);
 			for (int32_t lane = 1; lane < LANES; lane++)
 			{
 				const int32_t lx = cx - row.half_width + (row.half_width * 2 * lane) / LANES;
@@ -125,6 +321,25 @@ static void draw_road(PnxTarget* target, const Game* g, int32_t horizon_y)
 		fb_rect(target, 0, dy, cx - row.rumble_width, height, ground);
 		fb_rect(target, cx + row.rumble_width, dy, LOGICAL_W - (cx + row.rumble_width), height,
 				ground);
+
+		// Perspective ground grid, beyond the road edge -- the vanishing-point cue the
+		// lane dividers already give the road itself, extended onto the ground. Scaled
+		// by row.half_width the same way draw_traffic's own screen_x scales a car sitting
+		// off the road centre, so a grid line at a fixed WORLD offset still converges
+		// toward the horizon correctly. Every other row only: full coverage doesn't read
+		// differently at this resolution and would double the fb_rect calls in the
+		// hottest loop in the renderer.
+		if ((y & 1) == 0)
+		{
+			const int32_t grid_hw = pnx_max_i32(1, row.half_width / 20);
+			for (int32_t i = 1; i <= GRID_LINE_COUNT; i++)
+			{
+				const int32_t world_offset	= ROAD_HALF_MAX + i * GRID_SPACING;
+				const int32_t screen_offset = (world_offset * row.half_width) / ROAD_HALF_MAX;
+				fb_rect(target, cx + screen_offset - grid_hw, dy, grid_hw * 2, height, COLOUR_GRID);
+				fb_rect(target, cx - screen_offset - grid_hw, dy, grid_hw * 2, height, COLOUR_GRID);
+			}
+		}
 	}
 }
 
@@ -189,9 +404,13 @@ static void draw_traffic(PnxTarget* target, const Game* g, int32_t horizon_y)
 		const int32_t ax_logical = LOGICAL_W / 2 + curve_offset + screen_x;
 		const int32_t dy		 = y - elev_offset;
 
+		// Recoloured (orange, not the player's own green) so traffic reads as distinct
+		// from the player's car at a glance, reported directly ("recolor the traffic
+		// cars so they stand out on the road") -- same bitmap, a palette swap
+		// (assets.toml's touring_normal `variants`), not a second sprite.
 		const uint8_t frame = (uint8_t)(tier * 9 + 4); // angle 4: facing straight ahead
-		pnx_sprite_draw(&g->car, target, &CAM0, VIEW_H - 1 - dy, ax_logical, frame, NULL,
-						false);
+		pnx_sprite_draw(&g->car, target, &CAM0, VIEW_H - 1 - dy, ax_logical, frame,
+						pnx_palette(SPRITE_TOURING_NORMAL_PALETTE_TRAFFIC), false);
 	}
 }
 
@@ -379,7 +598,8 @@ static void draw_game_over(PnxTarget* target, const Game* g)
 void render_game(const Game* g, PnxTarget* target)
 {
 	const int32_t horizon_y = current_horizon_y(g->distance);
-	draw_sky(target, horizon_y);
+	draw_sky(target, g->distance, horizon_y);
+	draw_sun(target, g->distance, horizon_y);
 	draw_road(target, g, horizon_y);
 	draw_traffic(target, g, horizon_y);
 	draw_police(target, g, horizon_y);

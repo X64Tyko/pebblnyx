@@ -44,9 +44,17 @@ chase, not traffic".
 
 ## Art
 
-Placeholder NES/Genesis sprite rips (`art/`), not the target look -- a neon synthwave
-pass (magenta/cyan horizon gradient, grid-line horizon) is still pending. Good enough to
-prove out the road, traffic, and chase feel.
+Sprites (`art/`) are still placeholder NES/Genesis rips -- replacing them needs new
+source art this project doesn't have, so the shapes are untouched. One exception:
+traffic is a palette-swapped orange recolour of the player's own green car sprite
+(`assets.toml`'s `variants`, a Python pixel remap of the base sheet, not new art), so
+it reads as a distinct car rather than a copy of the player's own. Everything drawable
+in flat colour got a synthwave pass: a dithered sky gradient, a horizon sun (fixed
+size and position, top-of-screen anchored, independent of hills/valleys), a
+perspective ground grid, and a real road shoulder/edge-line/lane-marking treatment
+instead of the original racetrack-kerb look -- all slowly cross-fading from sunset to
+night and back over the length of a drive (the sun drifting with it) rather than a
+fixed look. Full breakdown in `DESIGN.md`'s "Aesthetic".
 
 ## Building
 
@@ -65,9 +73,11 @@ python3 ../../../tools/pnx_assets.py assets.toml --out resources \
 
 ## Status
 
-Host build passes clean (`cd ../../../tests && make`: 552 checks, 0 failures). Confirmed
-on the `emery` emulator: road/curve/hill rendering, traffic, crashes, pause menu, police
-chase/ram/BUSTED/restart, the light-bar overlay. Accelerometer tilt steering is also
-confirmed on real hardware (axis and sign). Curve, chase, and pacing tuning constants are
-still eyeballed from emulator play, not felt in-hand on a real run -- see `DESIGN.md`'s
-"Open questions" for the specific list.
+Host build passes clean (`cd ../../../tests && make`: full pebblnyx suite, 0 failures
+across all suites). Confirmed on the `emery` emulator: road/curve/hill rendering,
+traffic, crashes, pause menu, police chase/ram/BUSTED/restart, the light-bar overlay,
+and the sky/sun day-night cycle (a full sunset-night-sunset sweep, temporarily
+sped up to actually watch it happen). Accelerometer tilt steering is also confirmed on
+real hardware (axis and sign). Curve, chase, and pacing tuning constants are still
+eyeballed from emulator play, not felt in-hand on a real run -- see `DESIGN.md`'s "Open
+questions" for the specific list.

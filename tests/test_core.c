@@ -248,6 +248,7 @@ void test_physics(void);
 void test_sprite(void);
 void test_layer(void);
 void test_map_compress(void);
+void test_tween(void);
 
 int main(void)
 {
@@ -269,6 +270,7 @@ int main(void)
 	test_sprite();
 	test_layer();
 	test_map_compress();
+	test_tween();
 
 	printf("\n%d checks, %d failures\n", s_checks, s_failures);
 	return s_failures == 0 ? 0 : 1;

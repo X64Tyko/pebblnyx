@@ -321,6 +321,30 @@ void test_gfx(void)
 	G_CHECK_EQ(pixel_at(t, 0, 0), 0x55);
 	G_CHECK_EQ(pixel_at(t, 5, 5), 0x00);
 
+	// --- fill_rect_dither: a checkerboard keyed off ABSOLUTE (x, y), not rect-relative
+	// offsets, so two calls covering adjacent columns tile as one continuous pattern
+	// rather than each restarting its own phase at its own corner.
+	pnx_gfx_clear(t, 0x00);
+	pnx_gfx_fill_rect_dither(t, 10, 10, 4, 2, 0xAA, 0xBB);
+	G_CHECK_EQ(pixel_at(t, 10, 10), 0xAA); // (10+10)&1 == 0
+	G_CHECK_EQ(pixel_at(t, 11, 10), 0xBB); // (11+10)&1 == 1
+	G_CHECK_EQ(pixel_at(t, 12, 10), 0xAA);
+	G_CHECK_EQ(pixel_at(t, 13, 10), 0xBB);
+	G_CHECK_EQ(pixel_at(t, 10, 11), 0xBB); // (10+11)&1 == 1 -- alternates by row too
+
+	// A second call over the adjacent columns continues the SAME phase rather than
+	// restarting at its own corner: column 13 was B, column 14 is A, alternating clean
+	// across the boundary between the two calls.
+	pnx_gfx_fill_rect_dither(t, 14, 10, 2, 1, 0xAA, 0xBB);
+	G_CHECK_EQ(pixel_at(t, 14, 10), 0xAA);
+	G_CHECK_EQ(pixel_at(t, 15, 10), 0xBB);
+
+	// Clipped the same way fill_rect is.
+	pnx_gfx_clear(t, 0x00);
+	pnx_gfx_fill_rect_dither(t, -5, -5, 10, 10, 0xAA, 0xBB);
+	G_CHECK_EQ(pixel_at(t, 0, 0), 0xAA); // (0+0)&1 == 0
+	G_CHECK_EQ(pixel_at(t, 5, 5), 0x00); // outside the rect, untouched
+
 	// --- camera clamps to the world, never past it
 	PnxCamera cam;
 	pnx_camera_init(&cam, 200, 228);

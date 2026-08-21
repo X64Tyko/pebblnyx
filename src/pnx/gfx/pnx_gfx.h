@@ -98,6 +98,17 @@ void pnx_blit_metatile_with(PnxTarget* t, const PnxAtlas* atlas, uint8_t tile,
 void pnx_gfx_fill_rect(PnxTarget* t, int32_t x, int32_t y, int16_t w, int16_t h,
 					   uint8_t colour);
 
+// Same, but an ordered 1-pixel checkerboard between two colours instead of a solid
+// fill -- a gradient built entirely from `pnx_gfx_fill_rect` bands is flat steps at
+// this palette's resolution (2 bits/channel, 64 colours); alternating individual
+// pixels between two adjacent steps reads as an intermediate shade instead, the same
+// trick pixel art has always used to fake a bigger palette. The checkerboard parity
+// is keyed off absolute (x, y), not rect-relative offsets, so two calls covering
+// adjacent areas tile as one continuous pattern rather than each restarting its own
+// phase at its own corner.
+void pnx_gfx_fill_rect_dither(PnxTarget* t, int32_t x, int32_t y, int16_t w, int16_t h,
+							  uint8_t colour_a, uint8_t colour_b);
+
 // Blits an `sw` x `sh` window starting at `(sx, sy)` out of a larger 4bpp-packed source
 // image whose own full width is `src_w` -- unrelated to the window being copied. This is
 // what lets a 9-slice panel's corners/edges/centre be read out of ONE packed source image

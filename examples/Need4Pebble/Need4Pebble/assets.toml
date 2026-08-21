@@ -53,6 +53,14 @@ frames = [
     [54, 288, 12, 7], [95, 288, 12, 7], [136, 288, 10, 7], [176, 288, 10, 7], [215, 288, 10, 7], [255, 288, 10, 7], [294, 288, 10, 7], [334, 288, 12, 7], [374, 288, 12, 7],
 ]
 out = "touring_normal.bin"
+# Traffic reuses this same sprite (render.c's draw_traffic) at other tiers/angles, which
+# meant it rendered in the PLAYER's own green -- hard to tell apart from the player's car
+# at a glance, reported directly ("recolor the traffic cars so they stand out on the
+# road"). `variants` is a palette swap, not a second copy of every frame: the traffic
+# sheet is the base art with its one body-green pixel value (85, 199, 83) programmatically
+# remapped to orange (255, 170, 0), everything else (outline, brown accents, transparency)
+# untouched -- see that PNG's own generation, no hand-drawn art involved.
+variants = ["art/traffic.png"]
 
 [[sprite]]
 name = "touring_slope"

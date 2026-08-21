@@ -55,6 +55,16 @@
 #define PNX_USE_HUD 1
 #endif
 
+// Easing curves and time-based value interpolation (pnx_tween.h) -- no dependencies of
+// its own, and nothing else in the framework depends on it yet, but it is cheap and
+// broadly useful the way PNX_USE_HUD is, so it defaults on rather than off like
+// PNX_USE_PHYSICS/PNX_USE_COLLISION. Header-only (like pnx_fx.h): a disabled game pays
+// nothing for functions it never calls, this flag exists so "not using it" is a stated
+// choice a project can see in its own config, not just dead code left unlinked.
+#ifndef PNX_USE_TWEEN
+#define PNX_USE_TWEEN 1
+#endif
+
 // LZSS decoding for compressed WorldTile banks (M12). Paired with `compress_maps = true`
 // in the manifest's `[project]` table the same way `PNX_PACK_2BIT` is paired with
 // `pack_2bit` -- a project turns this on when it wants smaller map resources at the cost
