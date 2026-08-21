@@ -1,0 +1,84 @@
+# Publishes the hosted (browser-only) editor to GitHub Pages: the static frontend under
+# tools/editor/static/ plus web-payload.zip (tools/build_web_payload.py) -- the slice of
+# the Python editor that runs in-page via Pyodide. See tools/editor/webruntime.py and
+# tools/editor/static/js/{api,webruntime}.js for what that actually does.
+#
+# Deliberately a separate workflow from editor.yml, which keeps building and releasing
+# the native companion binaries exactly as before -- this one never touches that job or
+# its release artefacts.
+
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/editor/**'
+      - 'tools/pnx_*.py'
+      - 'tools/build_web_payload.py'
+      - 'src/pnx/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  # Same self-containment check test_web_payload.py runs locally: build the payload,
+  # then import it with ONLY the payload on sys.path, not this checkout's full tools/.
+  # A route or helper that quietly needs something outside the payload passes every
+  # other test in this repo (they all run with the real tools/ tree available) and
+  # would otherwise only fail once it's live, in someone's browser.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip pillow
+      - run: python3 tests/test_web_payload.py
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build the web payload
+        run: python3 tools/build_web_payload.py web-payload.zip
+
+      - name: Stage the site
+        # index.html references its own assets as absolute /static/css/... and
+        # /static/js/... paths (the same paths the native companion serves them at),
+        # so this mirrors that same layout rather than flattening it -- getting it
+        # wrong would 404 every script tag with nothing in the page to explain why.
+        run: |
+          mkdir -p _site/static
+          cp -r tools/editor/static/css _site/static/css
+          cp -r tools/editor/static/js _site/static/js
+          cp tools/editor/static/index.html _site/index.html
+          cp web-payload.zip _site/web-payload.zip
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

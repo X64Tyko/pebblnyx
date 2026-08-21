@@ -1300,6 +1300,14 @@
        is actually missing, the same way any other build failure is reported. The
        screen is QEMU's own monitor `screendump`, polled -- not VNC, not noVNC. -->
   <div id="device" style="display:none;flex:1;overflow:auto;padding:1.5rem">
+    <!-- Shown only when running online with no local companion detected -- building a
+         real .pbw, installing to a device and running the emulator all need a real ARM
+         toolchain and QEMU, which this tab's controls are disabled for below. Toggled
+         from webruntime.js's applyCompanionGating(). -->
+    <div id="companionbanner" class="plate wide" style="display:none">
+      <b style="color:#d08b2c">No local companion detected.</b> Install it to build a
+      real .pbw, flash a device, or run the emulator -- everything else in this editor
+      works without it.</div>
     <div class="sdkwrap">
       <div class="plate wide"><h3>Emulator</h3>
         <p class="prose">Builds this project for one platform and installs it into
@@ -1445,6 +1453,8 @@
     <footer class="dim" id="setnote"></footer>
   </div>
 </div>
+<script src="/static/js/api.js"></script>
+<script src="/static/js/webruntime.js"></script>
 <script src="/static/js/app.js"></script>
 <script src="/static/js/atlas.js"></script>
 <script src="/static/js/sprites.js"></script>

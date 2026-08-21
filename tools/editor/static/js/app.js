@@ -3759,6 +3759,18 @@ async function sdkStatus(remote){
     : '<small>—</small>';
   for(const b of $('#recent').querySelectorAll('button'))
     b.onclick=()=>openProject(b.dataset.path);
+  // No companion detected: /api/sdk/* isn't answered by anything (see api.js's
+  // viaCompanion), so `s` is a {ok:false, error} shape with none of the real fields
+  // below -- render that plainly instead of throwing on s.installed.length etc., and
+  // skip the SDK-install form entirely rather than show it half-populated.
+  if(s.ok===false){
+    $('#sdkstatus').innerHTML=`<div class="dim">${s.error||'SDK status unavailable'}</div>`;
+    $('#sdkinstall').disabled=true;
+    $('#sdkinstall').textContent='Install the SDK';
+    if(sdkPoll){ clearInterval(sdkPoll); sdkPoll=null; }
+    return s;
+  }
+
   $('#sdkstatus').innerHTML=
     row('pebble tool', s.pebble||'not installed', s.pebble?'yes':'no')+
     row('active SDK', s.active||'none', s.active?'yes':'no')+

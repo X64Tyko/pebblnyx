@@ -30,59 +30,28 @@ import editor.updater as updater_mod
 from editor import routes
 from editor.liveness import LIVE
 from editor.project import Project
+from editor.session import Session
 from editor.updater import UPDATER, https_context, _config_dir
 
 TOOLS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
+# The hosted (GitHub Pages) editor talks to this companion cross-origin, so browsers
+# preflight it. This is deliberately NOT "Access-Control-Allow-Origin: *" -- a route
+# table that can write files, launch external tools, and control a device or an
+# emulator must not be reachable from an arbitrary website just because it guessed
+# this is running on 127.0.0.1. Only the hosted editor's own origin, plus
+# localhost/127.0.0.1 at any port (a locally-served copy of the static site, or a
+# future local dev server for it), are ever allowed.
+CORS_ALLOWED_ORIGINS = frozenset({
+    "https://x64tyko.github.io",
+})
+CORS_ALLOWED_PREFIXES = ("http://127.0.0.1:", "http://localhost:")
 
-class Session:
-    """The project currently open, and the ones opened before.
 
-    A mutable holder rather than a captured value, because the editor can now switch
-    projects without restarting -- the request handlers all read through this.
-    """
-
-    RECENT_MAX = 12
-
-    def __init__(self, proj=None):
-        self.proj = proj
-        if proj:
-            self.remember(proj.root)
-
-    def _recent_path(self):
-        return os.path.join(_config_dir(), "recent.json")
-
-    def recent(self):
-        try:
-            with open(self._recent_path()) as f:
-                paths = json.load(f)
-        except Exception:                                # noqa: BLE001
-            return []
-        # Filter as they are read: a project deleted or on an unmounted drive should
-        # quietly leave the list rather than sit there failing to open.
-        out = []
-        for p in paths:
-            if os.path.isdir(p) and pp.looks_like_project(p):
-                try:
-                    name = pp.load(p).get("name") or os.path.basename(p)
-                except Exception:                        # noqa: BLE001
-                    name = os.path.basename(p)
-                out.append({"path": p, "name": name})
-        return out
-
-    def remember(self, root):
-        root = os.path.abspath(root)
-        paths = [r["path"] for r in self.recent() if r["path"] != root]
-        paths.insert(0, root)
-        with open(self._recent_path(), "w") as f:
-            json.dump(paths[:self.RECENT_MAX], f, indent=2)
-
-    def open(self, folder):
-        proj = Project(folder)
-        self.proj = proj
-        self.remember(proj.root)
-        return proj
+def _origin_allowed(origin):
+    return bool(origin) and (origin in CORS_ALLOWED_ORIGINS
+                             or origin.startswith(CORS_ALLOWED_PREFIXES))
 
 
 # Requests run on threads now (see EditorServer), but they still touch one Project, so
@@ -151,6 +120,22 @@ def make_handler(session):
             with self._serialised():
                 self._route_post()
 
+        def do_OPTIONS(self):
+            # The CORS preflight a browser sends before a cross-origin request from
+            # the hosted editor. Nothing here touches session.proj, so it doesn't take
+            # REQUEST_LOCK -- same reasoning as LOCK_FREE_PATHS above.
+            origin = self.headers.get("Origin", "")
+            if not _origin_allowed(origin):
+                self.send_response(403)
+                self.end_headers()
+                return
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Max-Age", "600")
+            self.end_headers()
+
         def _send(self, code, body, ctype="application/json"):
             # Any answered request counts as the UI being present, not just the
             # heartbeat: a long build or a big font preview must not look like silence.
@@ -159,6 +144,9 @@ def make_handler(session):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
+            origin = self.headers.get("Origin", "")
+            if _origin_allowed(origin):
+                self.send_header("Access-Control-Allow-Origin", origin)
             self.end_headers()
             self.wfile.write(data)
 
