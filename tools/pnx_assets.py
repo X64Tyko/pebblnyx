@@ -3764,45 +3764,33 @@ def derive_charset(man, spec, name):
     return sorted(chars), origin
 
 
-def quantise_coverage(value, depth, threshold):
-    """One greyscale sample to a glyph level.
+def quantise_coverage(value, threshold):
+    """One greyscale sample to ink or not.
 
-    At depth 1 this is a plain cutoff and `threshold` is the whole story -- which is why
-    the editor puts a slider on it. Move it 20 either way at 12px and stems appear or
-    vanish; there is no correct value, only a legible one for a given typeface.
+    A plain cutoff, and `threshold` is the whole story -- which is why the editor puts a
+    slider on it. Move it 20 either way at 12px and stems appear or vanish; there is no
+    correct value, only a legible one for a given typeface.
 
-    At depth 2, `threshold` is the black point below which a sample is transparent, and
-    what remains is spread over levels 1-3. Keeping the same field meaningful at both
-    depths means the slider does not change job when the depth changes.
+    Used to also spread a depth=2 sample over 4 antialiased levels -- that meaning of
+    depth=2 is gone, replaced entirely by baked outline/fill glyphs (see pack_font's own
+    comment on `rasterise_glyph_styled`). No font in pebblnyx ever shipped with the old
+    depth=2 antialiasing, so this dropped the branch rather than carry it as unreachable.
     """
-    if value < threshold:
-        return 0
-    if depth == 1:
-        return 1
-    span = 255 - threshold
-    if span <= 0:
-        return 3
-    return 1 + min(2, ((value - threshold) * 2 + span // 2) // span)
+    return 1 if value >= threshold else 0
 
 
-def rasterise_glyph(pil_font, ch, depth, threshold, pad):
-    """Render one character and trim it to its inked box.
+def _trim_to_ink(levels, pad):
+    """Shared by rasterise_glyph and rasterise_glyph_styled: trim a full padded level
+    grid down to the bounding box of its own non-zero cells, and report the bearing
+    (offset from the anchor point every glyph is drawn at) that trim implies.
 
-    Returns levels as a list of rows, plus metrics measured FROM THE BASELINE, which is
-    the only origin that keeps two different fonts aligned on one line.
-
-    Quantisation happens before the box is measured, deliberately: measuring the greyscale
-    bbox first would keep rows whose every sample falls below the threshold, padding the
-    glyph with blank lines that cost bytes and shift the bearing.
+    Quantisation/level-assignment has to happen before this runs, deliberately -- trimming
+    the raw greyscale bbox first would keep rows whose every sample falls below whatever
+    threshold applies, padding the glyph with blank lines that cost bytes and shift the
+    bearing.
     """
-    img = Image.new("L", (pad * 3, pad * 3), 0)
-    ImageDraw.Draw(img).text((pad, pad), ch, fill=255, font=pil_font, anchor="ls")
-
-    px = img.load()
-    w, h = img.size
-    levels = [[quantise_coverage(px[x, y], depth, threshold) for x in range(w)]
-              for y in range(h)]
-
+    h = len(levels)
+    w = len(levels[0]) if h else 0
     rows = [y for y in range(h) if any(levels[y])]
     cols = [x for x in range(w) if any(levels[y][x] for y in range(h))]
     if not rows or not cols:
@@ -3812,6 +3800,103 @@ def rasterise_glyph(pil_font, ch, depth, threshold, pad):
     left, right = cols[0], cols[-1]
     trimmed = [row[left:right + 1] for row in levels[top:bottom + 1]]
     return trimmed, left - pad, pad - top
+
+
+def rasterise_glyph(pil_font, ch, threshold, pad):
+    """Render one character crisp (ink or not) and trim it to its inked box.
+
+    Returns levels as a list of rows, plus metrics measured FROM THE BASELINE, which is
+    the only origin that keeps two different fonts aligned on one line -- the same
+    contract rasterise_glyph_styled keeps, so pack_font's own packing/dedup code never
+    needs to know which one produced a given glyph's rows.
+    """
+    img = Image.new("L", (pad * 3, pad * 3), 0)
+    ImageDraw.Draw(img).text((pad, pad), ch, fill=255, font=pil_font, anchor="ls")
+
+    px = img.load()
+    w, h = img.size
+    levels = [[quantise_coverage(px[x, y], threshold) for x in range(w)]
+              for y in range(h)]
+    return _trim_to_ink(levels, pad)
+
+
+def rasterise_glyph_styled(pil_font, ch, threshold, outline_width, pad):
+    """Crisp fill plus a dilated outline ring, baked as index levels -- 0 transparent, 1
+    outline, 2 fill A -- rather than antialiased coverage. This is font depth=2's whole
+    meaning now: a small indexed palette per glyph (outline / fill A / fill B), drawn with
+    a caller-supplied 3-colour palette at runtime (pnx_text_draw_outlined/
+    pnx_text_draw_gradient_outlined), not one ink colour blended at partial coverage.
+
+    Level 3 (fill B) is deliberately never produced here -- auto-baking only ever
+    generates a solid single-colour fill plus its outline. A second fill colour (a
+    two-tone outline, a split gradient across a letter, whatever) is paint-only: a human
+    editing the glyph by hand (`glyph_overrides`, pack_font's own handling of it) is a
+    better tool for "does this look good" than a pipeline heuristic guessing a split
+    point, per direct ask ("letting the user edit the glyphs... will be easier than
+    trying to set up tools to auto generate colorations").
+
+    Dilation is 4-connected (Manhattan distance <= outline_width), not 8-connected/
+    circular -- plenty at the glyph sizes this ships at (a handful of px), and cheaper.
+    """
+    img = Image.new("L", (pad * 3, pad * 3), 0)
+    ImageDraw.Draw(img).text((pad, pad), ch, fill=255, font=pil_font, anchor="ls")
+
+    px = img.load()
+    w, h = img.size
+    ink = [[px[x, y] >= threshold for x in range(w)] for y in range(h)]
+
+    outline = [[False] * w for _ in range(h)]
+    for y in range(h):
+        for x in range(w):
+            if ink[y][x]:
+                continue
+            for dy in range(-outline_width, outline_width + 1):
+                span = outline_width - abs(dy)
+                ny = y + dy
+                if not 0 <= ny < h:
+                    continue
+                for dx in range(-span, span + 1):
+                    nx = x + dx
+                    if 0 <= nx < w and ink[ny][nx]:
+                        outline[y][x] = True
+                        break
+                if outline[y][x]:
+                    break
+
+    levels = [[2 if ink[y][x] else (1 if outline[y][x] else 0) for x in range(w)]
+              for y in range(h)]
+    return _trim_to_ink(levels, pad)
+
+
+def parse_glyph_override_ascii(text, where, ch):
+    """A hand-painted glyph override -- one character per cell, the same ASCII-art
+    convention parse_collision_mask_ascii already uses ('.'/'#'), extended to the four
+    levels a styled glyph carries: '.' transparent, 'o' outline, '#' fill A, '%' fill B.
+
+    A full replacement of the glyph's level grid, not a diff against the auto-bake --
+    simpler to reason about (what you see in the editor's paint canvas is exactly what
+    ships), and it is the editor's own job to seed a fresh override from the current
+    auto-bake before the user starts painting, not this function's.
+    """
+    rows = text.strip("\n").split("\n")
+    if not rows or not rows[0]:
+        raise BuildError(f"{where}: glyph {ch!r}'s glyph_overrides entry is empty")
+    w = len(rows[0])
+    if any(len(r) != w for r in rows):
+        raise BuildError(f"{where}: glyph {ch!r}'s glyph_overrides rows are not all the same "
+                         f"width ({[len(r) for r in rows]})")
+    sym = {".": 0, "o": 1, "#": 2, "%": 3}
+    levels = []
+    for j, row in enumerate(rows):
+        line = []
+        for i, c in enumerate(row):
+            if c not in sym:
+                raise BuildError(f"{where}: glyph {ch!r}'s glyph_overrides has {c!r} at "
+                                 f"{i},{j} -- only '.' (transparent), 'o' (outline), "
+                                 f"'#' (fill A) and '%' (fill B) are allowed")
+            line.append(sym[c])
+        levels.append(line)
+    return levels
 
 
 def pack_glyph_rows(rows, depth):
@@ -3877,8 +3962,31 @@ def pack_font(root, spec, man, orient=ORIENT_BUTTONS_RIGHT):
 
     depth = int(spec.get("depth", 1))
     if depth not in (1, 2):
-        raise BuildError(f"font {name!r}: depth must be 1 (crisp) or 2 (antialiased), "
-                         f"not {depth}")
+        raise BuildError(f"font {name!r}: depth must be 1 (crisp) or 2 (baked outline + "
+                         f"fill, see outline_width/glyph_overrides), not {depth}")
+
+    # outline_width/glyph_overrides only mean something at depth=2 -- reject them at
+    # depth=1 rather than silently ignore, same posture every other manifest field this
+    # pipeline validates takes (a typo that goes silently unused is a bug report from
+    # someone who assumed it was working).
+    if depth == 2:
+        outline_width = int(spec.get("outline_width", 1))
+        if outline_width < 1:
+            raise BuildError(f"font {name!r}: outline_width must be >= 1, not "
+                             f"{outline_width}")
+        glyph_overrides = spec.get("glyph_overrides", {})
+        if not isinstance(glyph_overrides, dict):
+            raise BuildError(f"font {name!r}: glyph_overrides must be a table of "
+                             f"character -> mask string, e.g. [font.glyph_overrides]")
+    else:
+        outline_width = None
+        glyph_overrides = {}
+        if "outline_width" in spec:
+            raise BuildError(f"font {name!r}: outline_width only means something at "
+                             f"depth=2 (baked outline glyphs) -- this font is depth=1")
+        if "glyph_overrides" in spec:
+            raise BuildError(f"font {name!r}: glyph_overrides only means something at "
+                             f"depth=2 (baked outline glyphs) -- this font is depth=1")
 
     size = int(spec.get("size", 12))
     if not 4 <= size <= 64:
@@ -3899,14 +4007,70 @@ def pack_font(root, spec, man, orient=ORIENT_BUTTONS_RIGHT):
     except OSError as e:
         raise BuildError(f"font {name!r}: cannot open {path} at {size}px: {e}") from None
 
+    # A second source font for a subset of the charset -- one packed font whose glyphs
+    # come from two different typefaces (e.g. digits from one face, letters from
+    # another), rather than a game splitting strings at draw time to switch fonts
+    # mid-string. "Just combine all the rendered glyphs into a single font" (the ask,
+    # after an earlier draft did exactly that render-time split and it worked but read
+    # as more machinery than the problem needed). Each character rasterises from
+    # `overlay_source` if it's in `overlay_charset`, `source` otherwise -- no other
+    # difference between the two: same size/depth/threshold/tracking apply to both, so
+    # the two faces still sit on one consistent baseline/line-height (this font's own
+    # `ascent`/`descent`, read from `pil_font` -- the PRIMARY source -- alone, same as
+    # always; a glyph from the overlay face just has to fit within that box, same as any
+    # other glyph here already does via rasterise_glyph's own bearing/clipping).
+    overlay_path = spec.get("overlay_source")
+    overlay_charset = set(spec.get("overlay_charset", ""))
+    overlay_pil_font = None
+    if overlay_path:
+        full_overlay_path = os.path.join(root, overlay_path)
+        if not os.path.exists(full_overlay_path):
+            raise BuildError(f"font {name!r}: missing overlay_source: {full_overlay_path}")
+        if not spec.get("overlay_license"):
+            raise BuildError(
+                f"font {name!r}: overlay_source given but no overlay_license -- same "
+                f"redistribution rule license's own check enforces for `source`, applies "
+                f"here too: rasterising {os.path.basename(full_overlay_path)} into the "
+                f"bundle redistributes THAT typeface as well.")
+        try:
+            overlay_pil_font = ImageFont.truetype(full_overlay_path, size)
+        except OSError as e:
+            raise BuildError(f"font {name!r}: cannot open {full_overlay_path} at "
+                             f"{size}px: {e}") from None
+
     ascent, descent = pil_font.getmetrics()
     chars, origin = derive_charset(man, spec, name)
 
     glyphs, bitmaps, dedup = [], bytearray(), {}
     for ch in chars:
-        rows, bearing_x, bearing_y = rasterise_glyph(pil_font, ch, depth, threshold,
-                                                     max(size, 8) * 2)
-        advance = overrides.get(ch, int(round(pil_font.getlength(ch)))) + tracking
+        src_font = overlay_pil_font if (overlay_pil_font and ch in overlay_charset) else pil_font
+        pad = max(size, 8) * 2
+
+        if depth == 2:
+            rows, bearing_x, bearing_y = rasterise_glyph_styled(src_font, ch, threshold,
+                                                                outline_width, pad)
+            if ch in glyph_overrides:
+                override_levels = parse_glyph_override_ascii(glyph_overrides[ch],
+                                                              f"font {name!r}", ch)
+                auto_h = len(rows) if rows else 0
+                auto_w = len(rows[0]) if rows else 0
+                ov_h = len(override_levels)
+                ov_w = len(override_levels[0]) if ov_h else 0
+                if (ov_w, ov_h) != (auto_w, auto_h):
+                    raise BuildError(
+                        f"font {name!r}: glyph {ch!r}'s glyph_overrides is {ov_w}x{ov_h}, but "
+                        f"the current auto-bake (source/size/outline_width) is "
+                        f"{auto_w}x{auto_h} -- the override REPLACES the auto-baked "
+                        f"level grid, not a diff against it, so it has to match "
+                        f"whatever the auto-bake currently produces. Re-paint from the "
+                        f"editor, which always starts a fresh override from the current "
+                        f"auto-bake, rather than hand-editing saved text after a font "
+                        f"setting changed underneath it.")
+                rows = override_levels
+        else:
+            rows, bearing_x, bearing_y = rasterise_glyph(src_font, ch, threshold, pad)
+
+        advance = overrides.get(ch, int(round(src_font.getlength(ch)))) + tracking
         if advance < 0:
             raise BuildError(f"font {name!r}: advance for {ch!r} is negative ({advance}) "
                              f"-- tracking = {tracking} is too small")
@@ -3991,6 +4155,9 @@ def pack_font(root, spec, man, orient=ORIENT_BUTTONS_RIGHT):
             "tracking": tracking, "line_height": line_height, "baseline": ascent,
             "advance_axis": advance_axis,
             "license": spec["license"], "source": spec["source"],
+            "overlay_source": overlay_path, "overlay_license": spec.get("overlay_license"),
+            "overlay_charset": "".join(sorted(overlay_charset)),
+            "outline_width": outline_width, "glyph_overrides": sorted(glyph_overrides),
             "bitmap_bytes": len(bitmaps)}
 
 
@@ -4594,6 +4761,10 @@ def report_font_licences(fonts):
     for ft in fonts:
         print(f"  {ft['name'].ljust(width)}  {os.path.basename(ft['source'])} "
               f"@{ft['size']}px  --  {ft['license']}")
+        if ft.get("overlay_source"):
+            print(f"  {' ' * width}  {os.path.basename(ft['overlay_source'])} "
+                  f"@{ft['size']}px (glyphs: {ft['overlay_charset']!r})  --  "
+                  f"{ft['overlay_license']}")
 
 
 def report_budget(entries, budget):

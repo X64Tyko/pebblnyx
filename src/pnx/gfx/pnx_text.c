@@ -4,81 +4,26 @@
 
 #include "pnx_gfx.h" // pnx_bw_is_ink / pnx_bw_set_pixel, shared with the 1-bit blitter
 
-// ------------------------------------------------------------------------ blending
-//
-// Only depth 2 needs this, and only on a colour target: a 1-bit screen has no destination
-// shade to blend towards, so the whole table -- and the two colour-target span writers
-// below it -- compile out under PNX_DISPLAY_BW rather than sit there unused. Its 1-bit
-// replacement is bw_span_2bpp, further down, which rounds coverage to a bit instead.
-//
-// ARGB2222 gives each channel two bits, so a blend is a table indexed by (ink, dst) --
-// 16 entries per ratio, 32 bytes for both, shared across R, G and B. That is the whole
-// cost of antialiased text, and it is why the alternative (blending in a wider space and
-// quantising back) was not worth considering.
-//
-// Entry [s][d] is round((s * k + d * (3 - k)) / 3) for k = 1 and k = 2. The tables are
-// written out rather than computed so they cost no runtime and no bss; test_gfx.c checks
-// them against the formula, which is what keeps a typo here from becoming a colour bug.
-
-#if !PNX_DISPLAY_BW
-
-#define BLEND(s, d) ((uint8_t)(s) * 4u + (uint8_t)(d))
-
-// k = 1: one third ink, two thirds destination.
-static const uint8_t s_blend_13[16] = {
-	0,
-	1,
-	1,
-	2,
-	0,
-	1,
-	2,
-	2,
-	1,
-	1,
-	2,
-	3,
-	1,
-	2,
-	2,
-	3,
-};
-
-// k = 2: two thirds ink.
-static const uint8_t s_blend_23[16] = {
-	0,
-	0,
-	1,
-	1,
-	1,
-	1,
-	1,
-	2,
-	1,
-	2,
-	2,
-	2,
-	2,
-	2,
-	3,
-	3,
-};
-
-// Alpha comes from the ink, not from the blend: text is opaque, and the coverage level
-// has already decided how much of it lands.
-static inline uint8_t blend_px(uint8_t ink, uint8_t dst, const uint8_t* lut)
+// A depth=2 glyph's runtime colours: level 1 (outline), 2 (fill A) and 3 (fill B) each get
+// their own, baked into the levels at pipeline time rather than blended per pixel (see
+// rasterise_glyph_styled / glyph_overrides in pnx_assets.py). Level 0 is transparent and
+// never reaches a span writer. Not part of the public API -- draw_glyph builds one from a
+// single colour for the plain draw calls, and only pnx_text_draw_gradient_outlined lets a
+// caller supply the three colours directly.
+typedef struct
 {
-	const uint8_t r = lut[BLEND((ink >> 4) & 3, (dst >> 4) & 3)];
-	const uint8_t g = lut[BLEND((ink >> 2) & 3, (dst >> 2) & 3)];
-	const uint8_t b = lut[BLEND(ink & 3, dst & 3)];
-	return (uint8_t)((ink & 0xC0) | (uint8_t)(r << 4) | (uint8_t)(g << 2) | b);
-}
+	uint8_t outline;
+	uint8_t fill_a;
+	uint8_t fill_b;
+} PnxTextPalette;
 
 // --------------------------------------------------------------------------- spans
 //
 // One glyph row into one framebuffer row, clipped against the row's own reported span
 // rather than the target width -- a round display narrows [min_x, max_x] per row, and
 // assuming a rectangle is what breaks there. Same contract as span_4bpp in pnx_gfx.c.
+
+#if !PNX_DISPLAY_BW
 
 static void span_1bpp(uint8_t* row_base, int32_t x, const uint8_t* line, uint8_t colour,
 					  int32_t w, int16_t min_x, int16_t max_x)
@@ -100,8 +45,11 @@ static void span_1bpp(uint8_t* row_base, int32_t x, const uint8_t* line, uint8_t
 	}
 }
 
-static void span_2bpp(uint8_t* row_base, int32_t x, const uint8_t* line, uint8_t colour,
-					  int32_t w, int16_t min_x, int16_t max_x)
+// depth=2's whole meaning: a 2-bit index per pixel selecting one of three baked colours,
+// never a blend. 0 is transparent and skipped; 1..3 look the palette up directly.
+static void span_2bpp_styled(uint8_t* row_base, int32_t x, const uint8_t* line,
+							 const PnxTextPalette* pal, int32_t w, int16_t min_x,
+							 int16_t max_x)
 {
 	int32_t i0 = 0, i1 = w;
 	if (x + i0 < min_x)
@@ -117,12 +65,8 @@ static void span_2bpp(uint8_t* row_base, int32_t x, const uint8_t* line, uint8_t
 		const uint8_t level = (uint8_t)((line[i >> 2] >> (6 - 2 * (i & 3))) & 3u);
 		if (level == 0)
 			continue; // transparent, the common case
-		if (level == 3)
-		{
-			dst[i] = colour;
-			continue;
-		} // full ink, no read needed
-		dst[i] = blend_px(colour, dst[i], level == 1 ? s_blend_13 : s_blend_23);
+		dst[i] = (level == 1) ? pal->outline : (level == 2) ? pal->fill_a
+															: pal->fill_b;
 	}
 }
 
@@ -156,11 +100,11 @@ static void bw_span_1bpp(uint8_t* row_base, int32_t x, const uint8_t* line, bool
 	}
 }
 
-// A 1-bit target has no blend to land partial coverage in, so majority coverage (level 2
-// or 3 of 0..3) draws and anything less does not -- the nearest a fixed threshold gets to
-// what a human squinting at the antialiased result would call "on".
-static void bw_span_2bpp(uint8_t* row_base, int32_t x, const uint8_t* line, bool ink,
-						 int32_t w, int16_t min_x, int16_t max_x)
+// A 1-bit target has no room for three colours, so any non-transparent level -- outline or
+// either fill -- draws ink. That is the glyph's own silhouette (outline ring union filled
+// interior), which is the one thing a monochrome watch can still show of a styled glyph.
+static void bw_span_2bpp_styled(uint8_t* row_base, int32_t x, const uint8_t* line, bool ink,
+								int32_t w, int16_t min_x, int16_t max_x)
 {
 	int32_t i0 = 0, i1 = w;
 	if (x + i0 < min_x)
@@ -173,7 +117,7 @@ static void bw_span_2bpp(uint8_t* row_base, int32_t x, const uint8_t* line, bool
 	for (int32_t i = i0; i < i1; i++)
 	{
 		const uint8_t level = (uint8_t)((line[i >> 2] >> (6 - 2 * (i & 3))) & 3u);
-		if (level >= 2)
+		if (level != 0)
 			pnx_bw_set_pixel(row_base, x + i, ink);
 	}
 }
@@ -259,8 +203,13 @@ static inline void glyph_origin(uint8_t axis, const PnxGlyph* g, int32_t pen, in
 	}
 }
 
-// One glyph at a pen position. `pen` is along the baseline and `base` is across it: x and
-// y respectively for a portrait font, the other way round for a rotated one.
+// One glyph at a pen position, one solid colour. `pen` is along the baseline and `base` is
+// across it: x and y respectively for a portrait font, the other way round for a rotated
+// one. A depth=2 glyph drawn this way flattens its baked levels to one colour -- every
+// non-transparent pixel painted `colour` -- which is what a caller gets from the
+// single-colour API (pnx_text_draw, pnx_text_draw_outlined's dynamic path,
+// pnx_text_draw_wrapped) whether or not the font underneath carries baked levels; only
+// draw_glyph_pal below keeps them distinct.
 static void draw_glyph(PnxTarget* t, const PnxFont* f, const PnxGlyph* g, int32_t pen,
 					   int32_t base, uint8_t colour)
 {
@@ -299,11 +248,54 @@ static void draw_glyph(PnxTarget* t, const PnxFont* f, const PnxGlyph* g, int32_
 		else
 		{
 #if PNX_DISPLAY_BW
-			bw_span_2bpp(row.data, x, line, ink, g->w, row.min_x, row.max_x);
+			bw_span_2bpp_styled(row.data, x, line, ink, g->w, row.min_x, row.max_x);
 #else
-			span_2bpp(row.data, x, line, colour, g->w, row.min_x, row.max_x);
+			const PnxTextPalette pal = { colour, colour, colour };
+			span_2bpp_styled(row.data, x, line, &pal, g->w, row.min_x, row.max_x);
 #endif
 		}
+	}
+}
+
+// Same as draw_glyph, but keeps a depth=2 glyph's baked levels distinct -- outline, fill A,
+// fill B -- instead of flattening them to one colour. The caller (only
+// pnx_text_draw_gradient_outlined) guarantees f->depth == 2; a depth=1 font has no third
+// level to distinguish and never reaches here.
+static void draw_glyph_pal(PnxTarget* t, const PnxFont* f, const PnxGlyph* g, int32_t pen,
+						   int32_t base, const PnxTextPalette* pal)
+{
+	if (!g->bits)
+		return; // a space: advance only
+
+	int32_t x, y;
+	glyph_origin(f->advance, g, pen, base, &x, &y);
+	const int16_t th	 = pnx_target_height(t);
+	const uint8_t stride = pnx_font_row_bytes(f, g->w);
+#if PNX_DISPLAY_BW
+	// A 1-bit target has no colours to distinguish; draw_glyph's own depth=2 branch above
+	// resolves the same way, against the outline colour -- an outline reads as the "is this
+	// glyph dark-on-light or light-on-dark" choice more often than either fill would.
+	const bool ink = pnx_bw_is_ink(pal->outline);
+#endif
+
+	int32_t j0 = 0, j1 = g->h;
+	if (y < 0)
+		j0 = -y;
+	if (y + g->h > th)
+		j1 = th - y;
+
+	for (int32_t j = j0; j < j1; j++)
+	{
+		PnxRow row = pnx_target_row(t, (int16_t)(y + j));
+		if (!row.data)
+			continue;
+
+		const uint8_t* line = g->bits + (uint32_t)j * stride;
+#if PNX_DISPLAY_BW
+		bw_span_2bpp_styled(row.data, x, line, ink, g->w, row.min_x, row.max_x);
+#else
+		span_2bpp_styled(row.data, x, line, pal, g->w, row.min_x, row.max_x);
+#endif
 	}
 }
 
@@ -437,6 +429,71 @@ int16_t pnx_text_draw(PnxTarget* t, const PnxFont* f, const char* s, int32_t x, 
 	}
 	// The advance CONSUMED, which is a length and never negative -- a caller chaining a
 	// value after a label adds it to whichever coordinate its own text runs along.
+	return (int16_t)((pen - start) * step);
+}
+
+// The dynamic 5-draw outline: 4 cardinal offsets in `outline_colour` behind a plain fill.
+// Shared by pnx_text_draw_outlined and pnx_text_draw_gradient_outlined's own depth=1
+// fallback, so the two never need to call one another.
+static int16_t draw_outlined_dynamic(PnxTarget* t, const PnxFont* f, const char* s,
+									 int32_t x, int32_t y, uint8_t fill_colour,
+									 uint8_t outline_colour)
+{
+	// Cardinal offsets only (not the 4 diagonals too) -- a full 8-direction outline reads
+	// barely thicker at this glyph size (12-20px) and doubles the draw cost for it; see
+	// pnx_text_draw_outlined's own header comment on why 5x an already-cheap draw is fine
+	// but 9x is the wrong trade for a HUD redrawn every tick.
+	pnx_text_draw(t, f, s, x - 1, y, outline_colour);
+	pnx_text_draw(t, f, s, x + 1, y, outline_colour);
+	pnx_text_draw(t, f, s, x, y - 1, outline_colour);
+	pnx_text_draw(t, f, s, x, y + 1, outline_colour);
+	return pnx_text_draw(t, f, s, x, y, fill_colour);
+}
+
+int16_t pnx_text_draw_outlined(PnxTarget* t, const PnxFont* f, const char* s, int32_t x,
+							   int32_t y, uint8_t fill_colour, uint8_t outline_colour)
+{
+	if (!t || !f || !s)
+		return 0;
+
+	// A depth=2 font already carries a baked outline ring per glyph -- one styled draw
+	// reproduces the same silhouette the dynamic 5-offset trick approximates for a depth=1
+	// font, cheaper and sharper (the ring follows the letterform instead of 4 cardinal
+	// copies of it). fill_b just repeats fill_colour: this entry point offers only one fill
+	// colour, same as it always has.
+	if (f->depth == 2)
+		return pnx_text_draw_gradient_outlined(t, f, s, x, y, outline_colour, fill_colour,
+											   fill_colour);
+
+	return draw_outlined_dynamic(t, f, s, x, y, fill_colour, outline_colour);
+}
+
+int16_t pnx_text_draw_gradient_outlined(PnxTarget* t, const PnxFont* f, const char* s,
+										int32_t x, int32_t y, uint8_t outline_colour,
+										uint8_t fill_a, uint8_t fill_b)
+{
+	if (!t || !f || !s)
+		return 0;
+
+	// No baked levels to draw from -- fall back to the dynamic 5-draw outline every
+	// depth=1 font already has. fill_b has no meaning without baked levels, so it is
+	// dropped rather than guessed at.
+	if (f->depth != 2)
+		return draw_outlined_dynamic(t, f, s, x, y, fill_a, outline_colour);
+
+	const PnxTextPalette pal = { outline_colour, fill_a, fill_b };
+	const int32_t step		 = pen_sign(f->advance);
+	int32_t pen, base;
+	split_origin(f->advance, x, y, &pen, &base);
+
+	const int32_t start = pen;
+	for (const char* p = s; *p && *p != '\n'; p++)
+	{
+		PnxGlyph g;
+		pnx_font_glyph(f, pnx_font_glyph_index(f, *p), &g);
+		draw_glyph_pal(t, f, &g, pen, base, &pal);
+		pen += step * g.advance;
+	}
 	return (int16_t)((pen - start) * step);
 }
 

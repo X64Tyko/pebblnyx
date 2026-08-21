@@ -11,7 +11,6 @@
 // or a round-target host build proves it.
 
 #include "../src/pnx/gfx/pnx_text.h"
-#include "../src/pnx/gfx/pnx_gfx.h"
 #include "../src/pnx/platform/pnx_platform_host.h"
 
 #include <stdio.h>
@@ -564,6 +563,24 @@ void test_text(void)
 	pnx_text_draw(t, &font, "!", 10, 500, INK);
 	T_CHECK_EQ(ink_count(t, 0), 0);
 
+	// --- outlined draw. '!' is 2x3 at fb x 10-11 / y 17-19 (same glyph as the plain-draw
+	// placement check above). The outline is 4 copies offset +-1 in x/y, drawn BEFORE the
+	// fill copy -- so a pixel only the outline offsets reach stays OUTLINE, but any pixel
+	// both an outline pass and the fill pass touch (the glyph's own core) ends up FILL,
+	// since the fill draw runs last and each span write is an opaque set, not a blend.
+#define OUTLINE 0x40
+	pnx_host_reset();
+	T_CHECK_EQ(pnx_text_draw_outlined(t, &font, "!", 10, 20, INK, OUTLINE), 3);
+	T_CHECK_EQ(px(t, 10, 17), INK);		// core: fill wins over the outline passes
+	T_CHECK_EQ(px(t, 11, 19), INK);		// core, opposite corner
+	T_CHECK_EQ(px(t, 9, 18), OUTLINE);	// x-1 pass only
+	T_CHECK_EQ(px(t, 12, 18), OUTLINE); // x+1 pass only
+	T_CHECK_EQ(px(t, 10, 16), OUTLINE); // y-1 pass only
+	T_CHECK_EQ(px(t, 10, 20), OUTLINE); // y+1 pass only
+	T_CHECK_EQ(px(t, 8, 18), 0);		// two columns left: past even the outline
+	T_CHECK_EQ(px(t, 13, 18), 0);		// two columns right: past even the outline
+#undef OUTLINE
+
 	// --- wrapping. Advances are 3 for '!' and 2 for ' ', so "! ! !" is 3+2+3+2+3 = 13.
 	T_CHECK_EQ(pnx_text_lines_wrapped(&font, "! ! !", 13), 1); // exactly fits
 	T_CHECK_EQ(pnx_text_lines_wrapped(&font, "! ! !", 12), 2); // last '!' pushed over
@@ -613,11 +630,9 @@ void test_text(void)
 	T_CHECK_EQ(px(t, 21, 18), INK);
 	T_CHECK_EQ(px(t, 22, 18), 0);
 
-	// --- depth 2: coverage levels blend against what is already on screen.
-	//
-	// The glyph is one row of four pixels at levels 0, 1, 2, 3. Checked against the
-	// formula rather than against the table in pnx_text.c, so a typo in the table is a
-	// failure here rather than a colour that is merely slightly wrong.
+	// --- depth 2: baked outline/fill levels, drawn from a 3-colour palette -- never
+	// blended. The glyph is one row of four pixels at levels 0, 1, 2, 3 (transparent,
+	// outline, fill A, fill B), so each level's own pixel proves which colour it drew.
 	free(blob);
 	blob = build_font_blob(&len, 2, PNX_BLOB_VERSION);
 	// Overwrite glyph 1 with a 4x1 run of levels 0..3: at 2bpp that is one byte,
@@ -640,21 +655,43 @@ void test_text(void)
 	T_CHECK(pnx_font_load(&aa, 1));
 	T_CHECK_EQ(aa.depth, 2);
 
-	// A destination of 0x55 is ARGB2222 (1,1,1) with alpha 1; ink 0xFF is (3,3,3) opaque.
+#define AA_OUTLINE 0x40
+#define AA_FILL_A  0x80
+#define AA_FILL_B  0xC0
+
+	// The single-colour API (pnx_text_draw and friends) flattens every non-transparent
+	// level to `colour`, whether or not the font underneath carries baked levels.
 	pnx_host_reset();
-	pnx_gfx_fill_rect(t, 0, 0, 200, 228, 0x55);
-	pnx_text_draw(t, &aa, "!", 10, 20, 0xFF);
+	pnx_text_draw(t, &aa, "!", 10, 20, INK);
+	T_CHECK_EQ(px(t, 10, 19), 0);	// level 0: transparent
+	T_CHECK_EQ(px(t, 11, 19), INK); // level 1
+	T_CHECK_EQ(px(t, 12, 19), INK); // level 2
+	T_CHECK_EQ(px(t, 13, 19), INK); // level 3
 
-	const uint8_t dst_ch = 1, ink_ch = 3;
-	const uint8_t want1 = (uint8_t)((ink_ch * 1 + dst_ch * 2 + 1) / 3);
-	const uint8_t want2 = (uint8_t)((ink_ch * 2 + dst_ch * 1 + 1) / 3);
-	const uint8_t px1	= (uint8_t)(0xC0 | (want1 << 4) | (want1 << 2) | want1);
-	const uint8_t px2	= (uint8_t)(0xC0 | (want2 << 4) | (want2 << 2) | want2);
+	// pnx_text_draw_gradient_outlined keeps the three baked levels distinct, one draw, no
+	// blending.
+	pnx_host_reset();
+	T_CHECK_EQ(pnx_text_draw_gradient_outlined(t, &aa, "!", 10, 20, AA_OUTLINE, AA_FILL_A,
+											   AA_FILL_B),
+			   5);						   // the advance this overwrite gave glyph 1, above
+	T_CHECK_EQ(px(t, 10, 19), 0);		   // level 0: still transparent
+	T_CHECK_EQ(px(t, 11, 19), AA_OUTLINE); // level 1
+	T_CHECK_EQ(px(t, 12, 19), AA_FILL_A);  // level 2
+	T_CHECK_EQ(px(t, 13, 19), AA_FILL_B);  // level 3
 
-	T_CHECK_EQ(px(t, 10, 19), 0x55); // level 0: untouched
-	T_CHECK_EQ(px(t, 11, 19), px1);	 // level 1: one third ink
-	T_CHECK_EQ(px(t, 12, 19), px2);	 // level 2: two thirds
-	T_CHECK_EQ(px(t, 13, 19), 0xFF); // level 3: straight ink, no read
+	// pnx_text_draw_outlined on a depth=2 font routes through the same baked path with one
+	// fill colour standing in for both levels, rather than the dynamic 5-offset trick a
+	// depth=1 font uses.
+	pnx_host_reset();
+	T_CHECK_EQ(pnx_text_draw_outlined(t, &aa, "!", 10, 20, AA_FILL_A, AA_OUTLINE), 5);
+	T_CHECK_EQ(px(t, 10, 19), 0);
+	T_CHECK_EQ(px(t, 11, 19), AA_OUTLINE);
+	T_CHECK_EQ(px(t, 12, 19), AA_FILL_A);
+	T_CHECK_EQ(px(t, 13, 19), AA_FILL_A); // level 3 gets fill_colour too, not a second one
+
+#undef AA_OUTLINE
+#undef AA_FILL_A
+#undef AA_FILL_B
 
 	// --- the loader must refuse anything it cannot trust, because the blitter does no
 	// checking of its own.

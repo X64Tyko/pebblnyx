@@ -25,6 +25,13 @@
 // Colour is a GColor8 value, the same as every other draw takes. There is no palette:
 // text is one colour, and the four bits an atlas spends naming a palette entry would be
 // waste per pixel. See PnxFont in assets/pnx_assets.h for the storage format.
+//
+// A depth=2 font carries baked levels per glyph instead of one shape -- transparent,
+// outline, fill A, fill B -- painted at pipeline time (auto-baked outline ring plus a
+// solid fill, or hand-painted via a glyph_overrides entry), not blended coverage. Every
+// call on this page still takes one colour and flattens those levels to it; only
+// pnx_text_draw_gradient_outlined below asks for the levels distinctly. A depth=1 font has
+// no levels to flatten and draws exactly as it always has either way.
 
 #pragma once
 
@@ -65,6 +72,30 @@ int16_t pnx_text_lines_wrapped(const PnxFont* f, const char* s, int16_t w);
 // successive draws can be chained -- a label followed by a value in another colour.
 int16_t pnx_text_draw(PnxTarget* t, const PnxFont* f, const char* s, int32_t x, int32_t y,
 					  uint8_t colour);
+
+// Same, with a 1px outline in `outline_colour` first -- legibility over a busy or
+// changing background (a HUD number sitting directly on open sky/road, not on its own
+// solid panel) without needing an opaque backing rect behind it. The offset is applied
+// in FRAMEBUFFER space (the same (x, y) this function itself takes), not the font's own
+// rotated frame, so it reads as a normal up/down/left/right outline regardless of
+// orientation. Costs 5x the glyph draws of a plain pnx_text_draw -- fine for a few short
+// HUD strings a frame, not meant for a paragraph of dialogue.
+int16_t pnx_text_draw_outlined(PnxTarget* t, const PnxFont* f, const char* s, int32_t x,
+							   int32_t y, uint8_t fill_colour, uint8_t outline_colour);
+
+// A depth=2 font's baked outline and two fill levels, each in its own colour, in one pass
+// -- sharper than pnx_text_draw_outlined's dynamic offsets (a baked ring follows the
+// letterform instead of approximating it from 4 cardinal draws) and cheaper (1 draw per
+// glyph, not 5). `fill_a`/`fill_b` are levels 2/3 from rasterise_glyph_styled or a
+// glyph_overrides entry; a font that never uses fill B (the common case: auto-baked glyphs
+// never produce it) can pass the same colour for both.
+//
+// Falls back to pnx_text_draw_outlined on a depth=1 font, which has no baked levels to
+// draw from -- fill_b is dropped in that case, since depth=1 has no second fill colour to
+// give it meaning.
+int16_t pnx_text_draw_gradient_outlined(PnxTarget* t, const PnxFont* f, const char* s,
+										int32_t x, int32_t y, uint8_t outline_colour,
+										uint8_t fill_a, uint8_t fill_b);
 
 // Word-wrapped into a box. `x, y` is the baseline of the FIRST line; `w` is the wrap
 // width. `h` bounds the drawing -- lines whose baseline would fall past `y + h` are not

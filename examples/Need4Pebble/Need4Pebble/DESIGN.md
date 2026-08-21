@@ -1,7 +1,7 @@
 # Need 4 Pebble
 
-An OutRun-style pseudo-3D racer for Pebble Time 2 (emery). Landscape, two-handed,
-shoulder-trigger controls.
+An OutRun-style pseudo-3D racer for Pebble, targeting all seven pebblnyx-supported
+platforms (see "Multi-platform"). Landscape, two-handed, shoulder-trigger controls.
 
 ## Core loop
 
@@ -37,8 +37,11 @@ crash -- steering it into traffic or off the road wrecks it the same two ways th
 player's own car can wreck (`TRAFFIC_BEHIND_MARGIN` raised 60->220, game.h, so a
 just-passed traffic car sticks around long enough behind the player to actually be
 steerable into a trailing cop, and so a player who slows back down can catch up to
-one they already passed). No scoring hook yet (see "Open questions" --
-`police_takedowns` in the scoring formula is still unweighted). `police_normal`/
+one they already passed). Now scored (see "Checkpoints, timer, and scoring" below):
+`game.c`'s `police_crash` -- the single call site both self-crash paths in
+`police_tick` (off-road, into traffic) route through -- awards `POLICE_TAKEDOWN_SCORE`
+and posts the "ELUDED +2000" HUD banner; a ram that crashes the PLAYER (`check_collision`'s
+police branch) does not, since the cop didn't crash there. `police_normal`/
 `police_crash` (the sprite set the assets note below describes) are what
 `draw_police` actually draws; `police_slope`/`police_title`/`police_avatar` are
 staged but not yet used by anything.
@@ -95,8 +98,154 @@ load list (~29.3KB) with headroom; heap was never the binding constraint
 **Game over**: hitting 0 velocity with an active (not currently crashed) pursuer
 within `POLICE_BUST_RANGE` world units is "BUSTED" (`game.h`/`game.c`'s
 `check_busted`) -- whatever caused the stop, a forced collision or just braking
-to a stop mid-chase. Frozen like `paused` (`Game.game_over`), but BACK restarts
-(`game_restart`) instead of resuming -- see "Controls".
+to a stop mid-chase. Frozen like `paused` (`Game.game_over_reason`, one of two
+ways a run can now end -- see "Checkpoints, timer, and scoring"), but BACK
+restarts (`game_restart`) instead of resuming -- see "Controls".
+
+## Checkpoints, timer, and scoring
+
+The core loop DESIGN.md always described but hadn't built: a countdown clock,
+checkpoints that add to it, and a score built from more than one signal (distance,
+near-misses, checkpoints, police takedowns). First cut -- see "Open questions" for
+what's still an eyeballed guess rather than felt in-hand.
+
+**The clock.** `Game.timer_ticks_left` (`game.h`) counts down from
+`RACE_TIMER_START_TICKS` (45s); reaching 0 sets `Game.game_over_reason` to
+`GAME_OVER_TIME_UP` (`game.c`'s `tick_clock`) -- a second way a run can end,
+alongside `GAME_OVER_BUSTED`. Both freeze the sim exactly like `paused` and both
+restart on BACK rather than resume (`main.c`); `render.c`'s `draw_game_over` reads
+the reason to show "BUSTED" or "TIME'S UP". The clock runs through a crash/stun,
+same as traffic and a chasing cop already do -- DESIGN.md's "contact costs time"
+is this, for free, not a separate penalty.
+
+**Checkpoints.** `Game.next_checkpoint_z` starts at `CHECKPOINT_SPACING` (2800 world
+units -- 2 per lap on `TRACK`'s 5600-unit loop) and simply keeps incrementing by
+that amount every time `game.c`'s `check_checkpoint` sees `distance` clear it, so a
+looping test track just keeps handing out checkpoints lap after lap rather than
+needing to wrap. Each one adds `CHECKPOINT_TIME_BONUS_TICKS` to the clock and
+`CHECKPOINT_SCORE` (200) to the score. Spacing was originally 700 (8/lap) and the
+time bonus a flat 12s -- reported directly as "too frequent, too valuable, and
+award far too much time": at `MAX_SPEED` cruise, 700 units took ~1.1s to cover, so
+a flat 12s bonus was an 11s windfall on almost every tick. `CHECKPOINT_TIME_BONUS_TICKS`
+is no longer a flat number: `CHECKPOINT_PERFECT_TICKS` (`game.h`) is the ceiling-
+divided tick count to cover `CHECKPOINT_SPACING` at `MAX_SPEED` (cruise -- "perfect
+driving"), plus a small fixed buffer -- "one checkpoint should be 5-10s more than
+needed to reach the next checkpoint with perfect driving" (the ask, verbatim), so
+it recalculates correctly if spacing or top speed ever change again rather than
+needing to be re-tuned by hand alongside them.
+
+**Scoring**, `game.h`'s own comment has the full breakdown:
+- Distance isn't accumulated into `Game.score` at all -- `Game.distance` is already
+  a running total, so `render.c`'s `hud_total_score` just reads
+  `distance / DISTANCE_SCORE_DIVISOR` directly at display time.
+- Near misses: `check_collision`'s traffic loop, on a car that DIDN'T collide,
+  checks the same Z window `TRAFFIC_COLLIDE_Z` uses against a wider lane band
+  (`NEAR_MISS_LANE_MAX`) -- "close enough to have hit at a slightly different
+  line." `Traffic.near_miss_scored` caps it at one `NEAR_MISS_SCORE` (150) per
+  approach, cleared by `traffic_spawn` on the next recycle.
+- Checkpoints: `CHECKPOINT_SCORE`, above.
+- Police takedowns ("eluding police" per the ask): `POLICE_TAKEDOWN_SCORE` (2000)
+  -- see "Police: chase, not traffic"'s own updated note.
+
+Every award (`game.c`'s `award_score`) both adds to `Game.score` and posts a
+short-lived banner (`Game.hud_event`, e.g. "CHECKPOINT +200") that `render.c`'s
+`draw_hud_event` shows centred under the score/timer for `HUD_EVENT_TICKS` (~1.8s)
+before disappearing -- ticks, not wall-clock, same as everything else timed here,
+so it freezes with the sim rather than animating through a pause.
+
+**HUD.** `render.c`'s `draw_hud` draws score (top-left) and the clock as `M:SS`
+(top-right, not a bare seconds count -- two plain numbers in the same corner
+would otherwise be easy to confuse), both `pnx_text_draw_outlined` (below) rather
+than boxed -- an opaque backing rect was the first draft, dropped per direct
+feedback ("I hate the black background on the sprites"). `draw_hud_event`'s
+banner and `draw_pause_menu`/`draw_game_over`'s panel text draw the same way,
+except the panel keeps its own solid box (a deliberate modal background, not
+what the feedback was about) so its text stays on the plain `pnx_text_draw`.
+
+**Outlined text, an engine addition.** `pnx_text_draw_outlined`
+(`src/pnx/gfx/pnx_text.h`/`.c`, host-tested in `tests/test_text.c`) draws a
+1px outline (4 cardinal offsets, not 8 -- barely thicker at this glyph size and
+half the draw cost) before the fill colour, so a HUD string over open sky/road
+stays legible without an opaque panel behind it. Engine-level, not project-
+local -- the same "pull it up a level once a technique gets reused" call this
+project has made before (`pnx_gfx_fill_rect_dither`, `pnx_tween`), and broadly
+useful to any pebblnyx game with a HUD, not specific to a racer.
+
+**Two typefaces, split by content, not by which HUD element it is.** "Numbers =
+Monster Racing. Text = Racing Energy" (the ask, verbatim, after two earlier
+attempts at this split didn't land): score/timer/speedometer-value are pure
+numbers, `hud`/`menu` menu-panel labels are pure text, and `draw_hud_event`'s
+banner ("CHECKPOINT +200") and `draw_game_over`'s score line ("SCORE 13170")
+mix both in one string. The FIRST fix for the mixed case was a render-time
+split -- draw the label in one font, measure it, draw the value in the other
+flush after it -- which worked but was real machinery (a duplicated split/
+measure/draw path) for what turned out to be a font-authoring problem, not a
+rendering one: "just combine all the rendered glyphs into a single font."
+`assets.toml`'s `menu` font now does exactly that -- `overlay_source`/
+`overlay_charset` (a new `pnx_assets.py` capability, `pack_font`) rasterise
+just the digits/`+` from Monster Racing while every other character still
+comes from Racing Energy, all baked into ONE packed font asset at build time.
+`render.c` went back to one plain draw call per string once this landed; no
+game code needs to know two typefaces are involved. `hud` (score/timer) stays
+pure Monster Racing -- its own charset is 100% digits already, nothing to
+overlay. See `assets.toml`'s own comment on the `menu` font for the fuller
+back-and-forth (Monster Racing needed `tracking` to stop letters touching at
+14px; Racing Energy read fine for letters but its own digit glyphs turned out
+broken; the combination keeps only each face's strong half).
+
+**The speedometer is a vertical stack of horizontal bars, not a curved arc.**
+Went through two designs before landing: first a straight bar-plus-"N MPH"-text
+gauge, then a curved ring of small rotated rectangles swept clockwise from the
+corner (both replaced after direct follow-up -- "no MPH text," then "I want it
+to be counter clockwise," then a full redescription: "purely horizontal bars...
+a synthwavey stack of slightly differently colored boxes... shift to a more
+saturated color when activated. Imagine a cornucopia resting vertically, the
+green tip on the bottom, wide opening on the top... remove chunks of horizontal
+sections so it has a transparent gradient look"). `render.c`'s `draw_speedometer`
+now draws `GAUGE_SEGMENTS` (6) plain axis-aligned `fb_rect` bars, right-aligned
+to a shared edge and bottom-up stacked from the round-safe/car-safe pivot (below)
+-- bar 0 narrowest/green at the bottom, bar 5 widest/red at the top, a real gap
+between bars (not touching), no outline (the gauge's own "no black background"
+equivalent). `gauge_segment_colour` is the bar's fixed, printed-scale hue (green
+-> yellow -> red across the SEGMENT INDEX, the same two-stop `pnx_tween_gcolor8`
+cross-fade the sky/sun ramps use); `gauge_segment_dim_colour` blends that toward
+a near-black navy for bars not yet reached, rather than one shared grey for
+every unlit bar, so even a dim bar keeps a hint of its own eventual hue. How
+many bars are lit is the actual value slider -- a plain fraction of `MAX_SPEED`.
+The speed VALUE itself sits above the widest bar, `menu_font` (small, mixed
+per above) rather than `hud_font` -- no unit suffix. Being a stack of plain
+axis-aligned rects rather than a rotated arc is also what made this trivial to
+keep round-safe and identical on square displays: only the shared pivot point
+needs the round-safe/car-safe check (below), since every bar's own footprint
+is strictly further from the true corner than the pivot in both axes (bars
+extend left of it, stack upward from it) -- "the same shape should exist on
+the square displays but placed in the right corner" is true by construction,
+the geometry never referenced platform shape at all.
+
+**A real rasterisation bug caught along the way**: the curved-arc draft's
+rotated-rectangle segments (since replaced) used forward-mapped local (t, r)
+steps into world pixels, which doesn't guarantee one output pixel per one
+integer input step in every direction -- some destination pixels were never
+hit at all, visible as flecks of the ROAD's own magenta grid lines showing
+through what should have been solid segments in an emulator screenshot. Fixed
+(at the time) by scanning the world-space bounding box and testing each
+candidate pixel against the rotated rect via inverse transform instead --
+moot now that the design itself changed to plain axis-aligned bars, but worth
+remembering the shape of for any future rotated-shape fill in this engine.
+
+**Round-safe placement**: see "Multi-platform" below for `round_safe_margin`/
+`round_safe_row_for_width`, the project-local math that places all of the
+above correctly on a round display.
+
+**A real bug this caught**: the `menu` font's charset (`assets.toml`) was
+literally never given digits -- `extra = "ABCDEFGHIJKLMNOPQRSTUVWXYZ :"`, built for
+"PAUSED"/"STEER: TILT"-style text only, before any HUD element ever needed a
+number. A character outside a font's charset renders as `FONT_ABSENT` --
+silently nothing, not a visible fallback glyph -- so the first draft of the score/
+timer HUD (before the `hud` font existed) rendered as a couple of stray pixels
+per number, confirmed via a rotated emulator screenshot before the cause was
+clear. Fixed by adding digits and `+` to `menu`'s own `extra`, independent of
+adding the new `hud` font for the numeric readouts themselves.
 
 ## Personalization: car recolor
 
@@ -449,11 +598,18 @@ Built (across this and the following session):
   drive-length cycle driving both, a real-road edge/lane redesign, and the
   traffic recolour, plus the engine-level `pnx_gfx_fill_rect_dither`
   primitive it's all built on -- see "Aesthetic" above.
+- Checkpoints, race timer, time-added-on-checkpoint, and a first-cut scoring
+  formula (distance/near-misses/checkpoints/police takedowns) with an
+  outlined-text HUD and a curved segmented speedometer gauge -- see
+  "Checkpoints, timer, and scoring" above.
+- All seven pebblnyx-supported platforms, including round-safe HUD placement
+  (`chalk`/`gabbro`) and a new engine-level `pnx_text_draw_outlined` primitive
+  -- see "Multi-platform" above.
 
 Not built yet, in roughly the order they'd naturally get added:
-- Checkpoints, race timer, time-added-on-checkpoint.
-- Score, multiple maps/stage select, high score persistence (`pnx_save` exists and
-  is host-tested per prior work, not yet wired here).
+- Multiple maps/stage select, high score persistence (`pnx_save` exists and is
+  host-tested per prior work, not yet wired here -- the score built this session
+  lives only for the current run, same as `distance` always has).
 - Car recolor (`variants`, see "Personalization: car recolor").
 - Synthwave art pass (current art is placeholder).
 - Feature backlog items, pulled in whenever -- see that section.
@@ -462,8 +618,59 @@ Not built yet, in roughly the order they'd naturally get added:
 
 - Steering-input choice (touch drag vs. something else) is a guess -- confirm once
   it's playable in-hand.
-- Scoring formula (distance? time remaining? near-misses? perfect checkpoints?
-  police takedowns? some weighted combination?) is unspecified.
+- Scoring weights (`CHECKPOINT_SCORE` 200, `NEAR_MISS_SCORE` 150,
+  `POLICE_TAKEDOWN_SCORE` 2000, `DISTANCE_SCORE_DIVISOR` 10 -- game.h) are a first
+  cut, eyeballed the same way the curve-tuning constants below were -- not felt
+  in-hand or balanced against an actual full run yet, though `CHECKPOINT_SCORE`
+  and `CHECKPOINT_TIME_BONUS_TICKS` at least are no longer PURELY eyeballed --
+  see `CHECKPOINT_PERFECT_TICKS`'s own comment for the derivation. Whether a
+  checkpoint should additionally reward centred crossing ("perfect checkpoint,"
+  feature backlog) is still open.
+- **`SCENE_BYTES` (game.h) is hand-tuned and has already silently broken twice**
+  (`police_normal` failing to load, then `traffic_car` on the very next asset
+  added after that) -- direct feedback: "manually adjusting scene arena like
+  this is tedious and a foot-gun for users." `pnx_assets.py` already computes a
+  per-scene resident-byte report (`report_scene_budgets`) but only when a
+  project declares `[scene.*]`, which this one doesn't, and even then it's a
+  console report a human has to read and hand-copy, not a constant a game can
+  just use. The easy fix (emit a generated `PNX_ASSET_..._BYTES` upper bound,
+  sum of every declared sprite/font/palette, and size the arena off that) was
+  deliberately NOT taken -- explicitly asked for something more creative than
+  "reserve the conservative max and let it sit unused" first. Revisit; no
+  design decided yet.
+- **The running packaged `pebblnyx-editor` app silently reverted BOTH the engine
+  patch and the resource build twice this session** -- it bundles its own,
+  older copy of pebblnyx (engine C sources AND `tools/pnx_assets.py`), and
+  re-stages/rebuilds from that bundle on its own schedule, independent of and
+  overwriting whatever the live `~/CLionProjects/pebblnyx` checkout produces.
+  First hit: `pnx_text_draw_outlined` (a live-checkout-only addition) vanished
+  from `src/c/pnx/`, `pebble build` failing with an implicit-declaration error
+  on every platform -- fixed by re-staging from the live checkout and calling
+  `pnx_project.take_engine_ownership(folder, True)` (`.pknproj`'s
+  `engine_owned`), pebblnyx's own existing mechanism for exactly this, so the
+  editor stops touching `src/c/pnx/` for this project going forward. Second
+  hit, same session: `resources/font_menu.bin` got silently rebuilt by the
+  editor's own bundled (overlay-unaware) `pnx_assets.py`, which doesn't
+  understand `overlay_source`/`overlay_charset` at all and just silently
+  drops unknown manifest keys -- every digit in `menu` fell back to Racing
+  Energy's own broken numerals again, all rendering as the SAME glyph
+  (confirmed by parsing the packed `.bin` directly: identical offset/w/h for
+  every digit 0-9, a `pack_font` dedup collapsing what should have been ten
+  distinct glyphs into one). Reported directly as "all numbers except the
+  timer and score on the HUD are busted" -- score/timer (`hud` font, no
+  overlay, pure single-source Monster Racing) were never touched by this,
+  which is exactly why they were the two things that still worked. Fixed by
+  re-running the live checkout's `pnx_assets.py` again. **No engine_owned-
+  equivalent lock exists for resources/the asset pipeline** -- unlike the C
+  engine, there is nothing stopping the old editor from silently redoing this
+  again the next time it touches this project. Until the packaged editor is
+  rebuilt from a checkout that has the overlay feature, re-running
+  `python3 <live-checkout>/tools/pnx_assets.py assets.toml --package
+  package.json` is the recovery step if digits break again with this exact
+  signature (every digit identical).
+- The `hud` font (`assets.toml`'s "Monster Racing") is free for personal use only
+  -- fine for local builds, a blocker before any appstore submission or other
+  distribution unless replaced or licensed. See its own `[[font]]` comment.
 - Pursuit tuning: one pursuer at a time, occasional cooldown-based spawn,
   proportional gap-correction chase speed (see "Police: chase, not traffic")
   are all eyeballed starting points, not felt in-hand or confirmed against
@@ -475,6 +682,87 @@ Not built yet, in roughly the order they'd naturally get added:
 - Curve tuning constants (`CURVE_SCALE`, `CENTRIFUGAL_DIVISOR`,
   `CORNER_INSIDE_BONUS`, `CORNER_OUTSIDE_NUM`/`DEN` in `game.h`) are eyeballed
   from emulator screenshots, not felt in-hand on real hardware yet.
+- `draw_pause_menu`/`draw_game_over`'s panel (`fb_rect(target, 24, 48, LOGICAL_W-48,
+  104, ...)`) still uses fixed pixel margins tuned against `emery`'s 200x228 --
+  not re-derived per platform the way the HUD now is (below). Checked against
+  `chalk` (180x180): the panel's own bottom-left corner sits ~0.6% outside that
+  platform's inscribed circle (dist²=8200 vs r²=8100) -- barely, probably a
+  single clipped row, not confirmed visually. Also untested on `aplite`/
+  `diorite`'s shorter 168px-tall display (168 - (48+104) = 16px bottom margin --
+  cramped, not clipped, since those are rect). `round_safe_margin()` (`render.c`)
+  exists now and could size this panel too; not done here since it wasn't part
+  of what this session's checkpoints/scoring/HUD work actually touched.
+
+## Multi-platform
+
+Was `targetPlatforms: ["emery"]` only; now targets all seven pebblnyx supports
+(`aplite`, `basalt`, `chalk`, `diorite`, `emery`, `flint`, `gabbro` --
+`package.json`). Confirmed by building all seven, clean, via the project's own
+`pebble build` (`pebble clean` first to force every platform to actually
+recompile rather than reuse a cached emery-only tree) -- no errors, no resource-
+budget overage on any of them. The asset pipeline's existing `pack_2bit`
+mechanism (`assets.toml`'s own pipeline output: "emitting ~bw resource variants")
+already emits 1-bit variants for `aplite`/`diorite` automatically; nothing in
+this project had to change for colour depth. `aplite` is the tightest fit --
+6,619 B free heap of a 24 KB budget -- but links and reports fine; not yet run
+on the `aplite` emulator or real hardware, only confirmed via the linker's own
+memory report.
+
+**Round-safe HUD placement**, the one real gap: corner-anchored UI (score,
+timer, speedometer) is correct on a rect display but wrong on a round one
+(`chalk`/`gabbro`, both `PBL_ROUND`) -- a literal screen corner falls outside
+a round bezel's visible circle. `docs/PORTING.md`, pebblnyx's own porting
+reference, names this exact problem ("Round corners | safe-area rect from
+per-row bounds") with no engine primitive for it yet anywhere in the framework
+-- real work, not something to fake with a guessed margin. Built here instead,
+project-local, two related functions in `render.c`, both integer-only (squared-
+distance comparisons, no sqrt/trig -- `LOGICAL_W == VIEW_H` on every round
+platform makes the visible area exactly the circle inscribed in that square,
+so this is exact math, not an approximation):
+- `round_safe_margin()`: the smallest inset `m` such that a box's own near
+  corner, offset `(m, m)` from whichever screen corner it's anchored to,
+  provably clears the circle. A box's far corner, extending inward by its own
+  width/height, is always closer to centre than this near corner, so checking
+  just the one point is sufficient regardless of box size -- what
+  `draw_hud`'s score/timer and `draw_speedometer`'s gauge pivot are both
+  anchored against.
+- `round_safe_row_for_width()`: the smallest row at which the circle is at
+  least a given width -- for CENTRED content (`draw_hud_event`'s banner),
+  whose exposure is width, not a corner. Added after a first assumption --
+  "centred content only gets safer moving down the screen" -- turned out true
+  in DIRECTION but not automatically SUFFICIENT: a "CHECKPOINT +500" banner
+  positioned right below the score/timer row still ran past the bezel on the
+  right, confirmed directly on the `chalk` emulator (rotated screenshot), once
+  its own text turned out wider than the row it was sitting at could clear.
+  Fixed by deriving the row FROM the banner's own measured width instead of
+  assuming any fixed offset was enough.
+
+`round_safe_margin` also anchors `draw_speedometer`'s pivot (its bar-stack
+design now, see "Checkpoints, timer, and scoring" above -- was a curved arc of
+rotated segments when this was first verified, below, but the safety argument
+carries over unchanged: every bar's own footprint is strictly further from the
+true corner than the pivot, in both axes, so the pivot clearing the check is
+sufficient regardless of what shape extends from it).
+
+Confirmed on the `chalk` emulator (rotated screenshots, same pipeline used
+throughout this project): score, timer, the gauge (the curved-arc version, at
+the time), and the checkpoint banner all clear of the bezel with visible
+margin, across a fresh boot, mid-drive, and max-speed sequence, before AND
+after the banner fix above (the fix was caught by this same screenshot
+process, not assumed correct on the first attempt). Re-confirmed `emery`
+(rect) renders correctly throughout -- every `#ifdef PBL_ROUND` branch is
+inert there, not just visually similar. Not re-screenshotted on `chalk` since
+the gauge's own redesign to a bar stack -- the geometric argument above is
+unchanged either way, but this is a real gap in DIRECT confirmation, not just
+reasoning, worth closing before trusting it further.
+
+**Not done**: `gabbro`'s own QEMU emulator has known missing-pixel rendering
+issues (`pebblnyx/docs/EDITOR.md` flags this independently) that made it a
+worse test target than `chalk` for visual confirmation -- round-safety was
+verified geometrically (the same circle math applies to both, `LOGICAL_W`/
+`VIEW_H` just differ) and on `chalk` directly, not screenshotted on `gabbro`
+itself. Neither round platform, nor `aplite`/`diorite`/`basalt`/`flint`, has
+been run on real hardware.
 
 **Fixed bug, worth remembering the shape of:** the outside-of-a-curve penalty
 was originally a flat `-2`/tick, every tick, unconditionally, whenever the

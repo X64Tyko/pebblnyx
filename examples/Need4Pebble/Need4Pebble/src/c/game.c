@@ -17,6 +17,16 @@ static uint32_t rng_next(Game* g)
 	return g->rng;
 }
 
+// Every scoring event (checkpoint/near-miss/police takedown) both adds to the running
+// total AND posts the same short-lived HUD banner (render.c's draw_hud_event) -- one
+// call site instead of every award needing to remember both halves.
+static void award_score(Game* g, uint32_t amount, const char* label)
+{
+	g->score += amount;
+	pnx_format(g->hud_event, sizeof(g->hud_event), "%s +%u", label, (unsigned)amount);
+	g->hud_event_ticks_left = HUD_EVENT_TICKS;
+}
+
 // Places `t` somewhere between SPAWN_AHEAD_MIN and +SPAWN_AHEAD_SPAN ahead of
 // `ahead_of`, in a random lane, at a random speed within the traffic band. Used both
 // at boot (staggered) and to recycle a car the player has passed or crashed into.
@@ -28,6 +38,7 @@ static void traffic_spawn(Game* g, Traffic* t, uint32_t ahead_of)
 	t->lane_x = lane_center((int32_t)(rng_next(g) % LANES));
 	t->speed  = TRAFFIC_MIN_SPEED +
 		(int32_t)(rng_next(g) % (TRAFFIC_MAX_SPEED - TRAFFIC_MIN_SPEED + 1));
+	t->near_miss_scored = false; // a fresh approach -- see check_collision
 }
 
 // Staggered so the whole set doesn't spawn bunched into one window. Shared by boot and
@@ -58,7 +69,9 @@ static void police_reset(Game* g, bool first)
 bool game_boot(Game* g)
 {
 	memset(g, 0, sizeof(*g));
-	g->rng = 0x9E3779B9u; // any nonzero fixed seed; xorshift never recovers from 0
+	g->rng				 = 0x9E3779B9u; // any nonzero fixed seed; xorshift never recovers from 0
+	g->next_checkpoint_z = CHECKPOINT_SPACING;
+	g->timer_ticks_left	 = RACE_TIMER_START_TICKS;
 
 	if (!pnx_arena_init(&g->persistent, "persistent", PERSIST_BYTES, 4) ||
 		!pnx_arena_init(&g->scene, "scene", SCENE_BYTES, 4))
@@ -76,9 +89,15 @@ bool game_boot(Game* g)
 	g->has_crash = pnx_sprite_load(&g->crash, PNX_ASSET_SPRITE_TOURING_CRASH);
 	if (!g->has_crash)
 		pnx_platform_log("need4pebble: crash sprite would not load");
+	g->has_traffic_car = pnx_sprite_load(&g->traffic_car, PNX_ASSET_SPRITE_TRAFFIC_CAR);
+	if (!g->has_traffic_car)
+		pnx_platform_log("need4pebble: traffic car sprite would not load");
 	g->has_menu_font = pnx_font_load(&g->menu_font, PNX_ASSET_FONT_MENU);
 	if (!g->has_menu_font)
 		pnx_platform_log("need4pebble: menu font would not load");
+	g->has_hud_font = pnx_font_load(&g->hud_font, PNX_ASSET_FONT_HUD);
+	if (!g->has_hud_font)
+		pnx_platform_log("need4pebble: hud font would not load");
 	g->has_police = pnx_sprite_load(&g->police_car, PNX_ASSET_SPRITE_POLICE_NORMAL);
 	if (!g->has_police)
 		pnx_platform_log("need4pebble: police sprite would not load");
@@ -107,8 +126,14 @@ void game_restart(Game* g)
 	g->corner_penalty_accum = 0;
 	g->crash_ticks_left		= 0;
 	g->paused				= false;
-	g->game_over			= false;
+	g->game_over_reason		= GAME_OVER_NONE;
 	// use_tilt_steer is a player preference, not run state -- left alone.
+
+	g->score				= 0;
+	g->next_checkpoint_z	= CHECKPOINT_SPACING;
+	g->timer_ticks_left		= RACE_TIMER_START_TICKS;
+	g->hud_event[0]			= '\0';
+	g->hud_event_ticks_left = 0;
 
 	traffic_reset(g);
 	police_reset(g, true);
@@ -154,6 +179,17 @@ static void check_collision(Game* g)
 			traffic_spawn(g, t, g->distance); // this one's gone; the slot lives on
 			return;
 		}
+
+		// Near miss: close in the same Z window a collision would use, but outside the
+		// collision lane band (the check above already ruled that band out this tick) --
+		// "would have hit at a slightly different line," scored once per approach
+		// (near_miss_scored, cleared by traffic_spawn on the next recycle).
+		if (!t->near_miss_scored && dz > -TRAFFIC_COLLIDE_Z && dz < TRAFFIC_COLLIDE_Z &&
+			dx > -NEAR_MISS_LANE_MAX && dx < NEAR_MISS_LANE_MAX)
+		{
+			t->near_miss_scored = true;
+			award_score(g, NEAR_MISS_SCORE, "NEAR MISS");
+		}
 	}
 
 	// The pursuing cop forcing a hit, not the player driving into it (DESIGN.md:
@@ -177,6 +213,18 @@ static void check_collision(Game* g)
 			g->lane_x			= pnx_clamp_i32(g->lane_x + shove, -PLAYER_LANE_MAX, PLAYER_LANE_MAX);
 		}
 	}
+}
+
+// The cop wrecking itself (off-road, or into traffic) -- the player's actual tool for
+// shaking a chase (DESIGN.md), and per that doc's own "Open questions," the one scoring
+// hook that didn't exist yet ("police_takedowns in the scoring formula is still
+// unweighted"). Both call sites in police_tick funnel through here so the award can
+// never be missed on one path and not the other.
+static void police_crash(Game* g, Police* p)
+{
+	p->crash_ticks_left = CRASH_TOTAL_TICKS;
+	p->speed			= 0;
+	award_score(g, POLICE_TAKEDOWN_SCORE, "ELUDED");
 }
 
 // Chase AI. Spawns occasionally (a cooldown, not a per-tick chance -- see
@@ -270,8 +318,7 @@ static void police_tick(Game* g)
 	road_row(VIEW_H - 1, current_horizon_y((uint32_t)p->z), &row);
 	if (p->lane_x > row.half_width || p->lane_x < -row.half_width)
 	{
-		p->crash_ticks_left = CRASH_TOTAL_TICKS;
-		p->speed			= 0;
+		police_crash(g, p);
 		return;
 	}
 
@@ -287,8 +334,7 @@ static void police_tick(Game* g)
 		if (dz > -TRAFFIC_COLLIDE_Z && dz < TRAFFIC_COLLIDE_Z &&
 			ddx > -TRAFFIC_COLLIDE_LANE_HALF && ddx < TRAFFIC_COLLIDE_LANE_HALF)
 		{
-			p->crash_ticks_left = CRASH_TOTAL_TICKS;
-			p->speed			= 0;
+			police_crash(g, p);
 			traffic_spawn(g, t, g->distance);
 			return;
 		}
@@ -301,14 +347,44 @@ static void police_tick(Game* g)
 // correction is still very much "right there" (see that constant's own comment).
 static void check_busted(Game* g)
 {
-	if (g->game_over || g->speed != 0)
+	if (g->game_over_reason != GAME_OVER_NONE || g->speed != 0)
 		return;
 	const Police* p = &g->police;
 	if (!p->active || p->crash_ticks_left > 0)
 		return;
 	const int32_t gap = (int32_t)g->distance - p->z;
 	if (gap >= 0 && gap <= POLICE_BUST_RANGE)
-		g->game_over = true;
+		g->game_over_reason = GAME_OVER_BUSTED;
+}
+
+// Crossing CHECKPOINT_SPACING world units: time + score, DESIGN.md's "crossing a
+// checkpoint adds time" -- a while loop (not `if`) in case one tick's distance jump ever
+// clears more than one checkpoint at once (it doesn't at these speeds, but costs nothing
+// to be correct if MAX_SPEED or CHECKPOINT_SPACING ever change).
+static void check_checkpoint(Game* g)
+{
+	while (g->distance >= g->next_checkpoint_z)
+	{
+		g->next_checkpoint_z += CHECKPOINT_SPACING;
+		g->timer_ticks_left += CHECKPOINT_TIME_BONUS_TICKS;
+		award_score(g, CHECKPOINT_SCORE, "CHECKPOINT");
+	}
+}
+
+// The race clock and the HUD event banner's own fade -- both plain tick-count-downs,
+// grouped here since every game_tick exit path (stunned or driving) needs both. Runs
+// through a crash/stun on purpose: DESIGN.md's "contact costs time" is this, for free --
+// the clock does not pause just because the player did.
+static void tick_clock(Game* g)
+{
+	if (g->timer_ticks_left > 0)
+	{
+		g->timer_ticks_left--;
+		if (g->timer_ticks_left == 0 && g->game_over_reason == GAME_OVER_NONE)
+			g->game_over_reason = GAME_OVER_TIME_UP;
+	}
+	if (g->hud_event_ticks_left > 0)
+		g->hud_event_ticks_left--;
 }
 
 void game_toggle_pause(Game* g)
@@ -346,8 +422,8 @@ void game_tick(Game* g)
 {
 	if (g->paused)
 		return; // frozen: traffic, crash countdown, everything -- see game_toggle_pause
-	if (g->game_over)
-		return; // frozen until game_restart -- BACK's job while BUSTED, see main.c
+	if (g->game_over_reason != GAME_OVER_NONE)
+		return; // frozen until game_restart -- BACK's job while BUSTED/TIME_UP, see main.c
 
 	g->tick_count++;
 
@@ -361,6 +437,7 @@ void game_tick(Game* g)
 		traffic_tick(g);
 		police_tick(g);
 		check_busted(g);
+		tick_clock(g);
 		return;
 	}
 
@@ -460,9 +537,11 @@ void game_tick(Game* g)
 	police_tick(g);
 
 	g->distance += (uint32_t)g->speed;
+	check_checkpoint(g); // after distance moves -- checks against the position just reached
 
 	// After the tick's own distance update -- a no-op when speed is 0 (the only case
 	// check_busted cares about) either way, but keeps this reading as "state settled
 	// for the tick" rather than "mid-update."
 	check_busted(g);
+	tick_clock(g);
 }

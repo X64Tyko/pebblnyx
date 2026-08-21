@@ -1,6 +1,5 @@
 #include "render.h"
 #include "track.h"
-#include "assets_gen.h" // SPRITE_TOURING_NORMAL_PALETTE_TRAFFIC, draw_traffic's own recolour
 
 // ------------------------------------------------------------------------- colour
 //
@@ -360,11 +359,13 @@ static bool depth_to_row(int32_t relative_z, int32_t horizon_y, int32_t* out_y,
 	return true;
 }
 
-// Traffic reuses the player's own touring_normal handle (g->car) -- same asset, other
-// tiers/angles, see game.h's own comment on why that's not a second sprite load.
+// Its own sprite (g->traffic_car), not a reuse of the player's touring_normal handle --
+// used to be, until "make the traffic cars 10% smaller" needed a real geometry change
+// `variants` (a palette swap only) can't express. See assets.toml's "traffic car"
+// section for how the smaller sheet/frame rects were derived.
 static void draw_traffic(PnxTarget* target, const Game* g, int32_t horizon_y)
 {
-	if (!g->has_car)
+	if (!g->has_traffic_car)
 		return;
 
 	for (int i = 0; i < MAX_TRAFFIC; i++)
@@ -404,13 +405,13 @@ static void draw_traffic(PnxTarget* target, const Game* g, int32_t horizon_y)
 		const int32_t ax_logical = LOGICAL_W / 2 + curve_offset + screen_x;
 		const int32_t dy		 = y - elev_offset;
 
-		// Recoloured (orange, not the player's own green) so traffic reads as distinct
-		// from the player's car at a glance, reported directly ("recolor the traffic
-		// cars so they stand out on the road") -- same bitmap, a palette swap
-		// (assets.toml's touring_normal `variants`), not a second sprite.
+		// No palette override -- traffic_car's own pixels are already the recoloured
+		// orange (baked into art/traffic_small.png at the source), unlike touring_normal's
+		// own green original that the old shared-sprite approach had to override at draw
+		// time.
 		const uint8_t frame = (uint8_t)(tier * 9 + 4); // angle 4: facing straight ahead
-		pnx_sprite_draw(&g->car, target, &CAM0, VIEW_H - 1 - dy, ax_logical, frame,
-						pnx_palette(SPRITE_TOURING_NORMAL_PALETTE_TRAFFIC), false);
+		pnx_sprite_draw(&g->traffic_car, target, &CAM0, VIEW_H - 1 - dy, ax_logical, frame,
+						NULL, false);
 	}
 }
 
@@ -544,6 +545,275 @@ static void draw_police_lights(PnxTarget* target, const Game* g)
 		fb_rect(target, 0, (VIEW_H - 1) - row, LOGICAL_W, 1, colour);
 }
 
+#define COLOUR_HUD_TEXT	   COLOUR_MENU_TEXT
+#define COLOUR_HUD_OUTLINE RGB(0, 0, 0)
+#define HUD_MARGIN		   4
+
+// ---------------------------------------------------------------- round-safe placement
+//
+// LOGICAL_W == VIEW_H on every round platform (chalk/gabbro, both PBL_ROUND -- their
+// display is physically square-bounded, and pnx's own rotation is a no-op on a square),
+// so the visible area is exactly the circle inscribed in that LOGICAL_W x LOGICAL_W box.
+// docs/PORTING.md's own porting table names this exact problem ("Round corners | safe-
+// area rect from per-row bounds | none" -- that "none" is its ENGINE SUPPORT column) --
+// nothing in pebblnyx solves it yet, so this project builds the one piece of math it
+// actually needs rather than guess a margin.
+//
+// A box anchored so its own near corner sits `m` pixels in from BOTH axes of whichever
+// screen corner it's anchored to has that corner at logical point (m, m) (or the
+// horizontal/vertical mirror for the other three corners -- same distance from centre
+// either way). The box's FAR corner, extending inward by the box's own w/h, is always
+// strictly closer to centre, so checking only the near corner is sufficient regardless
+// of the box's own size: solving distance((m,m), centre) <= radius for the smallest
+// integer m is `round_safe_margin` below. No sqrt/trig needed -- squared-distance
+// comparison only, same integer-only constraint every other engine primitive in this
+// codebase already respects (see pnx_fmt.h's own comment on why no libm exists here).
+#ifdef PBL_ROUND
+static int32_t round_safe_margin(void)
+{
+	static int32_t cached = -1;
+	if (cached < 0)
+	{
+		const int32_t r = LOGICAL_W / 2;
+		int32_t m		= 0;
+		while (m < r)
+		{
+			const int32_t k = r - m; // distance from centre along EACH axis at (m, m)
+			if (k * k * 2 <= r * r)	 // Pythagorean distance-from-centre <= r, squared
+				break;
+			m++;
+		}
+		cached = m;
+	}
+	return cached;
+}
+#define HUD_CORNER_MARGIN round_safe_margin()
+
+// Smallest row `ay` at which the display's own inscribed circle is at least
+// `half_width` wide -- for CENTRED content (draw_hud_event's banner), whose only real
+// exposure is width, not a corner. Same integer-only circle test as round_safe_margin,
+// solved for a different unknown (row, given a required width, rather than corner
+// inset given a fixed offset) -- built after a first draft assumed centred content was
+// automatically safe near the top of the screen and wasn't: confirmed clipped on the
+// `chalk` emulator ("CHECKPOINT +500" ran past the bezel on the right) once the event
+// banner's own text turned out wider than that assumption accounted for.
+static int32_t round_safe_row_for_width(int32_t half_width)
+{
+	const int32_t r = LOGICAL_W / 2;
+	for (int32_t ay = 0; ay < r; ay++)
+	{
+		const int32_t dy = r - ay;
+		// hw = sqrt(r^2 - dy^2) >= half_width, compared squared to avoid the sqrt.
+		if (r * r - dy * dy >= half_width * half_width)
+			return ay;
+	}
+	return r; // unreached for any half_width <= r, the only input this is ever called with
+}
+#else
+#define HUD_CORNER_MARGIN HUD_MARGIN
+#endif
+
+// Distance/DISTANCE_SCORE_DIVISOR, not a per-tick accumulation into Game.score --
+// Game.distance is already a running total (game.h's own comment on why this reads it
+// directly rather than double-booking distance into the event-driven score).
+static uint32_t hud_total_score(const Game* g)
+{
+	return g->score + g->distance / DISTANCE_SCORE_DIVISOR;
+}
+
+// The Y just below whatever draw_hud itself drew -- shared so draw_hud_event's banner
+// can sit clear of it without hardcoding the same figure a second time.
+static int32_t hud_below_y(const Game* g)
+{
+	return HUD_CORNER_MARGIN + g->hud_font.line_height;
+}
+
+// SCORE (top-left) / TIME (top-right) -- outlined (pnx_text_draw_outlined), not boxed.
+// An opaque backing rect was the first draft; dropped per direct feedback ("I hate the
+// black background on the sprites") in favour of an outline, the same legibility idea
+// with no rectangle pasted over the scene. Uses hud_font (the "Monster Racing" face)
+// rather than menu_font -- see assets.toml's own comment on why the split: these two
+// numbers are meant to read at a glance while actually driving, not just on a paused/
+// game-over screen.
+//
+// HUD_CORNER_MARGIN insets BOTH score and timer on BOTH axes (not just horizontally) --
+// on a round platform that resolves to round_safe_margin (its own comment above), which
+// only holds if a box/glyph's near corner is inset by the SAME amount on x and y; on a
+// rect platform it's just HUD_MARGIN either way, so this one code path is correct for
+// both shapes without a separate branch (unlike the boxed draft, a continuous full-width
+// bar genuinely needed one -- see git history/DESIGN.md if that reasoning matters again).
+static void draw_hud(PnxTarget* target, const Game* g)
+{
+	if (!g->has_hud_font)
+		return;
+
+	const int32_t m			 = HUD_CORNER_MARGIN;
+	const int32_t baseline_y = m + g->hud_font.baseline;
+
+	char score_buf[16];
+	pnx_format(score_buf, sizeof(score_buf), "%u", (unsigned)hud_total_score(g));
+	int32_t fx, fy;
+	fb_point(m, baseline_y, &fx, &fy);
+	pnx_text_draw_outlined(target, &g->hud_font, score_buf, fx, fy, COLOUR_HUD_TEXT,
+						   COLOUR_HUD_OUTLINE);
+
+	// Ticks -> M:SS, floor (not round) -- "0" shows for however long is left in the
+	// final partial second rather than reading as a beat early. MM:SS rather than a
+	// bare seconds count so it can't be mistaken for the score at a glance -- both
+	// would otherwise be plain numbers sitting in the same corner region.
+	const int32_t secs_left = pnx_max_i32(0, g->timer_ticks_left) / 25;
+	char time_buf[16];
+	pnx_format(time_buf, sizeof(time_buf), "%d:%02d", (int)(secs_left / 60), (int)(secs_left % 60));
+	const int32_t time_w = pnx_text_width(&g->hud_font, time_buf);
+	fb_point(LOGICAL_W - m - time_w, baseline_y, &fx, &fy);
+	pnx_text_draw_outlined(target, &g->hud_font, time_buf, fx, fy, COLOUR_HUD_TEXT,
+						   COLOUR_HUD_OUTLINE);
+}
+
+// A stack of horizontal bars, not a rotated arc -- second direct correction after the
+// arc draft: "purely horizontal bars... a synthwavey stack of slightly differently
+// colored boxes... shift to a more saturated color when activated. Imagine a
+// cornucopia resting vertically, the green tip on the bottom, wide opening on the
+// top... remove chunks of horizontal sections so it has a transparent gradient look."
+// Narrow/green at the bottom (near the pivot) widening to broad/red at the top -- the
+// same horizontal-band technique draw_sky already uses for its own gradient, just
+// discrete bars with real gaps between them instead of a continuous per-row sweep, and
+// no rotation/trig at all: every bar is a plain axis-aligned fb_rect, right-aligned to
+// the pivot, which is what dropping the arc buys back (the previous draft needed
+// per-pixel rotated-rect plotting purely because ITS bars ran along a curve).
+#define GAUGE_SEGMENTS	 6
+#define GAUGE_BAR_HEIGHT 5
+#define GAUGE_BAR_GAP	 3	   // the "erased" chunk between bars -- see this block's own
+							   // top comment ("remove chunks... transparent gradient")
+#define GAUGE_BAR_WIDTH_MIN 10 // segment 0 (bottom, green) -- the cornucopia's tip
+#define GAUGE_BAR_WIDTH_MAX 42 // segment GAUGE_SEGMENTS-1 (top, red) -- its wide opening
+
+// Cosmetic only -- turns the internal 0..MAX_SPEED simulation unit into a bigger,
+// more "arcade speedometer" looking number for the display (real OutRun-style HUDs
+// don't show physically accurate km/h either). Purely render.c's concern: game.c never
+// sees this value, so it can't leak into anything that actually affects the sim.
+#define SPEEDOMETER_SCALE 8
+
+#define COLOUR_GAUGE_GREEN	RGB(0, 3, 0)
+#define COLOUR_GAUGE_YELLOW RGB(3, 3, 0)
+#define COLOUR_GAUGE_RED	RGB(3, 0, 0)
+// What an unlit bar blends TOWARD -- a near-black navy rather than flat grey, so each
+// bar's dim state keeps a hint of its own eventual hue (a dim green tip still reads as
+// green-ish, not the same grey every other unlit bar gets) instead of one flat colour
+// standing in for "not reached yet" on every bar alike.
+#define COLOUR_GAUGE_DIM_BASE	 RGB(0, 0, 1)
+#define COLOUR_GAUGE_DIM_BLEND_T 650 // 0..1000 toward COLOUR_GAUGE_DIM_BASE
+
+// Green -> yellow -> red across the segment RUN (index 0..GAUGE_SEGMENTS-1), not across
+// live speed -- this is the gauge's own fixed, printed-scale colouring (like a real
+// tachometer's redline zone), separate from which segments are currently LIT (below).
+// Same two-stop pnx_tween_gcolor8 cross-fade draw_sky/draw_sun already use for their own
+// day-night ramps -- green->yellow over the first half of the run, yellow->red over the
+// second, not one three-way blend, so the midpoint lands exactly on yellow.
+static uint8_t gauge_segment_colour(int32_t index)
+{
+	const int32_t t1000 = (index * 1000) / (GAUGE_SEGMENTS - 1);
+	if (t1000 <= 500)
+		return pnx_tween_gcolor8(COLOUR_GAUGE_GREEN, COLOUR_GAUGE_YELLOW, t1000 * 2);
+	return pnx_tween_gcolor8(COLOUR_GAUGE_YELLOW, COLOUR_GAUGE_RED, (t1000 - 500) * 2);
+}
+
+// The same bar's colour, dimmed -- "slightly differently colored boxes... shift to a
+// more saturated color when activated," i.e. reached vs not-yet-reached is a SATURATION
+// change on each bar's own hue, not a swap to one shared grey for every unlit bar.
+static uint8_t gauge_segment_dim_colour(int32_t index)
+{
+	return pnx_tween_gcolor8(gauge_segment_colour(index), COLOUR_GAUGE_DIM_BASE,
+							 COLOUR_GAUGE_DIM_BLEND_T);
+}
+
+// Bottom-right -- the classic spot for an arcade racer's speedometer, clear of the road
+// ahead. Bars are right-aligned to a single shared edge and bottom-up stacked from a
+// single pivot point, so (unlike the old rotated arc) the only thing that has to clear
+// the round-safe/car-safe corner is that ONE pivot point -- every bar's own footprint is
+// strictly further from the true corner than the pivot is, in both x (bars only ever
+// extend LEFT of it) and y (bars only ever stack UPWARD from it), so nothing here needs
+// its own separate safety check. See round_safe_margin's own comment above for why the
+// round half of that is exact integer math, not a guess, and PLAYER_NEAR_ROW_MAX's own
+// comment (game.h) for why the vertical constraint exists regardless of platform shape.
+static void draw_speedometer(PnxTarget* target, const Game* g)
+{
+#ifdef PBL_ROUND
+	const int32_t ax_inset = round_safe_margin();
+	const int32_t ay_inset = pnx_max_i32(round_safe_margin(), PLAYER_NEAR_ROW_MAX + HUD_MARGIN);
+#else
+	const int32_t ax_inset = HUD_MARGIN;
+	const int32_t ay_inset = PLAYER_NEAR_ROW_MAX + HUD_MARGIN;
+#endif
+	const int32_t right_x  = LOGICAL_W - ax_inset; // every bar's shared right edge
+	const int32_t bottom_y = VIEW_H - ay_inset;	   // segment 0's own bottom edge
+
+	// How many segments are LIT (the gauge's own value slider) -- a plain fraction of
+	// MAX_SPEED, reaching every segment exactly at MAX_SPEED (GAUGE_SEGMENTS * MAX_SPEED
+	// / MAX_SPEED == GAUGE_SEGMENTS, no off-by-one at the top of the range).
+	const int32_t lit = (GAUGE_SEGMENTS * pnx_clamp_i32(g->speed, 0, MAX_SPEED)) / MAX_SPEED;
+
+	int32_t stack_top = bottom_y; // tracked through the loop, reused below for the value
+	for (int32_t i = 0; i < GAUGE_SEGMENTS; i++)
+	{
+		const int32_t width = GAUGE_BAR_WIDTH_MIN +
+			(GAUGE_BAR_WIDTH_MAX - GAUGE_BAR_WIDTH_MIN) * i / (GAUGE_SEGMENTS - 1);
+		const int32_t bar_bottom = bottom_y - i * (GAUGE_BAR_HEIGHT + GAUGE_BAR_GAP);
+		const int32_t bar_top	 = bar_bottom - GAUGE_BAR_HEIGHT;
+		const uint8_t colour	 = (i < lit) ? gauge_segment_colour(i) : gauge_segment_dim_colour(i);
+
+		fb_rect(target, right_x - width, bar_top, width, GAUGE_BAR_HEIGHT, colour);
+		stack_top = bar_top;
+	}
+
+	// The value itself, above the stack's own widest (top) bar -- the smaller menu font,
+	// not the big hud one ("use the second smaller font from the menu... for the actual
+	// speedometer value"), and no unit suffix -- an earlier draft had "N MPH"; direct ask
+	// was "no MPH text," which this keeps: a bare number only. menu_font's own digits
+	// come from the SAME Monster Racing face hud_font uses (assets.toml's `menu` font,
+	// `overlay_source`) -- one plain draw call is enough; nothing here needs to know two
+	// typefaces are involved.
+	if (g->has_menu_font)
+	{
+		char buf[8];
+		pnx_format(buf, sizeof(buf), "%d", (int)g->speed * SPEEDOMETER_SCALE);
+		const int32_t w = pnx_text_width(&g->menu_font, buf);
+		int32_t fx, fy;
+		fb_point(right_x - w, stack_top - 3, &fx, &fy);
+		pnx_text_draw_outlined(target, &g->menu_font, buf, fx, fy, COLOUR_HUD_TEXT,
+							   COLOUR_HUD_OUTLINE);
+	}
+}
+
+// A short "CHECKPOINT +500" style banner (Game.hud_event, set by game.c's award_score),
+// centred just below the score/timer bar, fading in the sense that it simply disappears
+// once hud_event_ticks_left reaches 0 -- pnx_gfx has no alpha blend to fade it out
+// gradually (same constraint as everything else in this file that says so).
+static void draw_hud_event(PnxTarget* target, const Game* g)
+{
+	if (!g->has_menu_font || g->hud_event_ticks_left == 0 || g->hud_event[0] == '\0')
+		return;
+
+	// One font, one draw call -- menu_font's own digits already come from Monster Racing
+	// (assets.toml's `menu` font, `overlay_source`), so "CHECKPOINT +500" needs no
+	// per-string font-switching here; the combining happened once, in the font asset.
+	const int32_t w = pnx_text_width(&g->menu_font, g->hud_event);
+	int32_t top_y	= hud_below_y(g) + 4;
+#ifdef PBL_ROUND
+	// Centred content's only real exposure on a round display is width, not a corner --
+	// but width still has to be CHECKED, not assumed safe just because it's centred (see
+	// round_safe_row_for_width's own comment for the report that caught this). Whichever
+	// constraint needs the row pushed down further wins.
+	top_y = pnx_max_i32(top_y, round_safe_row_for_width(w / 2 + HUD_MARGIN));
+#endif
+	const int32_t baseline_y = top_y + g->menu_font.baseline;
+
+	int32_t fx, fy;
+	fb_point((LOGICAL_W - w) / 2, baseline_y, &fx, &fy);
+	pnx_text_draw_outlined(target, &g->menu_font, g->hud_event, fx, fy, COLOUR_HUD_TEXT,
+						   COLOUR_HUD_OUTLINE);
+}
+
 // Drawn over an otherwise-frozen last frame (game_tick returns immediately while
 // paused, so the scene underneath simply stops changing -- nothing here needs to know
 // what road/traffic looked like when the pause happened).
@@ -572,20 +842,31 @@ static void draw_pause_menu(PnxTarget* target, const Game* g)
 }
 
 // Drawn over an otherwise-frozen last frame, same idea as draw_pause_menu -- BACK
-// restarts from here instead of resuming (main.c gates the call on game_over).
+// restarts from here instead of resuming (main.c gates the call on game_over_reason).
+// Text picks between the two ways a run can end (game.h's GameOverReason) -- getting
+// caught vs. running out of clock read as different failures and should say so, not
+// share one "BUSTED" for both. The final score is worth showing here regardless of
+// which one ended the run.
 static void draw_game_over(PnxTarget* target, const Game* g)
 {
 	if (!g->has_menu_font)
 		return;
 
-	fb_rect(target, 24, 48, LOGICAL_W - 48, 104, COLOUR_MENU_BG);
+	fb_rect(target, 24, 40, LOGICAL_W - 48, 120, COLOUR_MENU_BG);
 
+	char score_line[24];
+	pnx_format(score_line, sizeof(score_line), "SCORE %u", (unsigned)hud_total_score(g));
+
+	// "SCORE 13170" needs no font-switching here -- menu_font's own digits already come
+	// from Monster Racing (assets.toml's `menu` font, `overlay_source`), same as every
+	// other line in this loop.
 	const char* lines[] = {
-		"BUSTED",
+		g->game_over_reason == GAME_OVER_TIME_UP ? "TIME'S UP" : "BUSTED",
+		score_line,
 		"BACK: RESTART",
 	};
 	const int32_t text_x = 40;
-	int32_t text_y		 = 88;
+	int32_t text_y		 = 74;
 	for (size_t i = 0; i < sizeof(lines) / sizeof(lines[0]); i++)
 	{
 		int32_t fx, fy;
@@ -605,8 +886,11 @@ void render_game(const Game* g, PnxTarget* target)
 	draw_police(target, g, horizon_y);
 	draw_car(target, g);
 	draw_police_lights(target, g);
+	draw_hud(target, g);
+	draw_speedometer(target, g);
+	draw_hud_event(target, g);
 	if (g->paused)
 		draw_pause_menu(target, g);
-	if (g->game_over)
+	if (g->game_over_reason != GAME_OVER_NONE)
 		draw_game_over(target, g);
 }

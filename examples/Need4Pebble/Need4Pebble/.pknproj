@@ -3,5 +3,8 @@
   "manifest": "assets.toml",
   "framework": "0.1.0",
   "author": "X64Tyko",
-  "format": 1
+  "format": 1,
+  "engine_owned": true,
+  "engine_owned_from": "0.1.0",
+  "engine_owned_at": "2026-08-21T12:36:49"
 }

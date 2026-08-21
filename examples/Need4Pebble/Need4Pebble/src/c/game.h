@@ -6,9 +6,9 @@
 #include "pnx/pnx.h"
 
 // touring_normal (player, tier 0) + touring_crash (player, only while crashing) +
-// palettes. Traffic reuses the SAME touring_normal handle at other tiers -- the sprite
-// is already "the traffic/opponent car at every depth" per assets.toml's own comment,
-// so it costs nothing extra to load.
+// traffic_car (its own, smaller sprite -- see assets.toml's "traffic car" section for
+// why this is no longer just a reused touring_normal handle) + police sprites + fonts +
+// palettes.
 //
 // Was 20KB, silently too small once police_normal/police_crash joined the load list:
 // touring_normal(12434) + touring_crash(~1900) + menu_font(646) leaves ~5.5KB, and
@@ -19,19 +19,26 @@
 // every draw call. This is almost certainly the real root cause of "I don't see the
 // cop car while driving" -- the lateral-drift/near-row-range fixes earlier in this
 // work were real improvements but couldn't have mattered if the sprite never loaded to
-// begin with. 32KB covers the full actual load list (~29.3KB) with headroom; heap was
-// never the constraint (~115KB free at 20KB, per `pebble build`'s own memory report).
+// begin with. Raised again, 32KB -> 48KB, once `traffic_car` (its own ~10.3KB sprite,
+// no longer free the way reusing touring_normal was) pushed the real load list to
+// ~40.4KB -- computed from the pipeline's own resource-budget report BEFORE it could
+// repeat the exact same silent-failure shape as the police sprite above, not discovered
+// by it happening again. Heap was never the binding constraint either time (~112KB
+// free at 32KB, per `pebble build`'s own memory report).
 #define PERSIST_BYTES (2 * 1024)
-#define SCENE_BYTES	  (32 * 1024)
+#define SCENE_BYTES	  (48 * 1024)
 
 #define MAX_TRAFFIC 5
 
 typedef struct
 {
 	bool active;
-	int32_t z;		// world-Z position, same units as Game.distance
-	int32_t lane_x; // lane_center() of whichever lane it spawned in
-	int32_t speed;	// world units per tick, its own -- independent of the player's
+	int32_t z;			   // world-Z position, same units as Game.distance
+	int32_t lane_x;		   // lane_center() of whichever lane it spawned in
+	int32_t speed;		   // world units per tick, its own -- independent of the player's
+	bool near_miss_scored; // one NEAR_MISS_SCORE per approach -- see game.c's
+						   // check_collision. Reset by traffic_spawn, same as every
+						   // other per-encounter field on this struct.
 } Traffic;
 
 // A chase, not reskinned traffic (DESIGN.md's "Police: chase, not traffic") -- tracks
@@ -53,15 +60,29 @@ typedef struct
 	uint32_t cooldown_ticks;		// >0 while inactive: ticks until eligible to spawn again
 } Police;
 
+// Why BUSTED, so render.c's draw_game_over can pick the right message -- see
+// game_over_reason's own comment on Game.
+typedef enum
+{
+	GAME_OVER_NONE = 0,
+	GAME_OVER_BUSTED,
+	GAME_OVER_TIME_UP,
+} GameOverReason;
+
 typedef struct
 {
 	PnxArena persistent, scene;
 	PnxSprite car;			// touring_normal
 	PnxSprite crash;		// touring_crash
+	PnxSprite traffic_car;	// traffic_car -- its own (smaller) sprite, not a touring_normal
+							// variant; see assets.toml's own "traffic car" section for why
 	PnxSprite police_car;	// police_normal
 	PnxSprite police_crash; // police_crash
 	PnxFont menu_font;
-	bool has_car, has_crash, has_menu_font;
+	PnxFont hud_font; // the stylised "Monster Racing" face -- score/timer/speedometer
+					  // only (render.c's draw_hud); pause/game-over text stays on
+					  // menu_font, see assets.toml's own comment on the split
+	bool has_car, has_crash, has_traffic_car, has_menu_font, has_hud_font;
 	bool has_police, has_police_crash;
 
 	uint32_t accumulator_ms;
@@ -83,9 +104,23 @@ typedef struct
 	uint32_t rng;			   // xorshift32 state, seeded fixed -- traffic is deterministic
 							   // on purpose, not device-random (see game.c's rng_next)
 
-	bool paused;		 // frozen: game_tick returns immediately, see its own top
-	bool use_tilt_steer; // false = touch drag (default), true = accelerometer tilt
-	bool game_over;		 // "BUSTED" -- frozen like `paused`, but BACK restarts, not resumes
+	bool paused;					 // frozen: game_tick returns immediately, see its own top
+	bool use_tilt_steer;			 // false = touch drag (default), true = accelerometer tilt
+	GameOverReason game_over_reason; // != GAME_OVER_NONE: frozen like `paused`, but BACK
+									 // restarts, not resumes -- see check_busted/tick_clock
+
+	uint32_t score;				// see "scoring" below (game.h) for what feeds this
+	uint32_t next_checkpoint_z; // world-Z of the next unclaimed checkpoint -- see
+								// CHECKPOINT_SPACING
+	int32_t timer_ticks_left;	// counts down to 0 -> GAME_OVER_TIME_UP; checkpoints add to
+								// it (CHECKPOINT_TIME_BONUS_TICKS), same "beat the clock"
+								// loop DESIGN.md's core loop describes
+
+	// A short-lived on-screen banner ("CHECKPOINT +500") -- render.c's draw_hud_event.
+	// Ticks, not wall-clock, same reasoning as every other timed UI element here (frozen
+	// with the sim while paused/game_over instead of continuing to animate over it).
+	char hud_event[24];
+	uint32_t hud_event_ticks_left;
 
 	Traffic traffic[MAX_TRAFFIC];
 	Police police;
@@ -290,6 +325,64 @@ typedef struct
 #define CRASH_HOLD_TICKS	  15 // extra ticks holding the wreck frame before control returns
 #define CRASH_TOTAL_TICKS	  (CRASH_TICKS_PER_FRAME * CRASH_FRAME_COUNT + CRASH_HOLD_TICKS)
 
+// ------------------------------------------------------------------------ scoring
+//
+// DESIGN.md's core loop: "a high score (distance, time remaining, near-misses, perfect
+// checkpoints, police takedowns -- some combination; exact weighting TBD)" and "crossing
+// a checkpoint adds time." This is that combination, first cut:
+//   - Distance: not accumulated per tick -- Game.distance already IS a running total, so
+//     the score just reads distance/DISTANCE_SCORE_DIVISOR directly (render.c's
+//     draw_hud) rather than double-booking it into Game.score every tick.
+//   - Checkpoints: CHECKPOINT_SCORE points + CHECKPOINT_TIME_BONUS_TICKS added to the
+//     countdown, once per CHECKPOINT_SPACING world units crossed (game.c's
+//     check_checkpoint).
+//   - Near misses: NEAR_MISS_SCORE for passing a traffic car within NEAR_MISS_LANE_MAX
+//     without colliding (game.c's check_collision) -- deliberately the same Z window
+//     TRAFFIC_COLLIDE_Z already uses, just a wider lane band, so "near" means "would have
+//     hit at a slightly different line," not merely "on screen at the same time."
+//   - Police takedowns ("eluding police" per the ask): POLICE_TAKEDOWN_SCORE when a
+//     pursuing cop crashes on its own -- off-road or into traffic (game.c's
+//     police_crash) -- DESIGN.md flagged this exact hook as "not yet weighted."
+#define RACE_TIMER_START_TICKS (45 * 25) // 45s at PNX_TICK_MS's ~25 ticks/sec
+
+// TRACK_TOTAL_LENGTH (track.c) is 5600 -- 2 checkpoints/lap. The track loops
+// (track_curve_at/track_elevation_at both wrap on world_z % TRACK_TOTAL_LENGTH), so
+// next_checkpoint_z simply keeps counting up past one lap's worth rather than wrapping
+// itself -- Game.distance is already an ever-increasing odometer, not a lap-relative
+// position, so a checkpoint just keeps recurring every CHECKPOINT_SPACING regardless of
+// how many laps have gone by.
+//
+// Raised 700->2800 (was 8/lap, ~1.1s apart at MAX_SPEED -- reported directly as "too
+// frequent, too valuable, and award far too much time"). The time bonus is no longer a
+// flat number disconnected from spacing/speed either: CHECKPOINT_PERFECT_TICKS is the
+// ceiling-divided tick count to cover CHECKPOINT_SPACING at MAX_SPEED (cruise, i.e.
+// "perfect driving" -- the ~3s accel ramp only matters right after a restart/crash, not
+// checkpoint to checkpoint once already up to speed), and the actual bonus is that PLUS
+// a small buffer -- "one checkpoint should be 5-10s more than needed to reach the next
+// checkpoint with perfect driving" (the ask, verbatim). Recalculates correctly if
+// CHECKPOINT_SPACING or MAX_SPEED ever change again, rather than needing to be re-tuned
+// by hand alongside them.
+#define CHECKPOINT_SPACING				   2800
+#define CHECKPOINT_PERFECT_TICKS		   ((CHECKPOINT_SPACING + MAX_SPEED - 1) / MAX_SPEED)
+#define CHECKPOINT_TIME_BONUS_BUFFER_TICKS (7 * 25) // 7s, within the asked 5-10s margin
+#define CHECKPOINT_TIME_BONUS_TICKS		   (CHECKPOINT_PERFECT_TICKS + CHECKPOINT_TIME_BONUS_BUFFER_TICKS)
+// Was 500 -- roughly on par with a near-miss/full lap of passive distance score despite
+// needing zero skill to collect (just reaching a distance marker), which is what made it
+// read as "too valuable" alongside being too frequent. 200 puts one checkpoint closer to
+// a single near-miss (150) than to a police takedown (2000, the real skill payoff).
+#define CHECKPOINT_SCORE 200
+
+// Just outside TRAFFIC_COLLIDE_LANE_HALF (game.h, defined above) -- close enough to have
+// been a hit on a slightly different line, not simply "passed in the same second."
+#define NEAR_MISS_LANE_MAX (TRAFFIC_COLLIDE_LANE_HALF + 30)
+#define NEAR_MISS_SCORE	   150
+
+#define POLICE_TAKEDOWN_SCORE 2000
+
+#define DISTANCE_SCORE_DIVISOR 10
+
+#define HUD_EVENT_TICKS 45 // ~1.8s the "+N" banner stays up before fading
+
 // Arenas, asset registry, the car sprite, input -- everything that has to happen once,
 // in order, before the first tick. False only on the fatal case (an arena wouldn't
 // init); a missing sprite is logged and leaves `has_car`/`has_crash` false rather than
@@ -308,8 +401,8 @@ void game_tick(Game* g);
 void game_toggle_pause(Game* g);
 void game_toggle_steer_mode(Game* g);
 
-// BACK while `game_over`, instead of the usual pause toggle (main.c gates the call).
-// Resets gameplay state (distance/speed/lane/traffic/police, the fixed rng seed) the
-// same way game_boot does, without re-touching arenas or reloading assets -- those
-// only need to happen once, ever.
+// BACK while `game_over_reason != GAME_OVER_NONE`, instead of the usual pause toggle
+// (main.c gates the call). Resets gameplay state (distance/speed/lane/traffic/police,
+// score/checkpoints/timer, the fixed rng seed) the same way game_boot does, without
+// re-touching arenas or reloading assets -- those only need to happen once, ever.
 void game_restart(Game* g);

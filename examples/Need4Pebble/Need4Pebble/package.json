@@ -13,7 +13,13 @@
     "sdkVersion": "3",
     "enableMultiJS": false,
     "targetPlatforms": [
-      "emery"
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery",
+      "flint",
+      "gabbro"
     ],
     "watchapp": {
       "watchface": false
@@ -30,6 +36,11 @@
           "type": "raw",
           "name": "TOURING_NORMAL",
           "file": "touring_normal.bin"
+        },
+        {
+          "type": "raw",
+          "name": "TRAFFIC_CAR",
+          "file": "traffic_car.bin"
         },
         {
           "type": "raw",
@@ -85,6 +96,11 @@
           "type": "raw",
           "name": "MENU",
           "file": "font_menu.bin"
+        },
+        {
+          "type": "raw",
+          "name": "HUD",
+          "file": "font_hud.bin"
         }
       ]
     }

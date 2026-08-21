@@ -17,6 +17,7 @@ budget_bytes = 262144
 # is gas, left top button (UP) is brake. See DESIGN.md.
 orientation = "buttons_top"
 device_address = "192.168.0.48"
+force_screen_lock = true
 
 # Add content with the editor's Import and Fonts tabs, or by hand:
 #
@@ -53,14 +54,43 @@ frames = [
     [54, 288, 12, 7], [95, 288, 12, 7], [136, 288, 10, 7], [176, 288, 10, 7], [215, 288, 10, 7], [255, 288, 10, 7], [294, 288, 10, 7], [334, 288, 12, 7], [374, 288, 12, 7],
 ]
 out = "touring_normal.bin"
-# Traffic reuses this same sprite (render.c's draw_traffic) at other tiers/angles, which
-# meant it rendered in the PLAYER's own green -- hard to tell apart from the player's car
-# at a glance, reported directly ("recolor the traffic cars so they stand out on the
-# road"). `variants` is a palette swap, not a second copy of every frame: the traffic
-# sheet is the base art with its one body-green pixel value (85, 199, 83) programmatically
-# remapped to orange (255, 170, 0), everything else (outline, brown accents, transparency)
-# untouched -- see that PNG's own generation, no hand-drawn art involved.
-variants = ["art/traffic.png"]
+
+# ------------------------------------------------------------------- traffic car
+#
+# Used to be `touring_normal` reused via a palette `variants` entry (a recolour only --
+# `variants` requires identical frame dimensions, so it could never also make traffic
+# smaller). Recolour first: the traffic sheet is the base art with its one body-green
+# pixel value (85, 199, 83) programmatically remapped to orange (255, 170, 0), everything
+# else (outline, brown accents, transparency) untouched, reported directly ("recolor the
+# traffic cars so they stand out on the road") -- see `art/traffic.png`'s own generation,
+# no hand-drawn art involved. Then, per a later direct ask ("make the traffic cars 10%
+# smaller"), that recoloured sheet was resized 90% (`art/traffic_small.png`, PIL LANCZOS,
+# a one-off offline script, not a build-time step) and every frame rect scaled by the
+# same 0.9 and re-rounded from it -- a genuinely separate, smaller sprite, not another
+# `variants` entry, since geometry (not just colour) had to change this time. Costs a
+# real second copy of every frame rather than one shared palette slot, but at ~81% of
+# touring_normal's own pixel area (0.9 linear -> ~0.81 area) that's an acceptable trade
+# for a real size change `variants` structurally cannot express. draw_traffic (render.c)
+# passes no palette override here -- the sheet's own pixels are already orange, unlike
+# touring_normal's own green original.
+#
+# A few frames' width got nudged +1px past the exact 0.9 scale (e.g. the first row's
+# 39->40, not 39): the pipeline requires each frame's own w*h to be EVEN (4bpp packs two
+# pixels/byte, no per-row padding -- pack_sprite's own check, pnx_assets.py), and scaling
+# a formerly-even area by a non-integer 0.9 doesn't reliably land back on an even product.
+# Caught by the pipeline's own build-time validation, not a visual check.
+[[sprite]]
+name = "traffic_car"
+sheet = "art/traffic_small.png"
+frames = [
+    [32, 159, 40, 21], [71, 159, 36, 21], [107, 159, 36, 21], [145, 159, 34, 21], [180, 159, 36, 21], [217, 159, 34, 21], [252, 159, 36, 21], [288, 159, 38, 21], [325, 159, 40, 21],
+    [34, 184, 34, 16], [75, 184, 29, 16], [112, 184, 28, 16], [148, 184, 28, 16], [184, 184, 28, 16], [220, 184, 28, 16], [256, 184, 28, 16], [292, 184, 29, 16], [328, 184, 34, 16],
+    [32, 205, 36, 15], [76, 205, 28, 15], [112, 205, 28, 15], [149, 205, 26, 15], [185, 205, 26, 15], [221, 205, 26, 15], [256, 205, 28, 15], [292, 205, 28, 15], [329, 205, 32, 15],
+    [40, 225, 26, 13], [79, 225, 22, 13], [115, 225, 24, 13], [151, 225, 22, 13], [187, 225, 22, 13], [223, 225, 22, 13], [258, 225, 24, 13], [295, 225, 22, 13], [331, 225, 26, 13],
+    [45, 243, 18, 9], [84, 243, 14, 9], [119, 243, 16, 9], [155, 243, 16, 9], [190, 243, 16, 9], [226, 243, 16, 9], [262, 243, 16, 9], [298, 243, 14, 9], [335, 243, 18, 9],
+    [49, 259, 10, 7], [86, 259, 10, 7], [122, 259, 10, 7], [158, 259, 10, 7], [194, 259, 8, 7], [230, 259, 8, 7], [265, 259, 10, 7], [301, 259, 10, 7], [337, 259, 10, 7],
+]
+out = "traffic_car.bin"
 
 [[sprite]]
 name = "touring_slope"
@@ -206,15 +236,61 @@ yellow = [24, 25, 26, 27, 28, 29, 30, 31]
 
 # --------------------------------------------------------------------------- menu
 
-# The pause menu's only text -- uppercase and short by choice, so `extra` can just be
-# every uppercase letter plus space/colon rather than tracking exact wording here.
+# The pause/game-over menus and the HUD event banner ("CHECKPOINT +500") -- uppercase
+# and short by choice, so `extra` can just be every uppercase letter plus space/colon/
+# digits/plus rather than tracking exact wording here. Digits+"+" were added alongside
+# checkpoint/score scoring (render.c's draw_hud_event, draw_game_over's score line) --
+# without them those draws silently render nothing for any character outside this set
+# (FONT_ABSENT, pnx_assets.py), which is exactly what happened before this line changed.
+#
+# Was LiberationSans (a plain UI face), then "Monster Racing" (a display face, needing a
+# `tracking` bump to stop its letters visibly touching at 14px -- reported "almost
+# unreadable"), then briefly "Racing Energy" instead (a readability worry that turned out
+# to already be fixed by the tracking bump -- confirmed via an emulator screenshot taken
+# right before the swap). Landed here: BOTH faces at once, one packed font --
+# `overlay_source`/`overlay_charset` (pnx_assets.py's own font-building code) rasterise
+# just the digits/`+` from Monster Racing (whose numerals "looked fine") while every
+# other character still comes from Racing Energy (the letters direct feedback preferred)
+# -- "Numbers = Monster Racing. Text = Racing Energy," and "just combine all the
+# rendered glyphs into a single font" rather than a game splitting strings at draw time
+# to switch fonts mid-string (render.c's own draw_hud_event/draw_game_over used to do
+# exactly that split; both are back to a single plain draw call now that this font does
+# the combining instead). Still named "menu" (not renamed to e.g. "menu_small") -- every
+# caller already references `PNX_ASSET_FONT_MENU`/`g->menu_font`, and this is still,
+# semantically, "the menu font," just sourced from two faces now instead of one.
 [[font]]
 name = "menu"
-source = "art/fonts/LiberationSans-Regular.ttf"
-size = 12
-depth = 1              # crisp: at 12px, antialiasing muddies more than it smooths
+source = "art/fonts/RacingEnergy-Personal.otf"
+size = 14
+depth = 1              # crisp: at this size, antialiasing muddies more than it smooths
 threshold = 128
 charset = "auto"
-extra = "ABCDEFGHIJKLMNOPQRSTUVWXYZ :"
-license = "SIL Open Font License 1.1"
+extra = "ABCDEFGHIJKLMNOPQRSTUVWXYZ :+0123456789"
+license = "Racing Energy -- DEMO/personal use only, not cleared for redistribution"
+overlay_source = "art/fonts/MonsterRacing-Personal.otf"
+overlay_charset = "0123456789+"
+overlay_license = "Monster Racing -- personal use only, not cleared for redistribution"
 out = "font_menu.bin"
+
+# The big numeric HUD readouts -- score, race timer (render.c's draw_hud) -- a stylised
+# display face instead of the plain menu font, since these need to read at a glance
+# while actually driving, not just during a paused/game-over screen. Pure Monster Racing,
+# no overlay needed: this font's own charset is 100% digits/colon already, so there is no
+# "text" portion for a second face to cover. The speedometer's own value uses the smaller
+# "menu" font instead (render.c's draw_speedometer) once the gauge redesign dropped its
+# "N MPH" text for a bare number above the gauge's own top bar -- small enough there that
+# the big face didn't suit it anymore, and menu's own digits (the overlay above) are the
+# same Monster Racing numerals this font uses, just at 14px instead of 20px.
+[[font]]
+name = "hud"
+source = "art/fonts/MonsterRacing-Personal.otf"
+size = 20
+depth = 1
+threshold = 128
+charset = "0123456789:"
+# Free for personal/non-commercial use per the source distribution (no OSI licence
+# accompanies it) -- fine for this project as currently built and run locally, but a
+# blocker if Need4Pebble is ever submitted to the Pebble appstore or otherwise
+# distributed; a commercial licence or a different display face would be needed first.
+license = "Monster Racing -- personal use only, not cleared for redistribution"
+out = "font_hud.bin"

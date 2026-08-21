@@ -26,8 +26,8 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 		// regardless of how many ticks the frame that notices it runs.
 		if (ev.button == PNX_BUTTON_BACK)
 		{
-			if (g->game_over)
-				game_restart(g); // BUSTED: BACK restarts instead of pausing
+			if (g->game_over_reason != GAME_OVER_NONE)
+				game_restart(g); // BUSTED/TIME_UP: BACK restarts instead of pausing
 			else
 				game_toggle_pause(g);
 		}

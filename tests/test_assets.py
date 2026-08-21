@@ -4622,6 +4622,95 @@ def main():
         expect_fail("font at an invalid depth", "depth must be", _extra=_font,
                     dialog=DIALOG, font=FONT_OK.replace("size = 12", "size = 12\ndepth = 4"))
 
+        # --- depth=2: baked outline + fill glyphs. outline_width/glyph_overrides only
+        #     mean something once a font opts into the baked format, and a hand-painted
+        #     override has to exactly match the dimensions the auto-bake produces (it
+        #     replaces those levels wholesale, not a diff against them).
+        DEPTH2 = FONT_OK.replace("size = 12", "size = 16\ndepth = 2\noutline_width = 2")
+
+        expect_ok("depth=2 font with outline_width builds", _extra=_font,
+                  dialog=DIALOG, font=DEPTH2)
+
+        expect_fail("outline_width at depth=1", "depth=2", _extra=_font, dialog=DIALOG,
+                    font=FONT_OK.replace("size = 12", "size = 12\noutline_width = 2"))
+
+        expect_fail("glyph_overrides at depth=1", "depth=2", _extra=_font, dialog=DIALOG,
+                    font=FONT_OK.replace(
+                        'out = "hud.bin"',
+                        'out = "hud.bin"\n        glyph_overrides = { H = "o.\\no." }'))
+
+        expect_fail("outline_width below 1", "outline_width must be", _extra=_font,
+                    dialog=DIALOG,
+                    font=FONT_OK.replace("size = 12",
+                                         "size = 12\ndepth = 2\noutline_width = 0"))
+
+        expect_fail("glyph override wrong size", "glyph_overrides is", _extra=_font,
+                    dialog=DIALOG,
+                    font=DEPTH2.replace(
+                        'out = "hud.bin"',
+                        'out = "hud.bin"\n        glyph_overrides = { H = "..\\n.." }'))
+
+        expect_fail("glyph override invalid character", "glyph_overrides has", _extra=_font,
+                    dialog=DIALOG,
+                    font=DEPTH2.replace(
+                        'out = "hud.bin"',
+                        'out = "hud.bin"\n        glyph_overrides = { H = "X." }'))
+
+        # A valid override replaces the auto-bake's own levels wholesale. Rather than
+        # predict the auto-bake's own dimensions for 'H' at this size/face, build once
+        # without an override to read them off the blob, then paint a same-sized override
+        # entirely in fill B (level 3) -- a level rasterise_glyph_styled itself never
+        # produces -- so any difference in the shipped bytes can only be the override.
+        checks += 1
+        with tempfile.TemporaryDirectory() as root:
+            make_sheet(_os.path.join(root, "sheet.png"))
+            _font(root)
+
+            def glyph_entry(blob, ch):
+                count = int.from_bytes(blob[8:10], "little")
+                first, last = blob[12], blob[13]
+                if not first <= ord(ch) <= last:
+                    return None
+                index = blob[16 + count * pnx_assets.FONT_GLYPH_ENTRY + (ord(ch) - first)]
+                if index == 0xFF:
+                    return None
+                e = blob[16 + index * pnx_assets.FONT_GLYPH_ENTRY:][:pnx_assets.FONT_GLYPH_ENTRY]
+                off, w, h = int.from_bytes(e[:2], "little"), e[2], e[3]
+                bitmaps_at = 16 + count * pnx_assets.FONT_GLYPH_ENTRY + (last - first + 1)
+                depth = blob[3]
+                row_bytes = (w * depth + 7) // 8
+                return w, h, blob[bitmaps_at + off: bitmaps_at + off + row_bytes * h]
+
+            err = run(root, dialog=DIALOG, font=DEPTH2)
+            entry = None
+            if err:
+                print(f"  FAIL glyph override applies: baseline build failed: {err}")
+                failures += 1
+            else:
+                blob = open(_os.path.join(root, "out", "hud.bin"), "rb").read()
+                entry = glyph_entry(blob, "H")
+                if entry is None:
+                    print("  FAIL glyph override applies: 'H' missing from the baseline build")
+                    failures += 1
+
+            if entry is not None:
+                w, h, plain_packed = entry
+                override_text = "\\n".join("%" * w for _ in range(h))
+                overridden = DEPTH2.replace(
+                    'out = "hud.bin"',
+                    f'out = "hud.bin"\n        glyph_overrides = {{ H = "{override_text}" }}')
+                err2 = run(root, dialog=DIALOG, font=overridden)
+                if err2:
+                    print(f"  FAIL glyph override applies: build failed: {err2}")
+                    failures += 1
+                else:
+                    blob2 = open(_os.path.join(root, "out", "hud.bin"), "rb").read()
+                    entry2 = glyph_entry(blob2, "H")
+                    if entry2 is None or entry2[2] == plain_packed:
+                        print("  FAIL glyph override applies: bytes unchanged from the "
+                              "auto-bake")
+                        failures += 1
+
         # --- glyphs rotate with everything else, and the blob says which way the pen
         #     then walks. Without the axis the glyphs would be correct and the line
         #     would still come out as a stack of characters in one place.
