@@ -106,13 +106,21 @@ assert d['ok'] is True, d
 
 r = wr.dispatch('GET', '/api/state')
 d = json.loads(r['body'])
-assert d['name'] == 'quickstart' and d['built'] is True, d
+assert d['name'] == 'quickstart', d
+# Not asserting d['built'] here: a fresh checkout hasn't been built yet, so this would
+# only pass by accident of whatever local state examples/quickstart happens to carry
+# (it's a real bug this test shipped with once already -- CI caught it, a dirty local
+# checkout didn't). The build itself is exercised properly just below.
 
 r = wr.dispatch('GET', '/api/sheets')
 assert r['status'] == 200, r
 
 r = wr.dispatch('POST', '/api/build', b'{{}}')
 assert json.loads(r['body'])['ok'] is True, r['body']
+
+r = wr.dispatch('GET', '/api/state')
+d = json.loads(r['body'])
+assert d['built'] is True, d  # now genuinely true, having just built it above
 
 r = wr.dispatch('GET', '/api/device/status?platform=aplite')
 assert r['status'] == 404, r  # not in the online table at all -- graceful, not a crash
