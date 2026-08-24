@@ -39,9 +39,7 @@
 // world fits with about 15 KB to spare -- before the game allocates anything of its own.
 // That is the argument for WorldTiles in one number: not that holding a 192x192 world is
 // impossible, but that it consumes the watch and leaves nothing to build a game with.
-#define FIELD_ARENA_BYTES	(20 * 1024)
-#define PLAIN_ARENA_BYTES	(100 * 1024)
-#define PERSIST_ARENA_BYTES 1024
+#define PLAIN_ARENA_BYTES (100 * 1024) // the held-whole world's byte cost, for the have_plain check
 
 #define MAX_SPRITES 4
 #define HERO		0
@@ -76,7 +74,7 @@ static const int8_t HEADING[8][2] = {
 
 typedef struct
 {
-	PnxArena persistent, scene;
+	PnxArena arena;
 	PnxCamera camera;
 
 	PnxSpriteInstance sprites[MAX_SPRITES];
@@ -172,7 +170,7 @@ static bool enter_scene(Game* g, uint8_t scene, int32_t tx, int32_t ty)
 	// Captured after the blocking stream, so it is what the scene ACTUALLY holds rather
 	// than what it had allocated before any WorldTile arrived. This is the number the whole
 	// comparison turns on, so it is read from the arena rather than recomputed.
-	g->scene_bytes = g->scene.used;
+	g->scene_bytes = g->arena.used_hi;
 
 	const PnxMapLayer* primary = &map->layers[map->primary_layer];
 	pnx_log("scene %u (%s): %ux%u, %u/%u WorldTiles resident, %u B arena, %u B read", scene,
@@ -522,26 +520,21 @@ int main(void)
 	g.autopilot = true;
 	g.heading	= 2; // east, so the patrol starts across the map rather than into a wall
 
-	if (!pnx_arena_init(&g.persistent, "persistent", PERSIST_ARENA_BYTES, 4))
+	if (!pnx_arena_init_max(&g.arena, "game", PNX_ARENA_HEAP_RESERVE, 4))
 	{
 		pnx_platform_log("arena init failed");
 		return 1;
 	}
 
-	// Ask for the arena the HELD-WHOLE world needs, and fall back to the streamed one's if
-	// the heap will not give it. Both outcomes are the result: on a watch where 96 KB
-	// allocates, SELECT swaps between them and the HUD shows 23 against 95; on one where it
-	// does not, the comparison has already been made and the app still runs -- which a hard
-	// failure at startup would not have told anyone.
-	g.have_plain = pnx_arena_init(&g.scene, "scene", PLAIN_ARENA_BYTES, 4);
-	if (!g.have_plain && !pnx_arena_init(&g.scene, "scene", FIELD_ARENA_BYTES, 4))
-	{
-		pnx_platform_log("arena init failed");
-		return 1;
-	}
-
-	pnx_assets_init(&g.persistent, &g.scene, RESOURCES, PNX_ASSET_COUNT);
+	pnx_assets_init(&g.arena, RESOURCES, PNX_ASSET_COUNT);
 	pnx_assets_expect_orientation(PNX_ORIENTATION);
+
+	// have_plain is now "would the held-whole world fit in whatever's left", checked
+	// against the one arena's remaining capacity instead of trying a second, smaller
+	// candidate malloc. Both outcomes are still the result: on a watch with enough spare
+	// arena, SELECT swaps between held-whole and streamed and the HUD shows 23 against
+	// 95; on one without, the comparison has already been made and the app still runs.
+	g.have_plain = pnx_arena_remaining(&g.arena) >= PLAIN_ARENA_BYTES;
 	pnx_camera_init(&g.camera, 200, 228);
 
 	if (!pnx_scenes_load(PNX_ASSET_SCENES_SCENES))
@@ -563,7 +556,6 @@ int main(void)
 	pnx_platform_set_post_frame_fn(post_frame);
 	pnx_platform_run(frame, &g);
 
-	pnx_arena_destroy(&g.scene);
-	pnx_arena_destroy(&g.persistent);
+	pnx_arena_destroy(&g.arena);
 	return 0;
 }

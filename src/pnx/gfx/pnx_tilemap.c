@@ -242,9 +242,10 @@ uint8_t pnx_tilemap_layers_build(const PnxMap* map, PnxLayer* out)
 		return 0;
 	for (uint8_t i = 0; i < map->layer_count; i++)
 	{
-		out[i].kind			= PNX_LAYER_CALLBACK;
-		out[i].parallax_pct = map->layers[i].parallax_pct;
-		out[i].as.draw		= thunks[i];
+		out[i].kind			  = PNX_LAYER_CALLBACK;
+		out[i].parallax_pct_x = map->layers[i].parallax_pct_x;
+		out[i].parallax_pct_y = map->layers[i].parallax_pct_y;
+		out[i].as.draw		  = thunks[i];
 	}
 	return map->layer_count;
 }

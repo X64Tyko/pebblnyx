@@ -62,6 +62,17 @@ void pnx_platform_log(const char* message)
 	printf("%s\n", message);
 }
 
+// No real heap ceiling worth querying on a host build -- a large, deterministic,
+// overridable constant, same shape as PNX_HOST_WIDTH/HEIGHT.
+#ifndef PNX_HOST_HEAP_BYTES
+#define PNX_HOST_HEAP_BYTES (128 * 1024)
+#endif
+
+size_t pnx_platform_heap_free_bytes(void)
+{
+	return PNX_HOST_HEAP_BYTES;
+}
+
 int16_t pnx_target_width(const PnxTarget* t)
 {
 	return t ? t->w : 0;

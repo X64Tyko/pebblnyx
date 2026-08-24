@@ -263,7 +263,7 @@ calls your `draw()` every rendered frame regardless -- a game built on it never 
 
 typedef struct
 {
-	PnxArena persistent, scene;
+	PnxArena arena;
 	PnxCamera camera;
 
 	PnxSpriteInstance sprites[MAX_SPRITES];
@@ -290,11 +290,6 @@ and all:
 #include "game.h"
 
 #include <string.h>
-
-// From the pipeline's own scene residency report ("WORST room1 1,204 B <- minimum
-// scene arena"). Rounded up rather than guessed.
-#define SCENE_ARENA_BYTES	(4 * 1024)
-#define PERSIST_ARENA_BYTES 256
 
 static const uint32_t RESOURCES[] = PNX_ASSET_RESOURCE_TABLE;
 
@@ -442,13 +437,12 @@ uint8_t game_boot(Game* g)
 {
 	memset(g, 0, sizeof(*g));
 
-	if (!pnx_arena_init(&g->persistent, "persistent", PERSIST_ARENA_BYTES, 4) ||
-		!pnx_arena_init(&g->scene, "scene", SCENE_ARENA_BYTES, 4))
+	if (!pnx_arena_init_max(&g->arena, "game", PNX_ARENA_HEAP_RESERVE, 4))
 	{
 		pnx_platform_log("arena init failed");
 		return 0;
 	}
-	pnx_assets_init(&g->persistent, &g->scene, RESOURCES, PNX_ASSET_COUNT);
+	pnx_assets_init(&g->arena, RESOURCES, PNX_ASSET_COUNT);
 	pnx_camera_init(&g->camera, PNX_DISPLAY_WIDTH, PNX_DISPLAY_HEIGHT);
 	pnx_input_init(PNX_ORIENTATION);
 
@@ -467,8 +461,7 @@ uint8_t game_boot(Game* g)
 
 void game_shutdown(Game* g)
 {
-	pnx_arena_destroy(&g->scene);
-	pnx_arena_destroy(&g->persistent);
+	pnx_arena_destroy(&g->arena);
 }
 
 // ---------------------------------------------------------------------------- main
@@ -490,9 +483,12 @@ int main(void)
 }
 ```
 
-**Large buffers go in a heap arena (`pnx_arena_init`), not a `static` array.** Static data
-shares one 64KB `uint16` ceiling with all your code; the heap has the rest of the 128KB
-slot. Both arenas above are heap allocations for exactly that reason.
+**Large buffers go in a heap arena (`pnx_arena_init_max`), not a `static` array.** Static
+data shares one 64KB `uint16` ceiling with all your code; the heap has the rest of the
+128KB slot. `pnx_arena_init_max` sizes the arena from whatever the platform actually has
+free at startup, rather than a byte constant you pick and have to remember to raise --
+see `pnx_arena.h`'s own comment for how one arena serves both persistent and per-scene
+allocations without needing two.
 
 **If you're used to hand-rolling the loop**, `examples/empty/src/c/main.c` is what the
 same shape looks like *without* `pnx_app` -- a `frame()` function that pumps events,

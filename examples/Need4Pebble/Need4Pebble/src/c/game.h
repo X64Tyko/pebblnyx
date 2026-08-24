@@ -5,28 +5,20 @@
 
 #include "pnx/pnx.h"
 
-// touring_normal (player, tier 0) + touring_crash (player, only while crashing) +
-// traffic_car (its own, smaller sprite -- see assets.toml's "traffic car" section for
-// why this is no longer just a reused touring_normal handle) + police sprites + fonts +
-// palettes.
-//
-// Was 20KB, silently too small once police_normal/police_crash joined the load list:
-// touring_normal(12434) + touring_crash(~1900) + menu_font(646) leaves ~5.5KB, and
-// police_normal alone needs 12434 -- pnx_sprite_load for it failed every single boot
-// (logged: "asset 6: arena full, needed 12434, 5450 free"), silently, the same way
-// docs/PLATFORM.md's own init-logging caveat warns about -- `has_police` was false the
-// whole time, so draw_police's own guard was skipping the cop's actual chase sprite on
-// every draw call. This is almost certainly the real root cause of "I don't see the
-// cop car while driving" -- the lateral-drift/near-row-range fixes earlier in this
-// work were real improvements but couldn't have mattered if the sprite never loaded to
-// begin with. Raised again, 32KB -> 48KB, once `traffic_car` (its own ~10.3KB sprite,
-// no longer free the way reusing touring_normal was) pushed the real load list to
-// ~40.4KB -- computed from the pipeline's own resource-budget report BEFORE it could
-// repeat the exact same silent-failure shape as the police sprite above, not discovered
-// by it happening again. Heap was never the binding constraint either time (~112KB
-// free at 32KB, per `pebble build`'s own memory report).
-#define PERSIST_BYTES (2 * 1024)
-#define SCENE_BYTES	  (48 * 1024)
+// Off by default -- enable with `PNX_DEFINES=N4P_STEER_DEBUG_LOG=1 pebble build`. Prints
+// the live steering pipeline (touch held/axis, steer_visual, lane_x, speed) to
+// `pebble logs` every 8 ticks -- see game.c's game_tick for what each field means.
+#ifndef N4P_STEER_DEBUG_LOG
+#define N4P_STEER_DEBUG_LOG 0
+#endif
+
+// The scene arena used to be a hand-picked byte constant, and got silently too small
+// twice as sprites (police_normal, then traffic_car) joined the load list -- each time
+// a quiet `pnx_sprite_load` failure, not a crash, the same shape docs/PLATFORM.md's
+// init-logging caveat warns about: `has_police` was false the whole game, so the cop
+// car simply never drew, and nothing said why. pnx_arena_init_max below sizes the
+// arena from whatever heap is actually free instead, which is what makes that class of
+// bug structurally impossible rather than a constant someone has to remember to raise.
 
 #define MAX_TRAFFIC 5
 
@@ -71,19 +63,37 @@ typedef enum
 
 typedef struct
 {
-	PnxArena persistent, scene;
-	PnxSprite car;			// touring_normal
-	PnxSprite crash;		// touring_crash
-	PnxSprite traffic_car;	// traffic_car -- its own (smaller) sprite, not a touring_normal
-							// variant; see assets.toml's own "traffic car" section for why
-	PnxSprite police_car;	// police_normal
-	PnxSprite police_crash; // police_crash
+	PnxArena arena;
+	PnxSprite car;					// touring_normal
+	PnxSprite crash;				// touring_crash
+	PnxSprite traffic_car;			// traffic_car -- its own (smaller) sprite, not a touring_normal
+									// variant; see assets.toml's own "traffic car" section for why
+	PnxSprite police_car;			// police_normal
+	PnxSprite police_crash;			// police_crash
+	PnxSprite road_chunk;			// road_chunk -- draw_road's per-row scaled band (render.c's
+									// fb_road_row_scaled); placeholder art, see assets.toml
+	PnxAtlas ground_atlas;			// ground -- draw_road's ground-tile batching (render.c);
+									// placeholder art, see assets.toml. Direct pnx_atlas_load,
+									// not a PnxMap: the ground strip is procedurally generated
+									// per depth band as the road scrolls, not a fixed authored
+									// grid, so there is no finite cell layout to place in a map.
+	PnxAnimState ground_light_anim; // plays GROUND_LIGHT_FRAMES (assets.toml's
+									// [atlas.anim]); one shared state, not per-cell --
+									// every "light" tile animates in lockstep, see
+									// core/pnx_anim.h's own comment on this convention
+	PnxAtlas horizon_atlas;			// horizon_band -- draw_horizon_band's synthwave
+									// cityscape strip (render.c); placeholder art, see
+									// assets.toml. Direct pnx_atlas_load, same reasoning
+									// as ground_atlas -- hand-rolled, not a PnxMap/layer
+									// (this project's landscape rotation has no hook in
+									// the generic pnx_tilemap_draw_layer path)
+	PnxAnimState horizon_lit_anim;	// plays HORIZON_BAND_LIT_FRAMES
 	PnxFont menu_font;
 	PnxFont hud_font; // the stylised "Monster Racing" face -- score/timer/speedometer
 					  // only (render.c's draw_hud); pause/game-over text stays on
 					  // menu_font, see assets.toml's own comment on the split
 	bool has_car, has_crash, has_traffic_car, has_menu_font, has_hud_font;
-	bool has_police, has_police_crash;
+	bool has_police, has_police_crash, has_road_chunk, has_ground_atlas, has_horizon_atlas;
 
 	uint32_t accumulator_ms;
 	uint32_t tick_count; // simulated ticks since boot/restart -- render.c's police light
@@ -104,10 +114,16 @@ typedef struct
 	uint32_t rng;			   // xorshift32 state, seeded fixed -- traffic is deterministic
 							   // on purpose, not device-random (see game.c's rng_next)
 
-	bool paused;					 // frozen: game_tick returns immediately, see its own top
-	bool use_tilt_steer;			 // false = touch drag (default), true = accelerometer tilt
-	GameOverReason game_over_reason; // != GAME_OVER_NONE: frozen like `paused`, but BACK
-									 // restarts, not resumes -- see check_busted/tick_clock
+	bool use_tilt_steer;			 // false = touch drag, true = accelerometer tilt -- game_boot
+									 // defaults this per pnx_platform_has_touch() (only emery/
+									 // gabbro carry PBL_TOUCH), player can still flip it in the
+									 // pause menu regardless of the platform default
+	GameOverReason game_over_reason; // != GAME_OVER_NONE: which of the two ways the last
+									 // run ended, for draw_game_over's own text -- no
+									 // longer a mode flag itself, the app stack (main.c)
+									 // is what decides whether driving/paused/game_over
+									 // is running now; see check_busted/tick_clock for
+									 // where this gets set
 
 	uint32_t score;				// see "scoring" below (game.h) for what feeds this
 	uint32_t next_checkpoint_z; // world-Z of the next unclaimed checkpoint -- see
@@ -393,16 +409,16 @@ void game_shutdown(Game* g);
 
 void game_tick(Game* g);
 
-// BACK: pause/resume, always -- long-press force-quits at the OS level regardless of
-// what the app does (only a single click is ever claimable, per docs/PLATFORM.md), so
-// there is no in-app quit path to build. SELECT while paused swaps the steering mode;
-// it's a no-op while driving (game_toggle_steer_mode checks `paused` itself), so main.c
-// doesn't need to gate the call.
-void game_toggle_pause(Game* g);
+// Long-press BACK force-quits at the OS level regardless of what the app does (only a
+// single click is ever claimable, per docs/PLATFORM.md), so there is no in-app quit path
+// to build. Pause/resume and BACK-while-game-over-means-restart are now the app stack's
+// own job (main.c's driving/paused/game_over PnxAppOps) rather than something this
+// function has to gate -- SELECT (steer mode) is only ever wired to the paused state's
+// own input(), so this has nothing left to check either.
 void game_toggle_steer_mode(Game* g);
 
-// BACK while `game_over_reason != GAME_OVER_NONE`, instead of the usual pause toggle
-// (main.c gates the call). Resets gameplay state (distance/speed/lane/traffic/police,
-// score/checkpoints/timer, the fixed rng seed) the same way game_boot does, without
-// re-touching arenas or reloading assets -- those only need to happen once, ever.
+// Called from the game_over app state's own input() on BACK, then that state pops
+// itself (main.c) -- resets gameplay state (distance/speed/lane/traffic/police,
+// score/checkpoints/timer, the fixed rng seed, the track) the same way game_boot does,
+// without re-touching arenas or reloading assets -- those only need to happen once, ever.
 void game_restart(Game* g);

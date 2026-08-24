@@ -152,12 +152,14 @@ class MapsMixin:
             layers = []
             for i, ls in enumerate(layer_specs):
                 d = self._plane_doc(ls, legend, default, primary=(i == primary_i))
-                d["parallax_pct"] = max(0, min(255, int(ls.get("parallax_pct", 255))))
+                d["parallax_pct_x"] = max(0, min(255, int(ls.get("parallax_pct_x", 255))))
+                d["parallax_pct_y"] = max(0, min(255, int(ls.get("parallax_pct_y", 255))))
                 d["wrap"] = bool(ls.get("wrap", False))
                 layers.append(d)
         else:
             d = self._plane_doc(m, legend, default, primary=True)
-            d["parallax_pct"] = 255
+            d["parallax_pct_x"] = 255
+            d["parallax_pct_y"] = 255
             d["wrap"] = False
             layers = [d]
             primary_i = 0
@@ -984,15 +986,17 @@ rows = """
 
     @staticmethod
     def _layer_lines(primary=False, source=None, rows=None, start=None, warps=None,
-                     parallax_pct=None, wrap=None):
+                     parallax_pct_x=None, parallax_pct_y=None, wrap=None):
         """The body lines of one `[[map.layer]]` sub-table."""
         body = ["[[map.layer]]"]
         if primary:
             body.append("primary = true")
         if source is not None:
             body.append(f'source = "{source}"')
-        if parallax_pct is not None and parallax_pct != 255:
-            body.append(f"parallax_pct = {parallax_pct}")
+        if parallax_pct_x is not None and parallax_pct_x != 255:
+            body.append(f"parallax_pct_x = {parallax_pct_x}")
+        if parallax_pct_y is not None and parallax_pct_y != 255:
+            body.append(f"parallax_pct_y = {parallax_pct_y}")
         if wrap:
             body.append("wrap = true")
         if start is not None:

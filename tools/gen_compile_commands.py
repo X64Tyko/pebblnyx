@@ -68,9 +68,17 @@ def _extract_recipe_extra_flags(text):
     Parsed from the recipe line itself rather than hardcoded, for the same reason
     CFLAGS/SRC are: a flag added to the recipe and not here would otherwise drift
     silently the way this one briefly did.
+
+    Backslash-continued first: the recipe wrapped onto a second physical line (to keep
+    the flag list readable) after this regex was written, which `.` -- no re.DOTALL --
+    cannot see across. That silently dropped back to `extra = []` with no error, the
+    exact silent-drift failure this function's own docstring above warns about; caught
+    when clang-tidy flagged pnx_physics.h's own symbols as undeclared despite this
+    function existing to prevent exactly that.
     """
+    joined = re.sub(r"\\\n[ \t]*", " ", text)
     m = re.search(r"^\$\(OUT\):.*\n(?:.*\n)*?\t\$\(CC\)\s+\$\(CFLAGS\)\s*(.*?)\s*\$\(SRC\)",
-                 text, re.M)
+                 joined, re.M)
     return shlex.split(m.group(1)) if m and m.group(1).strip() else []
 
 

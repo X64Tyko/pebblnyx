@@ -1,12 +1,25 @@
 // The road: per-row perspective geometry, plus the curve a car actually drives on.
 //
-// No `.c`-side state -- everything here is a pure function of a screen row or a world-Z
-// position, so game.c (simulation) and render.c (drawing) can both call it without
-// coordinating who owns what.
+// road_row/current_horizon_y/lane_center stay pure functions of a screen row or a
+// world-Z position, so game.c (simulation) and render.c (drawing) can both call them
+// without coordinating who owns what. The curve/elevation segment table itself is real
+// `.c`-side state now (track_randomize, below) -- a random track has to be generated
+// and stored somewhere, unlike the old compile-time-constant test loop it replaced.
 
 #pragma once
 
 #include "pnx/pnx.h"
+
+// Off by default -- enable with `PNX_DEFINES=N4P_LEGACY_FIXED_TRACK=1 pebble build` for
+// the old hand-authored 7-segment test loop (reproducible dev/debug runs) instead of a
+// real random track. Same shape as game.h's N4P_STEER_DEBUG_LOG; lives here rather than
+// there because it's specifically about what track_randomize does, not general game
+// behaviour -- track.h/.c stay the module that owns "what the track is" independently
+// of game.c, same reasoning this file's own header comment already gives for the rest
+// of the module.
+#ifndef N4P_LEGACY_FIXED_TRACK
+#define N4P_LEGACY_FIXED_TRACK 0
+#endif
 
 // Logical landscape space, as the player sees it holding the watch turned to
 // PNX_ORIENT_BUTTONS_TOP. The physical framebuffer never rotates (still
@@ -78,12 +91,24 @@ static inline int32_t lane_center(int32_t lane)
 
 // ---------------------------------------------------------------- curve segments
 //
-// A procedural test loop, not a real map (DESIGN.md's "multiple maps" is still
-// unbuilt) -- lengths in world-Z units (the same units Game.distance already counts
-// in), curve in screen-offset-per-row-per-row (a second derivative: it accumulates
-// once into a rate and again into a position, same as any pseudo-3D racer's curve
-// maths -- see render.c's draw_road and game.c's centrifugal pull).
+// Randomly generated per race by default (track_randomize, below) -- lengths in
+// world-Z units (the same units Game.distance already counts in), curve in
+// screen-offset-per-row-per-row (a second derivative: it accumulates once into a rate
+// and again into a position, same as any pseudo-3D racer's curve maths -- see
+// render.c's draw_road and game.c's centrifugal pull).
 int32_t track_curve_at(int32_t world_z);
+
+// How many segments the generated track holds. Sized well past the max distance one
+// race can possibly cover (MAX_SPEED * RACE_TIMER_START_TICKS, game.h) at an average
+// ~800 units/segment, so a player never sees the track loop back within a single race
+// -- see track_randomize's own comment for the exact numbers this was sized against.
+#define TRACK_SEGMENT_COUNT 64
+
+// (Re)generates the track from `seed` -- game.c calls this once at boot and once per
+// restart, so every race is a genuinely new layout, not just the first one. Under
+// N4P_LEGACY_FIXED_TRACK (above), `seed` is unused and this instead loads the old
+// hand-authored 7-segment test loop, for reproducible dev/debug runs.
+void track_randomize(uint32_t seed);
 
 #define CURVE_SCALE 60 // divides accumulated curve into a screen offset; tuned by eye
 

@@ -526,9 +526,14 @@ static int ink_in(PnxTarget* t, int16_t x0, int16_t y0, int16_t x1, int16_t y1,
 
 static void test_tilemap(void)
 {
-	PnxArena persistent, scene;
-	if (!pnx_arena_init(&persistent, "tm-persistent", 4 * 1024, 4) ||
-		!pnx_arena_init(&scene, "tm-scene", 128 * 1024, 4))
+	// 132 KB held everything this test loads before compression -- compress_atlases
+	// (now on in examples/overworld/assets.toml) adds one atlas pool slot's worth of LZSS
+	// scratch on top of that (pnx_map_load's atlas_scratch), so the old ceiling now runs
+	// out ~11 KB short loading the outdoor map. Rounded up with headroom, not trimmed to
+	// the exact new minimum, since that minimum moves with whatever overworld's content
+	// grows to next.
+	PnxArena arena;
+	if (!pnx_arena_init(&arena, "tm-arena", 160 * 1024, 4))
 	{
 		return;
 	}
@@ -542,11 +547,10 @@ static void test_tilemap(void)
 				 s_tilemap_files[i]);
 		pnx_host_register_resource(resources[i], s_tilemap_paths[i]);
 	}
-	if (!pnx_assets_init(&persistent, &scene, resources, PNX_ASSET_COUNT) ||
+	if (!pnx_assets_init(&arena, resources, PNX_ASSET_COUNT) ||
 		!pnx_palettes_load(PNX_ASSET_PALETTES_PALETTES))
 	{
-		pnx_arena_destroy(&persistent);
-		pnx_arena_destroy(&scene);
+		pnx_arena_destroy(&arena);
 		return;
 	}
 
@@ -622,6 +626,5 @@ static void test_tilemap(void)
 	G_CHECK_EQ(pnx_map_stream_now(&outdoor, 0, 0, 200, 228), 0);
 	G_CHECK_EQ(pnx_map_tile(&outdoor, 0, 0), corner);
 
-	pnx_arena_destroy(&persistent);
-	pnx_arena_destroy(&scene);
+	pnx_arena_destroy(&arena);
 }

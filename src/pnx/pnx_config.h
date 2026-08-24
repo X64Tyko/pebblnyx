@@ -12,6 +12,16 @@
 
 #pragma once
 
+// Bytes pnx_arena_init_max leaves unclaimed below the platform's reported free heap,
+// for whatever the SDK itself allocates after the game's own arena is sized (timers,
+// click handlers, dialogs). A starting point, not a guarantee -- MEASUREMENTS.md
+// documents a real case (PNX_USE_DIAGNOSTICS on aplite) where post-init heap use was
+// enough to matter; tighten or loosen this per project once you've profiled headroom
+// to spare against a real device.
+#ifndef PNX_ARENA_HEAP_RESERVE
+#define PNX_ARENA_HEAP_RESERVE 2048
+#endif
+
 // Asset registry: packed blobs, handle-based lookup, bulk residency.
 #ifndef PNX_USE_ASSETS
 #define PNX_USE_ASSETS 1
@@ -72,6 +82,75 @@
 // against a runtime with this off refuses to load rather than reading garbage cells.
 #ifndef PNX_USE_MAP_COMPRESS
 #define PNX_USE_MAP_COMPRESS 0
+#endif
+
+// LZSS decoding for compressed sprite frames, paired with `compress_sprites = true` in
+// the manifest, the same posture as PNX_USE_MAP_COMPRESS above -- opt-in, and a sprite
+// built compressed against a runtime with this off refuses to load rather than reading
+// garbage pixels. Shares pnx_lzss_decode with the map path (pnx_lzss.c is compiled in
+// when either flag is on); sprites load whole rather than banked, so there is no
+// streaming/atomic-unit tradeoff to document here the way there is for maps.
+#ifndef PNX_USE_SPRITE_COMPRESS
+#define PNX_USE_SPRITE_COMPRESS 0
+#endif
+
+// LZSS decoding for compressed atlas/tile pixel data, paired with `compress_atlases = true`
+// in the manifest -- same posture as the other two compress flags. This is the one that
+// usually matters most: an atlas is typically the largest single resource category in
+// tile-heavy content (a real RPG demo measured 93% of its resource budget as atlas), where
+// compress_maps/compress_sprites alone barely move the total. Atlases loaded through a map's
+// pool (PnxMap.pool_mem, a fixed, reused slot per atlas) decode via PnxMap's own lzss_src
+// scratch rather than a fresh arena allocation -- see pnx_assets.c's atlas_load_into.
+#ifndef PNX_USE_ATLAS_COMPRESS
+#define PNX_USE_ATLAS_COMPRESS 0
+#endif
+
+// Experimental: bitplane-separated, Elias-gamma-coded pixel decoding (pnx_bitplane.c) --
+// NOT wired into pnx_sprite_load/atlas_load_into yet, and no manifest flag builds it.
+// Exists standalone for correctness + decode-cost measurement against real content
+// before any production load path depends on it -- see pnx_bitplane.h's own comment for
+// what it trades against LZSS and why.
+#ifndef PNX_USE_BITPLANE_COMPRESS
+#define PNX_USE_BITPLANE_COMPRESS 0
+#endif
+
+// Decoded-tile LRU cache (pnx_tile_cache.c) -- the piece that makes PNX_USE_BITPLANE_COMPRESS
+// viable against a renderer with no dirty-tracking (pnx_tilemap_draw_layer redraws every
+// visible tile every frame, unconditionally -- confirmed this session). Caching only the
+// COMPRESSED bytes would mean paying full decode cost on every blit of every frame
+// regardless of hits, measured at ~40ms/screen on real emery hardware -- the whole frame
+// budget gone on tile decode alone. Caching the DECODED pixels instead means a tile pays
+// decode once per cache miss (new tile scrolling into view), not once per blit -- a
+// stationary or slow-scrolling camera hits the cache almost every frame.
+//
+// Real RAM tradeoff, not a free win: a decoded slot costs the full packed-4bpp size of one
+// tile (PNX_TILE_CACHE_TILE_PX^2/2 bytes), same as holding that tile in the CURRENT
+// resident atlas pool. The saving comes from caching only as many DISTINCT tiles as are
+// actually on screen, not a whole atlas's worth -- a real win for maps referencing several
+// or large atlases (this session measured 63KB -> 8-12KB for a 3-atlas streaming map), a
+// wash or a loss for small single-atlas content that was already cheap to hold whole
+// (overworld's `tiles`/`caveset`, both under 8KB total). Size this against the SPECIFIC
+// map's atlas footprint, not blindly.
+#ifndef PNX_TILE_CACHE_SLOTS
+#define PNX_TILE_CACHE_SLOTS 32
+#endif
+
+// Every cached tile is assumed this size (matches this session's "atlases=16x16,
+// sprites=whole-frame" split) -- a map with a different tile_px needs this raised (and
+// the RAM cost above scales with its square), not left silently truncating tiles that
+// don't fit.
+#ifndef PNX_TILE_CACHE_TILE_PX
+#define PNX_TILE_CACHE_TILE_PX 16
+#endif
+
+// Frames a slot may sit undrawn before it self-releases (pnx_tile_cache_tick, called once
+// per frame) -- independent of the evict-oldest-on-miss path, which can free a slot sooner
+// under pressure regardless of this threshold. ~90 frames is ~3.4s at PT2's measured 26.8fps
+// ceiling -- long enough that a slow-panning camera doesn't thrash tiles it's about to
+// re-need, short enough that a scene change (pnx_tile_cache_reset already handles that
+// explicitly) isn't the only way stale entries ever clear.
+#ifndef PNX_TILE_CACHE_MAX_AGE
+#define PNX_TILE_CACHE_MAX_AGE 90
 #endif
 
 // Defaults from the HARDWARE, not from a blanket "on": PBL_SPEAKER is a compiler define

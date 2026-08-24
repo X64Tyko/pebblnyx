@@ -11,7 +11,7 @@
 
 typedef struct
 {
-	PnxArena persistent, scene;
+	PnxArena arena;
 	PnxCamera camera;
 
 	PnxSpriteInstance sprites[MAX_SPRITES];

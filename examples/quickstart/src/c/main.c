@@ -11,12 +11,6 @@
 
 #include <string.h>
 
-// From the pipeline's own scene residency report ("WORST room1 1,204 B <- minimum
-// scene arena"), printed by `pnx_assets.py` on every build. Rounded up rather than
-// guessed -- re-read this off the build output whenever a scene gains an asset.
-#define SCENE_ARENA_BYTES	(4 * 1024)
-#define PERSIST_ARENA_BYTES 256
-
 static const uint32_t RESOURCES[] = PNX_ASSET_RESOURCE_TABLE;
 
 // -------------------------------------------------------------------- scene loading
@@ -163,13 +157,12 @@ uint8_t game_boot(Game* g)
 {
 	memset(g, 0, sizeof(*g));
 
-	if (!pnx_arena_init(&g->persistent, "persistent", PERSIST_ARENA_BYTES, 4) ||
-		!pnx_arena_init(&g->scene, "scene", SCENE_ARENA_BYTES, 4))
+	if (!pnx_arena_init_max(&g->arena, "game", PNX_ARENA_HEAP_RESERVE, 4))
 	{
 		pnx_platform_log("arena init failed");
 		return 0;
 	}
-	pnx_assets_init(&g->persistent, &g->scene, RESOURCES, PNX_ASSET_COUNT);
+	pnx_assets_init(&g->arena, RESOURCES, PNX_ASSET_COUNT);
 	pnx_camera_init(&g->camera, PNX_DISPLAY_WIDTH, PNX_DISPLAY_HEIGHT);
 	pnx_input_init(PNX_ORIENTATION);
 
@@ -190,8 +183,7 @@ uint8_t game_boot(Game* g)
 
 void game_shutdown(Game* g)
 {
-	pnx_arena_destroy(&g->scene);
-	pnx_arena_destroy(&g->persistent);
+	pnx_arena_destroy(&g->arena);
 }
 
 // ---------------------------------------------------------------------------- main

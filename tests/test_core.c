@@ -208,6 +208,57 @@ static void test_arena(void)
 	CHECK(!pnx_arena_init(&bad, "bad", 0, 4));
 }
 
+// ------------------------------------------------------------- arena, double-ended
+
+static void test_arena_hi(void)
+{
+	printf("arena hi\n");
+
+	PnxArena a;
+	CHECK(pnx_arena_init(&a, "test-hi", 1024, 4));
+
+	uint8_t* hi1 = (uint8_t*)pnx_arena_alloc_hi(&a, 100, 4);
+	CHECK(hi1 != NULL);
+	// Guarded, not just asserted above: CHECK logs and continues rather than stopping the
+	// test on failure (this file's own macro, by design -- one run reports every failure,
+	// not just the first), so an unguarded hi1+100 below would be pointer arithmetic on a
+	// null pointer -- UB -- in the one scenario (this alloc genuinely failing) a check is
+	// for. Caught by clang-analyzer-core.NullPointerArithm, not by any test run actually
+	// hitting it.
+	if (hi1)
+	{
+		CHECK_EQ(((uintptr_t)hi1) % 4, 0);
+		CHECK(hi1 >= a.base && hi1 + 100 <= a.base + a.capacity);
+	}
+	CHECK_EQ(a.used, 0); // the low cursor is untouched by a high-side alloc
+
+	// The two sides share one capacity: exhausting one refuses the other.
+	uint8_t* lo1 = (uint8_t*)pnx_arena_alloc(&a, 1024, 4);
+	CHECK(lo1 == NULL);
+	CHECK(pnx_arena_alloc_hi(&a, 1024, 4) == NULL);
+
+	pnx_arena_reset_hi(&a); // clears the high side only
+	CHECK_EQ(a.used_hi, 0);
+
+	// The scenario this design exists for: a "persistent" (low) allocation made AFTER a
+	// "scene" (high) allocation already advanced the high cursor must still land below
+	// it and survive the next reset -- interleaving order must not matter.
+	uint8_t* scene1 = (uint8_t*)pnx_arena_alloc_hi(&a, 200, 4);
+	CHECK(scene1 != NULL);
+	uint8_t* persist1 = (uint8_t*)pnx_arena_alloc(&a, 50, 4);
+	CHECK(persist1 != NULL);
+	memset(persist1, 0xAB, 50);
+
+	pnx_arena_reset_hi(&a); // simulates a scene boundary -- NOT pnx_arena_reset, which
+							// would also clear the persistent side this is proving survives
+	CHECK_EQ(a.used_hi, 0);
+	CHECK_EQ(a.used, 50); // the persistent allocation survived, untouched by the reset
+	for (int i = 0; i < 50; i++)
+		CHECK_EQ(persist1[i], 0xAB);
+
+	pnx_arena_destroy(&a);
+}
+
 // ------------------------------------------------------------------------- target
 
 static void test_target(void)
@@ -248,9 +299,16 @@ void test_physics(void);
 void test_sprite(void);
 void test_layer(void);
 void test_map_compress(void);
+void test_sprite_compress(void);
+void test_atlas_compress(void);
+void test_bitplane_compress(void);
+void test_tile_cache(void);
+void test_bitplane_atlas(void);
+void test_bitplane_sprite(void);
 void test_tween(void);
 void test_hud_vars(void);
 void test_hud_window(void);
+void test_blit_scaled(void);
 
 int main(void)
 {
@@ -258,6 +316,7 @@ int main(void)
 	test_fx();
 	test_fmt();
 	test_arena();
+	test_arena_hi();
 	test_target();
 	test_gfx();
 	test_text();
@@ -272,9 +331,16 @@ int main(void)
 	test_sprite();
 	test_layer();
 	test_map_compress();
+	test_sprite_compress();
+	test_atlas_compress();
+	test_bitplane_compress();
+	test_tile_cache();
+	test_bitplane_atlas();
+	test_bitplane_sprite();
 	test_tween();
 	test_hud_vars();
 	test_hud_window();
+	test_blit_scaled();
 
 	printf("\n%d checks, %d failures\n", s_checks, s_failures);
 	return s_failures == 0 ? 0 : 1;

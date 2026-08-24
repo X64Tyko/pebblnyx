@@ -22,6 +22,7 @@ typedef enum
 {
 	PNX_ASSET_PALETTES_PALETTES,
 	PNX_ASSET_ATLAS_TILES,
+	PNX_ASSET_SPRITE_FLAT,
 	PNX_ASSET_MAP_A,
 	PNX_ASSET_BANK_A_0,
 	PNX_ASSET_COUNT
@@ -42,6 +43,7 @@ _Static_assert(PNX_ASSET_PALETTES_PALETTES == 0,
 #define PNX_ASSET_RESOURCE_TABLE { \
 	RESOURCE_ID_PALETTES,          \
 	RESOURCE_ID_TILES,             \
+	RESOURCE_ID_FLAT,              \
 	RESOURCE_ID_A,                 \
 	RESOURCE_ID_A_0,               \
 }
@@ -53,6 +55,7 @@ _Static_assert(PNX_ASSET_PALETTES_PALETTES == 0,
 #define PNX_ASSET_FILE_TABLE { \
 	"palettes.bin",            \
 	"tiles.bin",               \
+	"flat.bin",                \
 	"a.bin",                   \
 	"a_b0.bin",                \
 }
@@ -74,6 +77,8 @@ _Static_assert(PNX_ASSET_PALETTES_PALETTES == 0,
 #define TILE_ACCENT		  0
 #define TILE_FLOOR		  1
 #define TILE_WALL		  3
+
+#define FLAT_FRAME_COUNT 1
 
 #define MAP_A_W		  8
 #define MAP_A_H		  8

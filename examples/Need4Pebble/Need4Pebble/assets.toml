@@ -18,6 +18,13 @@ budget_bytes = 262144
 orientation = "buttons_top"
 device_address = "192.168.0.48"
 force_screen_lock = true
+# Sprites are 98% of this project's resource budget (touring/police/hangon_bike), so
+# this is where compression actually matters. "bitplane" (experimental,
+# PNX_USE_BITPLANE_COMPRESS = 1 in src/c/pnx/pnx_config.h) in place of plain LZSS
+# (PNX_USE_SPRITE_COMPRESS) -- this session's real-content measurements found it costs
+# more flash on this project's busier/dithered sprites than LZSS does, but decodes each
+# frame independently, which LZSS's single combined stream cannot.
+compress_sprites = "bitplane"
 
 # Add content with the editor's Import and Fonts tabs, or by hand:
 #
@@ -35,6 +42,67 @@ force_screen_lock = true
 # and give a legend character an `atlas` key to say which one its role resolves against.
 # A scene must NOT list a map's atlases: the map owns them, sizes its own pool and streams
 # them by WorldTile, so naming one in a scene loads a second resident copy.
+
+# ---------------------------------------------------------------- ground
+
+[[atlas]]
+name = "ground"
+sheet = "art/ground.png"
+tile = 16
+region = [0, 0, 2, 2]
+max_tiles = 4
+out = "ground.bin"
+# PLACEHOLDER art (4 flat-colour tiles), same role as road_chunk.png -- validates the
+# ground-tile batching in draw_road end-to-end, not final art. Tiles 0/1 are the two
+# alternating band colours draw_road's old ground fill already used (COLOUR_GROUND_A/B);
+# 2/3 are an "amber marker light" accent, cycled by the anim clip below so the real
+# device build exercises pnx_anim_frame on a genuine atlas tile id, not just the host
+# test fixture in tests/test_assets.py.
+[atlas.anim]
+light = { frames = [2, 3], fps = 2, loop = true }
+
+# ---------------------------------------------------------------- horizon band
+
+[[atlas]]
+name = "horizon_band"
+sheet = "art/horizon_band.png"
+tile = 32
+region = [0, 0, 2, 3]
+max_tiles = 6
+colorkey = [85, 170, 255]
+out = "horizon_band.bin"
+# PLACEHOLDER art: a stylised synthwave cityscape silhouette. Tiles 0-3 are distinct
+# building skylines (variety when tiled side to side); 4/5 are a lit-window accent
+# variant of tile 1's skyline, cycled the same way ground.bin's "light" tile is --
+# same pnx_anim_frame call, same generated-handle convention, a second real exercise
+# of the tile-animation pipeline rather than a one-off.
+#
+# Drawn hand-rolled (draw_horizon_band, render.c), the same way draw_ground is, NOT
+# through pnx_tilemap_draw_layer/pnx_layers_draw: that generic path writes screen
+# coordinates directly in the TARGET's native space with no rotation hook, and this
+# project's whole landscape orientation depends on fb_rect's own logical->physical
+# transform being applied by hand at every draw call (buttons_top). A generic map/
+# layer here would render sideways. No [[map]] for this reason -- just the atlas.
+[atlas.anim]
+lit = { frames = [4, 5], fps = 1, loop = true }
+
+# ---------------------------------------------------------------- road chunk
+
+[[sprite]]
+name = "road_chunk"
+sheet = "art/road_chunk.png"
+# PLACEHOLDER art (a flat shoulder/road/shoulder band, no texture) -- generated to
+# validate pnx_blit_4bpp_scaled end-to-end, not final art. Authored wide (cross-track,
+# 180px = (ROAD_HALF_MAX + ROAD_HALF_MAX/RUMBLE_FRAC)*2, the widest total_half_width*2
+# draw_road ever asks for) x thin (depth, 1px) -- the pack-time buttons_top rotation
+# (rotate_dims) transposes this to a packed frame.w=1/frame.h=180, so the common case
+# (height==1, i.e. no elevation stretch on this row) hits pnx_blit_4bpp_scaled's
+# dst_w==src_w fast path. Two frames, matching draw_road's existing `alt` banding.
+frames = [
+    [0, 0, 180, 1],
+    [0, 1, 180, 1],
+]
+out = "road_chunk.bin"
 
 # ---------------------------------------------------------------- touring car
 

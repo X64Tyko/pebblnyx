@@ -27,9 +27,6 @@
 
 #include <string.h>
 
-#define PERSIST_BYTES 512
-#define SCENE_BYTES	  (4 * 1024)
-
 #define POINT_COUNT 5
 // Bytes of other resource content declared -- and so packed -- before each probe. Not
 // read directly; this is what the read cost is being plotted against.
@@ -53,7 +50,7 @@ typedef enum
 
 typedef struct
 {
-	PnxArena persistent, scene;
+	PnxArena arena;
 	PnxFont font;
 	bool has_font;
 
@@ -228,15 +225,14 @@ int main(void)
 	static App a;
 	memset(&a, 0, sizeof(a));
 
-	if (!pnx_arena_init(&a.persistent, "persistent", PERSIST_BYTES, 4) ||
-		!pnx_arena_init(&a.scene, "scene", SCENE_BYTES, 4))
+	if (!pnx_arena_init_max(&a.arena, "app", PNX_ARENA_HEAP_RESERVE, 4))
 	{
 		pnx_platform_log("arena init failed");
 		return 1;
 	}
 
 	static const uint32_t RESOURCES[] = PNX_ASSET_RESOURCE_TABLE;
-	pnx_assets_init(&a.persistent, &a.scene, RESOURCES, PNX_ASSET_COUNT);
+	pnx_assets_init(&a.arena, RESOURCES, PNX_ASSET_COUNT);
 
 	s_probe_ids[0] = RESOURCE_ID_PROBE_0;
 	s_probe_ids[1] = RESOURCE_ID_PROBE_1;
@@ -252,7 +248,6 @@ int main(void)
 
 	pnx_platform_run(frame, &a);
 
-	pnx_arena_destroy(&a.scene);
-	pnx_arena_destroy(&a.persistent);
+	pnx_arena_destroy(&a.arena);
 	return 0;
 }

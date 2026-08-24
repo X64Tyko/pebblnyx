@@ -10,10 +10,14 @@ CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -DPNX_PLATFORM_HOST -DPNX_USE_SYNTH=1 -g -O1
 SRC      = test_core.c test_assets.c test_gfx.c test_text.c test_audio.c test_input.c test_stream.c \
            test_synth.c test_save.c test_app.c test_physics.c test_sprite.c test_layer.c test_map_compress.c \
-           test_tween.c test_hud_vars.c test_hud_window.c \
+           test_sprite_compress.c test_atlas_compress.c test_bitplane_compress.c \
+           test_tile_cache.c test_bitplane_atlas.c test_bitplane_sprite.c \
+           test_tween.c test_hud_vars.c test_hud_window.c test_blit_scaled.c \
            ../src/pnx/core/pnx_arena.c ../src/pnx/core/pnx_fmt.c ../src/pnx/core/pnx_diag.c \
+           ../src/pnx/core/pnx_anim.c \
            ../src/pnx/app/pnx_app.c \
            ../src/pnx/assets/pnx_assets.c ../src/pnx/assets/pnx_lzss.c \
+           ../src/pnx/assets/pnx_bitplane.c ../src/pnx/assets/pnx_tile_cache.c \
            ../src/pnx/gfx/pnx_gfx.c ../src/pnx/gfx/pnx_tilemap.c \
            ../src/pnx/gfx/pnx_sprite.c ../src/pnx/gfx/pnx_text.c \
            ../src/pnx/gfx/pnx_nineslice.c ../src/pnx/gfx/pnx_layer.c \
@@ -30,10 +34,13 @@ OUT      = build/test_core
 # -DPNX_HOST_BW=1, which the main binary must NOT carry, since the point of the main one
 # is that ordinary colour behaviour stays the default. Only pnx_assets.c is linked in --
 # this checks the loader's format auto-detection against real pipeline output, not the
-# whole framework -- so it does not need every other module's .c file.
+# whole framework -- so it does not need every other module's .c file. It does need
+# pnx_lzss.c + PNX_USE_ATLAS_COMPRESS now: overworld's assets.toml (the real pipeline
+# output this test loads) turned compress_atlases on, so the ~bw resource it reads is
+# compressed on disk, same as the colour one $(OUT) already builds with the flag for.
 BW_SRC   = test_pack2bit_bw.c \
            ../src/pnx/core/pnx_arena.c ../src/pnx/core/pnx_fmt.c ../src/pnx/core/pnx_diag.c \
-           ../src/pnx/assets/pnx_assets.c \
+           ../src/pnx/assets/pnx_assets.c ../src/pnx/assets/pnx_lzss.c \
            ../src/pnx/platform/pnx_platform_host.c
 BW_OUT   = build/test_pack2bit_bw
 
@@ -62,15 +69,17 @@ all: test
 HDRS = $(shell find ../src -name '*.h') \
        ../examples/overworld/src/c/assets_gen.h \
        ../examples/worldtiles/src/c/assets_gen.h \
-       fixtures/lzss/gen.h
+       fixtures/lzss/gen.h \
+       fixtures/bitplane/bpeg_fixtures.h
 
 $(OUT): $(SRC) $(HDRS)
 	@mkdir -p build
-	$(CC) $(CFLAGS) -DPNX_USE_PHYSICS=1 -DPNX_USE_MAP_COMPRESS=1 $(SRC) -o $(OUT)
+	$(CC) $(CFLAGS) -DPNX_USE_PHYSICS=1 -DPNX_USE_MAP_COMPRESS=1 -DPNX_USE_SPRITE_COMPRESS=1 \
+		-DPNX_USE_ATLAS_COMPRESS=1 -DPNX_USE_BITPLANE_COMPRESS=1 $(SRC) -o $(OUT)
 
 $(BW_OUT): $(BW_SRC) $(HDRS)
 	@mkdir -p build
-	$(CC) $(CFLAGS) -DPNX_HOST_BW=1 $(BW_SRC) -o $(BW_OUT)
+	$(CC) $(CFLAGS) -DPNX_HOST_BW=1 -DPNX_USE_ATLAS_COMPRESS=1 $(BW_SRC) -o $(BW_OUT)
 
 $(ROUND_OUT): $(ROUND_SRC) $(HDRS)
 	@mkdir -p build

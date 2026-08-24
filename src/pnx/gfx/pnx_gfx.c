@@ -356,6 +356,80 @@ void pnx_blit_4bpp_region(PnxTarget* t, const uint8_t* src, int16_t src_w,
 	}
 }
 
+#if !PNX_DISPLAY_BW
+void pnx_blit_4bpp_scaled(PnxTarget* t, const uint8_t* src, const PnxPalette* palette,
+						  int32_t x, int32_t y, int16_t src_w, int16_t src_h, int16_t dst_w,
+						  int16_t dst_h)
+{
+	if (!src || !palette || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0)
+		return;
+
+	if (dst_w == src_w && dst_h == src_h)
+	{
+		pnx_blit_4bpp(t, src, palette, x, y, dst_w, dst_h, PNX_FLIP_NONE);
+		return;
+	}
+
+	const int16_t th = pnx_target_height(t);
+
+	// 16.16 fixed point. Plain int32_t here (not int64_t): src_h/src_w would need to pass
+	// 32767 before `<< 16` overflows int32_t, far past any sprite this display's own
+	// resource budget could hold -- and a division, unlike the `>> 16` multiplies below,
+	// costs real bytes (__aeabi_ldivmod pulled out of libgcc) the moment ANY caller
+	// anywhere in the link reaches it, on every platform, not just the ones tight on
+	// space. The multiplies below stay widened: j/i can run up to a screen dimension and
+	// row_step/col_step can itself be large at extreme scale ratios, so THAT product can
+	// realistically exceed int32_t -- but `>> 16` is a shift, not a division, so it never
+	// carries this same cost.
+	const int32_t row_step = (int32_t)((src_h << 16) / dst_h);
+	const int32_t col_step = (int32_t)((src_w << 16) / dst_w);
+
+	int32_t j0 = 0, j1 = dst_h;
+	if (y < 0)
+		j0 = -y;
+	if (y + dst_h > th)
+		j1 = th - y;
+
+	for (int32_t j = j0; j < j1; j++)
+	{
+		PnxRow row = pnx_target_row(t, (int16_t)(y + j));
+		if (!row.data)
+			continue;
+
+		const int32_t sy	= (int32_t)(((int64_t)j * row_step) >> 16);
+		const int32_t nbase = sy * src_w; // flat nibble-stream row start, not a byte stride
+
+		if (dst_w == src_w)
+		{
+			// Height-only scaling (the one shape that actually reaches hardware today):
+			// span_4bpp already does its own horizontal clip, so no i0/i1 here.
+			span_4bpp(row.data, x, src, nbase, palette->entries, dst_w, row.min_x, row.max_x);
+			continue;
+		}
+
+		int32_t i0 = 0, i1 = dst_w;
+		if (x + i0 < row.min_x)
+			i0 = row.min_x - x;
+		if (x + i1 > row.max_x + 1)
+			i1 = row.max_x + 1 - x;
+		if (i1 <= i0)
+			continue;
+
+		// General 2-axis case: per-pixel column accumulator, same no-lockstep shape
+		// span_4bpp_at already uses, with a scaled `col` instead of a literal col0+i.
+		for (int32_t i = i0; i < i1; i++)
+		{
+			const int32_t col	 = (int32_t)(((int64_t)i * col_step) >> 16);
+			const int32_t n		 = nbase + col;
+			const uint8_t packed = src[n >> 1];
+			const uint8_t v		 = (n & 1) ? (uint8_t)(packed & 0x0F) : (uint8_t)(packed >> 4);
+			if (v != PNX_PALETTE_TRANSPARENT)
+				row.data[x + i] = palette->entries[v];
+		}
+	}
+}
+#endif // !PNX_DISPLAY_BW
+
 void pnx_blit_metatile(PnxTarget* t, const PnxAtlas* atlas, uint8_t tile, int32_t x, int32_t y)
 {
 	pnx_blit_metatile_with(t, atlas, tile, pnx_atlas_tile_palette(atlas, tile), x, y);

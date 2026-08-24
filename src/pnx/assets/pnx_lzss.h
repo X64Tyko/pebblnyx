@@ -13,7 +13,7 @@
 
 #include "../pnx_config.h"
 
-#if PNX_USE_MAP_COMPRESS
+#if PNX_USE_MAP_COMPRESS || PNX_USE_SPRITE_COMPRESS || PNX_USE_ATLAS_COMPRESS
 
 #include <stddef.h>
 #include <stdint.h>
@@ -24,7 +24,11 @@
 // many WorldTiles it holds, both known before the read), so this is a bound, not a guess.
 // Returns the number of bytes actually written; short of `dst_len` means the stream ended
 // early, which pnx_assets.c treats as a truncated/corrupt bank the same way a short
-// resource read already is.
+// resource read already is. Deliberately does NOT detect a `dst_len`-limited decode that
+// left `src_len` bytes unconsumed -- decoding into a buffer smaller than the real output
+// on purpose is a real, load-bearing case (see test_assets.c's test_lzss_decode, and
+// worldtile_load_run's own bounded scratch), so it cannot double as a "this stream was
+// too big" error signal without breaking that.
 size_t pnx_lzss_decode(const uint8_t* src, size_t src_len, uint8_t* dst, size_t dst_len);
 
 #endif // PNX_USE_MAP_COMPRESS

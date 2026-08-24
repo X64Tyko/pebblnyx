@@ -1,0 +1,21 @@
+# Dedicated fixture for compress_sprites = "bitplane" -- exercises the NEW C decode path
+# in pnx_sprite_load (pnx_assets.c) against a real pipeline build, separate from
+# fixtures/lzss/ (which tests the LZSS path specifically and must not be repurposed).
+#
+# Four frames, two of them byte-identical (frame 0 and frame 2, same source rect) --
+# deliberately, to exercise build_sprite_frame_meta's existing dedup interacting
+# correctly with the new per-deduped-unit bitplane encoding (compress_sprite_pixels_bitplane's
+# whole reason for deriving unit order from frame_meta's offsets rather than storing a
+# second copy of it).
+
+[project]
+name = "bitplane_sprite_fixture"
+resources = "resources"
+header = "gen.h"
+compress_sprites = "bitplane"
+
+[[sprite]]
+name = "quad"
+sheet = "art/sheet.png"
+frames = [[0, 0, 16, 16], [16, 0, 16, 16], [0, 0, 16, 16], [16, 16, 16, 16]]
+out = "quad.bin"

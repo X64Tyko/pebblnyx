@@ -18,12 +18,9 @@
 
 #include <string.h>
 
-#define PERSIST_BYTES 1024
-#define SCENE_BYTES	  (16 * 1024)
-
 typedef struct
 {
-	PnxArena persistent, scene;
+	PnxArena arena;
 	PnxFont hud_font;
 	bool has_font;
 	PnxSong song;
@@ -276,13 +273,12 @@ int main(void)
 	static App a;
 	memset(&a, 0, sizeof(a));
 
-	if (!pnx_arena_init(&a.persistent, "persistent", PERSIST_BYTES, 4) ||
-		!pnx_arena_init(&a.scene, "scene", SCENE_BYTES, 4))
+	if (!pnx_arena_init_max(&a.arena, "app", PNX_ARENA_HEAP_RESERVE, 4))
 	{
 		pnx_platform_log("arena init failed");
 		return 1;
 	}
-	pnx_assets_init(&a.persistent, &a.scene, RESOURCES, PNX_ASSET_COUNT);
+	pnx_assets_init(&a.arena, RESOURCES, PNX_ASSET_COUNT);
 
 	if (!pnx_audio_init(PNX_AUDIO_16KHZ_8BIT, 85))
 	{
@@ -339,13 +335,12 @@ int main(void)
 #endif
 	pnx_log("start: song=%d (%u patterns, %ubpm) laser=%u boom=%u arena %u/%u", (int)a.ready,
 			a.song.pattern_count, a.song.tempo_bpm, (unsigned)a.laser_len, (unsigned)a.boom_len,
-			(unsigned)a.scene.used, (unsigned)a.scene.capacity);
+			(unsigned)a.arena.used_hi, (unsigned)a.arena.capacity);
 
 	pnx_platform_set_audio_timer(audio_tick, &a, 10);
 	pnx_platform_run(frame, &a);
 
 	pnx_audio_shutdown();
-	pnx_arena_destroy(&a.scene);
-	pnx_arena_destroy(&a.persistent);
+	pnx_arena_destroy(&a.arena);
 	return 0;
 }

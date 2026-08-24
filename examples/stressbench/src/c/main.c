@@ -36,12 +36,6 @@
 
 #include <string.h>
 
-#define PERSIST_BYTES 512
-// Room for the tileset atlas, the hero sprite (base + its bw_variant bake), the field map
-// and its one WorldTile bank, and the font's glyph bitmaps -- all resident at once, which
-// is the point: everything this app stresses is loaded together, the same as a real scene.
-#define SCENE_BYTES (8 * 1024)
-
 #define TEST_SLOT		   ((PnxSaveSlot)0)
 #define SAVE_VERSION	   1
 #define SAVE_PAYLOAD_BYTES 2000 // ~8 chunks at PNX_SAVE_CHUNK0_PAYLOAD=248 / 256 each
@@ -55,7 +49,7 @@ static uint8_t s_payload[SAVE_PAYLOAD_BYTES];
 
 typedef struct
 {
-	PnxArena persistent, scene;
+	PnxArena arena;
 	PnxFont font;
 	bool has_font;
 
@@ -317,15 +311,14 @@ int main(void)
 	static App a;
 	memset(&a, 0, sizeof(a));
 
-	if (!pnx_arena_init(&a.persistent, "persistent", PERSIST_BYTES, 4) ||
-		!pnx_arena_init(&a.scene, "scene", SCENE_BYTES, 4))
+	if (!pnx_arena_init_max(&a.arena, "app", PNX_ARENA_HEAP_RESERVE, 4))
 	{
 		pnx_platform_log("arena init failed");
 		return 1;
 	}
 
 	static const uint32_t RESOURCES[] = PNX_ASSET_RESOURCE_TABLE;
-	pnx_assets_init(&a.persistent, &a.scene, RESOURCES, PNX_ASSET_COUNT);
+	pnx_assets_init(&a.arena, RESOURCES, PNX_ASSET_COUNT);
 
 	// A no-op on a 1-bit build (PnxPalette's own comment, pnx_assets.h) -- called anyway,
 	// same source on every platform, matching every other example's boot order.
@@ -370,7 +363,6 @@ int main(void)
 	pnx_platform_run(frame, &a);
 
 	pnx_audio_shutdown();
-	pnx_arena_destroy(&a.scene);
-	pnx_arena_destroy(&a.persistent);
+	pnx_arena_destroy(&a.arena);
 	return 0;
 }

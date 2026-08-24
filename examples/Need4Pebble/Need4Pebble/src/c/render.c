@@ -1,5 +1,10 @@
 #include "render.h"
 #include "track.h"
+// GROUND_TILE_PX/GROUND_LIGHT_* (draw_ground_tile_row's tile constants and anim clip) --
+// game.h deliberately does NOT include this project-wide (see its own comment on
+// TOURING_CRASH_CRASH_COUNT), but render.c is a leaf .c file, the same way game.c already
+// includes it directly for its own asset ids.
+#include "assets_gen.h"
 
 // ------------------------------------------------------------------------- colour
 //
@@ -148,27 +153,30 @@ static void fb_point(int32_t ax, int32_t ay, int32_t* fx, int32_t* fy)
 	*fy = ax;
 }
 
-// y=0 is the top of the sky (farthest from the camera); y=horizon_y-1 is the row right
-// at the horizon. Ramp position is continuous in y/horizon_y rather than a fixed
-// row-count banding, so this still holds up as horizon_y itself changes with the
-// player's slope (current_horizon_y) -- a steep uphill's shorter sky still sees the
-// full ramp, just compressed into fewer rows.
-static int32_t sky_ramp_index(int32_t y, int32_t horizon_y, int32_t ramp_len)
+// y=0 is the top of the sky (farthest from the camera); y=HORIZON_Y-1 is the row right
+// at the (flat-ground baseline) horizon. Static now, not driven by the per-frame
+// current_horizon_y -- direct feedback, the same "moves with the ground horizon" issue
+// draw_horizon_band's own header comment already describes and fixes for the cityscape,
+// applying here too: the sky gradient's own extent/banding was visibly shifting with
+// every hill and valley instead of reading as a fixed backdrop. The cityscape (drawn
+// after this, extending well past HORIZON_Y -- see its own comment) is what bridges
+// whatever gap opens between this static sky and the dynamic ground/road boundary now.
+static int32_t sky_ramp_index(int32_t y, int32_t ramp_len)
 {
-	return pnx_clamp_i32((y * ramp_len) / horizon_y, 0, ramp_len - 1);
+	return pnx_clamp_i32((y * ramp_len) / HORIZON_Y, 0, ramp_len - 1);
 }
 
-static void draw_sky(PnxTarget* target, uint32_t distance, int32_t horizon_y)
+static void draw_sky(PnxTarget* target, uint32_t distance)
 {
 	const int32_t t1000 = sky_cycle_progress(distance);
 	uint8_t ramp[SKY_RAMP_LEN];
 	for (int32_t i = 0; i < SKY_RAMP_LEN; i++)
 		ramp[i] = pnx_tween_gcolor8(SKY_RAMP_SUNSET[i], SKY_RAMP_NIGHT[i], t1000);
 
-	for (int32_t y = 0; y < horizon_y; y++)
+	for (int32_t y = 0; y < HORIZON_Y; y++)
 	{
-		const int32_t idx	   = sky_ramp_index(y, horizon_y, SKY_RAMP_LEN);
-		const int32_t prev_idx = (y == 0) ? idx : sky_ramp_index(y - 1, horizon_y, SKY_RAMP_LEN);
+		const int32_t idx	   = sky_ramp_index(y, SKY_RAMP_LEN);
+		const int32_t prev_idx = (y == 0) ? idx : sky_ramp_index(y - 1, SKY_RAMP_LEN);
 		if (idx != prev_idx)
 			fb_rect_dither(target, 0, y, LOGICAL_W, 1, ramp[prev_idx], ramp[idx]);
 		else
@@ -239,6 +247,246 @@ static void draw_sun(PnxTarget* target, uint32_t distance, int32_t horizon_y)
 	}
 }
 
+// Draws one scanline row's shoulder+road band from g->road_chunk, scaled to this row's
+// exact width. `total_half_width` is row.rumble_width -- that field already includes
+// half_width (track.c: rumble_width = half + max(2, half/RUMBLE_FRAC)), it is not an
+// additive extra, so it alone is both the sprite's scale target and where the ground
+// fill (Part 2) has to pick up.
+//
+// Physical-space call shape mirrors fb_rect's own ax/ay -> x/y swap (VIEW_H - ay - ah,
+// ax): the source frame's cross-track axis (frame.h, post pack-time buttons_top
+// rotation) maps to the destination's physical ROW COUNT, which is the value that
+// changes every scanline row -- see pnx_blit_4bpp_scaled's own header comment and
+// road_chunk's assets.toml comment for why this is dst_h, not dst_w.
+//
+// PNX_DISPLAY_BW-only builds (flint, aplite, diorite) never call this: pnx_blit_4bpp_scaled
+// itself does not exist on those (v1 has no ~bw path, see its own header comment), and
+// draw_road's own call site guards on the same condition, falling back to the original
+// flat fills there instead.
+#if !PNX_DISPLAY_BW
+static void fb_road_row_scaled(PnxTarget* target, const PnxSprite* road_chunk, int32_t cx,
+							   int32_t total_half_width, int32_t dy, int32_t height,
+							   uint8_t frame)
+{
+	PnxSpriteFrame f;
+	pnx_sprite_frame_get(road_chunk, frame, &f);
+	const PnxPalette* pal = pnx_sprite_frame_palette(road_chunk, frame);
+
+	pnx_blit_4bpp_scaled(target, f.pixels, pal, VIEW_H - dy - height, cx - total_half_width,
+						 f.w, f.h, height, total_half_width * 2);
+}
+#endif
+
+// A fixed 8-tile pattern for horizon_band's 4 skyline variants (tiles 0-3), so the strip
+// reads as an actual skyline rather than one tile repeated -- see assets.toml's own
+// comment on the tile layout.
+static const uint8_t HORIZON_PATTERN[] = { 0, 1, 2, 3, 1, 0, 3, 2 };
+#define HORIZON_PATTERN_LEN (int32_t)(sizeof(HORIZON_PATTERN) / sizeof(HORIZON_PATTERN[0]))
+
+// Divides accumulated curve into the horizon strip's own horizontal shift -- deliberately
+// coarser than CURVE_SCALE*GROUND_TILE_PX (draw_ground's own divisor), so the backdrop
+// drifts less than the road/ground do on a turn: the classic parallax depth cue, distant
+// things move less. Tuned by eye, same as CURVE_SCALE/ELEVATION_SCALE (track.h).
+#define HORIZON_SHIFT_DIVISOR (CURVE_SCALE * GROUND_TILE_PX * 3)
+
+// One flat 16px-tall strip, positioned right above wherever the road's own horizon_y
+// currently sits (elevation moves it exactly the way it moves everything else drawn this
+// frame) -- not a fixed screen position, so a hill crest genuinely reveals more of the
+// skyline rather than the strip floating disconnected from the road. Horizontal position
+// shifts with accumulated road curve (HORIZON_SHIFT_DIVISOR above), sold as "you're
+// turning" the same way the ground's own shift is, just at a distant-background rate.
+static void draw_horizon_band(PnxTarget* target, const Game* g, int32_t horizon_y)
+{
+	if (!g->has_horizon_atlas)
+		return;
+
+	// Accumulated once across the whole visible depth (not per-row like draw_ground's
+	// bands) -- this is a single flat strip, so it only needs ONE representative shift,
+	// evaluated at the farthest point the road loop itself ever reaches.
+	int32_t curve_dx = 0, curve_x = 0;
+	for (int32_t y = VIEW_H - 1; y >= horizon_y; y--)
+	{
+		RoadRow row;
+		road_row(y, horizon_y, &row);
+		const int32_t world_z = (int32_t)(g->distance + row.depth);
+		curve_dx += track_curve_at(world_z);
+		curve_x += curve_dx;
+	}
+	const int32_t col_shift = curve_x / HORIZON_SHIFT_DIVISOR;
+
+	const uint8_t lit = pnx_anim_frame(&g->horizon_lit_anim, HORIZON_BAND_LIT_FPS,
+									   HORIZON_BAND_LIT_DURATIONS, HORIZON_BAND_LIT_LOOP,
+									   pnx_platform_now_ms());
+
+	// Static screen position -- HORIZON_Y (track.h), the flat-ground baseline, not the
+	// per-frame `horizon_y` parameter (current_horizon_y, which bobs with elevation).
+	// Direct feedback: tracking horizon_y made the whole skyline visibly move up and
+	// down with every hill/valley, which read as broken rather than as parallax. Drawn
+	// after sky/sun (render_game's own call order) but at a fixed rect, so it always
+	// fully repaints its own area regardless of what horizon_y happened to be this
+	// frame -- ground/road (drawn after this) still cover it from below exactly as
+	// before.
+	//
+	// Extends past HORIZON_Y, not just up to it -- ground's own topmost band is anchored
+	// from VIEW_H and stops at a 16px tile boundary, which does not generally land
+	// exactly on horizon_y (current_horizon_y ranges HORIZON_Y +-15 today,
+	// track.h's own HORIZON_SLOPE_SHIFT comment), so ground can stop short of it.
+	// Rather than patching draw_ground's accumulator to chase an exact boundary, the
+	// cityscape simply extends far enough past HORIZON_Y to always be there underneath
+	// -- direct request: going downhill (a larger horizon_y, ground's own coverage
+	// starting further down) should reveal MORE of the city, not a gap. Sized to
+	// current_horizon_y's own documented worst case (track.c's clamp, `VIEW_H - 40`)
+	// rather than today's actual (smaller) elevation range, so this does not need
+	// revisiting if that range ever widens -- the comment there already flags it as a
+	// real possibility ("if that ever changes"). The building art already touches each
+	// tile's own bottom edge, so each additional identical row underneath reads as the
+	// same buildings continuing down, not a seam.
+	const int32_t band_top	= HORIZON_Y - HORIZON_BAND_TILE_PX;
+	const int32_t deepest_y = VIEW_H - 40;
+	const int32_t row_count = 1 + pnx_max_i32(0, (deepest_y - HORIZON_Y + HORIZON_BAND_TILE_PX - 1) / HORIZON_BAND_TILE_PX);
+
+	for (int32_t row = 0; row < row_count; row++)
+	{
+		const int32_t row_top = band_top + row * HORIZON_BAND_TILE_PX;
+		const int32_t phys_x  = VIEW_H - row_top - HORIZON_BAND_TILE_PX;
+
+		// Row 0 only: the actual skyline art (transparent sky-coloured top, solid
+		// building-coloured bottom, per assets.toml's own comment on the tile layout).
+		// Rows 1+ (the safety extension past HORIZON_Y, above) are NOT drawn with this
+		// same tile art repeated -- a building tile's transparent top has real sky
+		// behind it at row 0 (draw_sky, drawn earlier this frame), but nothing does at
+		// row 1+ (sky stops at HORIZON_Y, and this is the layer meant to fill in
+		// underneath it), so stacking the same tile vertically left the transparent
+		// portion of every extension row showing raw black -- exactly the black-bar
+		// artifact this replaced. A flat solid fill (COLOUR_GROUND_B, the same 2-bit
+		// value BUILDING's own art uses, so it matches the visible skyline's colour
+		// exactly) has no transparent pixels to leak through, and reads as the
+		// buildings' own shadowed base continuing down, which is what it is meant to be.
+		if (row > 0)
+		{
+			fb_rect(target, 0, row_top, LOGICAL_W, HORIZON_BAND_TILE_PX, COLOUR_GROUND_B);
+			continue;
+		}
+
+		// `x < LOGICAL_W`, not `x + TILE_PX <= LOGICAL_W`: LOGICAL_W is not generally a
+		// multiple of HORIZON_BAND_TILE_PX (228 % 32 == 4 on emery, worse on narrower
+		// platforms), and stopping the loop before the last tile would overshoot left
+		// that remainder undrawn -- a real black gap at the far edge, not a rounding
+		// nicety. pnx_blit_4bpp already clips to the target's own bounds, so drawing
+		// one tile past LOGICAL_W here is exactly as safe as everywhere else in this
+		// file that relies on the same clipping (fb_rect included).
+		for (int32_t col = 0, x = 0; x < LOGICAL_W; x += HORIZON_BAND_TILE_PX, col++)
+		{
+			const int32_t world_col = col + col_shift;
+			// (% then +len then % again): a safe, always-non-negative modulo regardless
+			// of which way world_col has drifted -- C's % keeps the dividend's sign,
+			// which a raw `% len` would turn into a negative array index on a left curve.
+			const int32_t pattern_idx =
+				((world_col % HORIZON_PATTERN_LEN) + HORIZON_PATTERN_LEN) % HORIZON_PATTERN_LEN;
+			const uint8_t tile =
+				(((world_col % 5) + 5) % 5 == 0) ? lit : HORIZON_PATTERN[pattern_idx];
+
+			pnx_blit_4bpp(target, pnx_atlas_tile(&g->horizon_atlas, tile),
+						  pnx_atlas_tile_palette(&g->horizon_atlas, tile), phys_x, x,
+						  HORIZON_BAND_TILE_PX, HORIZON_BAND_TILE_PX, PNX_FLIP_NONE);
+		}
+	}
+}
+
+// Draws the WHOLE ground layer, full width, as its own pass -- before draw_road, which
+// draws on top and covers wherever the road actually is. This replaced an earlier
+// version that tracked the road's own curve-varying width per tile band (min/max across
+// every scanline row in a band, to guarantee no overhang) -- correct, but real
+// engineering weight for what is, once ground is simply a layer UNDER the road instead
+// of clipped beside it, a non-problem: road repaints its own exact width every row
+// regardless of what ground already put there.
+//
+// The topmost band (anchored from VIEW_H, stepping in fixed GROUND_TILE_PX increments)
+// generally does NOT land exactly on horizon_y -- current_horizon_y ranges HORIZON_Y
+// +-15 (track.h's HORIZON_SLOPE_SHIFT), so ground can stop up to a tile short of the
+// real horizon line most frames. Deliberately not chased with an extra accumulator
+// flush here: draw_horizon_band's own static band already extends a full second tile
+// row past HORIZON_Y for exactly this reason (see its own header comment), so whatever
+// ground leaves uncovered near the horizon shows the cityscape underneath instead of a
+// gap -- direct request, not an incidental side effect: going downhill (a larger
+// horizon_y, ground's own coverage starting further down the screen) is supposed to
+// reveal more of the city, not less.
+static void draw_ground(PnxTarget* target, const Game* g, int32_t horizon_y)
+{
+	const uint8_t light = g->has_ground_atlas
+		? pnx_anim_frame(&g->ground_light_anim, GROUND_LIGHT_FPS, GROUND_LIGHT_DURATIONS,
+						 GROUND_LIGHT_LOOP, pnx_platform_now_ms())
+		: 0;
+
+	// Curve accumulation, walked at SCANLINE granularity even though a tile band only
+	// draws once per GROUND_TILE_PX rows -- same double-integration draw_road's own
+	// curve_dx/curve_x does (track_curve_at -> rate -> offset), sampled at each band's
+	// own boundary. This is what makes a band nearer the horizon show MORE accumulated
+	// shift than one nearer the camera during a turn -- exactly draw_road's own "the
+	// road curves more sharply toward the horizon" read, now shared by the ground
+	// instead of the ground sitting static under a curving road. Recomputed here rather
+	// than shared with draw_road's own loop: draw_ground is a separate, earlier pass
+	// (this function's own header comment), and the accumulation itself is cheap integer
+	// arithmetic, not the draw-call cost this whole feature exists to keep down.
+	int32_t curve_dx = 0, curve_x = 0;
+	int32_t next_boundary = VIEW_H - GROUND_TILE_PX;
+	int32_t row_idx		  = 0;
+
+	for (int32_t y = VIEW_H - 1; y >= horizon_y; y--)
+	{
+		RoadRow row;
+		road_row(y, horizon_y, &row);
+		const int32_t world_z = (int32_t)(g->distance + row.depth);
+		curve_dx += track_curve_at(world_z);
+		curve_x += curve_dx;
+
+		if (y > next_boundary)
+			continue;
+
+		const int32_t band_top = next_boundary;
+		const bool alt		   = ((row.depth + g->distance) / (BAND_WORLD * 2)) & 1;
+		const int32_t phys_x   = VIEW_H - band_top - GROUND_TILE_PX;
+		// Same units as draw_road's own `cx` (curve_x / CURVE_SCALE is a screen-pixel
+		// offset); one more division turns that into a whole tile-column shift, since
+		// this only ever moves which PATTERN a fixed screen column shows, not the
+		// column's own screen position -- see the tile-selection line below.
+		const int32_t col_shift = (curve_x / CURVE_SCALE) / GROUND_TILE_PX;
+
+		if (!g->has_ground_atlas)
+		{
+			// Fallback if the placeholder atlas failed to load -- flat COLOUR_GROUND_A/B,
+			// same full-width/horizon_y-clamped band shape the tile path below uses.
+			fb_rect(target, 0, band_top, LOGICAL_W, GROUND_TILE_PX,
+					alt ? COLOUR_GROUND_A : COLOUR_GROUND_B);
+			next_boundary -= GROUND_TILE_PX;
+			row_idx++;
+			continue;
+		}
+
+		const uint8_t plain = alt ? 1 : 0; // GROUND tiles 0/1: the old COLOUR_GROUND_A/B pair
+
+		// pnx_blit_metatile requires atlas->metatiles (quadrant-composed tiles) --
+		// ground.bin is a plain/flat atlas (4 whole 16x16 tiles, metatiles unset), so
+		// its tiles are read directly via pnx_atlas_tile + pnx_blit_4bpp, the same way
+		// any other flat atlas tile is (pnx_atlas_tile's own comment). Square tile, so
+		// the usual logical/physical w<->h swap (fb_rect's own transform) is a no-op.
+		//
+		// `x < LOGICAL_W`, not `x + TILE_PX <= LOGICAL_W`: same reasoning as
+		// draw_horizon_band's own identical comment -- LOGICAL_W is not generally a
+		// multiple of GROUND_TILE_PX, so stopping short of an overshooting last tile
+		// leaves a real, visible gap at the far edge instead of a rounding nicety.
+		for (int32_t col = 0, x = 0; x < LOGICAL_W; x += GROUND_TILE_PX, col++)
+		{
+			const uint8_t tile = ((col + col_shift + row_idx) % 4 == 0) ? light : plain;
+			pnx_blit_4bpp(target, pnx_atlas_tile(&g->ground_atlas, tile),
+						  pnx_atlas_tile_palette(&g->ground_atlas, tile), phys_x, x,
+						  GROUND_TILE_PX, GROUND_TILE_PX, PNX_FLIP_NONE);
+		}
+		next_boundary -= GROUND_TILE_PX;
+		row_idx++;
+	}
+}
+
 static void draw_road(PnxTarget* target, const Game* g, int32_t horizon_y)
 {
 	const int32_t base_cx = LOGICAL_W / 2;
@@ -258,6 +506,9 @@ static void draw_road(PnxTarget* target, const Game* g, int32_t horizon_y)
 	// row's fill to cover however many screen lines it's actually claiming, so nothing
 	// is ever left undrawn.
 	int32_t prev_dy = VIEW_H;
+
+	// Ground is now drawn as its own pass, before this function is even called -- see
+	// draw_ground's own header comment.
 
 	// Near to far (VIEW_H-1 down to horizon_y): curve/elevation both have to
 	// accumulate zero at the camera and grow toward the horizon, the same
@@ -289,10 +540,21 @@ static void draw_road(PnxTarget* target, const Game* g, int32_t horizon_y)
 		const uint32_t band = (row.depth + g->distance) / BAND_WORLD;
 		const bool alt		= (band & 1) != 0;
 
-		fb_rect(target, cx - row.rumble_width, dy, row.rumble_width * 2, height,
-				alt ? COLOUR_SHOULDER_A : COLOUR_SHOULDER_B);
-		fb_rect(target, cx - row.half_width, dy, row.half_width * 2, height,
-				alt ? COLOUR_ROAD_A : COLOUR_ROAD_B);
+#if !PNX_DISPLAY_BW
+		if (g->has_road_chunk)
+			fb_road_row_scaled(target, &g->road_chunk, cx, row.rumble_width, dy, height,
+							   alt ? 1 : 0);
+		else
+#endif
+		{
+			// BW builds, and the fallback if the placeholder sprite failed to load on a
+			// colour build -- same fills this replaced, so either case degrades to the
+			// old look instead of a gap.
+			fb_rect(target, cx - row.rumble_width, dy, row.rumble_width * 2, height,
+					alt ? COLOUR_SHOULDER_A : COLOUR_SHOULDER_B);
+			fb_rect(target, cx - row.half_width, dy, row.half_width * 2, height,
+					alt ? COLOUR_ROAD_A : COLOUR_ROAD_B);
+		}
 
 		// Edge/fog line: thin, solid white, straddling the pavement edge -- a real
 		// road's edge marking, drawn over both the shoulder and road fills above so it
@@ -314,12 +576,13 @@ static void draw_road(PnxTarget* target, const Game* g, int32_t horizon_y)
 			}
 		}
 
-		const uint8_t ground = ((row.depth + g->distance) / (BAND_WORLD * 2)) & 1
-			? COLOUR_GROUND_A
-			: COLOUR_GROUND_B;
-		fb_rect(target, 0, dy, cx - row.rumble_width, height, ground);
-		fb_rect(target, cx + row.rumble_width, dy, LOGICAL_W - (cx + row.rumble_width), height,
-				ground);
+		// pnx_blit_4bpp (draw_ground_tile_row) works on both colour and PNX_DISPLAY_BW
+		// builds (unlike pnx_blit_4bpp_scaled above, which has no BW path) -- no BW
+		// fallback needed here.
+		// draw_ground's own fallback (no atlas loaded) draws nothing extra here -- it
+		// falls back to the flat COLOUR_GROUND_A/B bands itself, same full-width/
+		// horizon_y-clamped shape as the tile path, so there is nothing left for
+		// draw_road's own loop to do for ground at all any more.
 
 		// Perspective ground grid, beyond the road edge -- the vanishing-point cue the
 		// lane dividers already give the road itself, extended onto the ground. Scaled
@@ -668,6 +931,25 @@ static void draw_hud(PnxTarget* target, const Game* g)
 	fb_point(LOGICAL_W - m - time_w, baseline_y, &fx, &fy);
 	pnx_text_draw_outlined(target, &g->hud_font, time_buf, fx, fy, COLOUR_HUD_TEXT,
 						   COLOUR_HUD_OUTLINE);
+
+#if PNX_USE_DIAGNOSTICS
+	// Dev-only readout, compiled out entirely from a diagnostics-off (shipped) build.
+	// menu_font, not hud_font -- hud_font (the Monster Racing face) is digits-only, so
+	// the "fps" suffix and the decimal point silently dropped when this used hud_font,
+	// leaving an unlabelled run of bare digits. menu_font's own digits come from the
+	// same Monster Racing face (see the speedometer's comment above), so the numeric
+	// part still reads identically; it just also has the letters this line needs.
+	if (g->has_menu_font)
+	{
+		const PnxFrameStats* stats = pnx_diag_stats();
+		char fps_buf[12];
+		pnx_format(fps_buf, sizeof(fps_buf), "%u.%u fps", (unsigned)(stats->fps_x10 / 10),
+				   (unsigned)(stats->fps_x10 % 10));
+		fb_point(m, hud_below_y(g) + g->menu_font.baseline, &fx, &fy);
+		pnx_text_draw_outlined(target, &g->menu_font, fps_buf, fx, fy, COLOUR_HUD_TEXT,
+							   COLOUR_HUD_OUTLINE);
+	}
+#endif
 }
 
 // A stack of horizontal bars, not a rotated arc -- second direct correction after the
@@ -876,12 +1158,42 @@ static void draw_game_over(PnxTarget* target, const Game* g)
 	}
 }
 
+#if PNX_USE_DIAGNOSTICS
+// Raw single-frame reading, not windowed like pnx_diag's own fps -- this stays "road Xms"
+// (not renamed for draw_ground joining it) for log continuity with the earlier
+// road-scaling measurements; it now times draw_ground + draw_road together, the two
+// passes that draw the scene between the sky and the cars.
+static uint32_t s_last_road_ms;
+#endif
+
 void render_game(const Game* g, PnxTarget* target)
 {
 	const int32_t horizon_y = current_horizon_y(g->distance);
-	draw_sky(target, g->distance, horizon_y);
+	draw_sky(target, g->distance);
 	draw_sun(target, g->distance, horizon_y);
+	// Outside the "road Xms" timed block below on purpose -- Part 3's own real-device
+	// checkpoint is real fps (pnx_diag_frame) before/after, not a change to that specific
+	// number, since this draws in its own pass, not inside draw_road's.
+	draw_horizon_band(target, g, horizon_y);
+#if PNX_USE_DIAGNOSTICS
+	const uint32_t road_start = pnx_platform_now_ms();
+	draw_ground(target, g, horizon_y);
 	draw_road(target, g, horizon_y);
+	s_last_road_ms = pnx_platform_now_ms() - road_start;
+
+	// Piggybacks pnx_diag's own ~1s window log rather than keeping a second timer:
+	// close enough to that cadence at this project's real ~17fps (25 frames = ~1.5s),
+	// good enough for an eyeballed number, not worth a second windowing scheme for.
+	static uint32_t s_road_log_tick;
+	if (++s_road_log_tick >= 25)
+	{
+		s_road_log_tick = 0;
+		pnx_log("road %ums", (unsigned)s_last_road_ms);
+	}
+#else
+	draw_ground(target, g, horizon_y);
+	draw_road(target, g, horizon_y);
+#endif
 	draw_traffic(target, g, horizon_y);
 	draw_police(target, g, horizon_y);
 	draw_car(target, g);
@@ -889,8 +1201,44 @@ void render_game(const Game* g, PnxTarget* target)
 	draw_hud(target, g);
 	draw_speedometer(target, g);
 	draw_hud_event(target, g);
-	if (g->paused)
-		draw_pause_menu(target, g);
-	if (g->game_over_reason != GAME_OVER_NONE)
-		draw_game_over(target, g);
+}
+
+// Pure scene draw plus its own overlay -- the paused/game_over app states' own draw()
+// hooks (main.c) call exactly one of these three functions each, never render_game
+// directly themselves while an overlay is up. Both overlays draw over an otherwise
+// frozen scene by construction now: the app stack suspends driving's tick() while either
+// is on top (main.c), so render_game here is redrawing the SAME distance/lane/traffic
+// state every frame, not stale data left over from before the overlay appeared.
+void render_paused(const Game* g, PnxTarget* target)
+{
+	render_game(g, target);
+	draw_pause_menu(target, g);
+}
+
+void render_game_over(const Game* g, PnxTarget* target)
+{
+	render_game(g, target);
+	draw_game_over(target, g);
+}
+
+// Shown once, before driving_ops is ever pushed (main.c) -- no game state to draw behind
+// it, unlike the two above, so a plain fill rather than render_game underneath.
+void render_title(const Game* g, PnxTarget* target)
+{
+	fb_rect(target, 0, 0, LOGICAL_W, VIEW_H, COLOUR_MENU_BG);
+
+	if (!g->has_menu_font)
+		return;
+
+	const char* title  = "NEED 4 PEBBLE";
+	const char* prompt = "SELECT: START";
+	int32_t fx, fy;
+
+	const int32_t title_w = pnx_text_width(&g->menu_font, title);
+	fb_point((LOGICAL_W - title_w) / 2, VIEW_H / 2 - 20, &fx, &fy);
+	pnx_text_draw(target, &g->menu_font, title, fx, fy, COLOUR_MENU_TEXT);
+
+	const int32_t prompt_w = pnx_text_width(&g->menu_font, prompt);
+	fb_point((LOGICAL_W - prompt_w) / 2, VIEW_H / 2 + 10, &fx, &fy);
+	pnx_text_draw(target, &g->menu_font, prompt, fx, fy, COLOUR_MENU_TEXT);
 }

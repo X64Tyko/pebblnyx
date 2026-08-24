@@ -39,10 +39,8 @@
 
 #include <string.h>
 
-#define PERSIST_BYTES 512
-#define SCENE_BYTES	  2048
-#define RATE		  16000u
-#define CHUNK		  768u
+#define RATE  16000u
+#define CHUNK 768u
 
 // ~19 s of audio per configuration. Long enough that a feature worth a nanosecond a
 // sample still moves a millisecond clock; short enough that a full sweep of nine
@@ -99,7 +97,7 @@ typedef struct
 
 typedef struct
 {
-	PnxArena persistent, scene;
+	PnxArena arena;
 	Case cases[12];
 	uint8_t case_count;
 	uint8_t showing;
@@ -526,8 +524,7 @@ int main(void)
 	static App app;
 	memset(&app, 0, sizeof(app));
 
-	if (!pnx_arena_init(&app.persistent, "persistent", PERSIST_BYTES, 4) ||
-		!pnx_arena_init(&app.scene, "scene", SCENE_BYTES, 4))
+	if (!pnx_arena_init_max(&app.arena, "app", PNX_ARENA_HEAP_RESERVE, 4))
 	{
 		pnx_platform_log("arena init failed");
 		return 1;
@@ -575,7 +572,6 @@ int main(void)
 
 	pnx_platform_audio_close();
 	pnx_synth_shutdown();
-	pnx_arena_destroy(&app.scene);
-	pnx_arena_destroy(&app.persistent);
+	pnx_arena_destroy(&app.arena);
 	return 0;
 }

@@ -274,16 +274,125 @@ makes possible"):
 - **Left top button** (physical UP, `pnx_input_cluster(0)`): brake
 - **SELECT** (physical middle, `pnx_input_cluster(1)`): while paused, swaps the
   steering mode (Touch/Tilt); a no-op while driving.
-- **Steering**: touch drag left/right (`pnx_input_drag_dx`) by default, with
-  accelerometer tilt as a second option, toggled from the pause menu (SELECT).
-  Thumbs rest on the screen while index fingers work the top buttons in the
-  touch case; tilt frees the thumbs entirely, which may end up the more
-  natural two-handed hold for this control scheme -- neither is confirmed as
-  the better feel yet, both are worth having since the button cluster has no
-  spare axis for steering once both ends are claimed by gas/brake. Tilt reads
-  `PnxAccel.y` with `ACCEL_STEER_DEADZONE` (`game.h`), negated in
-  `game.c`'s `steer_input` -- **confirmed on real hardware**: the axis was
-  right but the raw sign had tilt-left steering right, backwards; fixed.
+- **Steering**: touch position or accelerometer tilt, toggled from the pause
+  menu (SELECT). Touch is absolute, not a drag: wherever you're currently
+  touching the screen, proportional to its distance from screen centre, is
+  the steering input -- not `pnx_input_drag_dx()`'s dominant-axis-since-
+  touch-down, which turned out to be the wrong model for a wheel (see "Fixed
+  for real this time" below for why). Thumbs rest on the screen while
+  index fingers work the top buttons in the touch case; tilt frees the
+  thumbs entirely, which may end up the more natural two-handed hold for this
+  control scheme -- neither is confirmed as the better feel yet, both are
+  worth having since the button cluster has no spare axis for steering once
+  both ends are claimed by gas/brake. Tilt reads `PnxAccel.y` with
+  `ACCEL_STEER_DEADZONE` (`game.h`), negated in `game.c`'s `steer_input` --
+  **confirmed on real hardware**: the axis was right but the raw sign had
+  tilt-left steering right, backwards; fixed.
+- **Fixed bug**: `game_boot` defaulted `use_tilt_steer` to `false` (touch) on
+  every platform via its own `memset`. Per `docs/PORTING.md`'s capability
+  table, only `emery`/`gabbro` carry `PBL_TOUCH` -- `aplite`, `basalt`,
+  `chalk`, `diorite`, and `flint` have no touchscreen at all, so
+  `pnx_input_drag_dx()` can never leave 0 on those builds: not a broken
+  gesture, no touch events ever arrive to read. Reported as "swipe controls
+  don't work for steering." Fixed by defaulting `use_tilt_steer` to
+  `!pnx_platform_has_touch()` in `game_boot` (game.c), so non-touch platforms
+  boot straight into tilt instead of a dead control scheme; still a player
+  preference, still togglable from the pause menu regardless of the
+  platform default. Confirmed by a full `pebble build` across all seven
+  platforms; not yet confirmed in-hand that tilt actually reads as steering
+  on a device that boots this way (only touch-drag and tilt individually had
+  prior hardware confirmation, not this new default-selection path).
+- **Fixed bug, engine-level**: on a touch-capable platform, deliberate
+  left/right swipes still couldn't steer -- "spam swipes in random
+  directions and the car moves at some point, but I can't figure out how to
+  steer" was the report. Two separate engine bugs compounded on the way to
+  this symptom, both in `pnx_input.c`/`pnx_platform_pebble.c`, not this
+  project's own code:
+  1. `pnx_platform_pebble.c`'s touch event queue dropped the newest event
+     when its 16 slots filled, which could silently eat the `TOUCH_UP` that
+     ends a swipe during a fast gesture or a slow frame, leaving steering
+     stuck at its last dragged value after the finger lifted. Fixed by
+     coalescing consecutive `TOUCH_MOVE` events into one slot instead of
+     growing the queue for them, since only the latest position matters
+     between polls -- guarantees room for `DOWN`/`UP` regardless of how fast
+     position updates arrive.
+  2. The real one behind THIS report: `pnx_input.c` fed a touch drag's raw
+     delta straight into its dominant-axis dead-zone check with no
+     orientation transform. Per `pnx_orient.h`, "the framebuffer never
+     rotates" -- a `TouchEvent`'s (x, y) is always the display's own
+     physical frame. But `pnx_input_drag_dx/dy` is read as an AUTHOR-frame
+     quantity by every consumer (here, `game.c`'s `steer_input` drives
+     `lane_x`, which `render.c`'s own `fb_point`/`fb_rect` comment spells
+     out as "author/logical frame -> framebuffer" for exactly this
+     `BUTTONS_TOP` orientation). Under a landscape orientation those two
+     frames are rotated 90 degrees from each other, so a player's
+     intentional horizontal swipe arrived as mostly VERTICAL raw motion and
+     never crossed the dead zone on the axis `game.c` actually reads --
+     matching the report exactly: only swipes that happened to carry enough
+     raw motion on the wrong axis produced any steering at all, at random.
+     `tests/test_input.c` had an existing, passing test asserting touch
+     needs no transform -- true, but scoped to absolute POSITION
+     (`pnx_input_touch_x/y`, what a tap is checked against), never exercised
+     for drag DIRECTION under a non-native orientation before Need4Pebble
+     became the framework's first touch-drag-steering game in landscape.
+     Fixed by rotating the raw delta with `rotate_point`'s own inverse
+     (`tools/pnx_assets.py`) before the dead-zone check -- a pure rotation
+     needs no width/height, unlike `rotate_point` itself, which maps a
+     position. Both the fix and the gap it closes are now pinned down with
+     new `test_input.c` cases per orientation (all four), not just asserted
+     in a comment; full suite is 81,770 checks, 0 failures. Applies to every
+     pebblnyx game with touch-drag steering under a landscape orientation,
+     not just this one -- Need4Pebble just happened to be first.
+- **Fixed for real this time -- the orientation fix above was necessary but
+  not sufficient.** Even with the rotation correct, steering still felt
+  broken: "I swiped multiple times, only see 1 long swipe," then "dragging
+  back and forth" while a live debug log (`N4P_STEER_DEBUG_LOG`, see below)
+  showed the reported drag axis frozen on one sign for 8+ seconds of
+  continuous back-and-forth motion. Root cause: `steer_input` was built on
+  `pnx_input_drag_dx()`, which reports a dominant-axis SIGN relative to
+  wherever the touch went DOWN -- a joystick-recentre model where changing
+  direction requires the player's finger to physically swing back through
+  that exact original point and out the other side by the dead zone's width.
+  Nobody's mental model of "drag left/right to steer" matches that; a real
+  back-and-forth swipe that never happens to re-cross the original touch-
+  down x reads as one long fixed-direction drag, confirmed directly in the
+  debug log (two single-tick `dy`-dominant blips where the swing passed near
+  the origin, immediately reverting to the same sign because it never
+  carried far enough past it on the other side). It also compounded with the
+  binary ±1 output: reaching the dead zone at all snapped `steer_visual`
+  straight to its max in a few ticks, and since `lane_x` only moves in
+  response to active steering or track curvature -- nothing pulls it back
+  toward centre on release -- the very first touch of a session routinely
+  rocketed the car to the `PLAYER_LANE_MAX` clamp and left it stuck there,
+  confirmed the same way (`lane=85`, frozen, for the rest of a log even after
+  `held` dropped back to 0 and gas was released).
+  `steer_input` no longer touches `pnx_input_drag_dx()` for touch at all --
+  it reads the touch's CURRENT absolute position instead
+  (`pnx_input_touch_y()`, which -- per `fb_point`'s own inverse, `render.c`
+  -- IS the author-frame x this game steers on for `BUTTONS_TOP`),
+  proportional to distance from screen centre: left edge is full lock left,
+  right edge full lock right, centre straight, linear between, clamped and
+  scaled directly onto `steer_visual`'s -4..4 range rather than a flat ±1.
+  No origin to remember, no swinging back through a point required, and
+  proportional control incidentally fixes the instant-full-lock problem too
+  -- confirmed live (`N4P_STEER_DEBUG_LOG`): a touch near one edge now
+  produces `target=-3`, not an instant `-4`, ramping smoothly; alternating
+  touches at three fixed screen points (centre, near-top, near-bottom)
+  produced `target=0`/`-2`/`+2` respectively, each taking effect immediately
+  on touch-down with no memory of the previous point; and touching the
+  opposite side of the screen while pinned at the `lane=-85` clamp visibly
+  recovered the car (`-85 -> -82 -> -66 -> -44 -> -31` over five ticks),
+  confirmed both in the log and by screenshot (car back on the road, not
+  pinned to the edge). Tilt is unchanged (still binary ±4, not ±1 like
+  before, to match the new target scale) -- it has a natural centre a player
+  can feel without looking, so full-deflection-at-any-deadzone-crossing
+  doesn't fight the player the way it did for touch.
+  A permanent debug hook (`N4P_STEER_DEBUG_LOG`, `game.h`/`game.c`, off by
+  default) is what made this whole diagnosis possible without guessing --
+  `PNX_DEFINES=N4P_STEER_DEBUG_LOG=1 pebble build` prints
+  held/touch_y/target/visual/lane/speed/gas to `pebble logs` every 8 ticks.
+  Worth keeping for the next control-feel report rather than re-adding by
+  hand each time.
 - **BACK**: pauses/resumes (single click only -- a long hold force-quits at
   the OS level unconditionally, per `docs/PLATFORM.md`, so there is no in-app
   quit to build). No longer calls `pnx_platform_quit()`. While `game_over`

@@ -101,9 +101,14 @@
   }
 
   async function pickAndMount(pyodide) {
-    const handle = await window.showDirectoryPicker();
-    const perm = await handle.requestPermission({ mode: "readwrite" });
-    if (perm !== "granted") throw new Error("permission to read/write that folder was denied");
+    // Requesting "readwrite" here, rather than a separate handle.requestPermission()
+    // call after the picker resolves, is deliberate: that second call needs its own
+    // fresh user activation, and Chrome doesn't reliably treat the activation from
+    // opening the picker as still current once its promise resolves -- surfaced as
+    // "Failed to execute 'requestPermission' ... User activation is required" even
+    // though the user just picked a folder. Asking for the mode up front grants it as
+    // part of the same gesture the picker itself already consumed.
+    const handle = await window.showDirectoryPicker({ mode: "readwrite" });
     if (mountedFs) {
       try { pyodide.FS.unmount(MOUNT_PATH); } catch (_) { /* nothing was mounted yet */ }
     }
@@ -135,10 +140,16 @@
 
     newBtn.textContent = "New project in a folder on this device…";
     newBtn.onclick = async () => {
-      const name = prompt("Project name?");
-      if (!name) return;
       try {
+        // showDirectoryPicker (inside pickAndMount) has to run first, before any
+        // prompt() -- prompt() blocks on the user actually reading and typing, and by
+        // the time it returns, Chrome's transient user-activation from this very click
+        // has typically already expired, so the picker call after it fails outright
+        // ("Must be handling a user gesture to show a file picker"). Name/author don't
+        // touch the filesystem, so asking for them after the folder is picked is safe.
         const handle = await pickAndMount(pyodide);
+        const name = prompt("Project name?");
+        if (!name) return;
         const author = prompt("Author (optional)?") || "";
         const r = await (await fetch("/api/project/create", {
           method: "POST", headers: { "content-type": "application/json" },

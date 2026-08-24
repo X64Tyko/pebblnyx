@@ -132,7 +132,9 @@ int main(void)
 
 	// Heap, not static: static allocation shares the same 64KB uint16 ceiling as code,
 	// while the heap has the rest of the 128KB. Anything of size belongs here.
-	if (!pnx_arena_init(&g.arena, "game", 8 * 1024, 4))
+	// pnx_arena_init_max sizes it from whatever the platform actually has free at
+	// startup, rather than a hand-picked constant a project has to remember to raise.
+	if (!pnx_arena_init_max(&g.arena, "game", PNX_ARENA_HEAP_RESERVE, 4))
 	{
 		pnx_platform_log("arena init failed");
 		return 1;

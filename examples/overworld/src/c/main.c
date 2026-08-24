@@ -10,16 +10,11 @@
 
 #include <string.h>
 
-// Sized from the pipeline's own scene residency report, which prints the worst case at
-// build time -- 10,086 B for the outdoor scene. Rounded up rather than guessed.
-#define SCENE_ARENA_BYTES	(14 * 1024)
-#define PERSIST_ARENA_BYTES 1024
-
 #define MAX_SPRITES 8
 
 typedef struct
 {
-	PnxArena persistent, scene;
+	PnxArena arena;
 	PnxCamera camera;
 
 	PnxSpriteInstance sprites[MAX_SPRITES];
@@ -209,6 +204,7 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 		}
 	}
 
+#if PNX_USE_DIAGNOSTICS
 	pnx_diag_frame(elapsed_ms, pnx_platform_now_ms() - work_start);
 
 	// Report the render cost every 2s. This is the M3 measurement: how long a full frame
@@ -223,6 +219,9 @@ static void frame(void* ctx, uint32_t elapsed_ms, PnxTarget* target)
 			pnx_diag_flush();
 		pnx_log("render: %s worst %uus", g->hud, (unsigned)st->worst_us);
 	}
+#else
+	(void)work_start;
+#endif
 }
 
 // Runs after the framebuffer is released. The HUD used to be drawn here, because the
@@ -241,13 +240,12 @@ int main(void)
 	static Game g;
 	memset(&g, 0, sizeof(g));
 
-	if (!pnx_arena_init(&g.persistent, "persistent", PERSIST_ARENA_BYTES, 4) ||
-		!pnx_arena_init(&g.scene, "scene", SCENE_ARENA_BYTES, 4))
+	if (!pnx_arena_init_max(&g.arena, "game", PNX_ARENA_HEAP_RESERVE, 4))
 	{
 		pnx_platform_log("arena init failed");
 		return 1;
 	}
-	pnx_assets_init(&g.persistent, &g.scene, RESOURCES, PNX_ASSET_COUNT);
+	pnx_assets_init(&g.arena, RESOURCES, PNX_ASSET_COUNT);
 	pnx_camera_init(&g.camera, PNX_DISPLAY_WIDTH, PNX_DISPLAY_HEIGHT);
 
 	if (!pnx_scenes_load(PNX_ASSET_SCENES_SCENES))
@@ -264,7 +262,6 @@ int main(void)
 	pnx_platform_set_post_frame_fn(post_frame);
 	pnx_platform_run(frame, &g);
 
-	pnx_arena_destroy(&g.scene);
-	pnx_arena_destroy(&g.persistent);
+	pnx_arena_destroy(&g.arena);
 	return 0;
 }

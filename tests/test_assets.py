@@ -2670,6 +2670,268 @@ def check_variable_frame_sprites():
                     ''')
 
 
+def check_sprite_dedup_and_compress():
+    """Two things build_sprite_frame_meta/finish_sprite gained together: identical PACKED
+    frames collapsing to one shared `frame_meta` offset (always on, the same way
+    pack_font already dedups glyph bitmaps), and `compress_sprites = true` LZSS-
+    compressing the pixel region (opt-in, pairs with PNX_USE_SPRITE_COMPRESS -- the
+    compress_maps test above is the template this follows).
+    """
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))  # 32x32: a flat 16x16 quadrant at
+                                                       # (0,0), a busy checkerboard one at
+                                                       # (16,16) -- see make_sheet's own
+                                                       # comment.
+
+        # Frames 0 and 2 both name the SAME flat region -- identical source pixels
+        # through the same palette, so their packed bytes must be byte-identical too.
+        # Frame 1 names the busy region, which must NOT collapse with either.
+        dedup_toml = '''
+            [[sprite]]
+            name = "hero"
+            sheet = "sheet.png"
+            frames = [[0, 0, 16, 16], [16, 16, 16, 16], [0, 0, 16, 16]]
+            out = "hero.bin"
+        '''
+        err = run(root, sprite=dedup_toml)
+        check("sprite dedup: a sprite with a repeated frame builds", err is None)
+        if err is None:
+            blob = read_blob(os.path.join(root, "out"), "hero.bin")
+
+            def frame_offset(frame):
+                e = blob[pnx_assets.HEADER_BYTES + frame * 8:
+                        pnx_assets.HEADER_BYTES + frame * 8 + 8]
+                return e[0] | (e[1] << 8)
+
+            check("sprite dedup: frame 0 and identical frame 2 share one offset",
+                  frame_offset(0) == frame_offset(2))
+            check("sprite dedup: the genuinely different frame 1 does not share it",
+                  frame_offset(1) != frame_offset(0))
+
+        # --- compress_sprites: a single flat (maximally repetitive) frame, built once
+        # plain and once compressed, off the same source pixels.
+        def write_manifest(root, compress):
+            manifest_body = f'''
+                [project]
+                name = "t"
+                resources = "out"
+                header = "out/gen.h"
+                {"compress_sprites = true" if compress else ""}
+
+                [[sprite]]
+                name = "flat"
+                sheet = "sheet.png"
+                frames = [[0, 0, 16, 16]]
+                out = "flat.bin"
+            '''
+            path = os.path.join(root, "m.toml")
+            with open(path, "w") as f:
+                f.write(textwrap.dedent(manifest_body))
+            return path
+
+        plain_path = write_manifest(root, compress=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            pnx_assets.build(plain_path, os.path.join(root, "plain"),
+                             os.path.join(root, "plain", "gen.h"))
+        compressed_path = write_manifest(root, compress=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            pnx_assets.build(compressed_path, os.path.join(root, "compressed"),
+                             os.path.join(root, "compressed", "gen.h"))
+
+        plain_bin = read_blob(os.path.join(root, "plain"), "flat.bin")
+        compressed_bin = read_blob(os.path.join(root, "compressed"), "flat.bin")
+
+        check("compress_sprites: sets the compressed flag bit",
+              (compressed_bin[4] & 1) != 0)
+        check("compress_sprites: uncompressed build leaves the bit clear",
+              (plain_bin[4] & 1) == 0)
+        check("compress_sprites: a flat, highly repetitive frame compresses smaller",
+              len(compressed_bin) < len(plain_bin))
+
+        # frame_meta(8) + pad4(assign, 1 frame) + 2-byte COMPRESSED-length prefix, then
+        # that many bytes of LZSS stream -- pnx_sprite_load's own comment documents this
+        # layout, and why the prefix is the compressed count rather than the
+        # uncompressed one (the uncompressed size is already derivable from frame_meta).
+        meta_span = 8
+        pal_span = len(pnx_assets.pad4(bytes(1)))  # one frame's `assign` byte, padded to 4
+        pixel_len = 16 * 16 // 2  # one 16x16 frame at 4bpp
+        prefix_at = pnx_assets.HEADER_BYTES + meta_span + pal_span
+        compressed_len = compressed_bin[prefix_at] | (compressed_bin[prefix_at + 1] << 8)
+        stream_at = prefix_at + 2
+        check("compress_sprites: the length prefix names a stream shorter than plain pixels",
+              0 < compressed_len < pixel_len)
+
+        pixel_start = pnx_assets.HEADER_BYTES + meta_span + pal_span
+        plain_pixels = plain_bin[pixel_start:pixel_start + pixel_len]
+        stream = compressed_bin[stream_at:stream_at + compressed_len]
+        decoded = pnx_assets.lzss_decompress(stream, pixel_len)
+        check("compress_sprites: decoding the compressed stream reproduces the plain pixels",
+              decoded == plain_pixels)
+
+        # The shape tables (4 bytes of zero counts -- no collision declared) must sit
+        # immediately after the stream, not after some other guessed length.
+        check("compress_sprites: the blob ends exactly at the shape tables' 4 bytes",
+              len(compressed_bin) == stream_at + compressed_len + 4)
+
+
+def check_atlas_compress():
+    """`compress_atlases = true` LZSS-compresses an atlas's tile pixel data -- opt-in,
+    pairs with PNX_USE_ATLAS_COMPRESS, same `compress_pixel_body` helper compress_sprites
+    already uses (see check_sprite_dedup_and_compress). Built through the real pipeline,
+    plain (non-metatiled) layout: make_sheet's own flat 16x16 quadrant compresses well,
+    which is what this manifest picks (region [0,0,1,1], one tile) to keep the maths
+    simple to check by hand.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))  # 32x32; (0,0) quadrant is flat shade=40
+
+        def write_manifest(root, compress):
+            manifest_body = f'''
+                [project]
+                name = "t"
+                resources = "out"
+                header = "out/gen.h"
+                {"compress_atlases = true" if compress else ""}
+
+                [[atlas]]
+                name = "flat"
+                sheet = "sheet.png"
+                tile = 16
+                region = [0, 0, 1, 1]
+                max_tiles = 1
+                out = "flat.bin"
+                metatiles = false
+            '''
+            path = os.path.join(root, "m.toml")
+            with open(path, "w") as f:
+                f.write(textwrap.dedent(manifest_body))
+            return path
+
+        plain_path = write_manifest(root, compress=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            pnx_assets.build(plain_path, os.path.join(root, "plain"),
+                             os.path.join(root, "plain", "gen.h"))
+        compressed_path = write_manifest(root, compress=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            pnx_assets.build(compressed_path, os.path.join(root, "compressed"),
+                             os.path.join(root, "compressed", "gen.h"))
+
+        plain_bin = read_blob(os.path.join(root, "plain"), "flat.bin")
+        compressed_bin = read_blob(os.path.join(root, "compressed"), "flat.bin")
+
+        check("compress_atlases: sets the compressed flag bit (byte 6, the header's `d`)",
+              (compressed_bin[6] & 1) != 0)
+        check("compress_atlases: uncompressed build leaves the bit clear",
+              (plain_bin[6] & 1) == 0)
+        check("compress_atlases: a flat, highly repetitive tile compresses smaller",
+              len(compressed_bin) < len(plain_bin))
+
+        # header(8) + pad4(assign, 1 tile) + pad4(flags, 1 tile) + 2-byte compressed
+        # length + 2-byte TRUE uncompressed pixel length, then the LZSS stream --
+        # atlas_load_into's own comment documents this layout (the plain/layout-0 case:
+        # no subtile_count/pad/table the metatiled one has). Atlases carry that extra
+        # length field and sprites don't (compress_pixel_body's tag_len) because an
+        # atlas is the one place two on-disk pixel depths of the same content coexist
+        # (pack_2bit's colour vs ~bw blob) -- see compress_pixel_body's own comment.
+        tables = len(pnx_assets.pad4(bytes(1))) * 2
+        pixel_len = 16 * 16 // 2  # one 16x16 tile at 4bpp
+        prefix_at = pnx_assets.HEADER_BYTES + tables
+        compressed_len = compressed_bin[prefix_at] | (compressed_bin[prefix_at + 1] << 8)
+        true_pixel_len = compressed_bin[prefix_at + 2] | (compressed_bin[prefix_at + 3] << 8)
+        stream_at = prefix_at + 4
+        check("compress_atlases: the length prefix names a stream shorter than plain pixels",
+              0 < compressed_len < pixel_len)
+        check("compress_atlases: the true-length tag matches the real uncompressed size",
+              true_pixel_len == pixel_len)
+
+        pixel_start = pnx_assets.HEADER_BYTES + tables
+        plain_pixels = plain_bin[pixel_start:pixel_start + pixel_len]
+        stream = compressed_bin[stream_at:stream_at + compressed_len]
+        decoded = pnx_assets.lzss_decompress(stream, pixel_len)
+        check("compress_atlases: decoding the compressed stream reproduces the plain pixels",
+              decoded == plain_pixels)
+
+
+def check_atlas_anim():
+    """`[atlas.anim]` generates the same NAME_CLIP_FRAMES/_COUNT/_FPS/_LOOP/_DURATIONS
+    handle shape `[sprite.anim]` already does (check_variable_frame_sprites' own
+    territory), except a clip's "frames" are ATLAS TILE INDICES -- validated against the
+    atlas's own POST-DEDUP tile count, the same index space [[atlas.collision]]/roles/
+    autopick already use, not the raw sheet grid.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))  # region [0,0,2,2]: 4 distinct tiles
+
+        def write_manifest(root, anim_toml):
+            manifest_body = f'''
+                [project]
+                name = "t"
+                resources = "out"
+                header = "out/gen.h"
+
+                [[atlas]]
+                name = "ground"
+                sheet = "sheet.png"
+                tile = 16
+                region = [0, 0, 2, 2]
+                max_tiles = 4
+                out = "ground.bin"
+
+                {anim_toml}
+            '''
+            path = os.path.join(root, "m.toml")
+            with open(path, "w") as f:
+                f.write(textwrap.dedent(manifest_body))
+            return path
+
+        ok_path = write_manifest(root, '''
+            [atlas.anim]
+            water = { frames = [0, 1, 2], fps = 4, loop = true, durations = [1, 2, 1] }
+            solo = 2
+        ''')
+        with contextlib.redirect_stdout(io.StringIO()):
+            pnx_assets.build(ok_path, os.path.join(root, "ok"), os.path.join(root, "ok", "gen.h"))
+
+        header_text = open(os.path.join(root, "ok", "gen.h")).read()
+        d = defines(os.path.join(root, "ok"))
+
+        check("atlas.anim: single-pose entry emits a plain #define",
+              d.get("GROUND_SOLO") == 2)
+        check("atlas.anim: clip emits its frame-index array",
+              "static const uint8_t GROUND_WATER_FRAMES[] = { 0, 1, 2 };" in header_text)
+        check("atlas.anim: clip emits _COUNT", d.get("GROUND_WATER_COUNT") == 3)
+        check("atlas.anim: clip emits authored _FPS, not a default", d.get("GROUND_WATER_FPS") == 4)
+        check("atlas.anim: clip emits _LOOP as 1/0, not true/false", d.get("GROUND_WATER_LOOP") == 1)
+        check("atlas.anim: clip emits its authored _DURATIONS array",
+              "static const uint8_t GROUND_WATER_DURATIONS[] = { 1, 2, 1 };" in header_text)
+
+        # A clip with no authored durations gets the NULL sentinel, not an empty array --
+        # see pnx_anim_frame's own comment on why a caller always passes this symbol
+        # without needing to know which case it is.
+        no_dur_path = write_manifest(root, '''
+            [atlas.anim]
+            plain = [0, 1]
+        ''')
+        with contextlib.redirect_stdout(io.StringIO()):
+            pnx_assets.build(no_dur_path, os.path.join(root, "no_dur"),
+                             os.path.join(root, "no_dur", "gen.h"))
+        no_dur_text = open(os.path.join(root, "no_dur", "gen.h")).read()
+        check("atlas.anim: an undurationed clip's _DURATIONS is the NULL sentinel",
+              "#define GROUND_PLAIN_DURATIONS NULL" in no_dur_text)
+
+        err = None
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                pnx_assets.build(write_manifest(root, '''
+                    [atlas.anim]
+                    bad = { frames = [0, 99] }
+                '''), os.path.join(root, "bad"), os.path.join(root, "bad", "gen.h"))
+        except pnx_assets.BuildError as e:
+            err = str(e)
+        check("atlas.anim: a tile index past the post-dedup tile count is rejected",
+              err is not None and "but there are only" in err)
+
+
 def check_editor_sprite_frame_collision():
     """sprite_frames' per-frame collision info, and save/remove_sprite_collision -- the
     backend the Sprites tab's per-frame collision editor is built on. Mirrors
@@ -3312,7 +3574,8 @@ def check_map_layers():
         rows = """{BASE_MAP}"""
 
         [[map.layer]]
-        parallax_pct = 128
+        parallax_pct_x = 128
+        parallax_pct_y = 64
         wrap = true
         rows = """{BASE_MAP}"""
 
@@ -3345,14 +3608,16 @@ def check_map_layers():
             failures += 1
 
         checks += 1
-        got = (mp["layers"][1]["parallax_pct"], mp["layers"][1]["wrap"])
-        if got != (128, True):
-            print(f"  FAIL map a: layer 1 parallax/wrap did not round-trip, got {got}")
+        got = (mp["layers"][1]["parallax_pct_x"], mp["layers"][1]["parallax_pct_y"],
+              mp["layers"][1]["wrap"])
+        if got != (128, 64, True):
+            print(f"  FAIL map a: layer 1 parallax_x/y/wrap did not round-trip, got {got}")
             failures += 1
 
         checks += 1
-        got = (mp["layers"][0]["parallax_pct"], mp["layers"][0]["wrap"])
-        if got != (255, False):
+        got = (mp["layers"][0]["parallax_pct_x"], mp["layers"][0]["parallax_pct_y"],
+              mp["layers"][0]["wrap"])
+        if got != (255, 255, False):
             print(f"  FAIL map a: layer 0 (primary) should default to world parallax, "
                   f"no wrap, got {got}")
             failures += 1
@@ -4912,6 +5177,9 @@ def main():
     check_editor_map_lifecycle()
     check_editor_sprites()
     check_variable_frame_sprites()
+    check_sprite_dedup_and_compress()
+    check_atlas_compress()
+    check_atlas_anim()
     check_editor_sprite_frame_collision()
     check_nine_slice_preview_compose()
     check_editor_nine_slice()

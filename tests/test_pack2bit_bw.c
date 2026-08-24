@@ -55,11 +55,10 @@ int main(void)
 	pnx_host_register_resource(R_TILES_BW, RES_DIR "tiles~bw.bin");
 	pnx_host_register_resource(R_TILES_COLOUR, RES_DIR "tiles.bin");
 
-	static PnxArena persistent, scene;
-	CHECK(pnx_arena_init(&persistent, "persistent", 4 * 1024, 4));
-	CHECK(pnx_arena_init(&scene, "scene", 64 * 1024, 4));
+	static PnxArena arena;
+	CHECK(pnx_arena_init(&arena, "arena", 68 * 1024, 4));
 	const uint32_t resources[R_COUNT] = { R_TILES_BW, R_TILES_COLOUR };
-	CHECK(pnx_assets_init(&persistent, &scene, resources, R_COUNT));
+	CHECK(pnx_assets_init(&arena, resources, R_COUNT));
 
 	// A no-op on this build (PnxPalette's own comment, pnx_assets.h) -- still called, and
 	// still expected to succeed trivially, because game init code is the same source on

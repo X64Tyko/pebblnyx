@@ -150,6 +150,25 @@ void test_input(void)
 	I_CHECK_EQ(pnx_input_drag_dy(), 1);
 	feed_touch(PNX_EVENT_TOUCH_UP, 15, 15, 420);
 
+	// A drag that leaves the dead zone and comes back WITHOUT releasing reads 0 again --
+	// not latched at its last direction. Real bug, found independently of the
+	// orientation one below: a back-and-forth drag that eased toward the touch-down
+	// origin kept reporting whichever direction it last had while outside the dead zone,
+	// because the dead-zone branch used to just `return` without resetting s_drag_dx/dy.
+	// "0 before the dead zone is crossed" (pnx_input_drag_dx/dy's own doc comment) has to
+	// hold every time the touch is back inside it, not just the first.
+	pnx_input_frame();
+	feed_touch(PNX_EVENT_TOUCH_DOWN, 0, 0, 500);
+	feed_touch(PNX_EVENT_TOUCH_MOVE, 20, 0, 510); // well past the dead zone, dx = +1
+	I_CHECK_EQ(pnx_input_drag_dx(), 1);
+	feed_touch(PNX_EVENT_TOUCH_MOVE, 3, 0, 520); // back inside the dead zone, NOT released
+	I_CHECK_EQ(pnx_input_drag_dx(), 0);
+	I_CHECK_EQ(pnx_input_drag_dy(), 0);
+	I_CHECK(pnx_input_touch_held());			   // still down the whole time
+	feed_touch(PNX_EVENT_TOUCH_MOVE, -20, 0, 530); // out again, the OTHER direction
+	I_CHECK_EQ(pnx_input_drag_dx(), -1);
+	feed_touch(PNX_EVENT_TOUCH_UP, -20, 0, 540);
+
 	// --- the cluster, per orientation
 	//
 	// SELECT is the middle in all four. The ENDS are the claim: turning the watch the
@@ -206,7 +225,7 @@ void test_input(void)
 	pnx_input_init(200);
 	I_CHECK_EQ(pnx_input_cluster(0), PNX_BUTTON_UP);
 
-	// --- touch needs no transform, which is a claim worth pinning down
+	// --- touch POSITION needs no transform, which is a claim worth pinning down
 	//
 	// M4c's roadmap called for rotating touch coordinates in the platform layer. It does
 	// not need to: content is rotated at BUILD time, so a landscape game draws in the
@@ -215,6 +234,10 @@ void test_input(void)
 	//
 	// Asserted rather than argued: paint a pixel, report a touch at those coordinates, and
 	// check the touch names the pixel that was painted.
+	//
+	// This is about ABSOLUTE position (pnx_input_touch_x/y) only -- what a game checks a
+	// tap against, which is drawn in the same framebuffer frame the touch is reported in.
+	// Drag DIRECTION (below) is a different question with the opposite answer.
 	pnx_host_reset();
 	{
 		PnxTarget* t	 = pnx_host_target();
@@ -232,4 +255,54 @@ void test_input(void)
 		I_CHECK(row.data != NULL);
 		I_CHECK_EQ(row.data[got.x], 0xF3);
 	}
+
+	// --- drag DIRECTION, unlike position, DOES need a transform
+	//
+	// A game reads pnx_input_drag_dx/dy as an AUTHOR-frame quantity -- it is what steers
+	// lane_x in Need4Pebble, which render.c's own fb_point/fb_rect comment spells out as
+	// "author/logical frame -> framebuffer". The touch EVENT arrives in the framebuffer's
+	// frame (see the position test above), so a raw delta fed straight into the dominant-
+	// axis check would report axes rotated 90 degrees from the one the game is asking
+	// about under BUTTONS_TOP/BOTTOM. This is exactly what Need4Pebble hit: a horizontal
+	// swipe, meant as steering, arrived as mostly-vertical raw motion and never crossed
+	// the dead zone on the axis game.c actually reads -- "the car moves at some point"
+	// only when a swipe happened to have enough raw-dx to tip the wrong-axis check, "but I
+	// can't steer" the rest of the time.
+	//
+	// Expected values are rotate_point's own inverse (tools/pnx_assets.py), restricted to
+	// a delta: BUTTONS_TOP maps a rightward raw drag (physical +x) to author "up"
+	// (ady = -1), and a downward raw drag (physical +y) to author "right" (adx = +1).
+	pnx_input_init(PNX_ORIENT_BUTTONS_TOP);
+	pnx_input_frame();
+	feed_touch(PNX_EVENT_TOUCH_DOWN, 0, 0, 500);
+	feed_touch(PNX_EVENT_TOUCH_MOVE, 20, 2, 510); // physical horizontal-dominant, rightward
+	I_CHECK_EQ(pnx_input_drag_dx(), 0);
+	I_CHECK_EQ(pnx_input_drag_dy(), -1);
+	feed_touch(PNX_EVENT_TOUCH_UP, 20, 2, 520);
+
+	pnx_input_frame();
+	feed_touch(PNX_EVENT_TOUCH_DOWN, 0, 0, 600);
+	feed_touch(PNX_EVENT_TOUCH_MOVE, 2, 20, 610); // physical vertical-dominant, downward
+	I_CHECK_EQ(pnx_input_drag_dx(), 1);
+	I_CHECK_EQ(pnx_input_drag_dy(), 0);
+	feed_touch(PNX_EVENT_TOUCH_UP, 2, 20, 620);
+
+	// BUTTONS_BOTTOM rotates the other way: a rightward raw drag is author "down" instead
+	// of "up".
+	pnx_input_init(PNX_ORIENT_BUTTONS_BOTTOM);
+	pnx_input_frame();
+	feed_touch(PNX_EVENT_TOUCH_DOWN, 0, 0, 700);
+	feed_touch(PNX_EVENT_TOUCH_MOVE, 20, 2, 710);
+	I_CHECK_EQ(pnx_input_drag_dx(), 0);
+	I_CHECK_EQ(pnx_input_drag_dy(), 1);
+	feed_touch(PNX_EVENT_TOUCH_UP, 20, 2, 720);
+
+	// BUTTONS_LEFT is a half-turn: both axes invert, neither swaps.
+	pnx_input_init(PNX_ORIENT_BUTTONS_LEFT);
+	pnx_input_frame();
+	feed_touch(PNX_EVENT_TOUCH_DOWN, 0, 0, 800);
+	feed_touch(PNX_EVENT_TOUCH_MOVE, 20, 2, 810);
+	I_CHECK_EQ(pnx_input_drag_dx(), -1);
+	I_CHECK_EQ(pnx_input_drag_dy(), 0);
+	feed_touch(PNX_EVENT_TOUCH_UP, 20, 2, 820);
 }

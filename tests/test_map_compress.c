@@ -63,10 +63,9 @@ void test_map_compress(void)
 		pnx_host_register_resource(s_resources[i], s_paths[i]);
 	}
 
-	PnxArena persistent, scene;
-	M_CHECK(pnx_arena_init(&persistent, "lzss-persistent", 4 * 1024, 4));
-	M_CHECK(pnx_arena_init(&scene, "lzss-scene", 16 * 1024, 4));
-	M_CHECK(pnx_assets_init(&persistent, &scene, s_resources, PNX_ASSET_COUNT));
+	PnxArena arena;
+	M_CHECK(pnx_arena_init(&arena, "lzss-arena", 20 * 1024, 4));
+	M_CHECK(pnx_assets_init(&arena, s_resources, PNX_ASSET_COUNT));
 	M_CHECK(pnx_palettes_load(PNX_ASSET_PALETTES_PALETTES));
 
 	PnxMap m;

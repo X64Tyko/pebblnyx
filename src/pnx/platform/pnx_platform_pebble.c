@@ -73,6 +73,11 @@ void pnx_platform_log(const char* message)
 	APP_LOG(APP_LOG_LEVEL_WARNING, "%s", message);
 }
 
+size_t pnx_platform_heap_free_bytes(void)
+{
+	return heap_bytes_free();
+}
+
 // ------------------------------------------------------------------------ target
 
 int16_t pnx_target_width(const PnxTarget* t)

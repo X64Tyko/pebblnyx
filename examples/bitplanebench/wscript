@@ -1,0 +1,79 @@
+# Build rules for a pebblnyx game.
+#
+# The only difference from a stock Pebble wscript is that the source glob reaches into
+# src/c/pnx, which is a symlink to the framework. Keeping it inside the project tree is
+# what lets waf resolve build outputs normally; pointing the glob outside `top` does
+# not work.
+#
+# After linking, the size report runs automatically. That is the point of it: the 64KB
+# ceiling is a uint16 that fails with an unreadable error when exceeded, so the
+# breakdown has to be in front of you on every build, not on request.
+
+import os
+import os.path
+import subprocess
+import sys
+
+top = '.'
+out = 'build'
+
+
+def options(ctx):
+    ctx.load('pebble_sdk')
+
+
+def configure(ctx):
+    ctx.load('pebble_sdk')
+
+
+def _size_report(ctx):
+    # waf execs this file without __file__ defined, so the framework root is derived
+    # from the build context rather than from the module path.
+    framework_root = os.path.abspath(os.path.join(ctx.path.abspath(), '..', '..'))
+    tool = os.path.join(framework_root, 'tools', 'size_report.py')
+    for platform in ctx.env.TARGET_PLATFORMS:
+        elf = os.path.join(out, platform, 'pebble-app.elf')
+        if not os.path.exists(elf):
+            continue
+        print('\n--- {} size report ---'.format(platform))
+        subprocess.call([sys.executable, tool, elf])
+
+
+def build(ctx):
+    ctx.load('pebble_sdk')
+
+    # PNX_DEFINES lets a build override pnx_config.h without editing it, which is what
+    # makes "does turning this module off actually reclaim the bytes?" a one-line check:
+    #     PNX_DEFINES=PNX_USE_DIAGNOSTICS=0 pebble build
+    # PNX_USE_BITPLANE_COMPRESS is off by default in pnx_config.h -- this app exists only
+    # to measure the cost of turning it on, so it turns it on unconditionally.
+    # PNX_USE_SPRITE_COMPRESS is what actually gates pnx_lzss.c being compiled in at all
+    # (pnx_lzss.h's own guard, shared with MAP/ATLAS_COMPRESS) -- needed here only to
+    # unlock pnx_lzss_decode for the side-by-side comparison, not because this app
+    # builds any LZSS-compressed sprite content of its own.
+    extra = ['PNX_USE_BITPLANE_COMPRESS=1', 'PNX_USE_SPRITE_COMPRESS=1']
+    extra += [d for d in os.environ.get('PNX_DEFINES', '').split() if d]
+
+    binaries = []
+    cached_env = ctx.env
+    for platform in ctx.env.TARGET_PLATFORMS:
+        ctx.env = ctx.all_envs[platform]
+        ctx.set_group(ctx.env.PLATFORM_NAME)
+        if extra:
+            ctx.env.append_value('DEFINES', extra)
+        app_elf = '{}/pebble-app.elf'.format(ctx.env.BUILD_DIR)
+
+        # follow_symlinks so the framework symlink is traversed rather than skipped.
+        # The host platform is excluded here as well as being #ifdef'd out, so a device
+        # build never compiles it at all.
+        sources = ctx.path.ant_glob('src/c/**/*.c',
+                                    excl=['**/pnx_platform_host.c'],
+                                    follow_symlinks=True)
+        ctx.pbl_build(source=sources, target=app_elf, bin_type='app')
+        binaries.append({'platform': platform, 'app_elf': app_elf})
+    ctx.env = cached_env
+
+    ctx.set_group('bundle')
+    ctx.pbl_bundle(binaries=binaries, js=[])
+
+    ctx.add_post_fun(_size_report)

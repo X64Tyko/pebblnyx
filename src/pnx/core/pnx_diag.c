@@ -113,6 +113,11 @@ void pnx_diag_frame(uint32_t frame_ms, uint32_t work_ms)
 	s_stats.worst_us = s_window_worst_ms * 1000u;
 	s_stats.frames	 = s_window_frames;
 
+	pnx_log("fps %u.%u frame=%uus work=%uus worst=%uus (%uf)",
+			(unsigned)(s_stats.fps_x10 / 10), (unsigned)(s_stats.fps_x10 % 10),
+			(unsigned)s_stats.frame_us, (unsigned)s_stats.work_us, (unsigned)s_stats.worst_us,
+			(unsigned)s_stats.frames);
+
 	s_window_ms		  = 0;
 	s_window_frames	  = 0;
 	s_window_work_ms  = 0;

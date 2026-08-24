@@ -40,15 +40,21 @@ static inline int32_t pnx_ease_linear(int32_t t1000)
 	return t1000;
 }
 
+// Plain int32_t throughout this file, not int64_t: every intermediate here stays under
+// t1000^2 (at most ~1e6 for the documented 0..1000 range, still nowhere near overflow
+// even with the modest overshoot a "back"-style PnxEaseFn might send), so the extra
+// width bought nothing but the cost of pulling __aeabi_ldivmod/__udivmoddi4 out of
+// libgcc -- several hundred bytes, for even a single caller anywhere in the link, real
+// money against aplite's 24KB app image.
 static inline int32_t pnx_ease_in_quad(int32_t t1000)
 {
-	return (int32_t)(((int64_t)t1000 * t1000) / 1000);
+	return (t1000 * t1000) / 1000;
 }
 
 static inline int32_t pnx_ease_out_quad(int32_t t1000)
 {
 	const int32_t u = 1000 - t1000;
-	return 1000 - (int32_t)(((int64_t)u * u) / 1000);
+	return 1000 - (u * u) / 1000;
 }
 
 // Quad in for the first half, quad out for the second -- the standard "slow, fast,
@@ -62,14 +68,13 @@ static inline int32_t pnx_ease_in_out_quad(int32_t t1000)
 
 static inline int32_t pnx_ease_in_cubic(int32_t t1000)
 {
-	const int64_t t = t1000;
-	return (int32_t)((t * t / 1000) * t / 1000);
+	return (t1000 * t1000 / 1000) * t1000 / 1000;
 }
 
 static inline int32_t pnx_ease_out_cubic(int32_t t1000)
 {
-	const int64_t u = 1000 - t1000;
-	return 1000 - (int32_t)((u * u / 1000) * u / 1000);
+	const int32_t u = 1000 - t1000;
+	return 1000 - (u * u / 1000) * u / 1000;
 }
 
 static inline int32_t pnx_ease_in_out_cubic(int32_t t1000)
@@ -86,7 +91,7 @@ static inline int32_t pnx_ease_in_out_cubic(int32_t t1000)
 // can legitimately send t1000 outside 0..1000 mid-tween.
 static inline int32_t pnx_tween_i32(int32_t from, int32_t to, int32_t t1000)
 {
-	return from + (int32_t)(((int64_t)(to - from) * t1000) / 1000);
+	return from + ((to - from) * t1000) / 1000;
 }
 
 // Same, per-channel, for this platform's GColor8 byte (2 bits/channel: 0xC0 | rrggbb --
@@ -138,7 +143,10 @@ static inline int32_t pnx_tween_value(const PnxTween* tw, uint32_t now_ms)
 	const uint32_t elapsed = now_ms - tw->start_ms;
 	if (tw->duration_ms == 0 || elapsed >= tw->duration_ms)
 		return tw->to;
-	const int32_t t1000 = (int32_t)(((uint64_t)elapsed * 1000) / tw->duration_ms);
+	// elapsed < duration_ms is already guaranteed above, and a tween's duration is a UI-
+	// scale quantity (milliseconds to low seconds) -- elapsed*1000 only risks overflowing
+	// uint32_t past a ~71-minute tween, not a real shape for this API.
+	const int32_t t1000 = (int32_t)((elapsed * 1000) / tw->duration_ms);
 	return pnx_tween_i32(tw->from, tw->to, tw->ease(t1000));
 }
 

@@ -308,10 +308,9 @@ static void test_load(void)
 	for (uint32_t i = 0; i < 3; i++)
 		resources[i] = i + 700; // arbitrary, distinct from every other suite's ids
 
-	static PnxArena persistent, scene;
-	pnx_arena_init(&persistent, "hud-window-persistent", 1024, 4);
-	pnx_arena_init(&scene, "hud-window-scene", 1024, 4);
-	pnx_assets_init(&persistent, &scene, resources, 3);
+	static PnxArena arena;
+	pnx_arena_init(&arena, "hud-window-arena", 2048, 4);
+	pnx_assets_init(&arena, resources, 3);
 
 	size_t len;
 	uint8_t* blob = build_window_blob(&len, 250, 200, 40, 0, /*ease=*/5 /* out_cubic */);

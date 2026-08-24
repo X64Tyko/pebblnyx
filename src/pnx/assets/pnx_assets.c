@@ -3,6 +3,7 @@
 #if PNX_USE_ASSETS
 
 #include "pnx_lzss.h"
+#include "pnx_bitplane.h"
 #include "../platform/pnx_platform.h"
 #include "../core/pnx_diag.h"
 
@@ -23,7 +24,6 @@
 #define PNX_SCENE_MAX_FONTS 2
 #endif
 
-static PnxArena* s_persistent;
 static const uint8_t* s_scene_table;
 static uint8_t s_scene_count;
 
@@ -42,29 +42,44 @@ static bool s_have_map, s_have_dialog;
 
 static PnxPalette* s_palettes;
 static uint16_t s_palette_count;
-// s_arena is where the NEXT load allocates; s_scene and s_persistent are the two it can
-// point at. Kept as three so pnx_assets_persistent can return to the scene arena without
-// the caller having to hand it back -- and so the temporary swap pnx_scenes_load already
-// does has something to restore to by name rather than by saved value.
+// s_arena is the one double-ended arena the project handed pnx_assets_init; every load
+// goes through it. s_persistent_mode says which end the NEXT load allocates from --
+// true routes to the low/persistent cursor (pnx_arena_alloc), false to the high/scene
+// one (pnx_arena_alloc_hi) -- replacing what used to be a choice between two separate
+// arena pointers. pnx_assets_persistent flips it; pnx_scenes_load's temporary swap
+// (below) saves and restores it the same way it used to save and restore s_arena.
 static PnxArena* s_arena;
-static PnxArena* s_scene;
+static bool s_persistent_mode;
 static const uint32_t* s_resources;
 static uint16_t s_resource_count;
 static uint32_t s_bytes_loaded;
 
-bool pnx_assets_init(PnxArena* persistent, PnxArena* scene, const uint32_t* resources,
-					 uint16_t count)
+static void* arena_alloc(size_t bytes, size_t align)
 {
-	if (!persistent || !scene || !resources || count == 0)
+	return s_persistent_mode ? pnx_arena_alloc(s_arena, bytes, align)
+							 : pnx_arena_alloc_hi(s_arena, bytes, align);
+}
+
+static void* arena_calloc(size_t bytes, size_t align)
+{
+	return s_persistent_mode ? pnx_arena_calloc(s_arena, bytes, align)
+							 : pnx_arena_calloc_hi(s_arena, bytes, align);
+}
+
+#define ARENA_ALLOC_ARRAY(type, count)	((type*)arena_alloc(sizeof(type) * (size_t)(count), _Alignof(type)))
+#define ARENA_CALLOC_ARRAY(type, count) ((type*)arena_calloc(sizeof(type) * (size_t)(count), _Alignof(type)))
+
+bool pnx_assets_init(PnxArena* arena, const uint32_t* resources, uint16_t count)
+{
+	if (!arena || !resources || count == 0)
 		return false;
-	s_persistent	 = persistent;
-	s_scene			 = scene;
-	s_arena			 = scene;
-	s_resources		 = resources;
-	s_resource_count = count;
-	s_bytes_loaded	 = 0;
-	s_palettes		 = NULL;
-	s_palette_count	 = 0;
+	s_arena			  = arena;
+	s_persistent_mode = false;
+	s_resources		  = resources;
+	s_resource_count  = count;
+	s_bytes_loaded	  = 0;
+	s_palettes		  = NULL;
+	s_palette_count	  = 0;
 	// Cleared here rather than left standing, so a second init starts from no expectation
 	// instead of inheriting one. Which is why the expectation is set AFTER init.
 	s_orientation = PNX_ORIENT_UNSET;
@@ -86,8 +101,8 @@ uint8_t pnx_assets_orientation(void)
 
 bool pnx_assets_persistent(bool on)
 {
-	const bool was = (s_arena == s_persistent);
-	s_arena		   = on ? s_persistent : s_scene;
+	const bool was	  = s_persistent_mode;
+	s_persistent_mode = on;
 	return was;
 }
 
@@ -197,7 +212,7 @@ static const uint8_t* load_blob_into(uint16_t asset_id, const char* magic, uint8
 	uint8_t* buf = dst;
 	if (!buf)
 	{
-		buf = (uint8_t*)pnx_arena_alloc(s_arena, size, 4);
+		buf = (uint8_t*)arena_alloc(size, 4);
 		if (!buf)
 		{
 			pnx_log("asset %u: arena full, needed %u, %u free", asset_id, (unsigned)size,
@@ -450,7 +465,13 @@ short_read:
 	return false;
 }
 
-static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size_t cap)
+// `scratch` is PnxMap's own `lzss_src` when this atlas is being loaded into a map's pool
+// slot (`dst` non-NULL), NULL otherwise -- only that path ever reads it, and only when
+// PNX_USE_ATLAS_COMPRESS is on. See the compressed+dst branch below for why it is needed
+// at all: decoding into `dst` in place would overwrite compressed bytes before they are
+// fully read, since decoded output is never smaller than what produced it.
+static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size_t cap,
+							uint8_t* scratch)
 {
 #if !PNX_DISPLAY_BW
 	// A 1-bit build never indexes a palette at all (see PnxPalette's own comment,
@@ -464,10 +485,10 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 	}
 #endif
 
-	uint8_t tile_px = 0, count_lo = 0, layout = 0;
-	size_t payload = 0;
-	const uint8_t* data =
-		load_blob_into(asset_id, "PA", dst, cap, &tile_px, &count_lo, &layout, NULL, &payload);
+	uint8_t tile_px = 0, count_lo = 0, layout = 0, atlas_flags = 0;
+	size_t payload		= 0;
+	const uint8_t* data = load_blob_into(asset_id, "PA", dst, cap, &tile_px, &count_lo,
+										 &layout, &atlas_flags, &payload);
 	if (!data)
 		return false;
 
@@ -486,48 +507,49 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 	out->subtile_count = 0;
 	out->sub_bytes	   = 0;
 
-	// Both branches finish the same way: the fixed-size portion is still one equality
-	// check (>= here, exact once the trailing shape tables are accounted for below), and
-	// `expected` marks where SCALED/COMPLEX's tail begins.
-	size_t expected;
+	// `pixel_off`/`pixel_len` describe the LOGICAL (uncompressed, resident) layout either
+	// way -- metadata (assign/flags/metatile table) sits at the same offsets whether the
+	// pixel body that follows is compressed on disk or not, so this half is unaffected by
+	// compression and unchanged from before this feature existed.
+	size_t pixel_off, pixel_len, subs = 0;
 
 	if (layout == 0)
 	{
-		expected = tables + tile_count * tile_bytes;
-		if (tile_px == 0 || tile_count == 0 || payload < expected)
+		if (tile_px == 0 || tile_count == 0)
 		{
-			pnx_log("atlas %u: %u tiles of %upx needs %u bytes, blob has %u", asset_id,
-					tile_count, tile_px, (unsigned)expected, (unsigned)payload);
+			pnx_log("atlas %u: %u tiles of %upx -- refused", asset_id, tile_count, tile_px);
 			return false;
 		}
+		pixel_off = tables;
+		pixel_len = (size_t)tile_count * tile_bytes;
+
 		out->tile_bytes	  = (uint8_t)tile_bytes;
 		out->tile_palette = data;
 		out->tile_flags	  = data + pad4(tile_count);
-		out->pixels		  = data + tables;
 	}
 	else
 	{
 		// u16 subtile_count, u16 pad, palettes, flags, metatile table, quadrant bank.
 		if (payload < 4)
 			return false;
-		const uint16_t subs		 = (uint16_t)(data[0] | (data[1] << 8));
+		subs					 = (size_t)(data[0] | (data[1] << 8));
 		const size_t sub_bytes	 = tile_bytes / 4;
 		const size_t table_bytes = (size_t)tile_count * 4 * 2;
-		expected				 = 4 + tables + table_bytes + (size_t)subs * sub_bytes;
 
-		if (tile_px == 0 || tile_count == 0 || subs == 0 || payload < expected)
+		if (tile_px == 0 || tile_count == 0 || subs == 0)
 		{
-			pnx_log("atlas %u: %u tiles, %u subtiles needs %u bytes, blob has %u", asset_id,
-					tile_count, subs, (unsigned)expected, (unsigned)payload);
+			pnx_log("atlas %u: %u tiles, %u subtiles -- refused", asset_id, tile_count,
+					(unsigned)subs);
 			return false;
 		}
+		pixel_off = 4 + tables + table_bytes;
+		pixel_len = subs * sub_bytes;
 
 		out->tile_bytes	   = (uint8_t)tile_bytes;
 		out->tile_palette  = data + 4;
 		out->tile_flags	   = data + 4 + pad4(tile_count);
 		out->metatiles	   = (const uint16_t*)(const void*)(data + 4 + tables);
-		out->pixels		   = data + 4 + tables + table_bytes;
-		out->subtile_count = subs;
+		out->subtile_count = (uint16_t)subs;
 		out->sub_bytes	   = (uint8_t)sub_bytes;
 
 		for (uint32_t i = 0; i < (uint32_t)tile_count * 4; i++)
@@ -535,7 +557,7 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 			if (out->metatiles[i] >= subs)
 			{
 				pnx_log("atlas %u: metatile quadrant %u indexes subtile %u of %u", asset_id,
-						(unsigned)i, out->metatiles[i], subs);
+						(unsigned)i, out->metatiles[i], (unsigned)subs);
 				return false;
 			}
 		}
@@ -544,17 +566,137 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 	out->tile_px	= tile_px;
 	out->tile_count = tile_count;
 
-	// SCALED rects / COMPLEX masks, appended after the pixel payload in either layout.
-	size_t shapes_consumed = 0;
-	if (!parse_atlas_shapes(data + expected, payload - expected, tile_count, tile_px,
-							asset_id, out, &shapes_consumed))
-		return false;
-	if (expected + shapes_consumed != payload)
+	const size_t expected = pixel_off + pixel_len; // uncompressed total through pixels
+
+	// Bit 0 of the atlas blob's own spare header byte: this atlas's pixel body is
+	// LZSS-compressed (`compress_atlases`). Same posture as compressed sprites/maps: a
+	// blob built compressed against a runtime with the flag off refuses to load rather
+	// than reading garbage.
+	const bool compressed = (atlas_flags & 1) != 0;
+#if !PNX_USE_ATLAS_COMPRESS
+	if (compressed)
 	{
 		pnx_log(
-			"atlas %u: %u bytes past the shape tables go unaccounted for in a %u byte "
-			"blob",
-			asset_id, (unsigned)(payload - expected - shapes_consumed), (unsigned)payload);
+			"atlas %u: built with compress_atlases, but PNX_USE_ATLAS_COMPRESS is 0 -- set "
+			"it in pnx_config.h, or rebuild the project without compress_atlases",
+			asset_id);
+		return false;
+	}
+#endif
+
+	const uint8_t* pixels_ptr;
+	const uint8_t* shapes_ptr;
+	size_t shapes_budget;
+
+#if PNX_USE_ATLAS_COMPRESS
+	if (compressed)
+	{
+		// 2-byte compressed length, then 2-byte TRUE uncompressed pixel length, then the
+		// LZSS stream itself (tools/pnx_assets.py's compress_pixel_body, tag_len=True for
+		// atlases only). The true length is redundant with `pixel_len` in the ordinary
+		// case -- both sides agree on tile_px/tile_count/build depth -- but it is the ONLY
+		// place that agreement is actually checked rather than assumed: pnx_lzss_decode
+		// stops at whichever of `dst_len`/`src_len` is smaller BY DESIGN (a bounded decode
+		// into a too-small buffer is a real, load-bearing case elsewhere -- see its own
+		// comment), so it cannot double as this check, and tile_count alone is bit-depth
+		// independent, so it cannot catch a colour blob loaded on a PNX_DISPLAY_BW build
+		// (or the reverse) either. Without this field that mismatch decodes "successfully"
+		// into half the pixel data it should, silently, rather than refusing.
+		if (payload < pixel_off + 4)
+		{
+			pnx_log("atlas %u: too small for a compressed length prefix", asset_id);
+			return false;
+		}
+		const uint8_t* len_field	  = data + pixel_off;
+		const size_t compressed_len	  = (size_t)(len_field[0] | ((size_t)len_field[1] << 8));
+		const size_t true_pixel_len	  = (size_t)(len_field[2] | ((size_t)len_field[3] << 8));
+		const size_t compressed_start = pixel_off + 4;
+		if (true_pixel_len != pixel_len)
+		{
+			pnx_log(
+				"atlas %u: built for %u pixel bytes, this build's tile_px/depth expects "
+				"%u -- wrong-depth or stale resource",
+				asset_id, (unsigned)true_pixel_len, (unsigned)pixel_len);
+			return false;
+		}
+		if (payload < compressed_start + compressed_len)
+		{
+			pnx_log("atlas %u: compressed pixel stream runs past the blob", asset_id);
+			return false;
+		}
+
+		if (dst)
+		{
+			// The compressed bytes + shapes tail are still sitting in `dst` at `pixel_off`
+			// (load_blob_into read the whole, smaller, compressed blob straight in) --
+			// decoding pixels there in place would overwrite them before the shapes copy
+			// below gets to read them, so they are preserved in the map's own scratch
+			// first. `scratch` is sized (pnx_map_load's max_scratch) to cover at least one
+			// pool slot's uncompressed size, comfortably more than `payload - pixel_off`.
+			const size_t preserve = payload - pixel_off;
+			memcpy(scratch, data + pixel_off, preserve);
+
+			uint8_t* dst_pixels = dst + PNX_BLOB_HEADER_BYTES + pixel_off;
+			const size_t got	= pnx_lzss_decode(scratch + 4, compressed_len, dst_pixels, pixel_len);
+			if (got != pixel_len)
+			{
+				pnx_log("atlas %u: LZSS stream decoded %u of %u expected bytes", asset_id,
+						(unsigned)got, (unsigned)pixel_len);
+				return false;
+			}
+			const size_t shapes_len = preserve - 4 - compressed_len;
+			memcpy(dst_pixels + pixel_len, scratch + 4 + compressed_len, shapes_len);
+
+			pixels_ptr	  = data + pixel_off;
+			shapes_ptr	  = data + expected;
+			shapes_budget = shapes_len;
+		}
+		else
+		{
+			uint8_t* decoded = (uint8_t*)arena_alloc(pixel_len, 4);
+			if (!decoded)
+			{
+				pnx_log("atlas %u: arena full, needed %u for decoded pixels, %u free",
+						asset_id, (unsigned)pixel_len, (unsigned)pnx_arena_remaining(s_arena));
+				return false;
+			}
+			const size_t got = pnx_lzss_decode(data + compressed_start, compressed_len,
+											   decoded, pixel_len);
+			if (got != pixel_len)
+			{
+				pnx_log("atlas %u: LZSS stream decoded %u of %u expected bytes", asset_id,
+						(unsigned)got, (unsigned)pixel_len);
+				return false;
+			}
+			pixels_ptr	  = decoded;
+			shapes_ptr	  = data + compressed_start + compressed_len;
+			shapes_budget = payload - compressed_start - compressed_len;
+		}
+	}
+	else
+#endif
+	{
+		if (payload < expected)
+		{
+			pnx_log("atlas %u: %u tiles of %upx needs %u bytes, blob has %u", asset_id,
+					tile_count, tile_px, (unsigned)expected, (unsigned)payload);
+			return false;
+		}
+		pixels_ptr	  = data + pixel_off;
+		shapes_ptr	  = data + expected;
+		shapes_budget = payload - expected;
+	}
+	out->pixels = pixels_ptr;
+
+	// SCALED rects / COMPLEX masks, appended after the pixel payload in either layout.
+	size_t shapes_consumed = 0;
+	if (!parse_atlas_shapes(shapes_ptr, shapes_budget, tile_count, tile_px, asset_id, out,
+							&shapes_consumed))
+		return false;
+	if (shapes_consumed != shapes_budget)
+	{
+		pnx_log("atlas %u: %u bytes past the shape tables go unaccounted for", asset_id,
+				(unsigned)(shapes_budget - shapes_consumed));
 		return false;
 	}
 
@@ -578,7 +720,7 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 
 bool pnx_atlas_load(PnxAtlas* out, uint16_t asset_id)
 {
-	return atlas_load_into(out, asset_id, NULL, 0);
+	return atlas_load_into(out, asset_id, NULL, 0, NULL);
 }
 
 bool pnx_sprite_load(PnxSprite* out, uint16_t asset_id)
@@ -592,8 +734,9 @@ bool pnx_sprite_load(PnxSprite* out, uint16_t asset_id)
 #endif
 
 	uint8_t frame_count = 0;
+	uint8_t flags		= 0;
 	size_t payload		= 0;
-	const uint8_t* data = load_blob(asset_id, "PS", &frame_count, NULL, NULL, &payload);
+	const uint8_t* data = load_blob(asset_id, "PS", &frame_count, &flags, NULL, &payload);
 	if (!data)
 		return false;
 	if (frame_count == 0)
@@ -602,10 +745,42 @@ bool pnx_sprite_load(PnxSprite* out, uint16_t asset_id)
 		return false;
 	}
 
-	// frame_meta, then frame_palette (padded to 4), then every frame's pixels packed
-	// back-to-back, then the sparse SCALED/COMPLEX shape tables -- see PnxSprite's own
-	// comment. Not one `expected == payload` equality the way the old fixed-stride format
-	// could check: a frame's own pixel span comes from its own record, and the shape
+	// Bit 0: pixels are LZSS-compressed (compress_sprites = true in the manifest). Bit 1:
+	// bitplane/Elias-gamma-compressed (compress_sprites = "bitplane", experimental --
+	// pnx_bitplane.h). Never both -- tools/pnx_assets.py's finish_sprite picks exactly
+	// one path per build. A sprite built against a runtime with the matching
+	// PNX_USE_*_COMPRESS off refuses to load rather than reading garbage pixels -- same
+	// posture as compressed maps/atlases.
+	const bool compressed = (flags & 1) != 0;
+	const bool bitplane	  = (flags & 2) != 0;
+#if !PNX_USE_SPRITE_COMPRESS
+	if (compressed)
+	{
+		pnx_log("sprite %u: built LZSS-compressed, PNX_USE_SPRITE_COMPRESS is off here",
+				asset_id);
+		return false;
+	}
+#endif
+#if !PNX_USE_BITPLANE_COMPRESS
+	if (bitplane)
+	{
+		pnx_log(
+			"sprite %u: built bitplane-compressed, PNX_USE_BITPLANE_COMPRESS is off "
+			"here",
+			asset_id);
+		return false;
+	}
+#endif
+
+	// frame_meta, then frame_palette (padded to 4), then either every frame's pixels
+	// packed back-to-back or (compressed) a 2-byte COMPRESSED length followed by that
+	// many bytes of LZSS stream, then the sparse SCALED/COMPLEX shape tables -- see
+	// PnxSprite's own comment. The length is the compressed count, not the uncompressed
+	// one: uncompressed size is already derivable from frame_meta (what sizes the
+	// decode buffer below), but nothing else says where the stream ends and shapes
+	// begin, since pnx_lzss_decode reports bytes written, not bytes consumed. Not one
+	// `expected == payload` equality the way the old fixed-stride format could check: a
+	// frame's own pixel span comes from its own record, and the shape
 	// tables are sparse, so this is validated incrementally instead.
 	const size_t meta_span = (size_t)frame_count * PNX_SPRITE_FRAME_BYTES;
 	const size_t pal_span  = pad4(frame_count);
@@ -618,50 +793,224 @@ bool pnx_sprite_load(PnxSprite* out, uint16_t asset_id)
 
 	out->frame_meta	   = data;
 	out->frame_palette = data + meta_span;
-	out->pixels		   = data + meta_span + pal_span;
 	out->frame_count   = frame_count;
 	out->scaled_rects  = NULL;
 	out->complex_masks = NULL;
 	out->scaled_count  = 0;
 	out->complex_count = 0;
 
-	const size_t pixel_budget = payload - meta_span - pal_span;
-	size_t shapes_start		  = 0;
+	// The logical (uncompressed) size of the pixel region -- what a decode buffer must
+	// be sized to, and, uncompressed, what the raw blob's pixel region itself spans.
+	// Computed the same way regardless of compression: a frame's offset/w/h are always
+	// logical (post-decode) values.
+	size_t pixel_logical_size = 0;
 	for (uint8_t i = 0; i < frame_count; i++)
 	{
 		const uint8_t* e   = out->frame_meta + (size_t)i * PNX_SPRITE_FRAME_BYTES;
 		const uint32_t off = (uint32_t)(e[0] | ((uint32_t)e[1] << 8));
 		const uint8_t w = e[2], h = e[3];
-		// One format, unconditionally -- see atlas_load_into's own comment.
+#if PNX_DISPLAY_BW
+		// pack_unit_2bpp (tools/pnx_assets.py) pads its last, possibly-partial group of 4
+		// pixels out to a full byte rather than requiring w*h to divide evenly -- so the
+		// byte count here has to round up the same way, not truncate. A w*h%2==0 check
+		// (right for the 4bpp branch below) is not strict enough to catch every mismatch:
+		// w*h=646 is even but still needs ceil(646/4)=162 bytes, one more than 646/4=161
+		// truncates to, and the byte that formula silently dropped is exactly what a real
+		// sprite frame (Need4Pebble's touring_crash, 19x34 rotated) hit first.
+		if (w == 0 || h == 0)
+		{
+			pnx_log("sprite %u: frame %u is %ux%u, invalid for 2bpp packing", asset_id, i, w,
+					h);
+			return false;
+		}
+		const size_t fb = ((size_t)w * h + 3) / 4;
+#else
+		// One format, unconditionally -- see atlas_load_into's own comment. 4bpp packs
+		// two pixels per byte with no padding (pack_unit_4bpp), so w*h must be exactly
+		// even or the packer itself would have failed at build time.
 		if (w == 0 || h == 0 || (((uint32_t)w * h) % 2) != 0)
 		{
 			pnx_log("sprite %u: frame %u is %ux%u, invalid for 4bpp packing", asset_id, i, w,
 					h);
 			return false;
 		}
-#if PNX_DISPLAY_BW
-		const size_t fb = (size_t)w * h / 4;
-#else
 		const size_t fb = (size_t)w * h / 2;
 #endif
 		const size_t end = (size_t)off + fb;
-		if (end > pixel_budget)
+		if (!compressed && !bitplane)
 		{
-			pnx_log("sprite %u: frame %u's pixels run past the blob", asset_id, i);
+			// Uncompressed, pixels live directly in the blob, so this doubles as the
+			// bounds check the compressed path instead gets from pnx_lzss_decode's own
+			// dst_len bound (the bitplane path gets its own bound from
+			// pnx_bitplane_decode's own n/scratch_cap arguments, same idea).
+			if (end > payload - meta_span - pal_span)
+			{
+				pnx_log("sprite %u: frame %u's pixels run past the blob", asset_id, i);
+				return false;
+			}
+		}
+		if (end > pixel_logical_size)
+			pixel_logical_size = end;
+	}
+
+	const uint8_t* shapes_src;
+	size_t shapes_budget;
+	if (compressed)
+	{
+#if PNX_USE_SPRITE_COMPRESS
+		if (payload < meta_span + pal_span + 2)
+		{
+			pnx_log("sprite %u: too small for a compressed length prefix", asset_id);
 			return false;
 		}
-		if (end > shapes_start)
-			shapes_start = end;
+		const uint8_t* len_field	  = data + meta_span + pal_span;
+		const size_t compressed_len	  = (size_t)(len_field[0] | ((size_t)len_field[1] << 8));
+		const size_t compressed_start = meta_span + pal_span + 2;
+		if (payload < compressed_start + compressed_len)
+		{
+			pnx_log("sprite %u: compressed pixel stream runs past the blob", asset_id);
+			return false;
+		}
+
+		uint8_t* decoded = (uint8_t*)arena_alloc(pixel_logical_size, 4);
+		if (!decoded)
+		{
+			pnx_log("sprite %u: arena full, needed %u for decoded pixels, %u free", asset_id,
+					(unsigned)pixel_logical_size, (unsigned)pnx_arena_remaining(s_arena));
+			return false;
+		}
+		const size_t decoded_got = pnx_lzss_decode(data + compressed_start, compressed_len,
+												   decoded, pixel_logical_size);
+		if (decoded_got != pixel_logical_size)
+		{
+			pnx_log("sprite %u: LZSS stream decoded %u of %u expected bytes", asset_id,
+					(unsigned)decoded_got, (unsigned)pixel_logical_size);
+			return false;
+		}
+		out->pixels	  = decoded;
+		shapes_src	  = data + compressed_start + compressed_len;
+		shapes_budget = payload - compressed_start - compressed_len;
+#else
+		return false; // unreachable: refused above when PNX_USE_SPRITE_COMPRESS is off
+#endif
+	}
+	else if (bitplane)
+	{
+#if PNX_USE_BITPLANE_COMPRESS
+		// Recovers the SAME deduped-unit ordering tools/pnx_assets.py's
+		// compress_sprite_pixels_bitplane used (ascending DISTINCT frame_meta offsets)
+		// -- see that function's own comment for why this is derived here rather than
+		// stored on disk: frame_meta already has to be loaded either way, so this is one
+		// dedup computation arrived at twice, not a second copy of the same information.
+		// O(frame_count^2), fine at the frame counts a sprite sheet actually has.
+		uint16_t unit_count		 = 0;
+		uint32_t max_unit_pixels = 0;
+		{
+			int32_t last = -1;
+			for (;;)
+			{
+				int32_t best   = -1;
+				uint8_t best_w = 0, best_h = 0;
+				for (uint8_t i = 0; i < frame_count; i++)
+				{
+					const uint8_t* e  = out->frame_meta + (size_t)i * PNX_SPRITE_FRAME_BYTES;
+					const int32_t off = (int32_t)(e[0] | ((uint32_t)e[1] << 8));
+					if (off > last && (best == -1 || off < best))
+					{
+						best   = off;
+						best_w = e[2];
+						best_h = e[3];
+					}
+				}
+				if (best == -1)
+					break;
+				const uint32_t px = (uint32_t)best_w * best_h;
+				if (px > max_unit_pixels)
+					max_unit_pixels = px;
+				unit_count++;
+				last = best;
+			}
+		}
+
+		const size_t table_bytes = (size_t)(unit_count + 1) * 2;
+		if (payload < meta_span + pal_span + table_bytes)
+		{
+			pnx_log("sprite %u: too small for a %u-unit bitplane offset table", asset_id,
+					(unsigned)unit_count);
+			return false;
+		}
+		const uint8_t* table	   = data + meta_span + pal_span;
+		const uint8_t* stream_base = table + table_bytes;
+		const size_t stream_budget = payload - meta_span - pal_span - table_bytes;
+
+		uint8_t* decoded = (uint8_t*)arena_alloc(pixel_logical_size, 4);
+		uint8_t* scratch = (uint8_t*)arena_alloc(max_unit_pixels, 4);
+		if (!decoded || !scratch)
+		{
+			pnx_log("sprite %u: arena full for bitplane decode, needed %u + %u, %u free",
+					asset_id, (unsigned)pixel_logical_size, (unsigned)max_unit_pixels,
+					(unsigned)pnx_arena_remaining(s_arena));
+			return false;
+		}
+
+		int32_t last = -1;
+		for (uint16_t u = 0; u < unit_count; u++)
+		{
+			int32_t best   = -1;
+			uint8_t best_w = 0, best_h = 0;
+			for (uint8_t i = 0; i < frame_count; i++)
+			{
+				const uint8_t* e  = out->frame_meta + (size_t)i * PNX_SPRITE_FRAME_BYTES;
+				const int32_t off = (int32_t)(e[0] | ((uint32_t)e[1] << 8));
+				if (off > last && (best == -1 || off < best))
+				{
+					best   = off;
+					best_w = e[2];
+					best_h = e[3];
+				}
+			}
+			last = best;
+
+			const uint16_t start = read_u16(table + (size_t)u * 2);
+			const uint16_t stop	 = read_u16(table + (size_t)(u + 1) * 2);
+			if (stop < start || (size_t)stop > stream_budget)
+			{
+				pnx_log("sprite %u: bitplane unit %u's offsets run past the blob", asset_id,
+						u);
+				return false;
+			}
+			const uint16_t n = (uint16_t)((uint32_t)best_w * best_h);
+			if (!pnx_bitplane_decode(stream_base + start, (size_t)(stop - start),
+									 decoded + best, scratch, n))
+			{
+				pnx_log("sprite %u: bitplane unit %u failed to decode", asset_id, u);
+				return false;
+			}
+		}
+
+		out->pixels				  = decoded;
+		const uint16_t stream_end = read_u16(table + (size_t)unit_count * 2);
+		shapes_src				  = stream_base + stream_end;
+		shapes_budget			  = stream_budget - stream_end;
+#else
+		return false; // unreachable: refused above when PNX_USE_BITPLANE_COMPRESS is off
+#endif
+	}
+	else
+	{
+		out->pixels	  = data + meta_span + pal_span;
+		shapes_src	  = out->pixels + pixel_logical_size;
+		shapes_budget = payload - meta_span - pal_span - pixel_logical_size;
 	}
 
 	size_t shapes_consumed = 0;
-	if (!parse_sprite_shapes(out->pixels + shapes_start, pixel_budget - shapes_start,
-							 frame_count, out, asset_id, &shapes_consumed))
+	if (!parse_sprite_shapes(shapes_src, shapes_budget, frame_count, out, asset_id,
+							 &shapes_consumed))
 		return false;
-	if (shapes_start + shapes_consumed != pixel_budget)
+	if (shapes_consumed != shapes_budget)
 	{
 		pnx_log("sprite %u: %u bytes past the shape tables go unaccounted for", asset_id,
-				(unsigned)(pixel_budget - shapes_start - shapes_consumed));
+				(unsigned)(shapes_budget - shapes_consumed));
 		return false;
 	}
 
@@ -698,8 +1047,13 @@ bool pnx_nineslice_load(PnxNineSlice* out, uint16_t asset_id)
 	// One packed image, not nine -- see PnxNineSlice's own comment. The four border bytes
 	// come first in the body (not in the fixed header: it has one spare field beyond
 	// w/h, not four), then the pixels, same as sprite frame data.
+	//
+	// BW rounds up (pack_unit_2bpp pads its last partial 4-pixel group to a full byte,
+	// so a w*h not divisible by 4 still costs a whole byte for the remainder) -- see
+	// pnx_sprite_load's own comment on this exact formula for why w*h%2==0 is not a
+	// strict enough guard to catch it.
 #if PNX_DISPLAY_BW
-	const size_t pixel_bytes = (size_t)w * h / 4;
+	const size_t pixel_bytes = ((size_t)w * h + 3) / 4;
 #else
 	const size_t pixel_bytes = (size_t)w * h / 2;
 #endif
@@ -768,7 +1122,7 @@ static uint8_t shift_of(uint8_t n)
 // genuinely variable length, and is read a second time once this probe has said how big.
 #define MAP_PROBE_BYTES                                                                     \
 	(PNX_BLOB_HEADER_BYTES + 12 + PNX_MAP_MAX_ATLASES * 4 + (PNX_MAP_MAX_ATLASES + 1) * 4 + \
-	 PNX_MAP_MAX_LAYERS * 13)
+	 PNX_MAP_MAX_LAYERS * 14)
 
 bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 {
@@ -852,7 +1206,7 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	// resource's real size above -- so this checks the real map, not the format ceiling,
 	// actually reached that far before indexing into it.
 	const size_t fixed_region =
-		12 + (size_t)atlas_count * 4 + ((size_t)atlas_slots + 1) * 4 + (size_t)layer_count * 13;
+		12 + (size_t)atlas_count * 4 + ((size_t)atlas_slots + 1) * 4 + (size_t)layer_count * 14;
 	if (PNX_BLOB_HEADER_BYTES + fixed_region > probe_len)
 	{
 		pnx_log("map %u: %u atlases/%u layers need %u B of fixed header, resource has %u",
@@ -863,16 +1217,55 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	const uint8_t* layer_dir =
 		pre + 12 + (size_t)atlas_count * 4 + ((size_t)atlas_slots + 1) * 4;
 
-	// Two totals accumulate across this scan: `resident` (everything the real read below
-	// needs, sized exactly once) and `max_scratch` (the biggest bank any layer owns, which
-	// is what the shared LZSS scratch pair -- one pair for the whole map, not one per layer,
-	// see PnxMap's own comment -- has to cover).
+	// `resident` is everything the real read below needs, sized exactly once. `max_scratch`
+	// is the biggest bank any layer owns -- computed unconditionally, same as always, since
+	// computing it costs nothing; only ALLOCATING it costs arena, gated on `out->compressed`
+	// below exactly as before this feature existed. `atlas_scratch` is the SEPARATE,
+	// independent contribution one compressed atlas pool slot could need -- kept apart from
+	// `max_scratch` rather than folded in unconditionally, because that was measured to cost
+	// real arena on maps that reference no compressed atlas at all (a pool-slot's worth,
+	// several KB on real content, reserved whether or not it was ever needed).
 	size_t resident = 12 + (size_t)atlas_count * 4 + ((size_t)atlas_slots + 1) * 4 +
-		(size_t)layer_count * 13;
+		(size_t)layer_count * 14;
 	size_t max_scratch = 0;
+#if PNX_USE_ATLAS_COMPRESS
+	size_t atlas_scratch = 0;
+	// Probed for real: one cheap 8-byte header read per atlas this map references (bit 0
+	// of the generic blob header's `d` byte, same convention pnx_sprite_load/
+	// atlas_load_into check), rather than assuming the worst case for every map that merely
+	// has the feature compiled in.
+	for (uint8_t i = 0; i < atlas_count; i++)
+	{
+		const uint16_t atlas_asset = read_u16(pre + 12 + (size_t)i * 4);
+		if (atlas_asset >= s_resource_count)
+			continue; // caught properly, with a real error, in the loop that populates out->atlas
+		uint8_t hdr[PNX_BLOB_HEADER_BYTES];
+		if (pnx_platform_resource_read(s_resources[atlas_asset], 0, hdr, sizeof(hdr)) ==
+				sizeof(hdr) &&
+			(hdr[6] & 1) != 0)
+		{
+			// Slots are only uniform-width when there is eviction (atlas_slots <
+			// atlas_count, atlas_pool_layout's stride case) -- when every atlas gets its
+			// own slot (the common case) each is sized to ITS OWN resident bytes, so
+			// pool_bytes / atlas_slots is only the average, not a safe bound for any one
+			// slot. Read the real per-slot widths from the pool_offset table (already
+			// within `probe_len`, checked by `fixed_region` above) and take the largest --
+			// this compressed atlas could land in any of them.
+			const uint8_t* pool_off_tbl = pre + 12 + (size_t)atlas_count * 4;
+			for (uint8_t s = 0; s < atlas_slots; s++)
+			{
+				const uint32_t from = read_u32(pool_off_tbl + (size_t)s * 4);
+				const uint32_t to	= read_u32(pool_off_tbl + (size_t)(s + 1) * 4);
+				if (to - from > atlas_scratch)
+					atlas_scratch = to - from;
+			}
+			break;
+		}
+	}
+#endif
 	for (uint8_t li = 0; li < layer_count; li++)
 	{
-		const uint8_t* ld = layer_dir + (size_t)li * 13;
+		const uint8_t* ld = layer_dir + (size_t)li * 14;
 		const uint8_t lw = ld[0], lh = ld[1], worldtile = ld[2], cols = ld[3], rows = ld[4];
 		const uint8_t bank_shift  = ld[5];
 		const uint16_t slot_bytes = read_u16(ld + 7);
@@ -894,7 +1287,7 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	resident += ((flags & 1) ? pad4(tile_total) : 0) + pad4((size_t)warps * sizeof(PnxWarp)) +
 		pad4((size_t)dict_count * 2);
 
-	uint8_t* pre_mem = (uint8_t*)pnx_arena_alloc(s_arena, resident, 4);
+	uint8_t* pre_mem = (uint8_t*)arena_alloc(resident, 4);
 	if (!pre_mem)
 	{
 		pnx_log("map %u: arena full, needed %u for the preamble, %u free", asset_id,
@@ -947,10 +1340,10 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 		return false;
 	}
 
-	out->pool		= PNX_ARENA_CALLOC_ARRAY(s_arena, PnxAtlas, atlas_slots);
-	out->pool_mem	= (uint8_t*)pnx_arena_alloc(s_arena, pool_bytes, 4);
-	out->pool_owner = (uint8_t*)pnx_arena_alloc(s_arena, atlas_slots, 4);
-	out->pool_pins	= (uint8_t*)pnx_arena_alloc(s_arena, atlas_slots, 4);
+	out->pool		= ARENA_CALLOC_ARRAY(PnxAtlas, atlas_slots);
+	out->pool_mem	= (uint8_t*)arena_alloc(pool_bytes, 4);
+	out->pool_owner = (uint8_t*)arena_alloc(atlas_slots, 4);
+	out->pool_pins	= (uint8_t*)arena_alloc(atlas_slots, 4);
 	if (!out->pool || !out->pool_mem || !out->pool_owner || !out->pool_pins)
 	{
 		pnx_log("map %u: arena full, needed %u for %u atlas slots, %u free", asset_id,
@@ -965,17 +1358,20 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	// the layout the probe above sized: every layer's fixed 13 bytes first, THEN every
 	// layer's own wt_mask, never interleaved, which is what let one probe size the whole
 	// thing without needing any layer's own cols/rows in advance.
+	// 14 bytes/layer, not 13: parallax_pct_x (ld[11]) and parallax_pct_y (ld[12]) each
+	// get their own byte -- an independent X/Y scroll rate needs a real second field,
+	// not a repacking of the one shared byte this used to be. `wrap` shifts to ld[13].
 	const uint8_t* dir = at;
-	at += (size_t)layer_count * 13;
+	at += (size_t)layer_count * 14;
 	for (uint8_t li = 0; li < layer_count; li++)
 	{
-		const uint8_t* ld = dir + (size_t)li * 13;
+		const uint8_t* ld = dir + (size_t)li * 14;
 		PnxMapLayer* l	  = &out->layers[li];
 		const uint8_t lw = ld[0], lh = ld[1], worldtile = ld[2], cols = ld[3], rows = ld[4];
 		const uint8_t bank_shift = ld[5], want_slots = ld[6];
 		const uint16_t slot_bytes		= read_u16(ld + 7);
 		const uint16_t first_bank_asset = read_u16(ld + 9);
-		const uint8_t parallax_pct = ld[11], wrap = ld[12];
+		const uint8_t parallax_pct_x = ld[11], parallax_pct_y = ld[12], wrap = ld[13];
 
 		const uint16_t n		  = (uint16_t)cols * rows;
 		const uint16_t bank_count = (uint16_t)(((n - 1) >> bank_shift) + 1);
@@ -1012,9 +1408,9 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 		// The slot count is the smaller of what the pipeline asked for and what this layer
 		// actually has -- a layer of four WorldTiles never needs nine slots.
 		const uint8_t slots = want_slots < n ? want_slots : (uint8_t)n;
-		l->slots			= PNX_ARENA_CALLOC_ARRAY(s_arena, PnxWorldTile, slots);
-		l->slot_mem			= (uint8_t*)pnx_arena_alloc(s_arena, (size_t)slots * slot_bytes, 4);
-		l->wt_slot			= (uint8_t*)pnx_arena_alloc(s_arena, n, 4);
+		l->slots			= ARENA_CALLOC_ARRAY(PnxWorldTile, slots);
+		l->slot_mem			= (uint8_t*)arena_alloc((size_t)slots * slot_bytes, 4);
+		l->wt_slot			= (uint8_t*)arena_alloc(n, 4);
 		if (!l->slots || !l->slot_mem || !l->wt_slot)
 		{
 			pnx_log(
@@ -1035,7 +1431,8 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 		l->wt_rows			= rows;
 		l->worldtile		= worldtile;
 		l->wt_shift			= shift_of(worldtile);
-		l->parallax_pct		= parallax_pct;
+		l->parallax_pct_x	= parallax_pct_x;
+		l->parallax_pct_y	= parallax_pct_y;
 		l->wrap				= wrap != 0;
 		// Only when this layer's atlases fit too: with fewer atlas slots than atlases,
 		// holding every WorldTile at once is not something the (shared) pool can express.
@@ -1079,20 +1476,6 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 	// second single bit.
 #if PNX_USE_MAP_COMPRESS
 	out->compressed = (flags & 2) != 0;
-	if (out->compressed)
-	{
-		// Sized to the LARGEST bank across every layer -- see PnxMap's own comment for why
-		// one shared pair, not one per layer, and why this bound covers both the
-		// compressed read and the decoded output.
-		out->lzss_src = (uint8_t*)pnx_arena_alloc(s_arena, max_scratch, 4);
-		out->lzss_dst = (uint8_t*)pnx_arena_alloc(s_arena, max_scratch, 4);
-		if (!out->lzss_src || !out->lzss_dst)
-		{
-			pnx_log("map %u: arena full, needed %u for LZSS scratch, %u free", asset_id,
-					(unsigned)(max_scratch * 2), (unsigned)pnx_arena_remaining(s_arena));
-			return false;
-		}
-	}
 #else
 	if (flags & 2)
 	{
@@ -1101,6 +1484,44 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id)
 			"in pnx_config.h, or rebuild the project without compress_maps",
 			asset_id);
 		return false;
+	}
+#endif
+
+	// Two independent contributions, each gated on its own real need -- `out->compressed`
+	// for the bank one (this map's own banks may or may not be compressed regardless of
+	// `PNX_USE_MAP_COMPRESS` being compiled in), the atlas probe result for the other
+	// (folded into `atlas_scratch` above only if something was actually found). Neither
+	// gate gets bypassed just because a flag is compiled in -- that was the bug this
+	// comment replaces the old version of. See PnxMap's own comment for why one shared
+	// pair, not one per use, and why this bound covers both the compressed read and the
+	// decoded output either way.
+#if PNX_USE_MAP_COMPRESS || PNX_USE_ATLAS_COMPRESS
+	size_t scratch_needed = 0;
+	bool need_dst		  = false; // lzss_dst decodes a whole BANK; a compressed atlas pool
+								   // load decodes straight into its own `dst` and never
+								   // touches it -- see atlas_load_into's own comment.
+#if PNX_USE_MAP_COMPRESS
+	if (out->compressed)
+	{
+		scratch_needed = max_scratch;
+		need_dst	   = true;
+	}
+#endif
+#if PNX_USE_ATLAS_COMPRESS
+	if (atlas_scratch > scratch_needed)
+		scratch_needed = atlas_scratch;
+#endif
+	if (scratch_needed > 0)
+	{
+		out->lzss_src = (uint8_t*)arena_alloc(scratch_needed, 4);
+		out->lzss_dst = need_dst ? (uint8_t*)arena_alloc(scratch_needed, 4) : NULL;
+		if (!out->lzss_src || (need_dst && !out->lzss_dst))
+		{
+			pnx_log("map %u: arena full, needed %u for LZSS scratch, %u free", asset_id,
+					(unsigned)(scratch_needed * (need_dst ? 2 : 1)),
+					(unsigned)pnx_arena_remaining(s_arena));
+			return false;
+		}
 	}
 #endif
 
@@ -1193,7 +1614,12 @@ static bool atlas_pin(PnxMap* m, uint8_t which)
 
 	const uint32_t from = read_u32(m->pool_offset + (size_t)slot * 4);
 	const uint32_t to	= read_u32(m->pool_offset + ((size_t)slot + 1) * 4);
-	if (!atlas_load_into(&m->pool[slot], a->asset, m->pool_mem + from, to - from))
+#if PNX_USE_MAP_COMPRESS || PNX_USE_ATLAS_COMPRESS
+	uint8_t* scratch = m->lzss_src;
+#else
+	uint8_t* scratch = NULL;
+#endif
+	if (!atlas_load_into(&m->pool[slot], a->asset, m->pool_mem + from, to - from, scratch))
 	{
 		return false;
 	}
@@ -1476,12 +1902,19 @@ static uint8_t stream_window(PnxMap* m, PnxMapLayer* l, int32_t x, int32_t y, in
 	// single-layer map costs nothing extra to stream through this. Not `#include`-ing
 	// pnx_layer.h for the constant: assets sits BELOW gfx/layer in this framework's
 	// dependency order, and a plain 255 is exactly what that header's own comment defines
-	// PNX_MAP_LAYER's parallax_pct against too.
-	if (l->parallax_pct != 255)
-	{
-		x = (int32_t)(((int64_t)x * l->parallax_pct) / 255);
-		y = (int32_t)(((int64_t)y * l->parallax_pct) / 255);
-	}
+	// PNX_MAP_LAYER's parallax_pct_x/y against too. Independent per axis, same reason
+	// pnx_layer.c's scaled_camera is: a layer streamed 1:1 vertically but slower
+	// horizontally (or vice versa) needs each axis checked on its own.
+	// Plain int32_t, not int64_t: x*pct only risks overflow past roughly +-8.4M (INT32_MAX
+	// / 254), a world coordinate no pebblnyx project can reach -- WorldTile maps are bounded
+	// by flash/resource size (see PT2 flash cost notes), nowhere close to that magnitude.
+	// The 64-bit widen this replaced pulled __aeabi_ldivmod/__udivmoddi4 out of libgcc,
+	// several hundred bytes even a single caller anywhere in the link brings in -- real
+	// money on aplite's 24KB app image.
+	if (l->parallax_pct_x != 255)
+		x = (x * (int32_t)l->parallax_pct_x) / 255;
+	if (l->parallax_pct_y != 255)
+		y = (y * (int32_t)l->parallax_pct_y) / 255;
 
 	// One WorldTile of margin on each side, matching worldtile_window() in the pipeline --
 	// which is what sized the pool. The two have to agree or the streamer asks for more
@@ -1919,19 +2352,20 @@ const char* pnx_dialog_page(const PnxDialog* d, uint16_t entry, uint16_t page)
 
 bool pnx_scenes_load(uint16_t asset_id)
 {
-	if (!s_persistent)
+	if (!s_arena)
 		return false;
 
-	// Read into the PERSISTENT arena: the table has to survive the scene resets it
-	// drives, which is the whole reason the two arenas are separate.
-	PnxArena* saved = s_arena;
-	s_arena			= s_persistent;
+	// Read into the persistent (low) side: the table has to survive the scene resets
+	// it drives, which is why this forces persistent mode regardless of the caller's
+	// current setting, same as before this collapsed to one arena with two cursors.
+	const bool saved_mode = s_persistent_mode;
+	s_persistent_mode	  = true;
 
 	uint8_t count		= 0;
 	size_t payload		= 0;
 	const uint8_t* data = load_blob(asset_id, "PC", &count, NULL, NULL, &payload);
 
-	s_arena = saved;
+	s_persistent_mode = saved_mode;
 	if (!data)
 		return false;
 
@@ -1962,8 +2396,10 @@ bool pnx_scene_load(uint16_t scene_id)
 		(const uint16_t*)(const void*)(s_scene_table + (size_t)s_scene_count * 4);
 
 	// Everything the previous scene held goes at once. There is no partial free anywhere
-	// in the framework, and a scene boundary is the only point that needs one.
-	pnx_arena_reset(s_arena);
+	// in the framework, and a scene boundary is the only point that needs one. The
+	// persistent side must not be touched by this -- pnx_arena_reset_hi, not
+	// pnx_arena_reset, which would also clear it.
+	pnx_arena_reset_hi(s_arena);
 	s_atlas_count = s_sprite_count = s_nine_slice_count = s_font_count = 0;
 	s_have_map = s_have_dialog = false;
 	s_palettes				   = NULL;
@@ -2042,9 +2478,11 @@ bool pnx_scene_load(uint16_t scene_id)
 		}
 	}
 
-	pnx_log("scene %u: %u assets, %u atlases, %u sprites, %u nine-slices, %u fonts, arena %u/%u",
-			scene_id, count, s_atlas_count, s_sprite_count, s_nine_slice_count, s_font_count,
-			(unsigned)s_arena->used, (unsigned)s_arena->capacity);
+	pnx_log(
+		"scene %u: %u assets, %u atlases, %u sprites, %u nine-slices, %u fonts, scene "
+		"%u/%u",
+		scene_id, count, s_atlas_count, s_sprite_count, s_nine_slice_count, s_font_count,
+		(unsigned)s_arena->used_hi, (unsigned)(s_arena->capacity - s_arena->used));
 	return true;
 }
 
@@ -2088,5 +2526,49 @@ uint8_t pnx_scene_font_count(void)
 {
 	return s_font_count;
 }
+
+#if PNX_USE_BITPLANE_COMPRESS
+size_t pnx_bitplane_atlas_fetch(void* ctx, uint16_t atlas_asset, uint16_t tile_index,
+								uint8_t* scratch, size_t scratch_cap)
+{
+	(void)ctx;
+	if (atlas_asset >= s_resource_count)
+		return 0;
+	const uint32_t resource = s_resources[atlas_asset];
+
+	uint8_t header[PNX_BLOB_HEADER_BYTES];
+	if (pnx_platform_resource_read(resource, 0, header, sizeof(header)) != sizeof(header))
+		return 0;
+	if (header[0] != 'P' || header[1] != 'T')
+		return 0;
+	const uint8_t tile_count = header[4];
+	if (tile_index >= tile_count)
+		return 0;
+
+	// Two u16 offsets bracketing this tile, straight out of the table -- one small read,
+	// not the whole table. Costs the same ~29us fixed overhead as a bigger read would
+	// (docs/MEASUREMENTS.md's own flash-read model), so this is a real second read paid
+	// on every miss, not a free lookup -- caching the table per-atlas across calls is the
+	// obvious follow-up if that shows up as a real cost once this is measured on device.
+	uint8_t off_pair[4];
+	const size_t off_pos = PNX_BLOB_HEADER_BYTES + (size_t)tile_index * 2;
+	if (pnx_platform_resource_read(resource, off_pos, off_pair, sizeof(off_pair)) !=
+		sizeof(off_pair))
+		return 0;
+	const uint16_t start = read_u16(off_pair);
+	const uint16_t end	 = read_u16(off_pair + 2);
+	if (end < start)
+		return 0;
+	const size_t tile_len = (size_t)(end - start);
+	if (tile_len == 0 || tile_len > scratch_cap)
+		return 0;
+
+	const size_t table_bytes = (size_t)(tile_count + 1) * 2;
+	const size_t data_pos	 = PNX_BLOB_HEADER_BYTES + table_bytes + start;
+	if (pnx_platform_resource_read(resource, data_pos, scratch, tile_len) != tile_len)
+		return 0;
+	return tile_len;
+}
+#endif // PNX_USE_BITPLANE_COMPRESS
 
 #endif // PNX_USE_ASSETS

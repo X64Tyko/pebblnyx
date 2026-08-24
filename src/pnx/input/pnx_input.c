@@ -56,12 +56,28 @@ void pnx_input_frame(void)
 // Dominant-axis sign of how far (dx, dy) has moved from the touch's origin, once that
 // exceeds the dead zone -- field.c's own ax/ay comparison before this moved into the
 // framework. Ties (a diagonal drag) favour the vertical axis, same as field.c did.
+//
+// Re-entering the dead zone resets to 0 rather than leaving the last direction latched:
+// without this, a drag that crossed the threshold and then eased back toward the origin
+// kept reporting whichever direction it last had, even sitting still near where the
+// touch went down -- "0 before the dead zone is crossed" (this header's own doc comment
+// on pnx_input_drag_dx/dy) is only true the FIRST time; every re-entry after that stayed
+// stuck. Confirmed as a real, separate defect from the orientation bug below: a drag
+// that goes out and comes back without releasing should read 0 again, and didn't.
+//
+// dx/dy here must already be in the AUTHOR frame a game draws in, not the raw touch
+// frame -- see rotate_touch_delta's own comment below for why.
 static void update_drag(int16_t dx, int16_t dy)
 {
 	const int16_t ax = (int16_t)(dx < 0 ? -dx : dx);
 	const int16_t ay = (int16_t)(dy < 0 ? -dy : dy);
 	if (ax < PNX_INPUT_DRAG_DEAD && ay < PNX_INPUT_DRAG_DEAD)
+	{
+		s_drag_dx = s_drag_dy = 0;
 		return;
+	}
+
+	// Dominant axis only -- the other stays 0. Ties favour vertical (ax > ay, not >=).
 	if (ax > ay)
 	{
 		s_drag_dx = dx > 0 ? 1 : -1;
@@ -74,9 +90,43 @@ static void update_drag(int16_t dx, int16_t dy)
 	}
 }
 
+// pnx_orient.h: "the framebuffer never rotates" -- a TouchEvent's (x, y) is the display's
+// own physical frame, same as it always is, with no per-orientation adjustment from the
+// platform layer. But a game's own drag steering (pnx_input_drag_dx/dy) means left/right
+// in the AUTHOR frame it draws and reasons in -- exactly what fb_point/fb_rect (e.g.
+// Need4Pebble's render.c) convert INTO from, every frame, via tools/pnx_assets.py's
+// rotate_point. Feeding a raw physical delta straight into update_drag skipped that
+// conversion, so under BUTTONS_TOP/BOTTOM a player's intentional horizontal swipe showed
+// up as mostly VERTICAL raw motion -- landing on the axis the game never reads. This is
+// rotate_point's own inverse, restricted to a delta: dropping the width/height terms is
+// valid because a pure rotation/reflection of a DIFFERENCE needs no absolute origin,
+// unlike rotate_point itself (which maps a position, not a displacement).
+static void rotate_touch_delta(int16_t dx, int16_t dy, int16_t* out_dx, int16_t* out_dy)
+{
+	switch (s_orientation)
+	{
+		case PNX_ORIENT_BUTTONS_TOP:
+			*out_dx = dy;
+			*out_dy = (int16_t)-dx;
+			break;
+		case PNX_ORIENT_BUTTONS_BOTTOM:
+			*out_dx = (int16_t)-dy;
+			*out_dy = dx;
+			break;
+		case PNX_ORIENT_BUTTONS_LEFT:
+			*out_dx = (int16_t)-dx;
+			*out_dy = (int16_t)-dy;
+			break;
+		default: // PNX_ORIENT_BUTTONS_RIGHT: the native frame, no rotation
+			*out_dx = dx;
+			*out_dy = dy;
+			break;
+	}
+}
+
 static void touch_event(const PnxEvent* ev)
 {
-	if (ev->type == PNX_EVENT_TOUCH_DOWN)
+	if (!s_touch_held && ev->type == PNX_EVENT_TOUCH_DOWN)
 	{
 		s_touch_held = true;
 		s_touch_x0 = s_touch_x = ev->x;
@@ -91,7 +141,10 @@ static void touch_event(const PnxEvent* ev)
 
 	s_touch_x = ev->x;
 	s_touch_y = ev->y;
-	update_drag((int16_t)(s_touch_x - s_touch_x0), (int16_t)(s_touch_y - s_touch_y0));
+	int16_t adx, ady;
+	rotate_touch_delta((int16_t)(s_touch_x - s_touch_x0), (int16_t)(s_touch_y - s_touch_y0),
+					   &adx, &ady);
+	update_drag(adx, ady);
 
 	if (ev->type == PNX_EVENT_TOUCH_UP)
 	{

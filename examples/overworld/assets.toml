@@ -11,6 +11,9 @@
 name = "overworld"
 resources = "resources"
 header = "src/c/assets_gen.h"
+compress_maps = true
+compress_sprites = true
+compress_atlases = true
 
 # Where the button cluster sits when the watch is held to play, which is what decides
 # whether the display is portrait or landscape. Named for the cluster rather than for a

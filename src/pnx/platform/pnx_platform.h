@@ -34,6 +34,16 @@ uint32_t pnx_platform_now_ms(void);
 
 void pnx_platform_log(const char* message);
 
+// ------------------------------------------------------------------------- heap
+//
+// Bytes currently free on the app's own heap -- the pool pnx_arena_init mallocs
+// from. This is what pnx_arena_init_max sizes a single project-wide arena against
+// instead of a hand-picked constant. The host build has no OS-level heap ceiling
+// worth querying, so it reports a large, deterministic, overridable constant
+// (PNX_HOST_HEAP_BYTES) rather than a real measurement -- host tests are not the
+// place fragmentation or real device RAM limits get exercised.
+size_t pnx_platform_heap_free_bytes(void);
+
 // ---------------------------------------------------------------- display size
 //
 // The SDK hands each per-platform compile its own PBL_DISPLAY_WIDTH/HEIGHT as compiler

@@ -4,8 +4,20 @@
 # immediately before each build. That directory is a build artefact rather than project
 # source -- the engine lives in the editor, so a project built on another machine uses
 # the engine there rather than carrying its own.
+#
+# After linking, the size report runs automatically -- every other example under
+# pebblnyx/examples/ does this (see e.g. quickstart/wscript's own comment on why: the
+# 64KB static-RAM ceiling is a uint16 that fails with an unreadable error when exceeded,
+# so the breakdown needs to be in front of you on every build). This project's wscript
+# was missing it, which is why `pebble build` here showed no package sizes even though
+# every sibling example did. framework_root goes up THREE levels, not the usual two --
+# this project sits at examples/Need4Pebble/Need4Pebble, one folder deeper than a normal
+# examples/<name> project.
 
 import os
+import os.path
+import subprocess
+import sys
 
 top = '.'
 out = 'build'
@@ -17,6 +29,19 @@ def options(ctx):
 
 def configure(ctx):
     ctx.load('pebble_sdk')
+
+
+def _size_report(ctx):
+    # waf execs this file without __file__ defined, so the framework root is derived
+    # from the build context rather than from the module path.
+    framework_root = os.path.abspath(os.path.join(ctx.path.abspath(), '..', '..', '..'))
+    tool = os.path.join(framework_root, 'tools', 'size_report.py')
+    for platform in ctx.env.TARGET_PLATFORMS:
+        elf = os.path.join(out, platform, 'pebble-app.elf')
+        if not os.path.exists(elf):
+            continue
+        print('\n--- {} size report ---'.format(platform))
+        subprocess.call([sys.executable, tool, elf])
 
 
 def build(ctx):
@@ -46,3 +71,5 @@ def build(ctx):
 
     ctx.set_group('bundle')
     ctx.pbl_bundle(binaries=binaries, js=[])
+
+    ctx.add_post_fun(_size_report)

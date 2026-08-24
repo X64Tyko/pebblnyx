@@ -57,7 +57,7 @@ int main(void)
 	app.started_ms = pnx_platform_now_ms();
 	game_init(&app.game);
 
-	if (!pnx_arena_init(&app.game.arena, "game", 8 * 1024, 4))
+	if (!pnx_arena_init_max(&app.game.arena, "game", PNX_ARENA_HEAP_RESERVE, 4))
 	{
 		pnx_platform_log("arena init failed");
 		return 1;

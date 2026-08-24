@@ -1,0 +1,50 @@
+{
+  "name": "pnx-bitplanebench",
+  "author": "tyton",
+  "version": "1.0.0",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "pnx bitplanebench",
+    "uuid": "8c2e2a1a-2f4b-4a1e-9d3a-7b6e5f9c0a11",
+    "sdkVersion": "3",
+    "enableMultiJS": false,
+    "targetPlatforms": [
+      "emery",
+      "gabbro",
+      "flint",
+      "basalt",
+      "chalk",
+      "diorite",
+      "aplite"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [],
+    "resources": {
+      "media": [
+        { "type": "raw", "name": "PALETTES", "file": "palettes.bin" },
+        { "type": "raw", "name": "BENCH", "file": "font_bench.bin" },
+        { "type": "raw", "name": "BPEG_HERO0", "file": "bpeg_hero0.bin" },
+        { "type": "raw", "name": "BPEG_HERO1", "file": "bpeg_hero1.bin" },
+        { "type": "raw", "name": "BPEG_HERO2", "file": "bpeg_hero2.bin" },
+        { "type": "raw", "name": "BPEG_NPC0", "file": "bpeg_npc0.bin" },
+        { "type": "raw", "name": "BPEG_TILE0", "file": "bpeg_tile0.bin" },
+        { "type": "raw", "name": "BPEG_TILE5", "file": "bpeg_tile5.bin" },
+        { "type": "raw", "name": "BPEG_TILE10", "file": "bpeg_tile10.bin" },
+        { "type": "raw", "name": "BPEG_TILE20", "file": "bpeg_tile20.bin" },
+        { "type": "raw", "name": "BPEG_CAR0", "file": "bpeg_car0.bin" },
+        { "type": "raw", "name": "BPEG_CAR3", "file": "bpeg_car3.bin" },
+        { "type": "raw", "name": "BPEG_SOLID", "file": "bpeg_solid.bin" },
+        { "type": "raw", "name": "BPEG_CHECKER", "file": "bpeg_checker.bin" },
+        { "type": "raw", "name": "BPEG_ALL16", "file": "bpeg_all16.bin" },
+        { "type": "raw", "name": "RAW_ALL", "file": "raw_all.bin" },
+        { "type": "raw", "name": "LZSS_ALL", "file": "lzss_all.bin" }
+      ]
+    }
+  }
+}

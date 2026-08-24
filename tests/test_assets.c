@@ -214,14 +214,13 @@ void test_assets(void)
 	if (!register_assets())
 		return;
 
-	PnxArena persistent, arena;
-	A_CHECK(pnx_arena_init(&persistent, "persistent", 4 * 1024, 4));
+	PnxArena arena;
 	// Deliberately larger than any watch's: these tests load every map in the example one
 	// after another without a scene reset between them, so the arena has to hold the sum of
 	// things a scene would only ever hold one of. The scene checks at the end are where
 	// realistic residency is asserted.
-	A_CHECK(pnx_arena_init(&arena, "scene", 192 * 1024, 4));
-	A_CHECK(pnx_assets_init(&persistent, &arena, s_resources, A_COUNT));
+	A_CHECK(pnx_arena_init(&arena, "test-assets", 196 * 1024, 4));
+	A_CHECK(pnx_assets_init(&arena, s_resources, A_COUNT));
 
 	// --- palettes must load before anything that indexes them
 	PnxAtlas atlas;
@@ -589,21 +588,20 @@ void test_assets(void)
 	A_CHECK(pnx_scene_font(2) == NULL);
 
 	// Loading another scene must release the first entirely rather than accumulating.
-	const size_t after_outdoor = arena.used;
+	const size_t after_outdoor = arena.used_hi;
 	A_CHECK(pnx_scene_load(SCENE_CAVE));
 	A_CHECK_EQ(pnx_scene_sprite_count(), 1); // cave declares no npc
 	A_CHECK(pnx_scene_dialog() == NULL);	 // nor dialog
 	A_CHECK_EQ(pnx_scene_font_count(), 1);	 // HUD only: no conversations here
 	if (pnx_scene_map())
 		A_CHECK_EQ(pnx_scene_map()->layers[0].w, MAP_CAVE_W);
-	A_CHECK(arena.used < after_outdoor); // smaller scene, less arena
+	A_CHECK(arena.used_hi < after_outdoor); // smaller scene, less arena
 
 	// Reloading the bigger scene must fit again, which it cannot if resets leak.
 	A_CHECK(pnx_scene_load(SCENE_OUTDOOR));
-	A_CHECK_EQ(arena.used, after_outdoor);
+	A_CHECK_EQ(arena.used_hi, after_outdoor);
 
 	A_CHECK(!pnx_scene_load(99));
 
 	pnx_arena_destroy(&arena);
-	pnx_arena_destroy(&persistent);
 }

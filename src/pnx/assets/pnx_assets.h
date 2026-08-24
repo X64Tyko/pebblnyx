@@ -264,9 +264,16 @@ typedef struct
 
 #define PNX_SPRITE_FRAME_BYTES 8
 
+// `pixels` always points at plain, decoded, frame-addressable bytes -- a frame's own
+// `offset` in frame_meta indexes into it directly, whether or not the on-disk blob was
+// LZSS-compressed (compress_sprites) or deduplicated (identical packed frames share one
+// offset). Compressed, pnx_sprite_load decodes the whole pixel region into a fresh
+// arena buffer once at load; uncompressed, `pixels` points straight into the loaded
+// blob, same as before either feature existed. Either way this field's contract to a
+// caller never changes.
 typedef struct
 {
-	const uint8_t* pixels;		  // every frame's pixels, packed back-to-back
+	const uint8_t* pixels;		  // every frame's pixels; see this struct's own comment above
 	const uint8_t* frame_meta;	  // frame_count * PNX_SPRITE_FRAME_BYTES, see PnxSpriteFrame
 	const uint8_t* frame_palette; // frame_count, palette slot per frame
 	// SCALED rects / COMPLEX masks, sparse, keyed by FRAME index -- identical byte shape
@@ -438,8 +445,11 @@ typedef struct
 
 	// Consumed by pnx_layer.c's pnx_layers_draw, the same PNX_LAYER_PARALLAX_WORLD/SCREEN
 	// scale every other layer kind uses -- a map layer is not a special case to that
-	// compositor, just another PNX_LAYER_CALLBACK.
-	uint8_t parallax_pct;
+	// compositor, just another PNX_LAYER_CALLBACK. Independent X/Y rates: a horizon strip
+	// that scrolls with road curve (X) but never vertically (Y=PNX_LAYER_PARALLAX_SCREEN)
+	// is exactly the case one shared rate couldn't express.
+	uint8_t parallax_pct_x;
+	uint8_t parallax_pct_y;
 
 	// A layer smaller than the camera's view (the common case for a parallax background)
 	// repeats: sampling and streaming both wrap modulo this layer's own w/h instead of
@@ -513,17 +523,25 @@ typedef struct
 	// not. A compressed bank is an ATOMIC streaming unit: any one WorldTile needed from it
 	// means reading and decoding the whole thing, not the precise partial-range reads an
 	// uncompressed bank allows -- see worldtile_load_run's own comment (pnx_assets.c) for
-	// why that is the right trade for what this buys.
-	//
-	// ONE scratch pair, shared and reused across every layer's banks, not one per layer:
-	// streaming is sequential (one bank decodes, gets consumed, then the next), so nothing
-	// is lost by sharing, and a second/third/fourth layer's own scratch would otherwise
-	// duplicate RAM for no reason. Sized to the LARGEST bank across every layer
-	// (`max over layers of (1 << bank_shift) * slot_bytes`) so it covers all of them: `src`
-	// holds the compressed bytes just read (LZSS output can never exceed what it started
-	// from, so this bound covers the compressed size too), `dst` holds the decoded bank
-	// body a WorldTile's own bytes are then copied out of into its resident pool slot.
+	// why that is the right trade for what this buys. Per-atlas compression (below) is a
+	// separate, independent knob -- this flag says nothing about whether this map's
+	// atlases are compressed, only its own cell-plane banks.
 	bool compressed;
+#endif
+#if PNX_USE_MAP_COMPRESS || PNX_USE_ATLAS_COMPRESS
+	// ONE scratch pair, shared and reused across every layer's banks AND every atlas pool
+	// load, not one per use: both are sequential (one bank/atlas decodes, gets consumed,
+	// then the next), so nothing is lost by sharing, and a second scratch pair would
+	// otherwise duplicate RAM for no reason. Sized to the LARGEST of (a) any layer's
+	// largest bank and (b) one atlas pool slot's uncompressed byte count (`pool_bytes /
+	// atlas_slots` -- every slot is the same size) -- LZSS output can never exceed what it
+	// started from, so covering the uncompressed size covers the compressed one too, with
+	// no per-atlas resource-size probe needed.
+	//
+	// `lzss_dst` holds a decoded BANK body, which a WorldTile's own bytes are then copied
+	// out of into its resident pool slot -- banks only. A compressed atlas pool load
+	// decodes straight into its own `dst` (the pool slot itself, see atlas_load_into's own
+	// comment), so it only ever needs `lzss_src`.
 	uint8_t* lzss_src;
 	uint8_t* lzss_dst;
 #endif
@@ -639,15 +657,16 @@ static inline uint8_t pnx_font_row_bytes(const PnxFont* f, uint8_t w)
 	return (uint8_t)(((uint16_t)w * f->depth + 7u) / 8u);
 }
 
-// Two arenas, because they have different lifetimes. `persistent` holds the scene table
-// and outlives everything; `scene` holds the assets a scene needs and is reset wholesale
-// at every scene boundary. Keeping them separate is what lets a scene load free its
-// predecessor without also freeing the table telling it what to load.
+// One double-ended arena, because loads have two different lifetimes but do not need
+// two separate allocations to get them: the scene table (loaded by pnx_scenes_load) and
+// anything pnx_assets_persistent(true) brackets outlive everything, from the low
+// (persistent) end; everything else is a scene's own assets, reset wholesale at every
+// scene boundary, from the high (scene) end. Pass an arena sized with
+// pnx_arena_init_max so the project stops hand-picking a byte budget for each side.
 //
 // `resources` maps each PnxAssetId to its platform resource id -- pass the generated
 // PNX_ASSET_RESOURCE_TABLE.
-bool pnx_assets_init(PnxArena* persistent, PnxArena* scene, const uint32_t* resources,
-					 uint16_t count);
+bool pnx_assets_init(PnxArena* arena, const uint32_t* resources, uint16_t count);
 
 // Declares which orientation this build's resources must carry. Pass the generated
 // header's PNX_ORIENTATION, AFTER pnx_assets_init -- init clears any expectation so that
@@ -664,8 +683,9 @@ uint8_t pnx_assets_orientation(void);
 
 // ------------------------------------------------------- loading past a scene
 //
-// Routes subsequent loads to the PERSISTENT arena instead of the scene one. Returns the
-// previous setting, so a caller can restore rather than assume.
+// Routes subsequent loads to the persistent (low) side of the arena instead of the
+// scene (high) one. Returns the previous setting, so a caller can restore rather than
+// assume.
 //
 //     const bool was = pnx_assets_persistent(true);
 //     pnx_music_load(&song, PNX_ASSET_MUSIC_BATTLE);
@@ -673,15 +693,15 @@ uint8_t pnx_assets_orientation(void);
 //
 // This exists because a scene is not the only lifetime a game has. Music is the clear
 // case: it is not scene-declared, it plays across a scene boundary by design -- a battle
-// theme starts as the field scene unloads -- and loaded into the scene arena it is freed
+// theme starts as the field scene unloads -- and loaded into the scene side it is freed
 // out from under the sequencer by the very transition it is scoring. That does not fail
 // loudly; the song plays on through whatever now occupies those bytes.
 //
-// It is a narrow hook rather than a third arena because the persistent arena already has
-// exactly the right lifetime. What was missing was any way for a game to reach it, which
-// pnx_scenes_load has needed internally since it was written.
+// A persistent load made through this toggle is safe no matter when it happens relative
+// to scene loads already in progress -- it always lands on the low side, below the high
+// cursor, so a later scene reset (which only rewinds the high cursor) cannot touch it.
 //
-// Keep what goes here small and bounded. The persistent arena is never reset, so anything
+// Keep what goes here small and bounded. The persistent side is never reset, so anything
 // loaded into it is loaded for the life of the app -- load once at boot, not per scene.
 bool pnx_assets_persistent(bool on);
 
@@ -713,10 +733,29 @@ uint8_t pnx_scene_sprite_count(void);
 uint8_t pnx_scene_font_count(void);
 uint8_t pnx_scene_nine_slice_count(void);
 
+#if PNX_USE_BITPLANE_COMPRESS
+// Implements pnx_tile_cache.h's PnxTileFetchFn against a real "PT" (per-tile-addressable
+// bitplane atlas) resource -- tools/... bpeg_atlas_encode.py's own header comment has the
+// on-disk layout this reads. `atlas_asset` is a PnxAssetId, same as every other function
+// here; `ctx` is unused. Returns the compressed length for `tile_index`, or 0 on any
+// failure (unknown asset, wrong magic, tile_index out of range, short read) -- the same
+// posture pnx_tile_cache_get already expects from any fetch function. Pass this directly
+// as the `fetch` argument, no wrapper needed -- the signature matches PnxTileFetchFn
+// exactly on purpose, so this header doesn't need to include pnx_tile_cache.h just to
+// name it.
+size_t pnx_bitplane_atlas_fetch(void* ctx, uint16_t atlas_asset, uint16_t tile_index,
+								uint8_t* scratch, size_t scratch_cap);
+#endif
+
 // Each returns false and leaves `out` untouched if the resource is missing, the blob is
 // the wrong type or version, or its declared dimensions do not match its actual size --
 // the last of which is what catches a truncated or half-written resource.
 bool pnx_atlas_load(PnxAtlas* out, uint16_t asset_id);
+// If the pipeline built this sprite with `compress_sprites` on, decodes the whole pixel
+// region into a fresh arena allocation (PNX_USE_SPRITE_COMPRESS must be on here too, or
+// this refuses to load rather than reading garbage). Identical frames the pipeline
+// deduplicated share one `frame_meta` offset either way -- nothing about that needs a
+// runtime flag, since the loader already treats each frame's offset independently.
 bool pnx_sprite_load(PnxSprite* out, uint16_t asset_id);
 bool pnx_nineslice_load(PnxNineSlice* out, uint16_t asset_id);
 bool pnx_dialog_load(PnxDialog* out, uint16_t asset_id);
@@ -735,7 +774,8 @@ bool pnx_map_load(PnxMap* out, uint16_t asset_id);
 
 // Bring the WorldTiles covering a world-pixel rectangle into residency, plus one
 // WorldTile of margin around it -- across EVERY layer the map declares (M13), each scaled
-// by its own `parallax_pct` and wrapped modulo its own extent first if `wrap` is set.
+// by its own `parallax_pct_x`/`parallax_pct_y` and wrapped modulo its own extent first if
+// `wrap` is set.
 //
 // `pnx_map_stream` spends at most PNX_MAP_STREAM_BUDGET reads TOTAL across every layer,
 // not per layer, and returns how many WorldTiles are still missing summed the same way, so

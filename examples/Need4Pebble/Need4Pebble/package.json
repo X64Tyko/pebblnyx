@@ -34,6 +34,21 @@
         },
         {
           "type": "raw",
+          "name": "ROAD_CHUNK",
+          "file": "road_chunk.bin"
+        },
+        {
+          "type": "raw",
+          "name": "GROUND",
+          "file": "ground.bin"
+        },
+        {
+          "type": "raw",
+          "name": "HORIZON_BAND",
+          "file": "horizon_band.bin"
+        },
+        {
+          "type": "raw",
           "name": "TOURING_NORMAL",
           "file": "touring_normal.bin"
         },

@@ -338,10 +338,9 @@ static void test_rotated_fonts(void)
 	for (uint32_t i = 0; i < 4; i++)
 		resources[i] = i + 600;
 
-	PnxArena persistent, scene;
-	pnx_arena_init(&persistent, "rot-persistent", 1024, 4);
-	pnx_arena_init(&scene, "rot-scene", 8192, 4);
-	pnx_assets_init(&persistent, &scene, resources, 4);
+	PnxArena arena;
+	pnx_arena_init(&arena, "rot-arena", 9216, 4);
+	pnx_assets_init(&arena, resources, 4);
 
 	size_t len	  = 0;
 	uint8_t* flat = build_rot_font(&len, PNX_ADVANCE_X_POS);
@@ -431,8 +430,7 @@ static void test_rotated_fonts(void)
 	}
 
 	free(flat);
-	pnx_arena_destroy(&scene);
-	pnx_arena_destroy(&persistent);
+	pnx_arena_destroy(&arena);
 }
 
 void test_text(void)
@@ -443,10 +441,9 @@ void test_text(void)
 	for (uint32_t i = 0; i < 8; i++)
 		resources[i] = i + 500;
 
-	PnxArena persistent, scene;
-	pnx_arena_init(&persistent, "text-persistent", 4096, 4);
-	pnx_arena_init(&scene, "text-scene", 16384, 4);
-	pnx_assets_init(&persistent, &scene, resources, 8);
+	PnxArena arena;
+	pnx_arena_init(&arena, "text-arena", 20480, 4);
+	pnx_assets_init(&arena, resources, 8);
 
 	size_t len	  = 0;
 	uint8_t* blob = build_font_blob(&len, 1, PNX_BLOB_VERSION);
@@ -741,8 +738,7 @@ void test_text(void)
 	}
 
 	free(blob);
-	pnx_arena_destroy(&scene);
-	pnx_arena_destroy(&persistent);
+	pnx_arena_destroy(&arena);
 
 	test_rotated_fonts();
 }

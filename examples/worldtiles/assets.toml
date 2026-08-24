@@ -13,6 +13,9 @@ name = "worldtiles"
 resources = "resources"
 header = "src/c/assets_gen.h"
 budget_bytes = 262144
+compress_maps = true
+compress_sprites = true
+compress_atlases = true
 
 # --------------------------------------------------------------------------- tilesets
 #

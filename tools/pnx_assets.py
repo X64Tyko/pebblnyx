@@ -128,9 +128,10 @@ BLOB_VERSION = 15  # v15: "PS" sprite frames are no longer fixed-stride -- each 
                    # layer_count/primary_layer/warp_count/pad (were w/h/warp_count/
                    # worldtile); the preamble carries a shared 12-byte fixed section
                    # (atlas_count, tile_px, flags, atlas_slots, tile_total, dict_count,
-                   # pool_bytes) then one 13-byte fixed directory entry PER LAYER
+                   # pool_bytes) then one 14-byte fixed directory entry PER LAYER
                    # (w, h, worldtile, cols, rows, bank_shift, want_slots, slot_bytes,
-                   # first_bank_asset, parallax_pct, wrap) followed immediately by that
+                   # first_bank_asset, parallax_pct_x, parallax_pct_y, wrap) followed
+                   # immediately by that
                    # layer's own wt_mask -- see finish_map's own layout comment. This
                    # pass emits exactly one layer (layer_count=1, primary_layer=0) for
                    # every `[[map]]`; multi-layer authoring (`[[map.layer]]`) is not
@@ -794,12 +795,14 @@ def pack_atlas(root, spec, orient=ORIENT_BUTTONS_RIGHT):
         print(f"    NOTE {repaired} tile(s) exceeded {PALETTE_USABLE} colours and were "
               f"reduced -- edit the art to avoid this")
 
+    anim = parse_atlas_anim(spec.get("anim", {}), len(fixed), name)
+
     return {"name": name, "tiles": fixed, "tile_px": T, "out": spec["out"],
             # Default OFF, not "auto": the runtime cannot read the metatile layout yet,
             # and a default that emits blobs the loader rejects is worse than no
             # feature at all. Flip to "auto" when pnx_atlas_load understands it.
             "repaired": repaired, "metatiles": spec.get("metatiles", False),
-            "variants": variants,
+            "variants": variants, "anim": anim,
             # Sheet TILE coordinates (not pixels -- `offset` already folded in above) each
             # packed tile was first carved from, index-aligned with `tiles`. Not consumed
             # by the build; the editor uses it to resolve a raw sheet cell back to the
@@ -850,7 +853,8 @@ def build_metatiles(tiles, pal_of, T, quiet=False):
     return bank, defs
 
 
-def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False):
+def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False,
+                 compress_atlases=False):
     """Palettise and pack. Called once map compilation has settled tile flags.
 
     `shared` is the running list of palettes from earlier atlases, so a later atlas
@@ -972,28 +976,46 @@ def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bi
             for qid in quad_ids:
                 table += qid.to_bytes(2, "little")
 
+        pixel_flags, pixel_body = compress_pixel_body(pixels, compress_atlases, tag_len=True)
         body = (len(bank).to_bytes(2, "little") + b"\0\0"
-                + pad4(bytes(assign)) + pad4(flags) + bytes(table) + pixels + shapes)
-        atlas["blob"] = blob_header(MAGIC_ATLAS, T, len(tiles), 1, orient=orient) + body
+                + pad4(bytes(assign)) + pad4(flags) + bytes(table) + pixel_body + shapes)
+        atlas["blob"] = (blob_header(MAGIC_ATLAS, T, len(tiles), 1, pixel_flags, orient=orient)
+                         + body)
         atlas["subtiles"] = len(bank)
+        # A map's atlas pool slot has to hold the DECODED pixels regardless of whether
+        # this blob is compressed on disk -- `resident_bytes` is what "blob" would have
+        # been with `pixels` written raw, i.e. the size compression never shrinks below
+        # at runtime. Equal to len(blob) whenever compress_atlases left this uncompressed.
+        atlas["resident_bytes"] = (8 + 4 + len(pad4(bytes(assign))) + len(pad4(flags))
+                                   + len(table) + len(pixels) + len(shapes))
 
         if pack_2bit:
             # Same table, same assign, same flags, same shapes -- pack_unit_2bpp needs no
             # palette, so the quadrant's raw pixels are all that changes.
             pixels_bw = b"".join(pack_unit_2bpp(bank[i]) for i in range(len(bank)))
+            flags_bw, body_bw_pixels = compress_pixel_body(pixels_bw, compress_atlases, tag_len=True)
             body_bw = (len(bank).to_bytes(2, "little") + b"\0\0"
-                      + pad4(bytes(assign)) + pad4(flags) + bytes(table) + pixels_bw + shapes)
-            atlas["blob_bw"] = blob_header(MAGIC_ATLAS, T, len(tiles), 1, orient=orient) + body_bw
+                      + pad4(bytes(assign)) + pad4(flags) + bytes(table) + body_bw_pixels
+                      + shapes)
+            atlas["blob_bw"] = (blob_header(MAGIC_ATLAS, T, len(tiles), 1, flags_bw,
+                                            orient=orient) + body_bw)
     else:
         pixels = b"".join(pack_unit_4bpp(t, palettes[a]) for t, a in zip(tiles, assign))
-        body = pad4(bytes(assign)) + pad4(flags) + pixels + shapes
-        atlas["blob"] = blob_header(MAGIC_ATLAS, T, len(tiles), 0, orient=orient) + body
+        pixel_flags, pixel_body = compress_pixel_body(pixels, compress_atlases, tag_len=True)
+        body = pad4(bytes(assign)) + pad4(flags) + pixel_body + shapes
+        atlas["blob"] = (blob_header(MAGIC_ATLAS, T, len(tiles), 0, pixel_flags, orient=orient)
+                         + body)
         atlas["subtiles"] = 0
+        # See the metatiled branch above for why this is tracked separately from len(blob).
+        atlas["resident_bytes"] = (8 + len(pad4(bytes(assign))) + len(pad4(flags))
+                                   + len(pixels) + len(shapes))
 
         if pack_2bit:
             pixels_bw = b"".join(pack_unit_2bpp(t) for t in tiles)
-            body_bw = pad4(bytes(assign)) + pad4(flags) + pixels_bw + shapes
-            atlas["blob_bw"] = blob_header(MAGIC_ATLAS, T, len(tiles), 0, orient=orient) + body_bw
+            flags_bw, body_bw_pixels = compress_pixel_body(pixels_bw, compress_atlases, tag_len=True)
+            body_bw = pad4(bytes(assign)) + pad4(flags) + body_bw_pixels + shapes
+            atlas["blob_bw"] = (blob_header(MAGIC_ATLAS, T, len(tiles), 0, flags_bw,
+                                            orient=orient) + body_bw)
     atlas["palettes"] = palettes
     atlas["assign"] = assign
     atlas["tile_flags"] = flags # kept beside the blob, not just baked into it -- see
@@ -1523,6 +1545,78 @@ def parse_atlas_collision(spec, atlas, roles):
                                  lambda i: (T, T), f"atlas {atlas['name']!r}")
 
 
+def parse_atlas_anim(anim_spec, tile_count, name):
+    """[atlas.anim] -> validated {name: value}. Same shape and validation as
+    parse_sprite_anim (below) -- a clip normalises to {"frames": [...], "fps": int,
+    "loop": bool, "durations": [...] or None} regardless of which TOML form authored it
+    -- except "frames" here are ATLAS TILE INDICES, not sprite frame indices, and `tile
+    count` is the atlas's own POST-DEDUP tile count (mirror/rotation-collapsed `fixed`,
+    the same index space collision/roles/autopick already validate against), not the raw
+    sheet grid -- an authored index has to name a tile that still exists after dedup.
+
+    Deliberately the same generated-handle shape as [sprite.anim] (tools/pnx_assets.py's
+    own generate_header: NAME_ANIM_FRAMES[]/_COUNT/_FPS/_LOOP/_DURATIONS) so a game
+    resolves an animated tile id through the exact same pnx_anim_play/pnx_anim_frame
+    (core/pnx_anim.h) a sprite clip uses -- one playback primitive, not a second one
+    invented for tiles.
+    """
+    out = {}
+    for anim_name, value in anim_spec.items():
+        if isinstance(value, bool):
+            raise BuildError(f"atlas {name!r}: anim {anim_name!r} must be a tile index, "
+                             f"a list of tile indices, or a table, not a bool")
+        if isinstance(value, int):
+            if not 0 <= value < tile_count:
+                raise BuildError(f"atlas {name!r}: anim {anim_name!r} points at tile "
+                                 f"{value}, but there are only {tile_count}")
+            out[anim_name] = value
+            continue
+
+        if isinstance(value, list):
+            clip_frames, fps, loop, durations = value, ANIM_DEFAULT_FPS, True, None
+        elif isinstance(value, dict):
+            unknown = set(value) - {"frames", "fps", "loop", "durations"}
+            if unknown:
+                raise BuildError(f"atlas {name!r}: anim {anim_name!r} has unknown "
+                                 f"key(s) {sorted(unknown)}")
+            if "frames" not in value:
+                raise BuildError(f"atlas {name!r}: anim {anim_name!r} needs `frames`")
+            clip_frames = value["frames"]
+            fps = value.get("fps", ANIM_DEFAULT_FPS)
+            loop = value.get("loop", True)
+            durations = value.get("durations")
+        else:
+            raise BuildError(f"atlas {name!r}: anim {anim_name!r} must be a tile index, "
+                             f"a list of tile indices, or a table, not {value!r}")
+
+        if not isinstance(clip_frames, list) or not clip_frames or len(clip_frames) > 255:
+            raise BuildError(f"atlas {name!r}: anim {anim_name!r} needs 1..255 tile "
+                             f"indices, got {clip_frames!r}")
+        for fi in clip_frames:
+            if not isinstance(fi, int) or isinstance(fi, bool) or not 0 <= fi < tile_count:
+                raise BuildError(f"atlas {name!r}: anim {anim_name!r} names tile "
+                                 f"{fi!r}, but there are only {tile_count}")
+        if not isinstance(fps, int) or isinstance(fps, bool) or not 1 <= fps <= 255:
+            raise BuildError(f"atlas {name!r}: anim {anim_name!r} fps must be an "
+                             f"integer 1..255, not {fps!r}")
+        if not isinstance(loop, bool):
+            raise BuildError(f"atlas {name!r}: anim {anim_name!r} loop must be "
+                             f"true/false, not {loop!r}")
+        if durations is not None:
+            if not isinstance(durations, list) or len(durations) != len(clip_frames):
+                raise BuildError(f"atlas {name!r}: anim {anim_name!r} durations must "
+                                 f"be a list of exactly {len(clip_frames)} integers, "
+                                 f"one per frame")
+            for d in durations:
+                if not isinstance(d, int) or isinstance(d, bool) or not 1 <= d <= 255:
+                    raise BuildError(f"atlas {name!r}: anim {anim_name!r} duration "
+                                     f"{d!r} must be an integer 1..255")
+
+        out[anim_name] = {"frames": list(clip_frames), "fps": fps, "loop": loop,
+                          "durations": list(durations) if durations is not None else None}
+    return out
+
+
 # --------------------------------------------------------------------------- sprite
 
 def parse_sprite_anim(anim_spec, frame_count, name):
@@ -1748,21 +1842,109 @@ def pack_sprite(root, spec, orient=ORIENT_BUTTONS_RIGHT):
             "anim": anim, "collision": collision, "repaired": repaired}
 
 
-def build_sprite_frame_meta(dims, origins, collision, frame_byte_lens):
+def build_sprite_frame_meta(dims, origins, collision, frame_packed):
     """The frame_meta table PnxSprite.frame_meta loads (PNX_SPRITE_FRAME_BYTES=8 per
     frame: u16 offset, u8 w, u8 h, u8 origin_x, u8 origin_y, u8 flags, u8 pad) -- the same
-    role pack_font's glyph-offset loop plays for PnxGlyph. `frame_byte_lens` is the
-    caller's own per-frame PIXEL byte length, which differs between the 4bpp blob and the
-    2bpp ~bw one (see PnxSprite's own comment), so this is called once per encoding.
+    role pack_font's glyph-offset loop plays for PnxGlyph, including its dedup: two
+    frames whose PACKED bytes are byte-identical (same w/h and the same palette-relative
+    indices -- palette-relative because pack_unit_4bpp/2bpp already baked the palette
+    assignment in by the time this runs) share one `offset` instead of a second copy.
+    `frame_packed` is the caller's own per-frame packed pixel bytes, which differ between
+    the 4bpp blob and the 2bpp ~bw one (see PnxSprite's own comment), so this is called
+    once per encoding. Returns (meta_bytes, deduped_pixels_bytes).
     """
     meta = bytearray()
-    offset = 0
+    pixels = bytearray()
+    dedup = {}
     for i, ((w, h), (ox, oy)) in enumerate(zip(dims, origins)):
         mode, kind, extra = collision.get(i, (COLLISION_NONE, COLLISION_KIND_WALL, None))
         flags = (kind << 2) | mode
+        packed = frame_packed[i]
+        key = (w, h, packed)
+        if key in dedup:
+            offset = dedup[key]
+        else:
+            offset = len(pixels)
+            dedup[key] = offset
+            pixels += packed
         meta += offset.to_bytes(2, "little") + bytes([w, h, ox, oy, flags, 0])
-        offset += frame_byte_lens[i]
-    return bytes(meta)
+    return bytes(meta), bytes(pixels)
+
+
+def compress_sprite_pixels_bitplane(frame_meta, dims, pixels):
+    """The bitplane-compressed alternative to compress_pixel_body's LZSS form, for a
+    sprite's pixel region specifically -- flags bit 1 (LZSS already owns bit 0), body is
+    a per-DEDUPED-UNIT offset table + concatenated encode_bitplane_unit() blobs, one per
+    distinct frame. `frame_meta`/`pixels` are exactly what build_sprite_frame_meta
+    already produced (unmodified) -- its offsets are logical/post-decode, assigned in
+    first-seen order, so walking the DISTINCT offsets in ascending order recovers the
+    same deduped unit list a second dedup pass would, without one. This is deliberate,
+    not incidental: pnx_sprite_load's own bitplane path does the identical walk over the
+    frame_meta it already loaded, rather than this function stashing a redundant unit
+    count/index anywhere -- one dedup computation, arrived at twice, from the one table
+    that already has to exist either way.
+
+    Never returned if it would not actually be smaller than shipping `pixels` unchanged
+    -- same guarantee compress_pixel_body gives LZSS.
+    """
+    seen = {}
+    for i, (w, h) in enumerate(dims):
+        off = int.from_bytes(frame_meta[i * 8:i * 8 + 2], "little")
+        if off not in seen:
+            seen[off] = (w, h)
+
+    units = []
+    for off in sorted(seen):
+        w, h = seen[off]
+        n = w * h
+        length = n // 2
+        indices = unpack_4bpp_to_indices(pixels[off:off + length], n)
+        units.append(encode_bitplane_unit(indices))
+
+    offsets = [0]
+    for u in units:
+        offsets.append(offsets[-1] + len(u))
+    offset_table = b"".join(o.to_bytes(2, "little") for o in offsets)
+    body = offset_table + b"".join(units)
+
+    if len(body) >= len(pixels):
+        return 0, pixels
+    return 2, body
+
+
+def compress_pixel_body(pixels, compress, tag_len=False):
+    """Returns (flags, body) for a sprite or atlas blob's pixel region -- shared by
+    `compress_sprites` and `compress_atlases`, the counterpart to compress_maps' bank-body
+    compression (see the bank-writing loop below), simpler because both sprites and
+    atlases load whole rather than banked, so there is one stream, not one per bank.
+    `flags` bit 0 set means `body` is a 2-byte COMPRESSED length followed by the LZSS
+    stream of that length (pnx_sprite_load's and atlas_load_into's own comments document
+    the convention); otherwise `body` is `pixels` unchanged. The length has to be the
+    compressed byte count, not the uncompressed one: the uncompressed size is already
+    derivable from frame_meta/tile_count (that is what sizes the decode buffer), but
+    nothing else says where the stream ENDS and the shape tables begin -- pnx_lzss_decode
+    reports bytes written, not bytes consumed, so the loader has no other way to find
+    that boundary. Never emits the compressed form if it would not actually be smaller --
+    a project turning compression on should never pay a decode cost for content too small
+    to benefit.
+
+    `tag_len` -- atlas call sites only (finish_atlas passes True; sprites don't) -- also
+    inserts a 2-byte TRUE uncompressed pixel length ahead of the stream, between the
+    compressed length and the stream itself. An atlas is the one place two on-disk pixel
+    depths of the SAME content coexist (`pack_2bit`'s colour blob and ~bw blob), and
+    "derivable from tile_count" above stops being true across that split: tile_count is
+    bit-depth independent, so a colour blob loaded by a PNX_DISPLAY_BW build's reader (or
+    the reverse) still looks self-consistent to it -- same tile_count, same tables -- and
+    decodes "successfully" into half the real pixel data rather than being refused. This
+    field is what atlas_load_into checks to catch that; see its own comment.
+    """
+    if not compress:
+        return 0, pixels
+    packed = lzss_compress(pixels)
+    tag = len(pixels).to_bytes(2, "little") if tag_len else b""
+    if len(packed) + 2 + len(tag) >= len(pixels):
+        return 0, pixels
+    return 1, len(packed).to_bytes(2, "little") + tag + packed
 
 
 def build_sprite_shapes(collision, dims, fixed):
@@ -1792,7 +1974,8 @@ def build_sprite_shapes(collision, dims, fixed):
            + complex_count.to_bytes(2, "little") + bytes(complex_masks))
 
 
-def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False):
+def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False,
+                                compress_sprites=False):
     """One bitmap, one palette per variant, on colour. On a 1-bit build (`pack_2bit`) this
     still emits exactly one ~bw blob -- see the comment above `sprite["blob_bw"]` below for
     why colour's variant-sharing trick has no BW equivalent and what replaces it.
@@ -1825,9 +2008,9 @@ def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pac
         return len(shared) - 1
 
     base_slot = slot(base_order)
-    pixel_lens = [w * h // 2 for (w, h) in dims]
-    frame_meta = build_sprite_frame_meta(dims, origins, collision, pixel_lens)
-    pixels = b"".join(pack_unit_4bpp(f, shared[base_slot]) for f in frames)
+    frame_packed = [pack_unit_4bpp(f, shared[base_slot]) for f in frames]
+    frame_meta, pixels = build_sprite_frame_meta(dims, origins, collision, frame_packed)
+    flags, pixel_body = compress_pixel_body(pixels, compress_sprites)
     assign = [base_slot] * len(frames)
     shapes = build_sprite_shapes(collision, dims, frames)
 
@@ -1842,8 +2025,8 @@ def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pac
                 f"share a bitmap. Recolour without merging colours.")
         variant_slots[v["name"]] = slot(order)
 
-    sprite["blob"] = (blob_header(MAGIC_SPRITE, len(frames), orient=orient)
-                      + frame_meta + pad4(bytes(assign)) + pixels + shapes)
+    sprite["blob"] = (blob_header(MAGIC_SPRITE, len(frames), flags, orient=orient)
+                      + frame_meta + pad4(bytes(assign)) + pixel_body + shapes)
     sprite["palettes"] = [shared[base_slot]]
     sprite["assign"] = assign
     sprite["variant_slots"] = variant_slots
@@ -1860,11 +2043,12 @@ def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pac
         if sprite.get("bw_variant"):
             bw_frames = next(v["frames"] for v in sprite["variants"]
                              if v["name"] == sprite["bw_variant"])
-        pixel_lens_bw = [w * h // 4 for (w, h) in dims]
-        frame_meta_bw = build_sprite_frame_meta(dims, origins, collision, pixel_lens_bw)
-        pixels_bw = b"".join(pack_unit_2bpp(f) for f in bw_frames)
-        sprite["blob_bw"] = (blob_header(MAGIC_SPRITE, len(frames), orient=orient)
-                             + frame_meta_bw + pad4(bytes(assign)) + pixels_bw + shapes)
+        frame_packed_bw = [pack_unit_2bpp(f) for f in bw_frames]
+        frame_meta_bw, pixels_bw = build_sprite_frame_meta(dims, origins, collision,
+                                                            frame_packed_bw)
+        flags_bw, pixel_body_bw = compress_pixel_body(pixels_bw, compress_sprites)
+        sprite["blob_bw"] = (blob_header(MAGIC_SPRITE, len(frames), flags_bw, orient=orient)
+                             + frame_meta_bw + pad4(bytes(assign)) + pixel_body_bw + shapes)
 
     frame_bytes = sum(w * h // 2 for (w, h) in dims)
     saved = frame_bytes * len(sprite["variants"])
@@ -1873,14 +2057,15 @@ def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pac
     return sprite
 
 
-def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False):
+def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False,
+                  compress_sprites=False):
     frames = sprite["frames"]
     dims = sprite["dims"]
     origins = sprite["origins"]
     collision = sprite["collision"]
 
     if sprite.get("variants"):
-        return finish_sprite_with_variants(sprite, shared, orient, pack_2bit)
+        return finish_sprite_with_variants(sprite, shared, orient, pack_2bit, compress_sprites)
 
     sets = sprite_colour_sets(sprite)
 
@@ -1892,22 +2077,26 @@ def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False):
         raise BuildError(f"sprite {sprite['name']!r}: a frame still exceeds "
                          f"{PALETTE_USABLE} colours after reduction")
 
-    pixel_lens = [w * h // 2 for (w, h) in dims]
-    frame_meta = build_sprite_frame_meta(dims, origins, collision, pixel_lens)
-    pixels = b"".join(pack_unit_4bpp(f, palettes[a]) for f, a in zip(frames, assign))
+    frame_packed = [pack_unit_4bpp(f, palettes[a]) for f, a in zip(frames, assign)]
+    frame_meta, pixels = build_sprite_frame_meta(dims, origins, collision, frame_packed)
+    if compress_sprites == "bitplane":
+        flags, pixel_body = compress_sprite_pixels_bitplane(frame_meta, dims, pixels)
+    else:
+        flags, pixel_body = compress_pixel_body(pixels, compress_sprites)
     shapes = build_sprite_shapes(collision, dims, frames)
-    body = frame_meta + pad4(bytes(assign)) + pixels + shapes
+    body = frame_meta + pad4(bytes(assign)) + pixel_body + shapes
 
-    sprite["blob"] = blob_header(MAGIC_SPRITE, len(frames), orient=orient) + body
+    sprite["blob"] = blob_header(MAGIC_SPRITE, len(frames), flags, orient=orient) + body
     sprite["palettes"] = palettes
     sprite["assign"] = assign
 
     if pack_2bit:
-        pixel_lens_bw = [w * h // 4 for (w, h) in dims]
-        frame_meta_bw = build_sprite_frame_meta(dims, origins, collision, pixel_lens_bw)
-        pixels_bw = b"".join(pack_unit_2bpp(f) for f in frames)
-        sprite["blob_bw"] = (blob_header(MAGIC_SPRITE, len(frames), orient=orient)
-                             + frame_meta_bw + pad4(bytes(assign)) + pixels_bw + shapes)
+        frame_packed_bw = [pack_unit_2bpp(f) for f in frames]
+        frame_meta_bw, pixels_bw = build_sprite_frame_meta(dims, origins, collision,
+                                                            frame_packed_bw)
+        flags_bw, pixel_body_bw = compress_pixel_body(pixels_bw, compress_sprites)
+        sprite["blob_bw"] = (blob_header(MAGIC_SPRITE, len(frames), flags_bw, orient=orient)
+                             + frame_meta_bw + pad4(bytes(assign)) + pixel_body_bw + shapes)
 
     print(f"    {sprite['name']}: uses {len(set(assign))} palette(s), "
           f"{len(palettes) - before} new to the project")
@@ -2607,6 +2796,138 @@ def rotate_maps(maps, orient):
                       for (tx, ty, dest, dtx, dty) in m["warps"]]
 
 
+class _BitWriter:
+    """MSB-first bit accumulator -- matches src/pnx/assets/pnx_bitplane.c's BitReader
+    exactly (bit 7 of byte 0 first). Simplicity over speed: build-time only, same posture
+    as lzss_compress below."""
+
+    def __init__(self):
+        self.bits = []
+
+    def write_bit(self, b):
+        self.bits.append(b & 1)
+
+    def write_bits_msb(self, value, n):
+        for i in range(n - 1, -1, -1):
+            self.write_bit((value >> i) & 1)
+
+    def to_bytes(self):
+        out = bytearray()
+        for i in range(0, len(self.bits), 8):
+            chunk = self.bits[i:i + 8] + [0] * (8 - len(self.bits[i:i + 8]))
+            byte = 0
+            for b in chunk:
+                byte = (byte << 1) | b
+            out.append(byte)
+        return bytes(out)
+
+
+def _elias_gamma_n_bits(v):
+    n_bits = 1
+    while not ((1 << n_bits) - 1 <= v <= (1 << (n_bits + 1)) - 2):
+        n_bits += 1
+    return n_bits
+
+
+def _write_elias_gamma(bw, v):
+    n_bits = _elias_gamma_n_bits(v)
+    for _ in range(n_bits - 1):
+        bw.write_bit(1)
+    bw.write_bit(0)
+    bw.write_bits_msb(v + 1 - (1 << n_bits), n_bits)
+
+
+def encode_bitplane_unit(pixels):
+    """Bitplane-separated, Elias-gamma-RLE-coded, frequency-sorted-local-palette
+    encoding of one sprite frame or atlas tile's pixel indices (flat, row-major, 0-15) --
+    src/pnx/assets/pnx_bitplane.c's decoder reads exactly this. Ported from this
+    session's bpeg_encode.py prototype (2000/2000 synthetic + 48/48 real-tile round-trips
+    verified there and again by test_bitplane_compress.c/test_bitplane_atlas.c on the C
+    side) rather than re-derived, so the format is proven before this ever touches a real
+    project's build. See src/pnx/assets/pnx_bitplane.h for the on-disk layout and why it
+    trades against LZSS the way it does (random per-unit access vs raw size).
+
+    Returns the complete on-disk bytes for this one unit: 1-byte header (bit 7 = raw
+    fallback flag, bits 3-0 = local colour count - 1) then either the packed-4bpp escape
+    hatch or a nibble-packed local-palette offset table + the bitplane/Elias-gamma
+    stream, whichever is smaller -- same "never worse than raw" guarantee
+    compress_pixel_body already gives LZSS.
+    """
+    n = len(pixels)
+    colors = sorted(set(pixels))
+    k = len(colors)
+    if k > 16:
+        raise BuildError(f"encode_bitplane_unit: {k} distinct colours, 4bpp allows at most 16")
+
+    raw_body = pack_unit_4bpp_raw_indices(pixels)
+
+    freq = {}
+    for p in pixels:
+        freq[p] = freq.get(p, 0) + 1
+    order = {c: i for i, (c, _) in enumerate(sorted(freq.items(), key=lambda kv: (-kv[1], kv[0])))}
+    local = [order[v] for v in pixels]
+
+    off_vals = [c for c, _ in sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))]
+    off_table = bytearray()
+    for i in range(0, k, 2):
+        hi = off_vals[i]
+        lo = off_vals[i + 1] if i + 1 < k else 0
+        off_table.append((hi << 4) | lo)
+
+    bits = 0 if k <= 1 else (1 if k <= 2 else 2 if k <= 4 else 3 if k <= 8 else 4)
+
+    bw = _BitWriter()
+    for p in range(bits):
+        plane = [(v >> p) & 1 for v in local]
+        bw.write_bit(plane[0])
+        i = 0
+        while i < n:
+            j = i
+            while j < n and plane[j] == plane[i]:
+                j += 1
+            _write_elias_gamma(bw, j - i)
+            i = j
+    bitstream = bw.to_bytes()
+
+    coded_body = bytes(off_table) + bitstream
+    coded_total = 1 + len(coded_body)
+    raw_total = 1 + len(raw_body)
+
+    if coded_total <= raw_total:
+        header = (k - 1) & 0xF
+        return bytes([header]) + coded_body
+    return bytes([0x80]) + raw_body
+
+
+def pack_unit_4bpp_raw_indices(pixels):
+    """2 pixels/byte, high nibble first -- pack_unit_4bpp's own layout, but from already-
+    palette-relative indices (0-15) rather than raw GColor8 values, since encode_bitplane_unit
+    is called AFTER a frame's own pack_unit_4bpp/palette assignment has already run (it
+    needs the on-disk raw-fallback escape hatch to be pixel-identical to what an
+    uncompressed build would have shipped, so a build turning compress OFF and back ON
+    round-trips through the exact same bytes)."""
+    px = list(pixels)
+    if len(px) % 2:
+        px.append(0)
+    return bytes((px[i] << 4) | px[i + 1] for i in range(0, len(px), 2))
+
+
+def unpack_4bpp_to_indices(data, n):
+    """Inverse of pack_unit_4bpp/pack_unit_4bpp_raw_indices -- reads `n` palette-relative
+    indices back out of `data`'s 2-per-byte packing. Needed because finish_sprite already
+    has frame pixels as PACKED bytes (frame_packed, from pack_unit_4bpp) by the time the
+    bitplane path needs per-pixel indices to feed encode_bitplane_unit -- unpacking is
+    cheaper than threading a second, unpacked copy of every frame through the function
+    just for the one caller that wants it."""
+    out = []
+    for i in range(n // 2 + (n % 2)):
+        b = data[i]
+        out.append(b >> 4)
+        if len(out) < n:
+            out.append(b & 0x0F)
+    return out[:n]
+
+
 def lzss_compress(data, window=4096, min_match=3, max_match=18):
     """Encodes `data` for pnx_lzss_decode (src/pnx/assets/pnx_lzss.c) to read back -- a
     classic (12,4) token: a control byte's 8 bits (LSB first) each say literal (1, one
@@ -2931,14 +3252,14 @@ def finish_map(m, atlas_assets, atlas_bytes, pal_table=b"",
         PER LAYER, layer_count times:
           u8  w, h, worldtile, wt_cols, wt_rows, bank_shift, want_slots
           u16 slot_bytes;  u16 first_bank_asset
-          u8  parallax_pct, wrap
+          u8  parallax_pct_x, parallax_pct_y, wrap
           wt mask        wt_cols * wt_rows bytes, padded to 4
         SHARED, once more, after every layer:
           palette remap  tile_total bytes when present, padded to 4
           warps          warp_count * 5, padded to 4
           cell dict      dict_count * 2 bytes, padded to 4
 
-    Every layer's fixed 13 bytes are written before ANY layer's wt_mask -- two
+    Every layer's fixed 14 bytes are written before ANY layer's wt_mask -- two
     contiguous zones, not interleaved -- because the runtime sizes its one read for the
     whole preamble from a worst-case-bounded probe before it knows any layer's own
     cols/rows; interleaving would mean it could not compute that size without already
@@ -3034,7 +3355,8 @@ def finish_map(m, atlas_assets, atlas_bytes, pal_table=b"",
                              shift, wt_slots])
         layer_dirs += slot_bytes.to_bytes(2, "little")
         layer_dirs += layer["first_bank_asset"].to_bytes(2, "little")
-        layer_dirs += bytes([layer.get("parallax_pct", 255),
+        layer_dirs += bytes([layer.get("parallax_pct_x", 255),
+                             layer.get("parallax_pct_y", 255),
                              1 if layer.get("wrap") else 0])
         layer_masks += bytes(t["mask"] for t in tiles)
 
@@ -3132,8 +3454,8 @@ def parse_map(blob, banks=()):
 
     Returns a dict with `layers` (one entry per declared layer, each shaped the way this
     function's single-layer return always was: w/h/worldtile/cols/rows/bank_shift/
-    bank_count/first_bank_asset/parallax_pct/wrap/masks/cells/extended/wt_slots/
-    wt_slot_bytes) plus every one of the PRIMARY layer's own fields mirrored at the TOP
+    bank_count/first_bank_asset/parallax_pct_x/parallax_pct_y/wrap/masks/cells/extended/
+    wt_slots/wt_slot_bytes) plus every one of the PRIMARY layer's own fields mirrored at the TOP
     level too, so `mp["cells"]`/`mp["w"]` etc. keep meaning exactly what they meant before
     multi-layer maps existed -- every caller that predates this (tests, the editor,
     cell_warp/cell_extended below) reads a single-layer map without any changes of its own.
@@ -3166,7 +3488,7 @@ def parse_map(blob, banks=()):
             for i in range(atlas_slots + 1)]
     at += (atlas_slots + 1) * 4
 
-    # Every layer's own fixed 13 bytes, contiguously, THEN every layer's wt_mask,
+    # Every layer's own fixed 14 bytes, contiguously, THEN every layer's wt_mask,
     # contiguously -- see finish_map's own layout comment for why those are two separate
     # zones rather than interleaved, even when layer_count is 1.
     dirs = []
@@ -3174,12 +3496,13 @@ def parse_map(blob, banks=()):
         w, h, worldtile, cols, rows, bank_shift, wt_slots = blob[at:at + 7]
         slot_bytes = int.from_bytes(blob[at + 7:at + 9], "little")
         first_bank_asset = int.from_bytes(blob[at + 9:at + 11], "little")
-        parallax_pct, wrap = blob[at + 11], blob[at + 12]
-        at += 13
+        parallax_pct_x, parallax_pct_y, wrap = blob[at + 11], blob[at + 12], blob[at + 13]
+        at += 14
         dirs.append({"w": w, "h": h, "worldtile": worldtile, "cols": cols, "rows": rows,
                      "bank_shift": bank_shift, "wt_slots": wt_slots,
                      "slot_bytes": slot_bytes, "first_bank_asset": first_bank_asset,
-                     "parallax_pct": parallax_pct, "wrap": bool(wrap)})
+                     "parallax_pct_x": parallax_pct_x, "parallax_pct_y": parallax_pct_y,
+                     "wrap": bool(wrap)})
 
     def take(n):
         nonlocal at
@@ -3264,7 +3587,8 @@ def parse_map(blob, banks=()):
         layers.append({"w": w, "h": h, "worldtile": worldtile,
                        "cols": cols, "rows": rows, "bank_shift": bank_shift,
                        "bank_count": bank_count, "first_bank_asset": d["first_bank_asset"],
-                       "parallax_pct": d["parallax_pct"], "wrap": d["wrap"],
+                       "parallax_pct_x": d["parallax_pct_x"],
+                       "parallax_pct_y": d["parallax_pct_y"], "wrap": d["wrap"],
                        "masks": masks, "cells": bytes(cells), "extended": extended,
                        "wt_slots": d["wt_slots"], "wt_slot_bytes": slot_bytes})
 
@@ -4574,7 +4898,29 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
         L += [f"#define {n}_TILE_PX {a['tile_px']}",
               f"#define {n}_TILE_BYTES {a['tile_px'] * a['tile_px'] // 2}",
               f"#define {n}_TILE_COUNT {len(a['tiles'])}",
-              f"#define {n}_PALETTE_COUNT {len(a['palettes'])}", ""]
+              f"#define {n}_PALETTE_COUNT {len(a['palettes'])}"]
+        for anim_name, value in sorted(a["anim"].items()):
+            an = c_ident(anim_name)
+            if isinstance(value, int):
+                L.append(f"#define {n}_{an} {value}")
+                continue
+            # A clip: a generated TILE-INDEX array plus its playback constants, fed
+            # straight to pnx_anim_play/pnx_anim_frame (core/pnx_anim.h) -- same shape
+            # a sprite's own [sprite.anim] clip generates, "frames" here are atlas tile
+            # ids instead of sprite frame indices. `durations` is a real array when
+            # authored, else the bare literal NULL, same convention as sprites.
+            frame_list = ", ".join(str(f) for f in value["frames"])
+            L.append(f"static const uint8_t {n}_{an}_FRAMES[] = {{ {frame_list} }};")
+            L.append(f"#define {n}_{an}_COUNT {len(value['frames'])}")
+            L.append(f"#define {n}_{an}_FPS {value['fps']}")
+            L.append(f"#define {n}_{an}_LOOP {1 if value['loop'] else 0}")
+            if value["durations"] is not None:
+                dur_list = ", ".join(str(d) for d in value["durations"])
+                L.append(f"static const uint8_t {n}_{an}_DURATIONS[] = "
+                         f"{{ {dur_list} }};")
+            else:
+                L.append(f"#define {n}_{an}_DURATIONS NULL")
+        L.append("")
 
     swaps = [(s_["name"], s_["variant_slots"]) for s_ in sprites if s_.get("variant_slots")]
     if swaps:
@@ -4960,7 +5306,8 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
                 # every layer of one map shares the map's worldtile/atlas_slots/resident/
                 # bank_bytes, which is a project-level performance knob this format leaves
                 # at one setting per map rather than one per layer).
-                layer_m["parallax_pct"] = max(0, min(255, int(ls.get("parallax_pct", 255))))
+                layer_m["parallax_pct_x"] = max(0, min(255, int(ls.get("parallax_pct_x", 255))))
+                layer_m["parallax_pct_y"] = max(0, min(255, int(ls.get("parallax_pct_y", 255))))
                 layer_m["wrap"] = bool(ls.get("wrap", False))
                 layers.append(layer_m)
             m["layers"] = layers
@@ -5081,6 +5428,39 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
         print("  compress_maps: LZSS-compressing WorldTile bank bodies -- set "
               "PNX_USE_MAP_COMPRESS=1 in the project's pnx_config.h to match")
 
+    # Same posture as compress_maps, simpler because a sprite loads whole rather than
+    # banked -- one LZSS stream per sprite, not one per bank. Pairs with
+    # PNX_USE_SPRITE_COMPRESS. compress_pixel_body never emits the compressed form
+    # for a sprite too small to benefit, so this is safe to leave on project-wide rather
+    # than needing a per-sprite opt-in.
+    #
+    # `"bitplane"` (a string, not the plain boolean every other compress_* flag takes)
+    # selects the experimental per-frame-random-access format (pnx_bitplane.c) instead --
+    # bool()'d away rather than compared against here would collapse it to True and
+    # silently build ordinary LZSS sprites, which is exactly the kind of "looks like it
+    # worked, decodes the wrong thing" failure this session's whole atlas depth-mismatch
+    # bug already was once. Left as the raw manifest value; finish_sprite is what
+    # actually branches on the string vs plain True.
+    compress_sprites_raw = project.get("compress_sprites", False)
+    compress_sprites = (compress_sprites_raw if compress_sprites_raw == "bitplane"
+                        else bool(compress_sprites_raw))
+    if compress_sprites == "bitplane":
+        print("  compress_sprites: bitplane/Elias-gamma-compressing sprite pixel data "
+              "(experimental) -- set PNX_USE_BITPLANE_COMPRESS=1 in the project's "
+              "pnx_config.h to match")
+    elif compress_sprites:
+        print("  compress_sprites: LZSS-compressing sprite pixel data -- set "
+              "PNX_USE_SPRITE_COMPRESS=1 in the project's pnx_config.h to match")
+
+    # The one most likely to actually matter: an atlas is typically the largest single
+    # resource category in tile-heavy content (a real RPG demo measured 93% of its
+    # resource budget as atlas), where compress_maps/compress_sprites alone barely move
+    # the total. Pairs with PNX_USE_ATLAS_COMPRESS.
+    compress_atlases = bool(project.get("compress_atlases", False))
+    if compress_atlases:
+        print("  compress_atlases: LZSS-compressing atlas/tile pixel data -- set "
+              "PNX_USE_ATLAS_COMPRESS=1 in the project's pnx_config.h to match")
+
     shared = []
     settle_palettes(atlases, sprites, shared, nine_slices)
     for a in atlases:
@@ -5089,12 +5469,13 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
         # anywhere in the engine before this (checked before touching it). SCALED's rect
         # and COMPLEX's mask are too big for one byte each and get their own sparse
         # tail tables, built inside finish_atlas itself now that the tiles are settled.
-        finish_atlas(a, collision_by_atlas[a["name"]], shared, orient, pack_2bit)
+        finish_atlas(a, collision_by_atlas[a["name"]], shared, orient, pack_2bit,
+                    compress_atlases)
     # The first point at which both halves are known: which atlases chose metatiles, and
     # which legend characters were painted flipped.
     check_flip_metatiles(maps, atlases)
     for sp in sprites:
-        finish_sprite(sp, shared, orient, pack_2bit)
+        finish_sprite(sp, shared, orient, pack_2bit, compress_sprites)
     for ns in nine_slices:
         finish_nine_slice(ns, shared, orient, pack_2bit)
 
@@ -5118,7 +5499,9 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
             table = b"".join(offered[n].get(want) or bytes(by_name[n]["assign"])
                              for n in m["atlases"])
 
-        sizes = {n: len(by_name[n]["blob"]) for n in m["atlases"]}
+        # Pool slots must fit the DECODED pixel data a compressed atlas expands to, not
+        # the smaller on-disk blob -- see finish_atlas's `resident_bytes` comment.
+        sizes = {n: by_name[n]["resident_bytes"] for n in m["atlases"]}
         first_bank = asset_index[f"PNX_ASSET_BANK_{c_ident(m['name'])}_0"]
         finish_map(m, assets, sizes, table,
                    m["worldtile"], m["atlas_slots"], m["resident"],

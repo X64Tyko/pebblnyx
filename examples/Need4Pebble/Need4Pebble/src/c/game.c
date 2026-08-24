@@ -72,20 +72,36 @@ bool game_boot(Game* g)
 	g->rng				 = 0x9E3779B9u; // any nonzero fixed seed; xorshift never recovers from 0
 	g->next_checkpoint_z = CHECKPOINT_SPACING;
 	g->timer_ticks_left	 = RACE_TIMER_START_TICKS;
+	track_randomize(pnx_platform_now_ms()); // a real seed -- every boot is a new track,
+											// unlike g->rng's own deliberately-fixed one
 
-	if (!pnx_arena_init(&g->persistent, "persistent", PERSIST_BYTES, 4) ||
-		!pnx_arena_init(&g->scene, "scene", SCENE_BYTES, 4))
+	if (!pnx_arena_init_max(&g->arena, "game", PNX_ARENA_HEAP_RESERVE, 4))
 	{
 		pnx_platform_log("arena init failed");
 		return false;
 	}
 
-	pnx_assets_init(&g->persistent, &g->scene, RESOURCES, PNX_ASSET_COUNT);
+	pnx_assets_init(&g->arena, RESOURCES, PNX_ASSET_COUNT);
 	if (!pnx_palettes_load(PNX_ASSET_PALETTES_PALETTES))
 		pnx_platform_log("need4pebble: palettes would not load");
 	g->has_car = pnx_sprite_load(&g->car, PNX_ASSET_SPRITE_TOURING_NORMAL);
 	if (!g->has_car)
 		pnx_platform_log("need4pebble: car sprite would not load");
+	g->has_road_chunk = pnx_sprite_load(&g->road_chunk, PNX_ASSET_SPRITE_ROAD_CHUNK);
+	if (!g->has_road_chunk)
+		pnx_platform_log("need4pebble: road chunk sprite would not load");
+	g->has_ground_atlas = pnx_atlas_load(&g->ground_atlas, PNX_ASSET_ATLAS_GROUND);
+	if (!g->has_ground_atlas)
+		pnx_platform_log("need4pebble: ground atlas would not load");
+	else
+		pnx_anim_play(&g->ground_light_anim, GROUND_LIGHT_FRAMES, GROUND_LIGHT_COUNT,
+					  pnx_platform_now_ms());
+	g->has_horizon_atlas = pnx_atlas_load(&g->horizon_atlas, PNX_ASSET_ATLAS_HORIZON_BAND);
+	if (!g->has_horizon_atlas)
+		pnx_platform_log("need4pebble: horizon band atlas would not load");
+	else
+		pnx_anim_play(&g->horizon_lit_anim, HORIZON_BAND_LIT_FRAMES, HORIZON_BAND_LIT_COUNT,
+					  pnx_platform_now_ms());
 	g->has_crash = pnx_sprite_load(&g->crash, PNX_ASSET_SPRITE_TOURING_CRASH);
 	if (!g->has_crash)
 		pnx_platform_log("need4pebble: crash sprite would not load");
@@ -109,12 +125,19 @@ bool game_boot(Game* g)
 	police_reset(g, true);
 
 	pnx_input_init(PNX_ORIENTATION);
+	// Touch drag is the default steering input, but only emery/gabbro actually carry
+	// PBL_TOUCH (docs/PORTING.md) -- everywhere else, pnx_input_drag_dx() can never
+	// leave 0 since no touch events ever arrive, which reads as "swipe doesn't work"
+	// rather than "there's no touchscreen." Start those platforms in tilt instead;
+	// still a player preference togglable from the pause menu either way.
+	g->use_tilt_steer = !pnx_platform_has_touch();
 	return true;
 }
 
 void game_restart(Game* g)
 {
-	g->rng = 0x9E3779B9u; // same fixed seed as boot -- see rng_next's own comment
+	g->rng = 0x9E3779B9u;					// same fixed seed as boot -- see rng_next's own comment
+	track_randomize(pnx_platform_now_ms()); // a new track every restart, not just at boot
 
 	g->accumulator_ms		= 0;
 	g->tick_count			= 0;
@@ -125,7 +148,6 @@ void game_restart(Game* g)
 	g->steer_visual			= 0;
 	g->corner_penalty_accum = 0;
 	g->crash_ticks_left		= 0;
-	g->paused				= false;
 	g->game_over_reason		= GAME_OVER_NONE;
 	// use_tilt_steer is a player preference, not run state -- left alone.
 
@@ -141,8 +163,7 @@ void game_restart(Game* g)
 
 void game_shutdown(Game* g)
 {
-	pnx_arena_destroy(&g->scene);
-	pnx_arena_destroy(&g->persistent);
+	pnx_arena_destroy(&g->arena);
 }
 
 static void traffic_tick(Game* g)
@@ -387,15 +408,12 @@ static void tick_clock(Game* g)
 		g->hud_event_ticks_left--;
 }
 
-void game_toggle_pause(Game* g)
-{
-	g->paused = !g->paused;
-}
-
+// Only ever called from the paused app state's own input() now (main.c) -- reserved for
+// the pause menu is no longer something this function has to enforce itself, the app
+// stack already guarantees driving's own input() (where SELECT does nothing) is what
+// runs instead whenever this one isn't on top.
 void game_toggle_steer_mode(Game* g)
 {
-	if (!g->paused)
-		return; // reserved for the pause menu; a no-op bump of SELECT mid-drive
 	g->use_tilt_steer = !g->use_tilt_steer;
 }
 
@@ -418,14 +436,37 @@ static int8_t steer_input(const Game* g)
 	return 0;
 }
 
+// Only ever runs while the driving app state is the uncovered top of the stack now
+// (main.c) -- the app stack itself is what guarantees nothing here runs while paused or
+// game-over, not a flag this function has to check on its own any more.
 void game_tick(Game* g)
 {
-	if (g->paused)
-		return; // frozen: traffic, crash countdown, everything -- see game_toggle_pause
-	if (g->game_over_reason != GAME_OVER_NONE)
-		return; // frozen until game_restart -- BACK's job while BUSTED/TIME_UP, see main.c
-
 	g->tick_count++;
+
+#if N4P_STEER_DEBUG_LOG
+	// DEBUG: watch the raw steering pipeline live -- `pebble logs --emulator emery --vnc`
+	// (or `pebble logs --phone <ip>` on real hardware) while you drag. held is whether a
+	// touch is currently down; touch_y is the RAW touch event position (pnx_input_touch_y,
+	// native/framebuffer frame) -- also the author-frame x this game steers on, per
+	// steer_input's own comment; target is what that resolves to on steer_visual's -4..4
+	// scale; visual is how far steer_visual has actually ramped toward target (one step
+	// per tick); lane is g->lane_x, clamped to +-PLAYER_LANE_MAX (85); speed/gas are here
+	// because steering has NO effect at speed 0 (turn_speed = min(speed,
+	// TURN_RATE_SPEED_CAP) gates it) -- if target/visual move but lane doesn't, check
+	// speed/gas before suspecting the touch axis. Gated behind this flag rather than
+	// deleted outright: flip it on again with `PNX_DEFINES=N4P_STEER_DEBUG_LOG=1 pebble
+	// build` instead of re-adding by hand.
+	if (g->tick_count % 8 == 0)
+	{
+		char buf[120];
+		pnx_format(buf, sizeof(buf),
+				   "steer dbg: held=%d touch_y=%d target=%d visual=%d lane=%d speed=%d gas=%d",
+				   (int)pnx_input_touch_held(), (int)pnx_input_touch_y(), (int)steer_input(g),
+				   (int)g->steer_visual, (int)g->lane_x, (int)g->speed,
+				   (int)pnx_input_held(pnx_input_cluster(2)));
+		pnx_platform_log(buf);
+	}
+#endif
 
 	if (g->crash_ticks_left > 0)
 	{

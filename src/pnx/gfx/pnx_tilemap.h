@@ -63,7 +63,8 @@ static inline int32_t pnx_tilemap_height(const PnxMap* m)
 
 // Fills one PNX_LAYER_CALLBACK PnxLayer per layer the map declares (up to
 // PNX_MAP_MAX_LAYERS, the array `out` must be sized to), each with that layer's own
-// `parallax_pct` and a draw function that calls pnx_tilemap_draw_layer for it. `out` is
+// `parallax_pct_x`/`parallax_pct_y` and a draw function that calls pnx_tilemap_draw_layer
+// for it. `out` is
 // ready to hand to pnx_layers_draw with `ctx` == `map` -- a game that wants to splice a
 // sprite layer or a custom callback layer between two map layers builds this first, then
 // writes its own entries into the gaps before calling pnx_layers_draw, the same way it

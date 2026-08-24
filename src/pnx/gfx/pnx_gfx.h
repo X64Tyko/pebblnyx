@@ -122,3 +122,27 @@ void pnx_gfx_fill_rect_dither(PnxTarget* t, int32_t x, int32_t y, int16_t w, int
 void pnx_blit_4bpp_region(PnxTarget* t, const uint8_t* src, int16_t src_w,
 						  const PnxPalette* palette, int32_t x, int32_t y, int16_t sx,
 						  int16_t sy, int16_t sw, int16_t sh);
+
+// Blits a whole `src_w` x `src_h` 4bpp image, independently nearest-neighbor-scaling each
+// axis to `dst_w` x `dst_h` -- the SNES/GBA-style "draw this sprite bigger/smaller" this
+// engine has never had (pnx_nineslice.h's own header comment: "pnx_blit_4bpp has never
+// scaled anything"). `src` uses the same flat-nibble-stream addressing pnx_blit_4bpp
+// itself does (row N starts at nibble N*src_w, not byte (N*src_w)/2) rather than
+// pnx_blit_4bpp_region's byte-per-row-stride convention -- this is what actual sprite
+// frame data looks like, and getting it wrong here silently shears any frame whose
+// authored width is odd, the same class of bug pnx_bitplane_decode's own history warns
+// about.
+//
+// dst_w==src_w && dst_h==src_h dispatches straight to pnx_blit_4bpp: an unscaled caller
+// pays nothing extra for this existing. Otherwise there is no fast paired-nibble path on
+// the scaled axis/axes -- same per-pixel shape as pnx_blit_4bpp_region's mirrored/rotated
+// siblings, because dest and source indices no longer walk in lockstep once a scale
+// factor decouples them.
+//
+// No flip/rotate, no ~bw build (PNX_DISPLAY_BW) in v1 -- neither is needed by anything
+// that calls this yet, and both are additive later, not a signature break.
+#if !PNX_DISPLAY_BW
+void pnx_blit_4bpp_scaled(PnxTarget* t, const uint8_t* src, const PnxPalette* palette,
+						  int32_t x, int32_t y, int16_t src_w, int16_t src_h, int16_t dst_w,
+						  int16_t dst_h);
+#endif

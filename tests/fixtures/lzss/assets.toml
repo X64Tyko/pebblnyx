@@ -3,6 +3,14 @@ name = "lzss_fixture"
 resources = "resources"
 header = "gen.h"
 compress_maps = true
+compress_sprites = true
+compress_atlases = true
+
+[[sprite]]
+name = "flat"
+sheet = "sheet.png"
+frames = [[0, 0, 16, 16]]
+out = "flat.bin"
 
 [[atlas]]
 name = "tiles"

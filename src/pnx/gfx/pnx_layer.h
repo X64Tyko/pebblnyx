@@ -42,8 +42,11 @@ typedef void (*PnxLayerDrawFn)(void* ctx, PnxTarget* t, const PnxCamera* camera)
 
 typedef struct
 {
-	uint8_t kind;		  // PNX_LAYER_CALLBACK or PNX_LAYER_SPRITES
-	uint8_t parallax_pct; // PNX_LAYER_PARALLAX_* or anything between the two
+	uint8_t kind;			// PNX_LAYER_CALLBACK or PNX_LAYER_SPRITES
+	uint8_t parallax_pct_x; // PNX_LAYER_PARALLAX_* or anything between the two
+	uint8_t parallax_pct_y; // independent of parallax_pct_x -- a horizon strip that
+							// scrolls with curve (X) but never vertically (Y=SCREEN) is
+							// exactly why these are split rather than one shared rate
 	union
 	{
 		PnxLayerDrawFn draw;  // PNX_LAYER_CALLBACK

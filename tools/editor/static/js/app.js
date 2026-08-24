@@ -938,7 +938,7 @@ function selectMap(i){
   if(!S.map.layers||!S.map.layers.length)
     S.map.layers=[{w:S.map.w,h:S.map.h,cells:S.map.cells,tiles:S.map.tiles,
                   format:S.map.format,source:S.map.source,start:S.map.start,
-                  warps:S.map.warps,parallax_pct:255,wrap:false}];
+                  warps:S.map.warps,parallax_pct_x:255,parallax_pct_y:255,wrap:false}];
   if(S.map.primary==null) S.map.primary=0;
   for(const layer of S.map.layers) if(layer.visible===undefined) layer.visible=true;
   S.activeLayer=S.map.primary;
