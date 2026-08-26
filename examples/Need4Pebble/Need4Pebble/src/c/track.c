@@ -34,14 +34,10 @@ void road_row(int32_t y, int32_t horizon_y, RoadRow* out)
 	out->depth		   = (uint32_t)d;
 }
 
-// Deliberately narrow: on aplite, `static` (not `const`) storage lands in .bss, unlike
-// the old compile-time TRACK[] literal it replaces (which the linker put in flash) --
-// int32_t x3 (12 bytes/segment) pushed aplite's tiny static-RAM region over budget by
-// four figures once pnx_app's own state was linked in too (Part 2). Every real value
-// fits comfortably narrower: length is one of {500..1000}, curve is -3..3, elevation is
-// -1..1 -- int16_t/int8_t/int8_t (4 bytes/segment, naturally aligned, no padding) is a
-// 3x shrink with zero behavioural change; every read already widens back to int32_t at
-// the point of use (track_curve_at/track_elevation_at's own return types).
+// int16_t/int8_t/int8_t (4 bytes/segment, naturally aligned): length is one of
+// {500..1000}, curve is -3..3, elevation is -1..1 -- every real value fits comfortably
+// narrower than int32_t, and every read already widens back to int32_t at the point of
+// use (track_curve_at/track_elevation_at's own return types).
 typedef struct
 {
 	int16_t length;
@@ -49,13 +45,36 @@ typedef struct
 	int8_t elevation; // world-Y slope contribution per unit length, like curve but vertical
 } RoadSegment;
 
-// Populated by track_randomize -- see its own comment and TRACK_SEGMENT_COUNT's (track.h).
-// Not `const` any more: a random track is written into this once per race, not baked in
-// at compile time. Slots past however many track_randomize actually used (always all of
-// them outside N4P_LEGACY_FIXED_TRACK; only the first 7 under it) sit zero-initialised
-// and unreachable -- s_track_total_length bounds the modulo below to real content only.
-static RoadSegment s_track[TRACK_SEGMENT_COUNT];
-static int32_t s_track_total_length;
+// A small ROLLING WINDOW, not the whole track: earlier this held TRACK_SEGMENT_COUNT
+// segments (56, sized so a full race's worth of distance -- MAX_SPEED *
+// RACE_TIMER_START_TICKS, game.h -- was covered before the track's own modulo wrapped
+// back to the start) pre-generated at boot. That bounds memory by "how long can one race
+// possibly run," which is both the wrong bound (a race isn't actually the limit on how
+// far a player can travel -- nothing here enforces the timer stops movement) and a much
+// bigger one than the road ever needs at once: render.c only ever queries
+// [distance, distance + VIEW_H + DEPTH_FUDGE) (road_curve_offset/road_elevation_offset's
+// own row sweep), a couple hundred world units, not tens of thousands. So: generate
+// segments on demand as the player approaches the far edge of what's already generated,
+// and drop segments once the player has fully passed them -- memory stays flat and small
+// regardless of how long a session runs, "indefinite play" included, and there is no
+// track LENGTH any more for a loop to wrap around at all.
+#define TRACK_WINDOW_SEGMENTS 5	   // capacity; see track_advance's own margin math for why
+								   // this comfortably covers the real lookahead need
+#define TRACK_LOOKAHEAD_MARGIN 600 // world units to stay generated ahead of `distance` --
+								   // >= VIEW_H + DEPTH_FUDGE (this platform's own real
+								   // worst-case query, up to ~252 on emery's 228px
+								   // height) with headroom for however many ticks pass
+								   // between track_advance calls
+
+static RoadSegment s_window[TRACK_WINDOW_SEGMENTS];
+static uint8_t s_head;		  // ring index of the oldest still-valid segment
+static uint8_t s_count;		  // how many of s_window's slots currently hold real content
+static int32_t s_window_z;	  // world-Z where s_window[s_head] begins
+static int32_t s_covered_end; // world-Z where the window's generated content currently
+							  // ends (s_window_z + every held segment's length) -- kept
+							  // incrementally rather than resummed every call
+static bool s_prev_sharp;	  // anti-clustering state, carried across generate() calls
+							  // so an evicted segment's own "was it sharp" isn't lost
 
 #if !N4P_LEGACY_FIXED_TRACK
 // xorshift32, the same algorithm (and for the same reason) game.c's own rng_next uses --
@@ -112,69 +131,105 @@ static RoadSegment random_segment(bool prev_sharp)
 }
 #endif // !N4P_LEGACY_FIXED_TRACK
 
+#if N4P_LEGACY_FIXED_TRACK
+// Cycled through in order, wrapping the INDEX (not world-Z the way the old modulo lookup
+// did) -- still the same short, memorable, reproducible test loop, just fed through the
+// same streaming window every other build uses instead of a separate static-array code
+// path. No anti-clustering needed: these are hand-authored, already paced on purpose.
+static const RoadSegment LEGACY[] = {
+	{ 1000, 0, 0 }, // straight, flat
+	{ 700, -2, 1 }, // gentle left, rising
+	{ 900, 0, 0 },	// straight, crests then flat
+	{ 500, 3, -1 }, // sharp right, falling
+	{ 900, 0, 0 },	// straight, valley then flat
+	{ 700, 1, 1 },	// gentle right, rising
+	{ 900, 0, -1 }, // straight, falling back to start's elevation
+};
+static uint8_t s_legacy_idx;
+#endif
+
+// Appends exactly one new segment to the window's tail -- the only place s_covered_end
+// grows. Never called when s_count == TRACK_WINDOW_SEGMENTS (track_advance's own ensure-
+// ahead loop stops before that; TRACK_LOOKAHEAD_MARGIN is sized so capacity is never
+// actually reached in practice, see track.h's own comment on TRACK_WINDOW_SEGMENTS).
+static void generate_next(void)
+{
+	RoadSegment s;
+#if N4P_LEGACY_FIXED_TRACK
+	s			 = LEGACY[s_legacy_idx];
+	s_legacy_idx = (uint8_t)((s_legacy_idx + 1) % (sizeof(LEGACY) / sizeof(LEGACY[0])));
+#else
+	s			 = random_segment(s_prev_sharp);
+	s_prev_sharp = (s.curve == 3 || s.curve == -3);
+#endif
+	s_window[(s_head + s_count) % TRACK_WINDOW_SEGMENTS] = s;
+	s_count++;
+	s_covered_end += s.length;
+}
+
+// Called once per tick (game.c's game_tick, right after g->distance advances): grows the
+// window forward as the player approaches its far edge, and drops segments the player
+// has fully passed. This is the whole "streaming" half of the design -- track_curve_at/
+// track_elevation_at (below) are pure lookups against whatever track_advance last left
+// in the window, they never generate or evict anything themselves.
+void track_advance(int32_t distance)
+{
+	while (s_count < TRACK_WINDOW_SEGMENTS && s_covered_end < distance + TRACK_LOOKAHEAD_MARGIN)
+		generate_next();
+
+	while (s_count > 0 && s_window_z + s_window[s_head].length <= distance)
+	{
+		s_window_z += s_window[s_head].length;
+		s_head = (uint8_t)((s_head + 1) % TRACK_WINDOW_SEGMENTS);
+		s_count--;
+	}
+}
+
 void track_randomize(uint32_t seed)
 {
-#if N4P_LEGACY_FIXED_TRACK
-	(void)seed;
-	static const RoadSegment LEGACY[] = {
-		{ 1000, 0, 0 }, // straight, flat
-		{ 700, -2, 1 }, // gentle left, rising
-		{ 900, 0, 0 },	// straight, crests then flat
-		{ 500, 3, -1 }, // sharp right, falling
-		{ 900, 0, 0 },	// straight, valley then flat
-		{ 700, 1, 1 },	// gentle right, rising
-		{ 900, 0, -1 }, // straight, falling back to start's elevation
-	};
-	s_track_total_length = 0;
-	for (size_t i = 0; i < sizeof(LEGACY) / sizeof(LEGACY[0]); i++)
-	{
-		s_track[i] = LEGACY[i];
-		s_track_total_length += LEGACY[i].length;
-	}
-#else
+#if !N4P_LEGACY_FIXED_TRACK
 	// xorshift never recovers from an all-zero state (track_rng_next's own algorithm) --
 	// same guard game.c's rng_next's own fixed seed comment notes, needed here because
 	// `seed` is real (pnx_platform_now_ms()-derived) and could plausibly be 0.
 	s_track_rng = seed ? seed : 0x9E3779B9u;
-
-	s_track_total_length = 0;
-	bool prev_sharp		 = false;
-	for (int i = 0; i < TRACK_SEGMENT_COUNT; i++)
-	{
-		const RoadSegment s = random_segment(prev_sharp);
-		s_track[i]			= s;
-		s_track_total_length += s.length;
-		prev_sharp = (s.curve == 3 || s.curve == -3);
-	}
+#else
+	(void)seed;
+	s_legacy_idx = 0;
 #endif
+	s_head = s_count = 0;
+	s_window_z = s_covered_end = 0;
+	s_prev_sharp			   = false;
+	track_advance(0); // prime the window before the first real query ever lands
 }
 
 int32_t track_curve_at(int32_t world_z)
 {
-	int32_t z = world_z % s_track_total_length;
-	if (z < 0)
-		z += s_track_total_length;
-	for (int i = 0; i < TRACK_SEGMENT_COUNT; i++)
+	// Guaranteed in-range by track_advance's own invariant (called once per tick, before
+	// any of this frame's draw code runs -- pnx_app_frame's tick-then-draw order) as long
+	// as world_z stays within [distance, distance + TRACK_LOOKAHEAD_MARGIN), which every
+	// real caller's own depth math (road_row's DEPTH_FUDGE-bounded `d`) already respects.
+	int32_t z = world_z - s_window_z;
+	for (uint8_t i = 0; i < s_count; i++)
 	{
-		if (z < s_track[i].length)
-			return s_track[i].curve;
-		z -= s_track[i].length;
+		const RoadSegment* s = &s_window[(s_head + i) % TRACK_WINDOW_SEGMENTS];
+		if (z < s->length)
+			return s->curve;
+		z -= s->length;
 	}
-	return 0; // unreachable: z is already reduced mod the sum of every segment's length
+	return 0; // window fell behind (shouldn't happen -- see the comment above)
 }
 
 int32_t track_elevation_at(int32_t world_z)
 {
-	int32_t z = world_z % s_track_total_length;
-	if (z < 0)
-		z += s_track_total_length;
-	for (int i = 0; i < TRACK_SEGMENT_COUNT; i++)
+	int32_t z = world_z - s_window_z;
+	for (uint8_t i = 0; i < s_count; i++)
 	{
-		if (z < s_track[i].length)
-			return s_track[i].elevation;
-		z -= s_track[i].length;
+		const RoadSegment* s = &s_window[(s_head + i) % TRACK_WINDOW_SEGMENTS];
+		if (z < s->length)
+			return s->elevation;
+		z -= s->length;
 	}
-	return 0; // unreachable, same as track_curve_at
+	return 0; // same fallback as track_curve_at
 }
 
 int32_t road_curve_offset(uint32_t distance, int32_t y)

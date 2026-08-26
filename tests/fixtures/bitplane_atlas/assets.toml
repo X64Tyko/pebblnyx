@@ -1,0 +1,21 @@
+[project]
+name = "bitplane_atlas_fixture"
+resources = "resources"
+header = "gen.h"
+# Bitplane-compressed atlas pixels specifically -- test_bitplane_atlas.c's own fixture
+# (tests/Makefile's BITPLANE_SRC, PNX_COMPRESS_MODE=PNX_COMPRESS_BITPLANE). A real
+# pipeline build, unlike the standalone bpeg_atlas_encode.py "PT" format this replaces --
+# see test_bitplane_atlas.c's own comment.
+compress = "bitplane"
+
+[[atlas]]
+name = "tiles"
+sheet = "sheet.png"
+tile = 16
+region = [0, 0, 2, 2]
+max_tiles = 16
+out = "tiles.bin"
+autopick = ["floor", "wall", "accent"]
+[[atlas.collision]]
+tile = "wall"
+type = "solid"

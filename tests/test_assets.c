@@ -306,7 +306,9 @@ void test_assets(void)
 	// bottom: w/2, h.
 	A_CHECK_EQ(hero_f0.origin_x, 8);
 	A_CHECK_EQ(hero_f0.origin_y, 24);
+#if !PNX_USE_BITPLANE_COMPRESS
 	A_CHECK_EQ(hero_f1.pixels - hero_f0.pixels, 16 * 24 / 2);
+#endif
 	A_CHECK(pnx_sprite_frame_palette(&hero, 0) != NULL);
 
 	// The npc sheet has no alpha channel, so its transparency comes from a colour key.

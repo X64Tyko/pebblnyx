@@ -84,42 +84,63 @@ bool game_boot(Game* g)
 	pnx_assets_init(&g->arena, RESOURCES, PNX_ASSET_COUNT);
 	if (!pnx_palettes_load(PNX_ASSET_PALETTES_PALETTES))
 		pnx_platform_log("need4pebble: palettes would not load");
+
+	// (M13) bitplane compression is project-wide -- pnx_sprite_load/pnx_atlas_load bring
+	// in metadata only, every frame/tile decodes on demand through the caches below.
 	g->has_car = pnx_sprite_load(&g->car, PNX_ASSET_SPRITE_TOURING_NORMAL);
 	if (!g->has_car)
 		pnx_platform_log("need4pebble: car sprite would not load");
 	g->has_road_chunk = pnx_sprite_load(&g->road_chunk, PNX_ASSET_SPRITE_ROAD_CHUNK);
 	if (!g->has_road_chunk)
 		pnx_platform_log("need4pebble: road chunk sprite would not load");
+
 	g->has_ground_atlas = pnx_atlas_load(&g->ground_atlas, PNX_ASSET_ATLAS_GROUND);
 	if (!g->has_ground_atlas)
 		pnx_platform_log("need4pebble: ground atlas would not load");
 	else
 		pnx_anim_play(&g->ground_light_anim, GROUND_LIGHT_FRAMES, GROUND_LIGHT_COUNT,
 					  pnx_platform_now_ms());
+
 	g->has_horizon_atlas = pnx_atlas_load(&g->horizon_atlas, PNX_ASSET_ATLAS_HORIZON_BAND);
 	if (!g->has_horizon_atlas)
 		pnx_platform_log("need4pebble: horizon band atlas would not load");
 	else
 		pnx_anim_play(&g->horizon_lit_anim, HORIZON_BAND_LIT_FRAMES, HORIZON_BAND_LIT_COUNT,
 					  pnx_platform_now_ms());
+
 	g->has_crash = pnx_sprite_load(&g->crash, PNX_ASSET_SPRITE_TOURING_CRASH);
 	if (!g->has_crash)
 		pnx_platform_log("need4pebble: crash sprite would not load");
+	g->has_police_crash = pnx_sprite_load(&g->police_crash, PNX_ASSET_SPRITE_POLICE_CRASH);
+	if (!g->has_police_crash)
+		pnx_platform_log("need4pebble: police crash sprite would not load");
+
 	g->has_traffic_car = pnx_sprite_load(&g->traffic_car, PNX_ASSET_SPRITE_TRAFFIC_CAR);
 	if (!g->has_traffic_car)
 		pnx_platform_log("need4pebble: traffic car sprite would not load");
+	g->has_police = pnx_sprite_load(&g->police_car, PNX_ASSET_SPRITE_POLICE_NORMAL);
+	if (!g->has_police)
+		pnx_platform_log("need4pebble: police sprite would not load");
 	g->has_menu_font = pnx_font_load(&g->menu_font, PNX_ASSET_FONT_MENU);
 	if (!g->has_menu_font)
 		pnx_platform_log("need4pebble: menu font would not load");
 	g->has_hud_font = pnx_font_load(&g->hud_font, PNX_ASSET_FONT_HUD);
 	if (!g->has_hud_font)
 		pnx_platform_log("need4pebble: hud font would not load");
-	g->has_police = pnx_sprite_load(&g->police_car, PNX_ASSET_SPRITE_POLICE_NORMAL);
-	if (!g->has_police)
-		pnx_platform_log("need4pebble: police sprite would not load");
-	g->has_police_crash = pnx_sprite_load(&g->police_crash, PNX_ASSET_SPRITE_POLICE_CRASH);
-	if (!g->has_police_crash)
-		pnx_platform_log("need4pebble: police crash sprite would not load");
+
+	// Cache init comes last, after every fixed-need asset above has already claimed its
+	// own arena space -- both caches size themselves from whatever's actually left
+	// (pnx_tile_cache_init/pnx_sprite_cache_init grant up to the target, less on a
+	// platform too tight to hold it, and still work correctly either way). Targets are
+	// the real reachable-content counts, not a guess: traffic_car/police_normal only
+	// ever draw 6 of their 54 frames each (render.c's own `frame = tier * 9 + 4`, angle
+	// fixed), police_crash uses all 4 of its own -- 16 reachable frames total, sized
+	// with a little margin. ground/horizon_band similarly sized from their own
+	// max_tiles (assets.toml).
+	if (!pnx_sprite_cache_init(&g->arena, 20))
+		pnx_platform_log("need4pebble: sprite cache would not fit the arena at all");
+	if (!pnx_tile_cache_init(&g->arena, 12, PNX_TILE_CACHE_MAX_TILE_PX))
+		pnx_platform_log("need4pebble: tile cache would not fit the arena at all");
 
 	traffic_reset(g);
 	police_reset(g, true);
@@ -578,7 +599,13 @@ void game_tick(Game* g)
 	police_tick(g);
 
 	g->distance += (uint32_t)g->speed;
-	check_checkpoint(g); // after distance moves -- checks against the position just reached
+	track_advance((int32_t)g->distance); // keep the generated window ahead of the new
+										 // position before anything this tick draws
+	pnx_sprite_cache_tick();			 // age cached traffic/police frames once/tick, same as
+	pnx_tile_cache_tick();				 // ground/horizon tiles -- mirrors pnx_tile_cache_tick's own
+										 // "call once per frame" contract, this project's fixed
+										 // step being the natural once-per-tick home for it
+	check_checkpoint(g);				 // after distance moves -- checks against the position just reached
 
 	// After the tick's own distance update -- a no-op when speed is 0 (the only case
 	// check_busted cares about) either way, but keeps this reading as "state settled

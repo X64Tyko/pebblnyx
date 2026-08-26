@@ -181,23 +181,52 @@ uint16_t pnx_palette_count(void);
 // declared-in-the-order-they-made-sense-to-explain layout carried). The comments keep
 // the earlier grouping in prose -- pixel data, then SCALED/COMPLEX shape data, then
 // sizes -- so reading order is unaffected even though declaration order now is not.
+// SCALED and COMPLEX shape data, sparse -- most tiles are NONE or plain SOLID, whose whole
+// shape IS the collision-mode byte (see the #define block above), so only the tiles that
+// need more than that pay for it. Byte-packed rather than struct-mapped on purpose: a
+// record starts wherever the previous one ended, which nothing guarantees is 2-byte
+// aligned, so this is walked with pnx_atlas_tile_scaled_rect/pnx_atlas_tile_complex_mask
+// rather than cast to a struct pointer the way PnxWarp's all-u8 layout safely can be.
+//   scaled_rects  -- scaled_count * 6B: u16 tile, u8 x, u8 y, u8 w, u8 h
+//   complex_masks -- complex_count * (2 + mask_bytes)B: u16 tile, then a row-major
+//                    MSB-first 1bpp mask, mask_bytes = (tile_px*tile_px+7)/8
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+// PNX_COMPRESS_BITPLANE: pixels are NOT resident. Every tile/subtile is one independently
+// bitplane-coded unit staying in ROM (`resource`, `stream_offset` name where its offset
+// table starts); pnx_atlas_tile fetches and decodes ONE on demand through
+// pnx_tile_cache_get, which owns the small RAM cache of recently-used decoded tiles. See
+// pnx_config.h's PNX_COMPRESS_MODE comment and pnx_tile_cache.h for the full design.
+typedef struct
+{
+	const uint8_t* tile_palette; // tile_count, palette slot per tile
+	const uint8_t* tile_flags;	 // tile_count, PNX_COLLISION_* mode
+	const uint16_t* metatiles;	 // NULL when flat; else tile_count * 4 indices
+	const uint8_t* scaled_rects;
+	const uint8_t* complex_masks;
+
+	uint32_t resource;		// resource id -- on-demand unit reads go straight to this
+	uint32_t stream_offset; // byte offset, within `resource`, of the (unit_count+1)-entry
+							// u16 offset table; unit i's compressed bytes start at
+							// stream_offset + (unit_count+1)*2 + table[i]
+
+	uint16_t scaled_count;
+	uint16_t complex_count;
+	uint16_t tile_count;
+	uint16_t subtile_count;
+	uint16_t unit_count; // addressable unit count: tile_count flat, subtile_count metatiled
+	uint16_t asset_id;	 // cache key namespace -- pnx_tile_cache_get's own use
+	uint8_t tile_px;
+	uint8_t sub_bytes; // bytes per DECODED quadrant; 0 when flat
+} PnxAtlas;
+#else
 typedef struct
 {
 	const uint8_t* pixels;		 // whole tiles, or the quadrant bank
 	const uint8_t* tile_palette; // tile_count, palette slot per tile
 	const uint8_t* tile_flags;	 // tile_count, PNX_COLLISION_* mode (see the #define above)
 	const uint16_t* metatiles;	 // NULL when flat; else tile_count * 4 indices
-
-	// SCALED and COMPLEX shape data, sparse -- most tiles are NONE or plain SOLID, whose
-	// whole shape IS the mode byte above, so only the tiles that need more than that pay
-	// for it. Byte-packed rather than struct-mapped on purpose: a record starts wherever
-	// the previous one ended, which nothing guarantees is 2-byte aligned, so this is
-	// walked with pnx_atlas_tile_scaled_rect/pnx_atlas_tile_complex_mask rather than cast
-	// to a struct pointer the way PnxWarp's all-u8 layout safely can be.
-	const uint8_t* scaled_rects;  // scaled_count * 6B: u16 tile, u8 x, u8 y, u8 w, u8 h
-	const uint8_t* complex_masks; // complex_count * (2 + mask_bytes)B: u16 tile, then a
-								  // row-major MSB-first 1bpp mask, mask_bytes =
-								  // (tile_px*tile_px+7)/8
+	const uint8_t* scaled_rects;
+	const uint8_t* complex_masks;
 
 	uint16_t scaled_count;
 	uint16_t complex_count;
@@ -211,6 +240,7 @@ typedef struct
 	uint8_t tile_bytes;
 	uint8_t sub_bytes; // bytes per quadrant; 0 when flat
 } PnxAtlas;
+#endif
 
 static inline bool pnx_atlas_is_metatiled(const PnxAtlas* a)
 {
@@ -266,11 +296,35 @@ typedef struct
 
 // `pixels` always points at plain, decoded, frame-addressable bytes -- a frame's own
 // `offset` in frame_meta indexes into it directly, whether or not the on-disk blob was
-// LZSS-compressed (compress_sprites) or deduplicated (identical packed frames share one
-// offset). Compressed, pnx_sprite_load decodes the whole pixel region into a fresh
-// arena buffer once at load; uncompressed, `pixels` points straight into the loaded
-// blob, same as before either feature existed. Either way this field's contract to a
-// caller never changes.
+// LZSS-compressed or deduplicated (identical packed frames share one offset). Compressed,
+// pnx_sprite_load decodes the whole pixel region into a fresh arena buffer once at load;
+// uncompressed, `pixels` points straight into the loaded blob, same as before either
+// feature existed. Either way this field's contract to a caller never changes.
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+// PNX_COMPRESS_BITPLANE: pixels are NOT resident, same posture as PnxAtlas's own bitplane
+// shape above. Only frame_meta/frame_palette/shape tables are resident; every frame is one
+// independently bitplane-coded unit staying in ROM, fetched and decoded on demand through
+// pnx_sprite_frame_get -> pnx_sprite_cache_get.
+typedef struct
+{
+	const uint8_t* frame_meta;	  // identical contract to the non-bitplane shape below
+	const uint8_t* frame_palette; // frame_count, palette slot per frame
+	const uint8_t* scaled_rects;
+	const uint8_t* complex_masks;
+
+	uint32_t resource;		// resource id -- on-demand unit reads go straight to this
+	uint32_t stream_offset; // byte offset, within `resource`, of the (unit_count+1)-entry
+							// u16 offset table; unit i's compressed bytes start at
+							// stream_offset + (unit_count+1)*2 + table[i]
+
+	uint16_t scaled_count;
+	uint16_t complex_count;
+	uint16_t max_unit_pixels; // largest single reachable unit's pixel count
+	uint16_t unit_count;
+	uint16_t asset_id; // cache key namespace -- pnx_sprite_cache_get's own use
+	uint8_t frame_count;
+} PnxSprite;
+#else
 typedef struct
 {
 	const uint8_t* pixels;		  // every frame's pixels; see this struct's own comment above
@@ -286,10 +340,20 @@ typedef struct
 	uint16_t complex_count;
 	uint8_t frame_count;
 } PnxSprite;
+#endif
 
-// Unpacks frame `frame`'s record. No bounds check on `frame`: the loader has already
-// validated every offset, and this runs per sprite instance per frame, same contract as
-// pnx_font_glyph.
+// Unpacks frame `frame`'s record, including its pixels. No bounds check on `frame`: the
+// loader has already validated every offset, and this runs per sprite instance per frame,
+// same contract as pnx_font_glyph.
+//
+// Under PNX_COMPRESS_BITPLANE this is a real function (pnx_assets.c), not inlined here:
+// it fetches/decodes through pnx_sprite_cache_get, which pnx_assets.h cannot include
+// itself without a circular dependency (pnx_sprite_cache.h needs PnxSprite). Every other
+// mode keeps the direct-pointer, zero-call inline below -- the cache module is not even
+// linked into that build.
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+void pnx_sprite_frame_get(const PnxSprite* s, uint8_t frame, PnxSpriteFrame* out);
+#else
 static inline void pnx_sprite_frame_get(const PnxSprite* s, uint8_t frame, PnxSpriteFrame* out)
 {
 	const uint8_t* e = s->frame_meta + (uint32_t)frame * PNX_SPRITE_FRAME_BYTES;
@@ -300,6 +364,7 @@ static inline void pnx_sprite_frame_get(const PnxSprite* s, uint8_t frame, PnxSp
 	out->flags		 = e[6];
 	out->pixels		 = s->pixels + (uint32_t)(e[0] | ((uint32_t)e[1] << 8));
 }
+#endif
 
 // One packed panel image plus the four insets that carve it into nine regions: four
 // corners drawn once each, four edges tiled along their own axis, a centre tiled in
@@ -528,7 +593,7 @@ typedef struct
 	// atlases are compressed, only its own cell-plane banks.
 	bool compressed;
 #endif
-#if PNX_USE_MAP_COMPRESS || PNX_USE_ATLAS_COMPRESS
+#if PNX_USE_MAP_COMPRESS || PNX_COMPRESS_MODE == PNX_COMPRESS_LZSS
 	// ONE scratch pair, shared and reused across every layer's banks AND every atlas pool
 	// load, not one per use: both are sequential (one bank/atlas decodes, gets consumed,
 	// then the next), so nothing is lost by sharing, and a second scratch pair would
@@ -536,7 +601,11 @@ typedef struct
 	// largest bank and (b) one atlas pool slot's uncompressed byte count (`pool_bytes /
 	// atlas_slots` -- every slot is the same size) -- LZSS output can never exceed what it
 	// started from, so covering the uncompressed size covers the compressed one too, with
-	// no per-atlas resource-size probe needed.
+	// no per-atlas resource-size probe needed. This scratch pair is unused under
+	// PNX_COMPRESS_BITPLANE (only PNX_USE_MAP_COMPRESS's bank decode can still need it
+	// there): a bitplane atlas's pool slot holds metadata only, filled by a handful of
+	// small direct resource reads (atlas_load_bitplane_into, pnx_assets.c) rather than a
+	// whole-region decode, so there is no scratch buffer for it to need.
 	//
 	// `lzss_dst` holds a decoded BANK body, which a WorldTile's own bytes are then copied
 	// out of into its resident pool slot -- banks only. A compressed atlas pool load
@@ -733,29 +802,30 @@ uint8_t pnx_scene_sprite_count(void);
 uint8_t pnx_scene_font_count(void);
 uint8_t pnx_scene_nine_slice_count(void);
 
-#if PNX_USE_BITPLANE_COMPRESS
-// Implements pnx_tile_cache.h's PnxTileFetchFn against a real "PT" (per-tile-addressable
-// bitplane atlas) resource -- tools/... bpeg_atlas_encode.py's own header comment has the
-// on-disk layout this reads. `atlas_asset` is a PnxAssetId, same as every other function
-// here; `ctx` is unused. Returns the compressed length for `tile_index`, or 0 on any
-// failure (unknown asset, wrong magic, tile_index out of range, short read) -- the same
-// posture pnx_tile_cache_get already expects from any fetch function. Pass this directly
-// as the `fetch` argument, no wrapper needed -- the signature matches PnxTileFetchFn
-// exactly on purpose, so this header doesn't need to include pnx_tile_cache.h just to
-// name it.
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+// Implements pnx_tile_cache.h's PnxTileFetchFn: fetches tile/subtile `tile_index`'s
+// compressed bytes for the already-loaded atlas `ctx` (a `const PnxAtlas*`) straight from
+// ROM, using its resident `resource`/`stream_offset` -- no bulk-resident compressed copy
+// ever exists. `atlas_asset` is unused (the atlas is `ctx`, not re-looked-up by id); kept
+// in the signature only because it matches PnxTileFetchFn exactly, so pnx_tile_cache.h
+// doesn't need to know this module's own argument shape. Returns 0 on any failure.
 size_t pnx_bitplane_atlas_fetch(void* ctx, uint16_t atlas_asset, uint16_t tile_index,
 								uint8_t* scratch, size_t scratch_cap);
+
+// Fetches sprite frame-unit `unit_index`'s compressed bytes for `sprite` straight from
+// ROM, using its resident `resource`/`stream_offset` -- pnx_sprite_cache.c's own use.
+// Returns 0 on any failure.
+size_t pnx_bitplane_sprite_fetch(const PnxSprite* sprite, uint16_t unit_index,
+								 uint8_t* scratch, size_t scratch_cap);
 #endif
 
 // Each returns false and leaves `out` untouched if the resource is missing, the blob is
 // the wrong type or version, or its declared dimensions do not match its actual size --
-// the last of which is what catches a truncated or half-written resource.
+// the last of which is what catches a truncated or half-written resource. A map's own
+// pooled/streamed atlases (PnxMap.pool) go through the same PNX_COMPRESS_MODE this does,
+// via their own load path in pnx_assets.c -- not this function, which is scene atlases
+// only, but the same on-disk format and compression mode either way.
 bool pnx_atlas_load(PnxAtlas* out, uint16_t asset_id);
-// If the pipeline built this sprite with `compress_sprites` on, decodes the whole pixel
-// region into a fresh arena allocation (PNX_USE_SPRITE_COMPRESS must be on here too, or
-// this refuses to load rather than reading garbage). Identical frames the pipeline
-// deduplicated share one `frame_meta` offset either way -- nothing about that needs a
-// runtime flag, since the loader already treats each frame's offset independently.
 bool pnx_sprite_load(PnxSprite* out, uint16_t asset_id);
 bool pnx_nineslice_load(PnxNineSlice* out, uint16_t asset_id);
 bool pnx_dialog_load(PnxDialog* out, uint16_t asset_id);
@@ -805,23 +875,53 @@ uint32_t pnx_assets_bytes_loaded(void);
 // Hot paths. No bounds checking on the tile accessors: they run per pixel per frame,
 // and the pipeline already guarantees indices are in range.
 
-// Whole-tile pixels. NULL on a metatiled atlas, where a tile has no contiguous
-// representation -- use pnx_blit_metatile instead.
+// Whole-tile pixels, DECODED and packed 4bpp. NULL on a metatiled atlas, where a tile has
+// no contiguous representation -- use pnx_blit_metatile instead -- or if fetch/decode
+// failed (the LRU cache had no room to grant even a flushed, empty slot; not expected in
+// practice, see pnx_tile_cache_get's own comment).
+//
+// Under PNX_COMPRESS_BITPLANE this is a real function (pnx_assets.c): it fetches+decodes
+// unit `index` through pnx_tile_cache_get on a miss, or returns the cached pointer on a
+// hit. The returned pointer is only valid until `index`'s own cache slot is evicted by a
+// LATER pnx_atlas_tile call for a different tile -- do not hold it across such a call.
+// Every other mode keeps the direct-pointer, zero-call inline below.
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+const uint8_t* pnx_atlas_tile(const PnxAtlas* a, uint8_t index);
+
+// A metatiled atlas's quadrant `subtile_index`, DECODED and packed 4bpp -- pnx_blit_
+// metatile_with's own use, addressed separately from pnx_atlas_tile because a metatiled
+// atlas's unit space is subtiles, not tiles (pnx_atlas_is_metatiled(a) is true exactly
+// when this is the accessor to use instead). Same cache/lifetime contract as
+// pnx_atlas_tile.
+const uint8_t* pnx_atlas_subtile(const PnxAtlas* a, uint16_t subtile_index);
+#else
 static inline const uint8_t* pnx_atlas_tile(const PnxAtlas* a, uint8_t index)
 {
 	return a->metatiles ? NULL : a->pixels + (uint32_t)index * a->tile_bytes;
 }
+
+static inline const uint8_t* pnx_atlas_subtile(const PnxAtlas* a, uint16_t subtile_index)
+{
+	// NULL rather than pointer arithmetic on a possibly-null `pixels` (a zeroed or
+	// failed-load PnxAtlas) -- undefined behaviour otherwise, and the same NULL-on-
+	// failure contract pnx_atlas_tile's own metatiles check and the bitplane-mode
+	// counterpart above already give a caller.
+	return a->pixels ? a->pixels + (uint32_t)subtile_index * a->sub_bytes : NULL;
+}
+#endif
 
 static inline const PnxPalette* pnx_atlas_tile_palette(const PnxAtlas* a, uint8_t index)
 {
 	return pnx_palette(a->tile_palette[index]);
 }
 
+#if PNX_COMPRESS_MODE != PNX_COMPRESS_BITPLANE
 static inline const uint8_t* pnx_sprite_frame(const PnxSprite* s, uint8_t frame)
 {
 	const uint8_t* e = s->frame_meta + (uint32_t)frame * PNX_SPRITE_FRAME_BYTES;
 	return s->pixels + (uint32_t)(e[0] | ((uint32_t)e[1] << 8));
 }
+#endif
 
 static inline const PnxPalette* pnx_sprite_frame_palette(const PnxSprite* s, uint8_t frame)
 {

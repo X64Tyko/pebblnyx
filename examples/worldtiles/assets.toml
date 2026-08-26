@@ -14,8 +14,10 @@ resources = "resources"
 header = "src/c/assets_gen.h"
 budget_bytes = 262144
 compress_maps = true
-compress_sprites = true
-compress_atlases = true
+# Uncompressed sprite/atlas pixels -- test_stream.c (the host test suite's default,
+# PNX_COMPRESS_NONE binary) reads this example's resources and needs a resident-pixel
+# build.
+compress = "none"
 
 # --------------------------------------------------------------------------- tilesets
 #

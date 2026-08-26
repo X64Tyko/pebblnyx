@@ -1,22 +1,27 @@
-// Host test for the NEW compress_sprites = "bitplane" path in pnx_sprite_load
-// (pnx_assets.c) -- against a REAL pipeline build (fixtures/bitplane_sprite/, a
-// dedicated fixture kept separate from fixtures/lzss/ so this doesn't repurpose the
-// fixture test_sprite_compress.c already depends on for the LZSS path specifically).
+// Host test for the compress = "bitplane" path in pnx_sprite_load (pnx_assets.c) --
+// against a REAL pipeline build (fixtures/bitplane_sprite/, a dedicated fixture kept
+// separate from fixtures/lzss/ so this doesn't repurpose the fixture
+// test_sprite_compress.c already depends on for the LZSS path specifically). Compiled
+// only into build/test_bitplane (tests/Makefile's BITPLANE_SRC) -- PNX_COMPRESS_MODE is a
+// project-wide, mutually exclusive compile-time choice, so there is no "other mode" branch
+// to guard against here the way an earlier, additive PNX_USE_BITPLANE_COMPRESS flag needed.
 //
-// Four frames, two byte-identical (frame 0 == frame 2) on purpose: proves the new
-// per-deduped-unit bitplane encoding survives build_sprite_frame_meta's existing dedup
-// rather than silently decoding a duplicate frame wrong.
+// Four frames, two byte-identical (frame 0 == frame 2) on purpose: proves the bitplane
+// encoding's per-deduped-unit table survives build_sprite_frame_meta's existing dedup
+// rather than silently decoding a duplicate frame wrong -- and, since a bitplane sprite's
+// pixels only ever exist through pnx_sprite_cache_get (pnx_sprite_frame_get's own call),
+// that both frames' fetches land on the SAME cache slot rather than two independent ones.
 
 #include "../src/pnx/pnx_config.h"
 
-#if PNX_USE_BITPLANE_COMPRESS
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
 
 #include "../src/pnx/core/pnx_arena.h"
 #include "../src/pnx/assets/pnx_assets.h"
+#include "../src/pnx/assets/pnx_sprite_cache.h"
 #include "../src/pnx/platform/pnx_platform_host.h"
 
 #include <stdio.h>
-#include <string.h>
 
 #define BS_DIR "fixtures/bitplane_sprite/resources/"
 #include "fixtures/bitplane_sprite/gen.h"
@@ -67,7 +72,13 @@ void test_bitplane_sprite(void)
 	BS_CHECK(pnx_arena_init(&arena, "bitplane-sprite-arena", 20 * 1024, 4));
 	BS_CHECK(pnx_assets_init(&arena, s_resources, PNX_ASSET_COUNT));
 	BS_CHECK(pnx_palettes_load(PNX_ASSET_PALETTES_PALETTES));
+	BS_CHECK(pnx_sprite_cache_init(&arena, 8));
+	pnx_sprite_cache_reset();
 
+	// pnx_sprite_load is the only loader now -- under PNX_COMPRESS_BITPLANE it brings in
+	// metadata only, exactly what an earlier design called "lazy" and gave a separate
+	// type/entry-point for. pnx_sprite_frame_get (below) is what actually fetches and
+	// decodes a frame, through pnx_sprite_cache_get on a miss.
 	PnxSprite sp;
 	BS_CHECK(pnx_sprite_load(&sp, PNX_ASSET_SPRITE_QUAD));
 	BS_CHECK(sp.frame_count == QUAD_FRAME_COUNT);
@@ -81,28 +92,29 @@ void test_bitplane_sprite(void)
 	BS_CHECK(f1.w == 16 && f1.h == 16);
 	BS_CHECK(f2.w == 16 && f2.h == 16);
 	BS_CHECK(f3.w == 16 && f3.h == 16);
+	BS_CHECK(f0.pixels && f1.pixels && f2.pixels && f3.pixels);
 
 	// Frame 0 and frame 2 are the SAME source rect -- dedup means they should share one
-	// physical pixel span, so their `pixels` pointers must be equal, not merely
-	// byte-identical (proves the deduped-unit encoding round-tripped through the SAME
-	// slot both frame_meta entries point at, not two independent decodes that just
-	// happen to agree).
+	// physical pixel span (the same cache slot), so their `pixels` pointers must be
+	// equal, not merely byte-identical: this proves the deduped-unit bitplane encoding
+	// round-tripped through the SAME cache entry both frame_meta entries resolve to, not
+	// two independent decodes that just happen to agree.
 	BS_CHECK(f0.pixels == f2.pixels);
 
-	// Frame 1 and frame 3 are DIFFERENT source rects -- must NOT collide with frame 0
-	// or each other.
+	// Frame 1 and frame 3 are DIFFERENT source rects -- must NOT collide with frame 0 or
+	// each other.
 	BS_CHECK(f1.pixels != f0.pixels);
 	BS_CHECK(f3.pixels != f0.pixels);
 	BS_CHECK(f1.pixels != f3.pixels);
 
 	// Every frame's pixels must actually be populated (not all-zero, which is what a
-	// silently-failed decode leaving the arena's zero-fill in place would look like).
+	// silently-failed decode leaving the cache pool's zero-fill in place would look like).
 	bool any_nonzero_1 = false, any_nonzero_3 = false;
 	for (int i = 0; i < 16 * 16 / 2; i++)
 	{
-		if (pnx_sprite_frame(&sp, 1)[i] != 0)
+		if (f1.pixels[i] != 0)
 			any_nonzero_1 = true;
-		if (pnx_sprite_frame(&sp, 3)[i] != 0)
+		if (f3.pixels[i] != 0)
 			any_nonzero_3 = true;
 	}
 	BS_CHECK(any_nonzero_1);

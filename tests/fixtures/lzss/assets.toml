@@ -3,8 +3,12 @@ name = "lzss_fixture"
 resources = "resources"
 header = "gen.h"
 compress_maps = true
-compress_sprites = true
-compress_atlases = true
+# Uncompressed sprite/atlas pixels -- test_map_compress.c (PNX_COMPRESS_MODE=NONE) is
+# this fixture's own consumer, testing WorldTile bank streaming/compression specifically,
+# which compress_maps already covers independently. LZSS-compressed sprite/atlas pixel
+# data has its own dedicated fixture, tests/fixtures/lzss_pixels/, since a project's
+# pixel compression mode is project-wide and mutually exclusive with this binary's own.
+compress = "none"
 
 [[sprite]]
 name = "flat"

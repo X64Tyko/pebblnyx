@@ -41,6 +41,10 @@ typedef struct
 // alongside PNX_MAP_MAX_LAYERS, pnx_assets.h), only how many can exist.
 #define PNX_SPRITE_LAYER_COUNT 16
 
+// Mode-transparent regardless of PNX_COMPRESS_MODE: pnx_sprite_frame_get (pnx_assets.h)
+// is what differs, fetching+decoding through pnx_sprite_cache_get under
+// PNX_COMPRESS_BITPLANE, a direct resident pointer otherwise. No-op if the frame's pixels
+// could not be produced (decode failure, or the cache had no room even flushed).
 void pnx_sprite_draw(const PnxSprite* sprite, PnxTarget* target, const PnxCamera* camera,
 					 int32_t wx, int32_t wy, uint8_t frame, const PnxPalette* palette,
 					 bool mirror);

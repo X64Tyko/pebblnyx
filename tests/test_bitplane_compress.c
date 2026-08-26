@@ -10,7 +10,7 @@
 
 #include "../src/pnx/pnx_config.h"
 
-#if PNX_USE_BITPLANE_COMPRESS
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
 
 #include "../src/pnx/assets/pnx_bitplane.h"
 #include "fixtures/bitplane/bpeg_fixtures.h"
@@ -19,12 +19,11 @@
 #include <string.h>
 #include <time.h>
 
-#if PNX_USE_MAP_COMPRESS || PNX_USE_SPRITE_COMPRESS || PNX_USE_ATLAS_COMPRESS
+// pnx_lzss.c is linked into this binary (tests/Makefile's BITPLANE_SRC) purely for this
+// one relative-cost comparison, not because a bitplane-mode build ever needs the LZSS
+// decoder at runtime -- see pnx_config.h's PNX_COMPRESS_MODE comment for why the two are
+// mutually exclusive in shipped code.
 #include "../src/pnx/assets/pnx_lzss.h"
-#define HAVE_LZSS 1
-#else
-#define HAVE_LZSS 0
-#endif
 
 extern int s_failures;
 extern int s_checks;
@@ -138,7 +137,6 @@ void test_bitplane_compress(void)
 		printf("  packed memcpy floor: %.4f ns/pixel (too fast to ratio meaningfully here)\n",
 			   raw_ns_per_px);
 
-#if HAVE_LZSS
 		// LZSS side: the SAME fixture pixels, pre-compressed offline as one concatenated
 		// stream (the realistic shape LZSS actually runs in -- one blob, not per-unit),
 		// timed decoding all of it back in one call. Deliberately not apples-to-apples on
@@ -156,17 +154,9 @@ void test_bitplane_compress(void)
 		BC_CHECK(memcmp(lzss_dst, BPEG_ALL_PACKED_RAW, sizeof(lzss_dst)) == 0);
 		printf("  LZSS decode        : %.2f ns/pixel (whole-blob, not per-tile)\n",
 			   lzss_ns_per_px);
-#endif
 
 		BC_CHECK(bp_ns_per_px > 0.0);
 	}
 }
 
-#else
-
-void test_bitplane_compress(void);
-void test_bitplane_compress(void)
-{
-}
-
-#endif // PNX_USE_BITPLANE_COMPRESS
+#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE

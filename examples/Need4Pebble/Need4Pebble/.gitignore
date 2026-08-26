@@ -13,3 +13,8 @@ src/c/pnx/
 # to catch.
 resources/*.bin
 src/c/assets_gen.h
+
+# Emulator captures kept locally as a running reference (recruiting posts, progress
+# checks) -- not source, and re-taken often enough that committing them would just be
+# repo-history churn.
+screenshots/

@@ -1,104 +1,59 @@
 #include "pnx_tile_cache.h"
 
-#if PNX_USE_BITPLANE_COMPRESS
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
 
 #include "pnx_bitplane.h"
+#include "pnx_lru_cache_impl.h"
 
-#define PNX_TILE_CACHE_PIXELS ((size_t)PNX_TILE_CACHE_TILE_PX * PNX_TILE_CACHE_TILE_PX)
-// Worst case a compressed tile can ever be: pnx_bitplane_decode's own raw-fallback escape
-// hatch, header byte + the tile packed 4bpp verbatim -- never larger than that by
-// construction (encode_unit always keeps whichever of the two forms is smaller).
-#define PNX_TILE_CACHE_MAX_COMPRESSED (1 + PNX_TILE_CACHE_SLOT_BYTES)
+static PnxLruCache s_cache;
 
-typedef struct
+static uint32_t make_key(uint16_t atlas_asset, uint16_t tile_index)
 {
-	uint16_t atlas_asset;
-	uint16_t tile_index;
-	uint8_t age;
-	bool occupied;
-	uint8_t pixels[PNX_TILE_CACHE_SLOT_BYTES]; // packed 4bpp -- pnx_bitplane_decode's own output
-} PnxTileSlot;
+	return ((uint32_t)atlas_asset << 16) | tile_index;
+}
 
-// Zero-initialised by the linker (occupied == false, same as pnx_tile_cache_reset would
-// set) -- no separate init call needed, same posture as every other pnx module with
-// file-scope state.
-static PnxTileSlot s_slots[PNX_TILE_CACHE_SLOTS];
+bool pnx_tile_cache_init(PnxArena* arena, uint16_t target_entries, uint8_t max_tile_px)
+{
+	const size_t slot_bytes = PNX_BITPLANE_PACKED_BYTES((size_t)max_tile_px * max_tile_px);
+	return pnx_lru_cache_init_impl(&s_cache, arena, target_entries, (uint16_t)slot_bytes,
+								   PNX_TILE_CACHE_MAX_AGE);
+}
 
-const uint8_t* pnx_tile_cache_get(uint16_t atlas_asset, uint16_t tile_index,
+const uint8_t* pnx_tile_cache_get(uint16_t atlas_asset, uint16_t tile_index, uint8_t tile_px,
 								  PnxTileFetchFn fetch, void* fetch_ctx)
 {
-	for (uint16_t i = 0; i < PNX_TILE_CACHE_SLOTS; i++)
-	{
-		PnxTileSlot* s = &s_slots[i];
-		if (s->occupied && s->atlas_asset == atlas_asset && s->tile_index == tile_index)
-		{
-			s->age = 0; // ticks once per frame, resets to 0 on draw -- see pnx_config.h
-			return s->pixels;
-		}
-	}
+	if (!fetch)
+		return NULL;
 
-	// Miss: a free slot if one exists, else the slot with the largest age -- which IS
-	// least-recently-drawn, since age already means exactly that (see pnx_tile_cache_tick).
-	uint16_t target	   = 0;
-	uint8_t target_age = 0;
-	bool have_target   = false;
-	for (uint16_t i = 0; i < PNX_TILE_CACHE_SLOTS; i++)
-	{
-		if (!s_slots[i].occupied)
-		{
-			// have_target already did its job for THIS iteration's own comparison below --
-			// break exits before another iteration would ever read it again, so setting it
-			// here would be a dead store (clang-analyzer-deadcode.DeadStores caught this).
-			target = i;
-			break;
-		}
-		if (!have_target || s_slots[i].age > target_age)
-		{
-			target		= i;
-			target_age	= s_slots[i].age;
-			have_target = true;
-		}
-	}
+	const uint32_t key = make_key(atlas_asset, tile_index);
+	bool hit;
+	uint8_t* dst = pnx_lru_cache_find_or_prepare(&s_cache, key, &hit);
+	if (!dst)
+		return NULL;
+	if (hit)
+		return dst;
 
-	uint8_t compressed[PNX_TILE_CACHE_MAX_COMPRESSED];
-	const size_t clen =
-		fetch(fetch_ctx, atlas_asset, tile_index, compressed, sizeof(compressed));
+	uint8_t compressed[1 + PNX_BITPLANE_PACKED_BYTES((size_t)PNX_TILE_CACHE_MAX_TILE_PX * PNX_TILE_CACHE_MAX_TILE_PX)];
+	const size_t clen = fetch(fetch_ctx, atlas_asset, tile_index, compressed, sizeof(compressed));
 	if (clen == 0)
 		return NULL;
 
-	// pnx_bitplane_decode's own working buffer -- see pnx_bitplane.h's own comment for
-	// why it can't decode straight into packed output. PNX_TILE_CACHE_PIXELS worst case
-	// (64x64) is 4096 B; a transient stack buffer for the duration of one decode call,
-	// not held resident, same shape as pnx_tile_cache_get's other locals.
-	uint8_t decode_scratch[PNX_TILE_CACHE_PIXELS];
-	PnxTileSlot* s = &s_slots[target];
-	if (!pnx_bitplane_decode(compressed, clen, s->pixels, decode_scratch,
-							 (uint16_t)PNX_TILE_CACHE_PIXELS))
-		return NULL; // slot left exactly as it was -- a failed fetch/decode evicts nothing
+	uint8_t decode_scratch[(size_t)PNX_TILE_CACHE_MAX_TILE_PX * PNX_TILE_CACHE_MAX_TILE_PX];
+	const uint16_t n = (uint16_t)((uint32_t)tile_px * tile_px);
+	if (!pnx_bitplane_decode(compressed, clen, dst, decode_scratch, n))
+		return NULL;
 
-	s->atlas_asset = atlas_asset;
-	s->tile_index  = tile_index;
-	s->age		   = 0;
-	s->occupied	   = true;
-	return s->pixels;
+	return dst;
 }
 
 void pnx_tile_cache_tick(void)
 {
-	for (uint16_t i = 0; i < PNX_TILE_CACHE_SLOTS; i++)
-	{
-		if (!s_slots[i].occupied)
-			continue;
-		s_slots[i].age++;
-		if (s_slots[i].age >= PNX_TILE_CACHE_MAX_AGE)
-			s_slots[i].occupied = false;
-	}
+	pnx_lru_cache_tick_impl(&s_cache);
 }
 
 void pnx_tile_cache_reset(void)
 {
-	for (uint16_t i = 0; i < PNX_TILE_CACHE_SLOTS; i++)
-		s_slots[i].occupied = false;
+	pnx_lru_cache_reset_impl(&s_cache);
 }
 
-#endif // PNX_USE_BITPLANE_COMPRESS
+#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE

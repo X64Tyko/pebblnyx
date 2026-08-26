@@ -2673,8 +2673,8 @@ def check_variable_frame_sprites():
 def check_sprite_dedup_and_compress():
     """Two things build_sprite_frame_meta/finish_sprite gained together: identical PACKED
     frames collapsing to one shared `frame_meta` offset (always on, the same way
-    pack_font already dedups glyph bitmaps), and `compress_sprites = true` LZSS-
-    compressing the pixel region (opt-in, pairs with PNX_USE_SPRITE_COMPRESS -- the
+    pack_font already dedups glyph bitmaps), and `compress = "lzss"` LZSS-compressing the
+    pixel region (project-wide, pairs with PNX_COMPRESS_MODE=PNX_COMPRESS_LZSS -- the
     compress_maps test above is the template this follows).
     """
     with tempfile.TemporaryDirectory() as root:
@@ -2716,7 +2716,7 @@ def check_sprite_dedup_and_compress():
                 name = "t"
                 resources = "out"
                 header = "out/gen.h"
-                {"compress_sprites = true" if compress else ""}
+                {'compress = "lzss"' if compress else 'compress = "none"'}
 
                 [[sprite]]
                 name = "flat"
@@ -2775,9 +2775,10 @@ def check_sprite_dedup_and_compress():
 
 
 def check_atlas_compress():
-    """`compress_atlases = true` LZSS-compresses an atlas's tile pixel data -- opt-in,
-    pairs with PNX_USE_ATLAS_COMPRESS, same `compress_pixel_body` helper compress_sprites
-    already uses (see check_sprite_dedup_and_compress). Built through the real pipeline,
+    """`compress = "lzss"` LZSS-compresses an atlas's tile pixel data -- project-wide,
+    pairs with PNX_COMPRESS_MODE=PNX_COMPRESS_LZSS, same `compress_pixel_body` helper the
+    sprite path already uses (see check_sprite_dedup_and_compress). Built through the real
+    pipeline,
     plain (non-metatiled) layout: make_sheet's own flat 16x16 quadrant compresses well,
     which is what this manifest picks (region [0,0,1,1], one tile) to keep the maths
     simple to check by hand.
@@ -2791,7 +2792,7 @@ def check_atlas_compress():
                 name = "t"
                 resources = "out"
                 header = "out/gen.h"
-                {"compress_atlases = true" if compress else ""}
+                {'compress = "lzss"' if compress else 'compress = "none"'}
 
                 [[atlas]]
                 name = "flat"

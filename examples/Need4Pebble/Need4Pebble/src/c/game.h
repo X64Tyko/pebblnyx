@@ -4,6 +4,8 @@
 #pragma once
 
 #include "pnx/pnx.h"
+#include "pnx/assets/pnx_sprite_cache.h"
+#include "pnx/assets/pnx_tile_cache.h"
 
 // Off by default -- enable with `PNX_DEFINES=N4P_STEER_DEBUG_LOG=1 pebble build`. Prints
 // the live steering pipeline (touch held/axis, steer_visual, lane_x, speed) to
@@ -66,13 +68,11 @@ typedef struct
 	PnxArena arena;
 	PnxSprite car;					// touring_normal
 	PnxSprite crash;				// touring_crash
-	PnxSprite traffic_car;			// traffic_car -- its own (smaller) sprite, not a touring_normal
-									// variant; see assets.toml's own "traffic car" section for why
+	PnxSprite traffic_car;			// traffic_car
 	PnxSprite police_car;			// police_normal
 	PnxSprite police_crash;			// police_crash
-	PnxSprite road_chunk;			// road_chunk -- draw_road's per-row scaled band (render.c's
-									// fb_road_row_scaled); placeholder art, see assets.toml
-	PnxAtlas ground_atlas;			// ground -- draw_road's ground-tile batching (render.c);
+	PnxSprite road_chunk;			// road_chunk
+	PnxAtlas ground_atlas;			// ground
 									// placeholder art, see assets.toml. Direct pnx_atlas_load,
 									// not a PnxMap: the ground strip is procedurally generated
 									// per depth band as the road scrolls, not a fixed authored

@@ -917,6 +917,36 @@ def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bi
     shapes = (scaled_count.to_bytes(2, "little") + bytes(scaled)
              + complex_count.to_bytes(2, "little") + bytes(complex_masks))
 
+    atlas_bitplane = compress_atlases == "bitplane"
+    pixel_compress = False if atlas_bitplane else compress_atlases
+
+    def bitplane_encode(units_pixels_and_palettes):
+        """bitplane-compressed pixel data replaces raw pixels in "PA" when enabled.
+        Format: offset_table((unit_count+1) x u16 LE) + concat(encoded units). Metadata
+        (assign, flags, metatiles, shapes) stays resident; pixels stay in ROM. The
+        addressable UNIT is a whole tile when flat, or a deduplicated quadrant when
+        metatiled -- callers pass whichever list of (pixels, palette) pairs matches, so a
+        metatiled atlas's bitplane units are the same `bank` every other encoding of it
+        already deduplicates against, not one unit per original tile.
+        """
+        units = []
+        for px, pal in units_pixels_and_palettes:
+            packed	= pack_unit_4bpp(px, pal)
+            indices = unpack_4bpp_to_indices(packed, len(px))
+            units.append(encode_bitplane_unit(indices))
+        return encode_bitplane_units(units)
+
+    def bitplane_encode_bw(units_pixels):
+        """`bitplane_encode`'s `~bw` counterpart: same offset-table + concat(units)
+        format, but each unit's indices are ink states (0-3, bw_pixel_states) rather than
+        a palette-relative index -- there is no palette on a 1-bit build. A 2-colour tile
+        (the common case: plain ink-on-paper art with no dither) costs ~1 bit/pixel here,
+        the same as it would on a colour build's bitplane path with 2 real colours --
+        bitplane's cost is driven by a unit's own distinct-value count, not by bpp.
+        """
+        units = [encode_bitplane_unit(bw_pixel_states(px), bpp=2) for px in units_pixels]
+        return encode_bitplane_units(units)
+
     # Decide by arithmetic, not by the flag alone. Metatile reuse scales with the size and
     # repetitiveness of a tileset: 1.29x across five full sheets, but only 1.04-1.12x on a
     # 64-tile hand-picked region, where the 9-byte definitions can outweigh the saving.
@@ -976,7 +1006,12 @@ def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bi
             for qid in quad_ids:
                 table += qid.to_bytes(2, "little")
 
-        pixel_flags, pixel_body = compress_pixel_body(pixels, compress_atlases, tag_len=True)
+        if atlas_bitplane:
+            pixel_flags = 2
+            pixel_body = bitplane_encode(
+                (bank[i], palettes[pal_of_sub[i]]) for i in range(len(bank)))
+        else:
+            pixel_flags, pixel_body = compress_pixel_body(pixels, pixel_compress, tag_len=True)
         body = (len(bank).to_bytes(2, "little") + b"\0\0"
                 + pad4(bytes(assign)) + pad4(flags) + bytes(table) + pixel_body + shapes)
         atlas["blob"] = (blob_header(MAGIC_ATLAS, T, len(tiles), 1, pixel_flags, orient=orient)
@@ -986,14 +1021,22 @@ def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bi
         # this blob is compressed on disk -- `resident_bytes` is what "blob" would have
         # been with `pixels` written raw, i.e. the size compression never shrinks below
         # at runtime. Equal to len(blob) whenever compress_atlases left this uncompressed.
+        # bitplane-compressed atlases are never eagerly decoded into a pool, so their
+        # resident_bytes is metadata-only.
         atlas["resident_bytes"] = (8 + 4 + len(pad4(bytes(assign))) + len(pad4(flags))
-                                   + len(table) + len(pixels) + len(shapes))
+                                   + len(table) + (0 if atlas_bitplane else len(pixels))
+                                   + len(shapes))
 
         if pack_2bit:
             # Same table, same assign, same flags, same shapes -- pack_unit_2bpp needs no
             # palette, so the quadrant's raw pixels are all that changes.
-            pixels_bw = b"".join(pack_unit_2bpp(bank[i]) for i in range(len(bank)))
-            flags_bw, body_bw_pixels = compress_pixel_body(pixels_bw, compress_atlases, tag_len=True)
+            if atlas_bitplane:
+                flags_bw	   = 2
+                body_bw_pixels = bitplane_encode_bw(bank[i] for i in range(len(bank)))
+            else:
+                pixels_bw = b"".join(pack_unit_2bpp(bank[i]) for i in range(len(bank)))
+                flags_bw, body_bw_pixels = compress_pixel_body(pixels_bw, pixel_compress,
+                                                               tag_len=True)
             body_bw = (len(bank).to_bytes(2, "little") + b"\0\0"
                       + pad4(bytes(assign)) + pad4(flags) + bytes(table) + body_bw_pixels
                       + shapes)
@@ -1001,18 +1044,28 @@ def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bi
                                             orient=orient) + body_bw)
     else:
         pixels = b"".join(pack_unit_4bpp(t, palettes[a]) for t, a in zip(tiles, assign))
-        pixel_flags, pixel_body = compress_pixel_body(pixels, compress_atlases, tag_len=True)
+        if atlas_bitplane:
+            pixel_flags = 2
+            pixel_body = bitplane_encode((t, palettes[a]) for t, a in zip(tiles, assign))
+        else:
+            pixel_flags, pixel_body = compress_pixel_body(pixels, pixel_compress, tag_len=True)
         body = pad4(bytes(assign)) + pad4(flags) + pixel_body + shapes
         atlas["blob"] = (blob_header(MAGIC_ATLAS, T, len(tiles), 0, pixel_flags, orient=orient)
                          + body)
         atlas["subtiles"] = 0
         # See the metatiled branch above for why this is tracked separately from len(blob).
         atlas["resident_bytes"] = (8 + len(pad4(bytes(assign))) + len(pad4(flags))
-                                   + len(pixels) + len(shapes))
+                                   + (0 if atlas_bitplane else len(pixels))
+                                   + len(shapes))
 
         if pack_2bit:
-            pixels_bw = b"".join(pack_unit_2bpp(t) for t in tiles)
-            flags_bw, body_bw_pixels = compress_pixel_body(pixels_bw, compress_atlases, tag_len=True)
+            if atlas_bitplane:
+                flags_bw	   = 2
+                body_bw_pixels = bitplane_encode_bw(tiles)
+            else:
+                pixels_bw = b"".join(pack_unit_2bpp(t) for t in tiles)
+                flags_bw, body_bw_pixels = compress_pixel_body(pixels_bw, pixel_compress,
+                                                               tag_len=True)
             body_bw = pad4(bytes(assign)) + pad4(flags) + body_bw_pixels + shapes
             atlas["blob_bw"] = (blob_header(MAGIC_ATLAS, T, len(tiles), 0, flags_bw,
                                             orient=orient) + body_bw)
@@ -1260,21 +1313,39 @@ def pack_unit_4bpp(pixels, palette):
 # RAW GColor8 value's own alpha and luminance, not of which merged palette a tile landed in
 # -- which is also why a ~bw variant can share the 4bpp variant's metatile index table and
 # per-tile palette assignment untouched; only the pixel payload differs between the two.
-def pack_unit_2bpp(pixels, threshold=DEFAULT_INK_THRESHOLD):
-    def state(c):
-        if c == TRANSPARENT:
-            return 0
-        alpha = (c >> 6) & 3
-        if alpha != 3:              # 0b01 or 0b10: a partially-transparent GColor8
-            return 3
-        return 2 if gcolor_luminance(c) < threshold else 1
+def bw_pixel_state(c, threshold=DEFAULT_INK_THRESHOLD):
+    """One raw GColor8 value's 2-bit ink state -- see pack_unit_2bpp's own comment for
+    what each of the 4 values means. Pulled out to its own function because
+    encode_bitplane_unit's BW path (finish_atlas/finish_sprite's `~bw` branches under
+    `compress = "bitplane"`) needs the flat per-pixel state list BEFORE it is packed into
+    bytes, the same way the colour bitplane path needs indices before pack_unit_4bpp."""
+    if c == TRANSPARENT:
+        return 0
+    alpha = (c >> 6) & 3
+    if alpha != 3:              # 0b01 or 0b10: a partially-transparent GColor8
+        return 3
+    return 2 if gcolor_luminance(c) < threshold else 1
 
+
+def bw_pixel_states(pixels, threshold=DEFAULT_INK_THRESHOLD):
+    return [bw_pixel_state(c, threshold) for c in pixels]
+
+
+def pack_unit_2bpp(pixels, threshold=DEFAULT_INK_THRESHOLD):
+    return pack_2bpp_raw_states(bw_pixel_states(pixels, threshold))
+
+
+def pack_2bpp_raw_states(states):
+    """4 states/byte, high bits first -- pack_unit_2bpp's own layout, but from already-
+    computed 0-3 ink states rather than raw GColor8 values. encode_bitplane_unit's BW raw-
+    fallback escape hatch uses this so it stays pixel-identical to what an uncompressed ~bw
+    build would ship, same reasoning as pack_unit_4bpp_raw_indices for the colour path."""
     out = bytearray()
-    for i in range(0, len(pixels), 4):
+    for i in range(0, len(states), 4):
         byte = 0
         for k in range(4):
             j = i + k
-            s = state(pixels[j]) if j < len(pixels) else 0
+            s = states[j] if j < len(states) else 0
             byte |= s << (6 - 2 * k)
         out.append(byte)
     return bytes(out)
@@ -1901,15 +1972,42 @@ def compress_sprite_pixels_bitplane(frame_meta, dims, pixels):
         indices = unpack_4bpp_to_indices(pixels[off:off + length], n)
         units.append(encode_bitplane_unit(indices))
 
-    offsets = [0]
-    for u in units:
-        offsets.append(offsets[-1] + len(u))
-    offset_table = b"".join(o.to_bytes(2, "little") for o in offsets)
-    body = offset_table + b"".join(units)
+    body = encode_bitplane_units(units)
+
+    if len(body) >= len(pixels):
+        return 0, pixels
+    # flag 2 means bitplane compression (M13)
+    return 2, body
+
+
+def compress_sprite_pixels_bitplane_bw(frame_meta, dims, pixels):
+    """compress_sprite_pixels_bitplane's `~bw` counterpart -- same per-deduped-unit walk
+    over `frame_meta`'s own offsets, but against a 2bpp-packed (pack_unit_2bpp) `pixels`
+    buffer and ink-state (bw_pixel_states) units rather than palette indices. `frame_meta`
+    here is the ~bw call's OWN build_sprite_frame_meta output, whose offsets are already
+    byte offsets into THIS `pixels` buffer's own 2bpp packing -- not the colour blob's.
+    """
+    seen = {}
+    for i, (w, h) in enumerate(dims):
+        off = int.from_bytes(frame_meta[i * 8:i * 8 + 2], "little")
+        if off not in seen:
+            seen[off] = (w, h)
+
+    units = []
+    for off in sorted(seen):
+        w, h = seen[off]
+        n = w * h
+        length = (n + 3) // 4
+        states = unpack_2bpp_to_states(pixels[off:off + length], n)
+        units.append(encode_bitplane_unit(states, bpp=2))
+
+    body = encode_bitplane_units(units)
 
     if len(body) >= len(pixels):
         return 0, pixels
     return 2, body
+
+
 
 
 def compress_pixel_body(pixels, compress, tag_len=False):
@@ -2010,7 +2108,18 @@ def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pac
     base_slot = slot(base_order)
     frame_packed = [pack_unit_4bpp(f, shared[base_slot]) for f in frames]
     frame_meta, pixels = build_sprite_frame_meta(dims, origins, collision, frame_packed)
-    flags, pixel_body = compress_pixel_body(pixels, compress_sprites)
+    # `compress = "bitplane"` does not extend to a variant sprite: the whole point of
+    # variants is one shared bitmap redrawn per palette, and bitplane's per-unit ROM
+    # fetch has nothing to key units by beyond frame_meta's own dedup -- which a variant
+    # sprite already uses for something else (recolour sharing, not decode-on-demand).
+    # Falls back to LZSS (still real compression, just not decode-on-demand) rather than
+    # silently doing nothing.
+    if compress_sprites == "bitplane":
+        print(f"    {name}: has variants, compress = \"bitplane\" falls back to LZSS for "
+              f"this sprite's pixel data (bitplane needs a single deduped unit table, "
+              f"which variant recolouring already spends on something else)")
+    flags, pixel_body = compress_pixel_body(pixels, "lzss" if compress_sprites == "bitplane"
+                                            else compress_sprites)
     assign = [base_slot] * len(frames)
     shapes = build_sprite_shapes(collision, dims, frames)
 
@@ -2046,7 +2155,15 @@ def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pac
         frame_packed_bw = [pack_unit_2bpp(f) for f in bw_frames]
         frame_meta_bw, pixels_bw = build_sprite_frame_meta(dims, origins, collision,
                                                             frame_packed_bw)
-        flags_bw, pixel_body_bw = compress_pixel_body(pixels_bw, compress_sprites)
+        # Unlike the colour blob above, the `~bw` blob is never a shared-bitmap-across-
+        # variants thing -- bw_frames is one flat rendering (a 1-bit screen has no runtime
+        # recolour to preserve, see pack_2bit's own comment), so it dedupes and bitplane-
+        # encodes exactly like a plain non-variant sprite's bw blob does.
+        if compress_sprites == "bitplane":
+            flags_bw, pixel_body_bw = compress_sprite_pixels_bitplane_bw(
+                frame_meta_bw, dims, pixels_bw)
+        else:
+            flags_bw, pixel_body_bw = compress_pixel_body(pixels_bw, compress_sprites)
         sprite["blob_bw"] = (blob_header(MAGIC_SPRITE, len(frames), flags_bw, orient=orient)
                              + frame_meta_bw + pad4(bytes(assign)) + pixel_body_bw + shapes)
 
@@ -2094,7 +2211,11 @@ def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False,
         frame_packed_bw = [pack_unit_2bpp(f) for f in frames]
         frame_meta_bw, pixels_bw = build_sprite_frame_meta(dims, origins, collision,
                                                             frame_packed_bw)
-        flags_bw, pixel_body_bw = compress_pixel_body(pixels_bw, compress_sprites)
+        if compress_sprites == "bitplane":
+            flags_bw, pixel_body_bw = compress_sprite_pixels_bitplane_bw(
+                frame_meta_bw, dims, pixels_bw)
+        else:
+            flags_bw, pixel_body_bw = compress_pixel_body(pixels_bw, compress_sprites)
         sprite["blob_bw"] = (blob_header(MAGIC_SPRITE, len(frames), flags_bw, orient=orient)
                              + frame_meta_bw + pad4(bytes(assign)) + pixel_body_bw + shapes)
 
@@ -2837,9 +2958,18 @@ def _write_elias_gamma(bw, v):
     bw.write_bits_msb(v + 1 - (1 << n_bits), n_bits)
 
 
-def encode_bitplane_unit(pixels):
+def encode_bitplane_units(units):
+    """Concatenates bitplane-encoded units with a leading u16 offset table."""
+    offsets = [0]
+    for u in units:
+        offsets.append(offsets[-1] + len(u))
+    offset_table = b"".join(o.to_bytes(2, "little") for o in offsets)
+    return offset_table + b"".join(units)
+
+
+def encode_bitplane_unit(pixels, bpp=4):
     """Bitplane-separated, Elias-gamma-RLE-coded, frequency-sorted-local-palette
-    encoding of one sprite frame or atlas tile's pixel indices (flat, row-major, 0-15) --
+    encoding of one sprite frame or atlas tile's pixel indices (flat, row-major) --
     src/pnx/assets/pnx_bitplane.c's decoder reads exactly this. Ported from this
     session's bpeg_encode.py prototype (2000/2000 synthetic + 48/48 real-tile round-trips
     verified there and again by test_bitplane_compress.c/test_bitplane_atlas.c on the C
@@ -2847,19 +2977,34 @@ def encode_bitplane_unit(pixels):
     project's build. See src/pnx/assets/pnx_bitplane.h for the on-disk layout and why it
     trades against LZSS the way it does (random per-unit access vs raw size).
 
+    The bitplane/Elias-gamma stream's own cost is ceil(log2(k)) bits/pixel for this unit's
+    own real colour count `k`, independent of `bpp` -- a 2-colour BW tile costs the same
+    ~1 bit/pixel here a 2-colour 4bpp tile would. `bpp` (4 for a colour build's own
+    pixels, 2 for a `~bw` build's ink states -- see bw_pixel_states) only selects which
+    packed layout the RAW fallback escape hatch below falls back to, so it stays pixel-
+    identical to what an uncompressed build of the SAME bpp would have shipped (the same
+    round-trip guarantee the 4bpp path always had).
+
     Returns the complete on-disk bytes for this one unit: 1-byte header (bit 7 = raw
-    fallback flag, bits 3-0 = local colour count - 1) then either the packed-4bpp escape
-    hatch or a nibble-packed local-palette offset table + the bitplane/Elias-gamma
-    stream, whichever is smaller -- same "never worse than raw" guarantee
-    compress_pixel_body already gives LZSS.
+    fallback flag, bits 3-0 = local colour count - 1) then either the packed escape hatch
+    (bpp-packed, matching bp_pack/pnx_bitplane_decode's PNX_DISPLAY_BW branch on the C
+    side) or a nibble-packed local-palette offset table + the bitplane/Elias-gamma stream,
+    whichever is smaller -- same "never worse than raw" guarantee compress_pixel_body
+    already gives LZSS.
     """
     n = len(pixels)
     colors = sorted(set(pixels))
     k = len(colors)
+    limit = 1 << bpp
     if k > 16:
-        raise BuildError(f"encode_bitplane_unit: {k} distinct colours, 4bpp allows at most 16")
+        raise BuildError(f"encode_bitplane_unit: {k} distinct colours, 16 is the most "
+                         f"the on-disk local-palette offset table can index")
+    if k > limit:
+        raise BuildError(f"encode_bitplane_unit: {k} distinct values, {bpp}bpp allows at "
+                         f"most {limit}")
 
-    raw_body = pack_unit_4bpp_raw_indices(pixels)
+    raw_body = (pack_unit_4bpp_raw_indices(pixels) if bpp == 4
+               else pack_2bpp_raw_states(pixels))
 
     freq = {}
     for p in pixels:
@@ -2925,6 +3070,20 @@ def unpack_4bpp_to_indices(data, n):
         out.append(b >> 4)
         if len(out) < n:
             out.append(b & 0x0F)
+    return out[:n]
+
+
+def unpack_2bpp_to_states(data, n):
+    """Inverse of pack_unit_2bpp/pack_2bpp_raw_states -- reads `n` ink states (0-3) back
+    out of `data`'s 4-per-byte, high-bits-first packing. compress_sprite_pixels_bitplane_bw's
+    own use, mirroring unpack_4bpp_to_indices for the colour path."""
+    out = []
+    for i in range(0, n, 4):
+        b = data[i // 4]
+        for k in range(4):
+            if len(out) >= n:
+                break
+            out.append((b >> (6 - 2 * k)) & 3)
     return out[:n]
 
 
@@ -5428,38 +5587,36 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
         print("  compress_maps: LZSS-compressing WorldTile bank bodies -- set "
               "PNX_USE_MAP_COMPRESS=1 in the project's pnx_config.h to match")
 
-    # Same posture as compress_maps, simpler because a sprite loads whole rather than
-    # banked -- one LZSS stream per sprite, not one per bank. Pairs with
-    # PNX_USE_SPRITE_COMPRESS. compress_pixel_body never emits the compressed form
-    # for a sprite too small to benefit, so this is safe to leave on project-wide rather
-    # than needing a per-sprite opt-in.
-    #
-    # `"bitplane"` (a string, not the plain boolean every other compress_* flag takes)
-    # selects the experimental per-frame-random-access format (pnx_bitplane.c) instead --
-    # bool()'d away rather than compared against here would collapse it to True and
-    # silently build ordinary LZSS sprites, which is exactly the kind of "looks like it
-    # worked, decodes the wrong thing" failure this session's whole atlas depth-mismatch
-    # bug already was once. Left as the raw manifest value; finish_sprite is what
-    # actually branches on the string vs plain True.
-    compress_sprites_raw = project.get("compress_sprites", False)
-    compress_sprites = (compress_sprites_raw if compress_sprites_raw == "bitplane"
-                        else bool(compress_sprites_raw))
-    if compress_sprites == "bitplane":
-        print("  compress_sprites: bitplane/Elias-gamma-compressing sprite pixel data "
-              "(experimental) -- set PNX_USE_BITPLANE_COMPRESS=1 in the project's "
-              "pnx_config.h to match")
-    elif compress_sprites:
-        print("  compress_sprites: LZSS-compressing sprite pixel data -- set "
-              "PNX_USE_SPRITE_COMPRESS=1 in the project's pnx_config.h to match")
+    # Project-wide sprite/atlas pixel compression -- exactly one mode, applied uniformly
+    # to every sprite and every atlas the project builds. Mirrors PNX_COMPRESS_MODE
+    # (pnx_config.h): a project sets one, matches the other. Defaults to "bitplane" --
+    # the only mode that keeps pixel data out of RAM until a frame or tile is actually
+    # drawn (pnx_tile_cache.c/pnx_sprite_cache.c decode on demand); "lzss" or "none" opts
+    # out. compress_pixel_body never emits the compressed form for content too small to
+    # benefit, so "lzss" is safe to leave on project-wide rather than needing a per-asset
+    # opt-in.
+    for stale_key in ("compress_sprites", "compress_atlases"):
+        if stale_key in project:
+            raise BuildError(
+                f"project: {stale_key!r} is no longer read -- sprite/atlas pixel "
+                f"compression is project-wide now, one choice for both. Replace it (and "
+                f"its sibling, if both are set) with a single `compress = \"none\" | "
+                f"\"lzss\" | \"bitplane\"` in [project].")
+    compress = project.get("compress", "bitplane")
+    if compress not in ("none", "lzss", "bitplane"):
+        raise BuildError(
+            f"project: compress = {compress!r} is not one of \"none\", \"lzss\", "
+            f"\"bitplane\"")
+    compress_sprites = compress if compress != "none" else False
+    compress_atlases = compress if compress != "none" else False
 
-    # The one most likely to actually matter: an atlas is typically the largest single
-    # resource category in tile-heavy content (a real RPG demo measured 93% of its
-    # resource budget as atlas), where compress_maps/compress_sprites alone barely move
-    # the total. Pairs with PNX_USE_ATLAS_COMPRESS.
-    compress_atlases = bool(project.get("compress_atlases", False))
-    if compress_atlases:
-        print("  compress_atlases: LZSS-compressing atlas/tile pixel data -- set "
-              "PNX_USE_ATLAS_COMPRESS=1 in the project's pnx_config.h to match")
+    if compress == "bitplane":
+        print("  compress: bitplane/Elias-gamma-compressing sprite and atlas pixel data "
+              "for on-demand decoding -- set PNX_COMPRESS_MODE=PNX_COMPRESS_BITPLANE in "
+              "the project's pnx_config.h to match (the default either side)")
+    elif compress == "lzss":
+        print("  compress: LZSS-compressing sprite and atlas pixel data -- set "
+              "PNX_COMPRESS_MODE=PNX_COMPRESS_LZSS in the project's pnx_config.h to match")
 
     shared = []
     settle_palettes(atlases, sprites, shared, nine_slices)

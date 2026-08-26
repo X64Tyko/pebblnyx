@@ -1,6 +1,6 @@
 #include "pnx_lzss.h"
 
-#if PNX_USE_MAP_COMPRESS || PNX_USE_SPRITE_COMPRESS || PNX_USE_ATLAS_COMPRESS
+#if PNX_USE_MAP_COMPRESS || PNX_COMPRESS_MODE == PNX_COMPRESS_LZSS
 
 size_t pnx_lzss_decode(const uint8_t* src, size_t src_len, uint8_t* dst, size_t dst_len)
 {

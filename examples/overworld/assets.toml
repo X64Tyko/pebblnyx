@@ -12,8 +12,12 @@ name = "overworld"
 resources = "resources"
 header = "src/c/assets_gen.h"
 compress_maps = true
-compress_sprites = true
-compress_atlases = true
+# Uncompressed sprite/atlas pixels -- this example is the main content the host test
+# suite's default (PNX_COMPRESS_NONE) binary loads (tests/test_gfx.c, test_assets.c) and
+# test_pack2bit_bw.c's ~bw depth-mismatch check also reads it, both of which need a
+# resident-pixel build. A project wanting to try LZSS or bitplane compression should copy
+# this manifest rather than change the one every host test depends on.
+compress = "none"
 
 # Where the button cluster sits when the watch is held to play, which is what decides
 # whether the display is portrait or landscape. Named for the cluster rather than for a

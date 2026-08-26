@@ -386,9 +386,17 @@ static void draw_horizon_band(PnxTarget* target, const Game* g, int32_t horizon_
 			const uint8_t tile =
 				(((world_col % 5) + 5) % 5 == 0) ? lit : HORIZON_PATTERN[pattern_idx];
 
-			pnx_blit_4bpp(target, pnx_atlas_tile(&g->horizon_atlas, tile),
-						  pnx_atlas_tile_palette(&g->horizon_atlas, tile), phys_x, x,
-						  HORIZON_BAND_TILE_PX, HORIZON_BAND_TILE_PX, PNX_FLIP_NONE);
+			// Pixels come from horizon_atlas's own bitplane-compressed units, fetched and
+			// decoded on demand by pnx_atlas_tile through the shared tile cache -- not a
+			// separate resource, and not g->horizon_atlas.pixels (that field does not
+			// exist under bitplane compression; see game.h's own comment on why this
+			// atlas loads through pnx_atlas_load for metadata only). A cache/decode miss
+			// just skips this one tile rather than drawing garbage.
+			const uint8_t* px = pnx_atlas_tile(&g->horizon_atlas, tile);
+			if (px)
+				pnx_blit_4bpp(target, px, pnx_atlas_tile_palette(&g->horizon_atlas, tile),
+							  phys_x, x, HORIZON_BAND_TILE_PX, HORIZON_BAND_TILE_PX,
+							  PNX_FLIP_NONE);
 		}
 	}
 }
@@ -466,10 +474,13 @@ static void draw_ground(PnxTarget* target, const Game* g, int32_t horizon_y)
 		const uint8_t plain = alt ? 1 : 0; // GROUND tiles 0/1: the old COLOUR_GROUND_A/B pair
 
 		// pnx_blit_metatile requires atlas->metatiles (quadrant-composed tiles) --
-		// ground.bin is a plain/flat atlas (4 whole 16x16 tiles, metatiles unset), so
-		// its tiles are read directly via pnx_atlas_tile + pnx_blit_4bpp, the same way
-		// any other flat atlas tile is (pnx_atlas_tile's own comment). Square tile, so
-		// the usual logical/physical w<->h swap (fb_rect's own transform) is a no-op.
+		// ground.bin is a plain/flat atlas (4 whole 16x16 tiles, metatiles unset).
+		// Pixels come from ground_atlas's own bitplane-compressed units, fetched and
+		// decoded on demand by pnx_atlas_tile through the shared tile cache -- not a
+		// separate resource, and not g->ground_atlas.pixels (that field does not exist
+		// under bitplane compression; see game.h's own comment on why this atlas loads
+		// through pnx_atlas_load for metadata only). Square tile, so the usual
+		// logical/physical w<->h swap (fb_rect's own transform) is a no-op.
 		//
 		// `x < LOGICAL_W`, not `x + TILE_PX <= LOGICAL_W`: same reasoning as
 		// draw_horizon_band's own identical comment -- LOGICAL_W is not generally a
@@ -478,9 +489,10 @@ static void draw_ground(PnxTarget* target, const Game* g, int32_t horizon_y)
 		for (int32_t col = 0, x = 0; x < LOGICAL_W; x += GROUND_TILE_PX, col++)
 		{
 			const uint8_t tile = ((col + col_shift + row_idx) % 4 == 0) ? light : plain;
-			pnx_blit_4bpp(target, pnx_atlas_tile(&g->ground_atlas, tile),
-						  pnx_atlas_tile_palette(&g->ground_atlas, tile), phys_x, x,
-						  GROUND_TILE_PX, GROUND_TILE_PX, PNX_FLIP_NONE);
+			const uint8_t* px  = pnx_atlas_tile(&g->ground_atlas, tile);
+			if (px)
+				pnx_blit_4bpp(target, px, pnx_atlas_tile_palette(&g->ground_atlas, tile),
+							  phys_x, x, GROUND_TILE_PX, GROUND_TILE_PX, PNX_FLIP_NONE);
 		}
 		next_boundary -= GROUND_TILE_PX;
 		row_idx++;

@@ -4,6 +4,9 @@
 
 #include "../assets/pnx_assets.h"
 
+// pnx_sprite_frame_get fetches+decodes through pnx_sprite_cache_get on a cache miss under
+// PNX_COMPRESS_BITPLANE, or is a direct offset into a resident buffer otherwise (see its
+// own comment, pnx_assets.h) -- either way this function's own source never changes.
 void pnx_sprite_draw(const PnxSprite* sprite, PnxTarget* target, const PnxCamera* camera,
 					 int32_t wx, int32_t wy, uint8_t frame, const PnxPalette* palette,
 					 bool mirror)
@@ -19,6 +22,8 @@ void pnx_sprite_draw(const PnxSprite* sprite, PnxTarget* target, const PnxCamera
 	// rather than every frame sharing one w/2,h.
 	PnxSpriteFrame f;
 	pnx_sprite_frame_get(sprite, frame, &f);
+	if (!f.pixels)
+		return; // decode failed, or the cache couldn't hold even one flushed frame
 	pnx_blit_4bpp(target, f.pixels, palette, wx - camera->x - f.origin_x,
 				  wy - camera->y - f.origin_y, f.w, f.h, mirror);
 }

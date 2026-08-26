@@ -1,25 +1,26 @@
-// Host test for `compress_sprites` against a real pipeline-built, LZSS-compressed sprite
-// -- test_assets.py's pipeline round-trip (lzss_decompress, the Python mirror) proves the
-// byte format is self-consistent; this proves the real C decoder (pnx_sprite_load's
-// compressed branch, wired to pnx_lzss_decode) reads it back correctly, the same
-// division of labour test_map_compress.c already has for compressed maps.
+// Host test for `compress = "lzss"` against a real pipeline-built, LZSS-compressed
+// sprite -- test_assets.py's pipeline round-trip (lzss_decompress, the Python mirror)
+// proves the byte format is self-consistent; this proves the real C decoder
+// (pnx_sprite_load's compressed branch, wired to pnx_lzss_decode) reads it back
+// correctly, the same division of labour test_map_compress.c already has for compressed
+// maps. Compiled only into build/test_lzss (tests/Makefile's LZSS_SRC).
 //
-// Reuses fixtures/lzss/, which now also declares `compress_sprites = true` and a single
-// flat (maximally repetitive, so it actually compresses) 16x16 sprite frame.
+// Uses fixtures/lzss_pixels/ (compress = "lzss", not fixtures/lzss/ itself, which stays
+// uncompressed for test_map_compress.c's own PNX_COMPRESS_NONE binary -- see that
+// fixture's own comment), a single flat (maximally repetitive, so it actually
+// compresses) 16x16 sprite frame.
 
 #include "../src/pnx/pnx_config.h"
-
-#if PNX_USE_SPRITE_COMPRESS
 
 #include "../src/pnx/core/pnx_arena.h"
 #include "../src/pnx/assets/pnx_assets.h"
 #include "../src/pnx/platform/pnx_platform_host.h"
 
+#include <stdbool.h>
 #include <stdio.h>
-#include <string.h>
 
-#define LZSS_DIR "fixtures/lzss/resources/"
-#include "fixtures/lzss/gen.h"
+#define LZSS_DIR "fixtures/lzss_pixels/resources/"
+#include "fixtures/lzss_pixels/gen.h"
 
 extern int s_failures;
 extern int s_checks;
@@ -96,12 +97,3 @@ void test_sprite_compress(void)
 	SC_CHECK(uniform);
 #endif
 }
-
-#else
-
-void test_sprite_compress(void);
-void test_sprite_compress(void)
-{
-}
-
-#endif // PNX_USE_SPRITE_COMPRESS

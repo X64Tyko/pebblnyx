@@ -1,6 +1,6 @@
 #include "pnx_bitplane.h"
 
-#if PNX_USE_BITPLANE_COMPRESS
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
 
 // Bit-level reader, MSB-first within each byte -- matches tools/bpeg_encode.py's
 // BitWriter exactly (see that file for the encoder, and pnx_bitplane.h for the format).
@@ -45,10 +45,30 @@ static uint32_t bp_read_elias_gamma(BitReader* r)
 	return (1u << n_bits) + mantissa - 1;
 }
 
-// Packs `scratch[0..n)` (one real 4bpp palette index per byte) into `dst`, 2 pixels/byte,
-// high nibble first -- pack_unit_4bpp's own layout, unconditionally: this is the only
+// Packs `scratch[0..n)` (one real palette index per byte) into `dst` -- this is the only
 // place decoded pixels ever leave the module, whichever path (raw/k==1/bitplane) produced
-// them.
+// them, so this #if is the single point that picks the build's output format.
+#if PNX_DISPLAY_BW
+// 4 pixels/byte, high bits first -- pack_unit_2bpp's own layout. Indices here are already
+// the 0-3 ink-state values pack_unit_2bpp itself would have computed; this format only
+// exists on a 1-bit build (PNX_DISPLAY_BW), so there is no separate "real" colour to remap
+// through the way a colour tile's index maps into a shared palette.
+static void bp_pack(const uint8_t* scratch, uint8_t* dst, uint16_t n)
+{
+	for (uint16_t i = 0; i < n; i += 4)
+	{
+		uint8_t byte = 0;
+		for (uint8_t k = 0; k < 4; k++)
+		{
+			const uint16_t j = (uint16_t)(i + k);
+			const uint8_t s	 = j < n ? scratch[j] : 0;
+			byte |= (uint8_t)(s << (6 - 2 * k));
+		}
+		dst[i / 4] = byte;
+	}
+}
+#else
+// 2 pixels/byte, high nibble first -- pack_unit_4bpp's own layout.
 static void bp_pack(const uint8_t* scratch, uint8_t* dst, uint16_t n)
 {
 	for (uint16_t i = 0; i < n; i += 2)
@@ -58,6 +78,7 @@ static void bp_pack(const uint8_t* scratch, uint8_t* dst, uint16_t n)
 		dst[i / 2]		 = (uint8_t)((hi << 4) | lo);
 	}
 }
+#endif
 
 bool pnx_bitplane_decode(const uint8_t* src, size_t src_len, uint8_t* dst, uint8_t* scratch,
 						 uint16_t n)
@@ -70,9 +91,10 @@ bool pnx_bitplane_decode(const uint8_t* src, size_t src_len, uint8_t* dst, uint8
 
 	if (raw_flag)
 	{
-		// Already packed on disk (the encoder's own escape hatch is pack_unit_4bpp's
-		// layout verbatim) -- straight copy, no scratch needed at all.
-		const size_t need = ((size_t)n + 1) / 2;
+		// Already packed on disk (the encoder's own escape hatch is bp_pack's own layout
+		// verbatim, whichever this build's PNX_DISPLAY_BW selects) -- straight copy, no
+		// scratch needed at all.
+		const size_t need = PNX_BITPLANE_PACKED_BYTES(n);
 		if (src_len < 1 + need)
 			return false;
 		for (size_t i = 0; i < need; i++)
@@ -146,4 +168,4 @@ bool pnx_bitplane_decode(const uint8_t* src, size_t src_len, uint8_t* dst, uint8
 	return true;
 }
 
-#endif // PNX_USE_BITPLANE_COMPRESS
+#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE

@@ -1,18 +1,20 @@
-// Host test for `compress_atlases` against a real pipeline-built, LZSS-compressed atlas
+// Host test for `compress = "lzss"` against a real pipeline-built, LZSS-compressed atlas
 // -- test_assets.py's pipeline round-trip (lzss_decompress, the Python mirror) proves the
 // byte format is self-consistent; test_map_compress.c proves the pool/`dst`-provided
-// decode branch of `atlas_load_into` (the one every map actually uses). Neither exercises
-// `pnx_atlas_load`'s own `dst=NULL`, fresh-arena-buffer branch, which is a different code
-// path with no precedent to copy from (see that branch's own comment in pnx_assets.c).
+// decode branch of `atlas_load_into` (the one every map actually uses), against its own
+// uncompressed fixture. Neither exercises `pnx_atlas_load`'s own `dst=NULL`, fresh-arena-
+// buffer branch, which is a different code path with no precedent to copy from (see that
+// branch's own comment in pnx_assets.c). Compiled only into build/test_lzss
+// (tests/Makefile's LZSS_SRC).
 //
-// Cross-checked against the SAME atlas loaded through the pool path (test_map_compress.c's
-// map "a" references it) rather than a hand-typed expected byte sequence: both branches
-// decode the identical on-disk compressed stream, so if either has an offset bug the two
-// will disagree, tile role identities and all.
+// Uses fixtures/lzss_pixels/ (compress = "lzss" -- see that fixture's own comment for why
+// it is separate from fixtures/lzss/), whose own map "a" (loaded here too, `compress_maps`
+// off) references this same atlas -- the pool-load path is cross-checked against the
+// direct one below rather than a hand-typed expected byte sequence: both decode the
+// identical on-disk compressed stream, so if either has an offset bug the two will
+// disagree, tile role identities and all.
 
 #include "../src/pnx/pnx_config.h"
-
-#if PNX_USE_ATLAS_COMPRESS
 
 #include "../src/pnx/core/pnx_arena.h"
 #include "../src/pnx/assets/pnx_assets.h"
@@ -21,8 +23,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#define LZSS_DIR "fixtures/lzss/resources/"
-#include "fixtures/lzss/gen.h"
+#define LZSS_DIR "fixtures/lzss_pixels/resources/"
+#include "fixtures/lzss_pixels/gen.h"
 
 extern int s_failures;
 extern int s_checks;
@@ -120,12 +122,3 @@ void test_atlas_compress(void)
 		AC_CHECK(memcmp(direct_accent, direct_floor, TILES_TILE_BYTES) != 0);
 	}
 }
-
-#else
-
-void test_atlas_compress(void);
-void test_atlas_compress(void)
-{
-}
-
-#endif // PNX_USE_ATLAS_COMPRESS

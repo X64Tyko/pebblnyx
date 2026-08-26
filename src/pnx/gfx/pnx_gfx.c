@@ -477,8 +477,10 @@ void pnx_blit_metatile_with(PnxTarget* t, const PnxAtlas* atlas, uint8_t tile,
 
 		for (int32_t k = 0; k < 2; k++)
 		{
-			const uint8_t* line =
-				atlas->pixels + (uint32_t)pair[k] * atlas->sub_bytes + qj * sub_stride;
+			const uint8_t* sub = pnx_atlas_subtile(atlas, pair[k]);
+			if (!sub)
+				continue;
+			const uint8_t* line = sub + qj * sub_stride;
 #if PNX_DISPLAY_BW
 			span_2bpp_packed(row.data, x + k * half, line, half, row.min_x, row.max_x, y + j);
 #else

@@ -1,0 +1,57 @@
+[project]
+name = "lzss_pixels_fixture"
+resources = "resources"
+header = "gen.h"
+# LZSS-compressed sprite/atlas pixels specifically -- test_sprite_compress.c and
+# test_atlas_compress.c's own fixture (tests/Makefile's LZSS_OUT, PNX_COMPRESS_LZSS),
+# split out from tests/fixtures/lzss/ (which stayed at compress = "none" for
+# test_map_compress.c -- see that manifest's own comment). `compress_maps` stays off
+# here: LZSS_OUT does not define PNX_USE_MAP_COMPRESS, and this fixture's own map exists
+# only so test_atlas_compress.c can cross-check the pool-load path against the direct one,
+# not to exercise bank compression.
+compress = "lzss"
+
+[[sprite]]
+name = "flat"
+sheet = "sheet.png"
+frames = [[0, 0, 16, 16]]
+out = "flat.bin"
+
+[[atlas]]
+name = "tiles"
+sheet = "sheet.png"
+tile = 16
+region = [0, 0, 2, 2]
+max_tiles = 16
+out = "tiles.bin"
+autopick = ["floor", "wall", "accent"]
+[[atlas.collision]]
+tile = "wall"
+type = "solid"
+
+[legend."."]
+tile = "floor"
+flags = []
+[legend."#"]
+tile = "wall"
+flags = []
+[legend."A"]
+tile = "accent"
+flags = []
+
+[[map]]
+name = "a"
+out = "a.bin"
+start = [1, 1]
+warps = []
+worldtile = 4
+rows = """
+########
+#......#
+#.####.#
+#.#..#.#
+#.#AA#.#
+#.####.#
+#......#
+########
+"""

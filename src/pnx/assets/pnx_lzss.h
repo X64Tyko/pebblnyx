@@ -13,7 +13,7 @@
 
 #include "../pnx_config.h"
 
-#if PNX_USE_MAP_COMPRESS || PNX_USE_SPRITE_COMPRESS || PNX_USE_ATLAS_COMPRESS
+#if PNX_USE_MAP_COMPRESS || PNX_COMPRESS_MODE == PNX_COMPRESS_LZSS
 
 #include <stddef.h>
 #include <stdint.h>

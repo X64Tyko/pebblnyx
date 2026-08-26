@@ -19,12 +19,17 @@ orientation = "buttons_top"
 device_address = "192.168.0.48"
 force_screen_lock = true
 # Sprites are 98% of this project's resource budget (touring/police/hangon_bike), so
-# this is where compression actually matters. "bitplane" (experimental,
-# PNX_USE_BITPLANE_COMPRESS = 1 in src/c/pnx/pnx_config.h) in place of plain LZSS
-# (PNX_USE_SPRITE_COMPRESS) -- this session's real-content measurements found it costs
-# more flash on this project's busier/dithered sprites than LZSS does, but decodes each
-# frame independently, which LZSS's single combined stream cannot.
-compress_sprites = "bitplane"
+# this is where compression actually matters. Bitplane (PNX_COMPRESS_MODE =
+# PNX_COMPRESS_BITPLANE in src/c/pnx/pnx_config.h, project-wide -- applies to every
+# sprite and every atlas alike, not a per-asset-type choice) in place of plain LZSS --
+# this session's real-content measurements found it costs more flash on this project's
+# busier/dithered sprites than LZSS does, but decodes each frame/tile independently,
+# which LZSS's single combined stream cannot: traffic_car/police_normal/police_crash and
+# ground/horizon_band all decode on demand through pnx_sprite_cache.c/pnx_tile_cache.c
+# instead of being decoded whole into the arena at boot, which is what let them fit
+# basalt-class platforms' scene arena at all. pnx_sprite_load/pnx_atlas_load themselves
+# stay the loaders either way -- there is no separate "lazy" entry point or resource.
+compress = "bitplane"
 
 # Add content with the editor's Import and Fonts tabs, or by hand:
 #
