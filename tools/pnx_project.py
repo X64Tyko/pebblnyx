@@ -245,6 +245,7 @@ import os
 import os.path
 import subprocess
 import sys
+import tomllib
 
 top = '.'
 out = 'build'
@@ -256,6 +257,35 @@ def options(ctx):
 
 def configure(ctx):
     ctx.load('pebble_sdk')
+
+
+# Derives the compile-time defines this project's OWN manifest requires from the
+# manifest itself, rather than relying on a developer to notice tools/pnx_assets.py's
+# own printed reminder ("set PNX_COMPRESS_MODE=... to match") and hand-edit pnx_config.h
+# or PNX_DEFINES every time `compress`/`compress_maps` changes. Still needed even though
+# the editor restages src/c/pnx fresh before most builds (this file's own top comment):
+# that staged copy is the framework's bare pnx_config.h defaults, which know nothing
+# about what THIS project's manifest actually built. A mismatch here is a silent
+# refusal-to-load at runtime (every flag mismatch decodes as "refuse, don't misread"),
+# not a build failure -- exactly the "presents as nothing happens" class of bug
+# tools/pnx_assets.py's own module docstring warns about.
+_COMPRESS_MODE_DEFINE = {
+    'none': 'PNX_COMPRESS_MODE=PNX_COMPRESS_NONE',
+    'lzss': 'PNX_COMPRESS_MODE=PNX_COMPRESS_LZSS',
+    'bitplane': 'PNX_COMPRESS_MODE=PNX_COMPRESS_BITPLANE',
+}
+
+
+def _manifest_defines(ctx):
+    manifest_path = ctx.path.find_node('assets.toml')
+    if not manifest_path:
+        return []
+    with open(manifest_path.abspath(), 'rb') as f:
+        project = tomllib.load(f).get('project', {})
+    defines = [_COMPRESS_MODE_DEFINE[project.get('compress', 'bitplane')]]
+    if project.get('compress_maps', False):
+        defines.append('PNX_USE_MAP_COMPRESS=1')
+    return defines
 
 
 def _size_report(ctx):
@@ -276,7 +306,9 @@ def build(ctx):
 
     # Lets a build override pnx_config.h without editing it:
     #     PNX_DEFINES=PNX_USE_DIAGNOSTICS=0 pebble build
-    extra = [d for d in os.environ.get('PNX_DEFINES', '').split() if d]
+    # Manifest-derived defines go first so an explicit PNX_DEFINES always wins (a later
+    # -D of the same macro silently overrides an earlier one; no clash either way).
+    extra = _manifest_defines(ctx) + [d for d in os.environ.get('PNX_DEFINES', '').split() if d]
 
     binaries = []
     cached_env = ctx.env

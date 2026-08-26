@@ -807,6 +807,77 @@ static uint8_t* atlas_bitplane_alloc(uint8_t* dst, size_t dst_off, size_t cap, s
 	return (uint8_t*)arena_alloc(bytes, 4);
 }
 
+// Shared by atlas_load_bitplane_into/sprite_load_bitplane: the bounds check + header
+// read + log both start with, identical apart from which noun (`what`) and magic go in
+// the message/read.
+// noinline: both are small enough, and each has only two call sites, that the compiler's
+// own cost model would otherwise inline them back into every caller -- correct, but it
+// silently undoes the point of factoring this out at all (identical compiled bytes at
+// each site, not shared ones). Loading is once-per-asset, never a hot loop, so the
+// call/return this forces costs nothing worth trading the real, measured byte saving
+// against (see docs/GAME-COMPARISON.md's own session note on this).
+__attribute__((noinline)) static bool bitplane_read_header(uint16_t asset_id, const char* what, const char* magic,
+														   uint8_t header[PNX_BLOB_HEADER_BYTES], uint32_t* out_resource)
+{
+	if (asset_id >= s_resource_count)
+	{
+		pnx_log("%s %u: out of range (have %u)", what, asset_id, s_resource_count);
+		return false;
+	}
+	*out_resource = s_resources[asset_id];
+	if (!read_blob_header(*out_resource, magic, header))
+	{
+		pnx_log("%s %u: missing, wrong type/version, or stale orientation", what, asset_id);
+		return false;
+	}
+	return true;
+}
+
+// Shared by atlas_load_bitplane_into/sprite_load_bitplane: reads the (unit_count+1)-entry
+// u16 offset table at `stream_offset` within `resource` to find where the compressed
+// stream ends and the shape-table tail begins, then reads that tail into `dst`/`cap` (an
+// atlas's pool slot) or a fresh arena buffer (`dst` NULL -- a plain sprite load, or a
+// standalone/scene atlas) via atlas_bitplane_alloc. Returns the tail, with its length in
+// `*out_len`, or NULL (logged against `what`/`asset_id`) on any failure.
+__attribute__((noinline)) static const uint8_t* load_bitplane_shapes(uint32_t resource, uint32_t stream_offset,
+																	 uint16_t unit_count, uint8_t* dst, size_t dst_off,
+																	 size_t cap, const char* what, uint16_t asset_id,
+																	 size_t* out_len)
+{
+	size_t size = 0;
+	if (!pnx_platform_resource_size(resource, &size))
+	{
+		pnx_log("%s %u: resource size unavailable", what, asset_id);
+		return NULL;
+	}
+	const size_t table_bytes = (size_t)(unit_count + 1) * 2;
+	uint8_t last_offset[2];
+	if (size < stream_offset + table_bytes ||
+		!read_resource_range(resource, stream_offset + (size_t)unit_count * 2, last_offset, 2))
+	{
+		pnx_log("%s %u: too small for a %u-unit bitplane offset table", what, asset_id,
+				unit_count);
+		return NULL;
+	}
+	const uint16_t stream_len = read_u16(last_offset);
+	const size_t shapes_off	  = stream_offset + table_bytes + stream_len;
+	if (size < shapes_off)
+	{
+		pnx_log("%s %u: bitplane stream runs past the blob", what, asset_id);
+		return NULL;
+	}
+	const size_t shapes_len = size - shapes_off;
+
+	uint8_t* shapes = atlas_bitplane_alloc(dst, dst_off, cap, shapes_len);
+	if (!shapes || !read_resource_range(resource, shapes_off, shapes, shapes_len))
+	{
+		pnx_log("%s %u: short read, shape tables", what, asset_id);
+		return NULL;
+	}
+	*out_len = shapes_len;
+	return shapes;
+}
+
 // Loads a bitplane atlas's METADATA only -- tile_palette/tile_flags/metatiles/shape
 // tables -- and records where its compressed pixel units live in `resource`
 // (`stream_offset`). No pixel or unit-offset-table byte is ever bulk-read: those stay in
@@ -825,19 +896,10 @@ static bool atlas_load_bitplane_into(PnxAtlas* out, uint16_t asset_id, uint8_t* 
 		return false;
 	}
 #endif
-	if (asset_id >= s_resource_count)
-	{
-		pnx_log("atlas %u: out of range (have %u)", asset_id, s_resource_count);
-		return false;
-	}
-	const uint32_t resource = s_resources[asset_id];
-
+	uint32_t resource;
 	uint8_t header[PNX_BLOB_HEADER_BYTES];
-	if (!read_blob_header(resource, "PA", header))
-	{
-		pnx_log("atlas %u: missing, wrong type/version, or stale orientation", asset_id);
+	if (!bitplane_read_header(asset_id, "atlas", "PA", header, &resource))
 		return false;
-	}
 	const uint8_t tile_px	  = header[3];
 	const uint16_t tile_count = header[4];
 	const uint8_t layout	  = header[5];
@@ -909,41 +971,15 @@ static bool atlas_load_bitplane_into(PnxAtlas* out, uint16_t asset_id, uint8_t* 
 			}
 		}
 	}
-	out->unit_count = (layout == 1) ? subtile_count : tile_count;
-
-	size_t size = 0;
-	if (!pnx_platform_resource_size(resource, &size))
-	{
-		pnx_log("atlas %u: resource size unavailable", asset_id);
-		return false;
-	}
+	out->unit_count	   = (layout == 1) ? subtile_count : tile_count;
 	out->stream_offset = (uint32_t)(PNX_BLOB_HEADER_BYTES + prefix_bytes);
 
-	const size_t table_bytes = (size_t)(out->unit_count + 1) * 2;
-	uint8_t last_offset[2];
-	if (size < out->stream_offset + table_bytes ||
-		!read_resource_range(resource, out->stream_offset + (size_t)out->unit_count * 2,
-							 last_offset, 2))
-	{
-		pnx_log("atlas %u: too small for a %u-unit bitplane offset table", asset_id,
-				out->unit_count);
+	size_t shapes_len	  = 0;
+	const uint8_t* shapes = load_bitplane_shapes(
+		resource, out->stream_offset, out->unit_count, dst,
+		PNX_BLOB_HEADER_BYTES + prefix_bytes, cap, "atlas", asset_id, &shapes_len);
+	if (!shapes)
 		return false;
-	}
-	const uint16_t stream_len = read_u16(last_offset);
-	const size_t shapes_off	  = out->stream_offset + table_bytes + stream_len;
-	if (size < shapes_off)
-	{
-		pnx_log("atlas %u: bitplane stream runs past the blob", asset_id);
-		return false;
-	}
-	const size_t shapes_len = size - shapes_off;
-
-	uint8_t* shapes = atlas_bitplane_alloc(dst, PNX_BLOB_HEADER_BYTES + prefix_bytes, cap, shapes_len);
-	if (!shapes || !read_resource_range(resource, shapes_off, shapes, shapes_len))
-	{
-		pnx_log("atlas %u: short read, shape tables", asset_id);
-		return false;
-	}
 	size_t shapes_consumed = 0;
 	if (!parse_atlas_shapes(shapes, shapes_len, tile_count, tile_px, asset_id, out,
 							&shapes_consumed))
@@ -1128,19 +1164,10 @@ static bool sprite_load_prefix(uint16_t asset_id, SpritePrefix* p)
 // atlas_load_bitplane exactly; see that function's own comment.
 static bool sprite_load_bitplane(PnxSprite* out, uint16_t asset_id)
 {
-	if (asset_id >= s_resource_count)
-	{
-		pnx_log("sprite %u: out of range (have %u)", asset_id, s_resource_count);
-		return false;
-	}
-	const uint32_t resource = s_resources[asset_id];
-
+	uint32_t resource;
 	uint8_t header[PNX_BLOB_HEADER_BYTES];
-	if (!read_blob_header(resource, "PS", header))
-	{
-		pnx_log("sprite %u: missing, wrong type/version, or stale orientation", asset_id);
+	if (!bitplane_read_header(asset_id, "sprite", "PS", header, &resource))
 		return false;
-	}
 	const uint8_t frame_count = header[3];
 	const uint8_t flags		  = header[4];
 	if (frame_count == 0)
@@ -1189,37 +1216,11 @@ static bool sprite_load_bitplane(PnxSprite* out, uint16_t asset_id)
 	out->max_unit_pixels = (uint16_t)max_unit_pixels;
 	out->stream_offset	 = (uint32_t)(PNX_BLOB_HEADER_BYTES + meta_span + pal_span);
 
-	size_t size = 0;
-	if (!pnx_platform_resource_size(resource, &size))
-	{
-		pnx_log("sprite %u: resource size unavailable", asset_id);
+	size_t shapes_len	  = 0;
+	const uint8_t* shapes = load_bitplane_shapes(resource, out->stream_offset, unit_count, NULL,
+												 0, 0, "sprite", asset_id, &shapes_len);
+	if (!shapes)
 		return false;
-	}
-	const size_t table_bytes = (size_t)(unit_count + 1) * 2;
-	uint8_t last_offset[2];
-	if (size < out->stream_offset + table_bytes ||
-		!read_resource_range(resource, out->stream_offset + (size_t)unit_count * 2,
-							 last_offset, 2))
-	{
-		pnx_log("sprite %u: too small for a %u-unit bitplane offset table", asset_id,
-				unit_count);
-		return false;
-	}
-	const uint16_t stream_len = read_u16(last_offset);
-	const size_t shapes_off	  = out->stream_offset + table_bytes + stream_len;
-	if (size < shapes_off)
-	{
-		pnx_log("sprite %u: bitplane offset table runs past the blob", asset_id);
-		return false;
-	}
-	const size_t shapes_len = size - shapes_off;
-
-	uint8_t* shapes = (uint8_t*)arena_alloc(shapes_len, 4);
-	if (!shapes || !read_resource_range(resource, shapes_off, shapes, shapes_len))
-	{
-		pnx_log("sprite %u: short read, shape tables", asset_id);
-		return false;
-	}
 	size_t shapes_consumed = 0;
 	if (!parse_sprite_shapes(shapes, shapes_len, frame_count, out, asset_id, &shapes_consumed))
 		return false;

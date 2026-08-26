@@ -13,6 +13,7 @@ import os
 import os.path
 import subprocess
 import sys
+import tomllib
 
 top = '.'
 out = 'build'
@@ -24,6 +25,36 @@ def options(ctx):
 
 def configure(ctx):
     ctx.load('pebble_sdk')
+
+
+# Derives the compile-time defines a project's OWN manifest requires from the manifest
+# itself, rather than relying on a developer to notice tools/pnx_assets.py's own printed
+# reminder ("set PNX_COMPRESS_MODE=... to match") and hand-edit pnx_config.h or PNX_DEFINES
+# every time `compress`/`compress_maps` changes. Without this, a project whose src/c/pnx
+# is a plain symlink to the shared framework (this one; Need4Pebble instead OWNS a copy
+# it hand-edits directly, so it does not need this) silently compiles against
+# pnx_config.h's own bare defaults regardless of what its manifest actually built --
+# which decodes as a clean, silent refusal-to-load at runtime (every flag mismatch here
+# refuses rather than misreads), not a build failure, so nothing catches it until the app
+# is actually run. Exactly the "presents as nothing happens" class of bug
+# tools/pnx_assets.py's own module docstring warns about.
+_COMPRESS_MODE_DEFINE = {
+    'none': 'PNX_COMPRESS_MODE=PNX_COMPRESS_NONE',
+    'lzss': 'PNX_COMPRESS_MODE=PNX_COMPRESS_LZSS',
+    'bitplane': 'PNX_COMPRESS_MODE=PNX_COMPRESS_BITPLANE',
+}
+
+
+def _manifest_defines(ctx):
+    manifest_path = ctx.path.find_node('assets.toml')
+    if not manifest_path:
+        return []
+    with open(manifest_path.abspath(), 'rb') as f:
+        project = tomllib.load(f).get('project', {})
+    defines = [_COMPRESS_MODE_DEFINE[project.get('compress', 'bitplane')]]
+    if project.get('compress_maps', False):
+        defines.append('PNX_USE_MAP_COMPRESS=1')
+    return defines
 
 
 def _size_report(ctx):
@@ -45,7 +76,10 @@ def build(ctx):
     # PNX_DEFINES lets a build override pnx_config.h without editing it, which is what
     # makes "does turning this module off actually reclaim the bytes?" a one-line check:
     #     PNX_DEFINES=PNX_USE_DIAGNOSTICS=0 pebble build
-    extra = [d for d in os.environ.get('PNX_DEFINES', '').split() if d]
+    # Manifest-derived defines go first so an explicit PNX_DEFINES always wins (a later
+    # -D of the same macro silently overrides an earlier one; no clash either way) --
+    # meant for one-off experiments, not for permanently disagreeing with the manifest.
+    extra = _manifest_defines(ctx) + [d for d in os.environ.get('PNX_DEFINES', '').split() if d]
 
     binaries = []
     cached_env = ctx.env
