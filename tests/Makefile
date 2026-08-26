@@ -54,6 +54,7 @@ BITPLANE_SRC = test_main_bitplane.c test_bitplane_compress.c test_tile_cache.c t
                ../src/pnx/assets/pnx_assets.c ../src/pnx/assets/pnx_bitplane.c \
                ../src/pnx/assets/pnx_lzss.c \
                ../src/pnx/assets/pnx_tile_cache.c ../src/pnx/assets/pnx_sprite_cache.c \
+               ../src/pnx/assets/pnx_lru_cache_impl.c \
                ../src/pnx/gfx/pnx_gfx.c ../src/pnx/gfx/pnx_sprite.c \
                ../src/pnx/platform/pnx_platform_host.c
 BITPLANE_OUT = build/test_bitplane
@@ -84,6 +85,7 @@ BWBP_SRC = test_main_bitplane_bw.c test_bitplane_bw.c \
            ../src/pnx/core/pnx_arena.c ../src/pnx/core/pnx_fmt.c ../src/pnx/core/pnx_diag.c \
            ../src/pnx/assets/pnx_assets.c ../src/pnx/assets/pnx_bitplane.c \
            ../src/pnx/assets/pnx_tile_cache.c ../src/pnx/assets/pnx_sprite_cache.c \
+           ../src/pnx/assets/pnx_lru_cache_impl.c \
            ../src/pnx/platform/pnx_platform_host.c
 BWBP_OUT = build/test_bitplane_bw
 

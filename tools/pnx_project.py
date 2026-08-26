@@ -304,11 +304,27 @@ def _size_report(ctx):
 def build(ctx):
     ctx.load('pebble_sdk')
 
+    # PNX_RELEASE=1 pebble build -- the one flag to set before shipping. Strips
+    # pnx_log/pnx_diag_* entirely (they're compiled-out no-ops under PNX_USE_DIAGNOSTICS=0,
+    # not just silenced) and the whole pnx/diagnostics module along with them: measured
+    # ~3.8KB on a real project (Need4Pebble/emery), most of it the diagnostics ring
+    # buffer's static allocation plus every buffered log call site across the engine, not
+    # just this project's own code. Off by default so a dev build still gets
+    # `pebble install --logs` output after pnx_diag_flush() -- see pnx_diag.h's own
+    # comment for why that flush exists at all. PNX_DEFINES can still set
+    # PNX_USE_DIAGNOSTICS=0 by hand; this is just the name to remember instead.
+    release = os.environ.get('PNX_RELEASE') == '1'
+    if release:
+        print('PNX_RELEASE=1: diagnostics (pnx_log/pnx_diag_*) stripped for this build')
+    release_defines = ['PNX_USE_DIAGNOSTICS=0'] if release else []
+
     # Lets a build override pnx_config.h without editing it:
     #     PNX_DEFINES=PNX_USE_DIAGNOSTICS=0 pebble build
-    # Manifest-derived defines go first so an explicit PNX_DEFINES always wins (a later
-    # -D of the same macro silently overrides an earlier one; no clash either way).
-    extra = _manifest_defines(ctx) + [d for d in os.environ.get('PNX_DEFINES', '').split() if d]
+    # Manifest-derived defines go first, then the release toggle, then PNX_DEFINES last so
+    # an explicit override always wins (a later -D of the same macro silently overrides an
+    # earlier one; no clash either way).
+    extra = (_manifest_defines(ctx) + release_defines +
+            [d for d in os.environ.get('PNX_DEFINES', '').split() if d])
 
     binaries = []
     cached_env = ctx.env
