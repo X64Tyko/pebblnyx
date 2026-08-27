@@ -1,8 +1,14 @@
 #include "pnx_tile_cache.h"
 
-#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
 
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
 #include "pnx_bitplane.h"
+#define PNX_UNIT_PACKED_BYTES PNX_BITPLANE_PACKED_BYTES
+#else
+#include "pnx_huffman.h"
+#define PNX_UNIT_PACKED_BYTES PNX_HUFFMAN_PACKED_BYTES
+#endif
 #include "pnx_lru_cache_impl.h"
 
 static PnxLruCache s_cache;
@@ -14,7 +20,7 @@ static uint32_t make_key(uint16_t atlas_asset, uint16_t tile_index)
 
 bool pnx_tile_cache_init(PnxArena* arena, uint16_t target_entries, uint8_t max_tile_px)
 {
-	const size_t slot_bytes = PNX_BITPLANE_PACKED_BYTES((size_t)max_tile_px * max_tile_px);
+	const size_t slot_bytes = PNX_UNIT_PACKED_BYTES((size_t)max_tile_px * max_tile_px);
 	return pnx_lru_cache_init_impl(&s_cache, arena, target_entries, (uint16_t)slot_bytes,
 								   PNX_TILE_CACHE_MAX_AGE);
 }
@@ -33,15 +39,20 @@ const uint8_t* pnx_tile_cache_get(uint16_t atlas_asset, uint16_t tile_index, uin
 	if (hit)
 		return dst;
 
-	uint8_t compressed[1 + PNX_BITPLANE_PACKED_BYTES((size_t)PNX_TILE_CACHE_MAX_TILE_PX * PNX_TILE_CACHE_MAX_TILE_PX)];
+	uint8_t compressed[1 + PNX_UNIT_PACKED_BYTES((size_t)PNX_TILE_CACHE_MAX_TILE_PX * PNX_TILE_CACHE_MAX_TILE_PX)];
 	const size_t clen = fetch(fetch_ctx, atlas_asset, tile_index, compressed, sizeof(compressed));
 	if (clen == 0)
 		return NULL;
 
 	uint8_t decode_scratch[(size_t)PNX_TILE_CACHE_MAX_TILE_PX * PNX_TILE_CACHE_MAX_TILE_PX];
 	const uint16_t n = (uint16_t)((uint32_t)tile_px * tile_px);
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
 	if (!pnx_bitplane_decode(compressed, clen, dst, decode_scratch, n))
 		return NULL;
+#else
+	if (!pnx_huffman_decode(pnx_huffman_table(), compressed, clen, dst, decode_scratch, n))
+		return NULL;
+#endif
 
 	return dst;
 }
@@ -56,4 +67,5 @@ void pnx_tile_cache_reset(void)
 	pnx_lru_cache_reset_impl(&s_cache);
 }
 
-#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#undef PNX_UNIT_PACKED_BYTES
+#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN

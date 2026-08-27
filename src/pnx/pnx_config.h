@@ -108,14 +108,25 @@
 //                         into a small RAM cache on demand, evicting the least-recently-
 //                         used entry under pressure. See pnx_tile_cache.h's own comment
 //                         for why decoded pixels are cached rather than compressed bytes.
+//   PNX_COMPRESS_HUFFMAN  Bitplane's sibling, same independent-per-unit/cache-on-demand
+//                         shape (pnx_huffman.c), but run lengths are length-limited-
+//                         Huffman-coded against ONE table shared by every sprite and atlas
+//                         in the project (loaded once, resident -- pnx_huffman_table_load,
+//                         called from pnx_assets_init) instead of Elias-gamma-coded
+//                         per-unit with no table at all. Measured (tools/bpeg2_benchmark.py,
+//                         docs/GAME-COMPARISON.md) as a real but modest resource-size win
+//                         on projects with enough cross-unit run-length reuse to amortize
+//                         the table -- not a universal upgrade over BITPLANE, which is why
+//                         it is its own opt-in mode rather than a replacement.
 //
-// Bitplane is the default because it is the only mode that keeps art out of RAM until a
-// frame or tile is actually drawn -- LZSS and NONE both hold a sprite/atlas's whole pixel
-// region resident for as long as it is loaded. A project sets `compress = "lzss"` or
-// `compress = "none"` in the manifest's `[project]` table to opt out.
+// Bitplane and Huffman are the only modes that keep art out of RAM until a frame or tile
+// is actually drawn -- LZSS and NONE both hold a sprite/atlas's whole pixel region
+// resident for as long as it is loaded. A project sets `compress = "lzss"`, `"none"`, or
+// `"huffman"` in the manifest's `[project]` table to opt out of the BITPLANE default.
 #define PNX_COMPRESS_NONE	  0
 #define PNX_COMPRESS_LZSS	  1
 #define PNX_COMPRESS_BITPLANE 2
+#define PNX_COMPRESS_HUFFMAN  3
 
 #ifndef PNX_COMPRESS_MODE
 #define PNX_COMPRESS_MODE PNX_COMPRESS_BITPLANE

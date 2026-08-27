@@ -1,6 +1,6 @@
 #include "pnx_lru_cache_impl.h"
 
-#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
 
 #include <string.h>
 
@@ -109,4 +109,4 @@ uint8_t* pnx_lru_cache_find_or_prepare(PnxLruCache* cache, uint32_t key, bool* o
 	return cache->pool + (size_t)target * cache->slot_bytes;
 }
 
-#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN

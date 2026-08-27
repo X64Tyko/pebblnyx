@@ -139,6 +139,7 @@ class CoreMixin:
                         for f in os.listdir(self.res) if f.endswith(".bin"))
             if self.built else 0,
             "app": self.app_size(),
+            "arena": self.arena_estimate(),
             "save": self.save_size(),
             # The catalog behind the overhead check (below) and the emulator panel --
             # sent once here rather than hardcoded twice in the page, so a platform the

@@ -1,8 +1,14 @@
 #include "pnx_sprite_cache.h"
 
-#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
 
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
 #include "pnx_bitplane.h"
+#define PNX_UNIT_PACKED_BYTES PNX_BITPLANE_PACKED_BYTES
+#else
+#include "pnx_huffman.h"
+#define PNX_UNIT_PACKED_BYTES PNX_HUFFMAN_PACKED_BYTES
+#endif
 #include "pnx_lru_cache_impl.h"
 
 static PnxLruCache s_cache;
@@ -14,7 +20,7 @@ static uint32_t make_key(uint16_t asset_id, uint32_t offset)
 
 bool pnx_sprite_cache_init(PnxArena* arena, uint16_t target_entries)
 {
-	const size_t slot_bytes = PNX_BITPLANE_PACKED_BYTES(PNX_SPRITE_CACHE_MAX_UNIT_PX);
+	const size_t slot_bytes = PNX_UNIT_PACKED_BYTES(PNX_SPRITE_CACHE_MAX_UNIT_PX);
 	return pnx_lru_cache_init_impl(&s_cache, arena, target_entries, (uint16_t)slot_bytes,
 								   PNX_SPRITE_CACHE_MAX_AGE);
 }
@@ -93,15 +99,18 @@ bool pnx_sprite_cache_get(const PnxSprite* sprite, uint8_t frame, PnxSpriteFrame
 		return true;
 	}
 
-	uint8_t compressed[PNX_BITPLANE_PACKED_BYTES(PNX_SPRITE_CACHE_MAX_UNIT_PX)];
-	const size_t clen = pnx_bitplane_sprite_fetch(sprite, unit, compressed, sizeof(compressed));
-	if (clen == 0)
-		return false;
-
+	uint8_t compressed[PNX_UNIT_PACKED_BYTES(PNX_SPRITE_CACHE_MAX_UNIT_PX)];
 	uint8_t decode_scratch[PNX_SPRITE_CACHE_MAX_UNIT_PX];
 	const uint16_t n = (uint16_t)((uint32_t)w * h);
-	if (!pnx_bitplane_decode(compressed, clen, dst, decode_scratch, n))
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+	const size_t clen = pnx_bitplane_sprite_fetch(sprite, unit, compressed, sizeof(compressed));
+	if (clen == 0 || !pnx_bitplane_decode(compressed, clen, dst, decode_scratch, n))
 		return false;
+#else
+	const size_t clen = pnx_huffman_sprite_fetch(sprite, unit, compressed, sizeof(compressed));
+	if (clen == 0 || !pnx_huffman_decode(pnx_huffman_table(), compressed, clen, dst, decode_scratch, n))
+		return false;
+#endif
 
 	out->pixels = dst;
 	return true;
@@ -117,4 +126,5 @@ void pnx_sprite_cache_reset(void)
 	pnx_lru_cache_reset_impl(&s_cache);
 }
 
-#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#undef PNX_UNIT_PACKED_BYTES
+#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN

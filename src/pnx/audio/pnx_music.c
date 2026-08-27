@@ -4,6 +4,7 @@
 
 #include "../core/pnx_diag.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 // Music holds the low priorities so effects can always steal a channel from it. A melody
@@ -26,13 +27,17 @@ static uint8_t s_row;
 static uint32_t s_next_row_ms;
 static uint8_t s_channel_voice[PNX_MUSIC_CHANNELS];
 
-// Instruments are decoded into a small fixed table rather than pointed at in the blob,
-// because PnxEnvelope has padding a packed blob does not -- casting onto it would read
-// whatever the compiler chose to leave between fields.
+// Instruments are decoded into a small table rather than pointed at in the blob, because
+// PnxEnvelope has padding a packed blob does not -- casting onto it would read whatever
+// the compiler chose to leave between fields. MAX_INSTRUMENTS is now only a sanity cap on
+// one song's own declared count (checked in pnx_music_load below), not a static array
+// bound: s_env/s_wave are malloc'd sized to that song's REAL instrument count, freed and
+// reallocated each load rather than reserving the worst case for every project that
+// turns the sequencer on at all, whether or not any song it ships ever needs 16.
 #define MAX_INSTRUMENTS 16
 
-static PnxEnvelope s_env[MAX_INSTRUMENTS];
-static uint8_t s_wave[MAX_INSTRUMENTS];
+static PnxEnvelope* s_env;
+static uint8_t* s_wave;
 
 bool pnx_music_load(PnxSong* out, uint16_t asset_id)
 {
@@ -114,6 +119,23 @@ bool pnx_music_load(PnxSong* out, uint16_t asset_id)
 				out->synth_stride = stride;
 			}
 		}
+	}
+
+	// Freed before realloc, not leaked: a project can load a different song later, and
+	// each load fully replaces the previous one's decoded instrument table.
+	free(s_env);
+	free(s_wave);
+	s_env  = (PnxEnvelope*)malloc(sizeof(PnxEnvelope) * instruments);
+	s_wave = (uint8_t*)malloc(instruments);
+	if (!s_env || !s_wave)
+	{
+		pnx_log("music %u: %u bytes refused", asset_id,
+				(unsigned)(sizeof(PnxEnvelope) * instruments + instruments));
+		free(s_env);
+		free(s_wave);
+		s_env  = NULL;
+		s_wave = NULL;
+		return false;
 	}
 
 	const uint8_t* ins = data + 4;

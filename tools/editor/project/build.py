@@ -11,6 +11,25 @@ import pnx_project as pp                                    # noqa: E402
 import pnx_preview as pv                                    # noqa: E402
 import size_report as sr                                    # noqa: E402
 
+# Real struct sizes on the actual ARM target (Pebble's own 4-byte pointers, not this
+# process's), measured via `nm` on a real compiled emery build rather than sizeof() here
+# -- the online editor has no ARM compiler to ask (see app_size()'s own comment for why
+# that method already degrades gracefully without one), so there is no way to derive
+# these live. Update by hand if the structs themselves change shape.
+ARENA_STRUCT_BYTES = {
+    "atlas": 44,       # PnxAtlas
+    "sprite": 36,      # PnxSprite
+    "nine_slice": 12,  # PnxNineSlice
+    "font": 24,        # PnxFont
+    "map": 260,        # PnxMap
+    "dialog": 16,      # PnxDialog
+    "palette": 16,     # PnxPalette
+}
+# PnxHuffmanTable's own fixed fields (first_code/first_symbol/count[17] each, symbols
+# pointer, cols, run_bits) -- the variable part (symbols[cols], 2 bytes/entry) is added
+# per project from that project's own real built table, not guessed.
+HUFFMAN_TABLE_FIXED_BYTES = 112
+
 
 class BuildMixin:
     def _map_bytes(self, spec, roles=None, legend=None):
@@ -210,6 +229,83 @@ class BuildMixin:
         }
         self._app_cache = ((elf, stamp), out)
         return out
+
+    def arena_estimate(self):
+        """Minimum resident arena bytes this project's own content requires at startup.
+
+        Not visible anywhere else: palettes, the huffman run-length table, and each
+        scene's own atlas/sprite/nine_slice/font/map/dialog slot tables are all arena-
+        allocated now (sized to the project's own real content, not a static
+        PNX_SCENE_MAX_*/PNX_HUFFMAN_TABLE_MAX_COLS worst case) rather than static -- which
+        is the fix, but it also means they no longer show up for free in app_size()'s own
+        .bss column the way they used to. This is what makes that cost visible again,
+        computed from the manifest (and the real built palettes.bin/huffman_table.bin,
+        where those exist) rather than needing a device or an ARM compiler.
+
+        A scene's slot tables are sized to whichever scene is LARGEST, not the sum of
+        every scene -- pnx_arena_reset_hi frees the previous scene's slot tables before
+        the next one's are allocated (pnx_scene_load's own comment), so only one scene's
+        worth is ever resident at a time.
+
+        Deliberately incomplete, and says so in "unknown": pnx_sprite_cache_init/
+        pnx_tile_cache_init's own pool sizes and a map's WorldTile bank buffers are both
+        sized by arguments a game passes in its OWN C code, not by anything the manifest
+        states, so this cannot compute them. Listed as reasons, not silently omitted.
+        """
+        unknown = []
+
+        palette_bytes = 0
+        pal_path = os.path.join(self.res, "palettes.bin")
+        if os.path.exists(pal_path):
+            # The real, settled count (settle_palettes may share or add across every
+            # atlas/sprite in ways only a real build resolves) -- not a count of manifest
+            # entries, since palettes are derived, never declared.
+            palette_bytes = len(pv.parse_palettes(pv.read(pal_path))) * ARENA_STRUCT_BYTES["palette"]
+        else:
+            unknown.append("palettes.bin not built yet")
+
+        compress = self.project.get("compress", "bitplane")
+        huffman_bytes = 0
+        if compress == "huffman":
+            hf_out = self.project.get("huffman_table_out", "huffman_table.bin")
+            hf_path = os.path.join(self.res, hf_out)
+            if os.path.exists(hf_path):
+                data = pv.read(hf_path)
+                # First 12 bits past the 8-byte blob header are the table's own declared
+                # column count -- see pnx_huffman_table_peek_cols's own comment
+                # (src/pnx/assets/pnx_huffman.h) for why this is the cheap way to size
+                # the real allocation instead of assuming a worst case.
+                cols = (data[8] << 4) | (data[9] >> 4)
+                huffman_bytes = HUFFMAN_TABLE_FIXED_BYTES + cols * 2
+            else:
+                unknown.append(f"{hf_out} not built yet")
+
+        peak_scene_bytes = 0
+        peak_scene_name = None
+        for name, spec in sorted(self.man.get("scene", {}).items()):
+            total = (len(spec.get("atlases", [])) * ARENA_STRUCT_BYTES["atlas"]
+                    + len(spec.get("sprites", [])) * ARENA_STRUCT_BYTES["sprite"]
+                    + len(spec.get("nine_slices", [])) * ARENA_STRUCT_BYTES["nine_slice"]
+                    + len(spec.get("fonts", [])) * ARENA_STRUCT_BYTES["font"]
+                    + (ARENA_STRUCT_BYTES["map"] if "map" in spec else 0)
+                    + (ARENA_STRUCT_BYTES["dialog"] if spec.get("dialog") else 0))
+            if total > peak_scene_bytes:
+                peak_scene_bytes, peak_scene_name = total, name
+
+        unknown += [
+            "pnx_sprite_cache_init/pnx_tile_cache_init pool sizes (set by a game's own "
+            "C code, not the manifest)",
+            "a map's WorldTile streaming pool (bank_bytes is per-map in the manifest, "
+            "but how many banks a game keeps resident is set in its own C code)",
+        ]
+        return {
+            "palette_bytes": palette_bytes,
+            "huffman_table_bytes": huffman_bytes,
+            "peak_scene_slot_bytes": peak_scene_bytes,
+            "peak_scene_name": peak_scene_name,
+            "total": palette_bytes + huffman_bytes + peak_scene_bytes,
+            "unknown": unknown,
+        }
 
     def save_size(self):
         """Persistent storage. Nothing to measure until M5 builds the save format.

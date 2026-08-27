@@ -33,14 +33,19 @@ static uint8_t s_scene_count;
 #define PNX_ORIENT_UNSET 0xFF
 static uint8_t s_orientation = PNX_ORIENT_UNSET;
 
-static PnxAtlas s_atlases[PNX_SCENE_MAX_ATLASES];
-static PnxSprite s_sprites[PNX_SCENE_MAX_SPRITES];
-static PnxNineSlice s_nine_slices[PNX_SCENE_MAX_NINE_SLICES];
-static PnxFont s_fonts[PNX_SCENE_MAX_FONTS];
-static PnxMap s_map;
-static PnxDialog s_dialog;
+// Pointers into this scene's own hi-arena allocation (pnx_scene_load pre-scans the scene
+// table to count each type before allocating), not resident arrays sized to a project-
+// wide PNX_SCENE_MAX_* worst case -- every project used to pay for that whether or not
+// any scene actually had that many, the same overreservation the huffman run-length
+// table's own s_huffman_symbols[] used to be. PNX_SCENE_MAX_* still exist, now checked as
+// a sanity cap on one scene's own declared counts rather than an array bound.
+static PnxAtlas* s_atlases;
+static PnxSprite* s_sprites;
+static PnxNineSlice* s_nine_slices;
+static PnxFont* s_fonts;
+static PnxMap* s_map;
+static PnxDialog* s_dialog;
 static uint8_t s_atlas_count, s_sprite_count, s_nine_slice_count, s_font_count;
-static bool s_have_map, s_have_dialog;
 
 static PnxPalette* s_palettes;
 static uint16_t s_palette_count;
@@ -332,16 +337,20 @@ static uint16_t read_u16(const uint8_t* p)
 	return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
 }
 
-#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
 // Reads exactly `len` bytes at `offset` within `resource` -- a PARTIAL read, unlike
-// load_blob_into's "always the whole blob" contract. This is what lets a bitplane
-// sprite/atlas load bring in only its small resident metadata (frame/tile tables, the
-// per-unit offset table) while its compressed pixel units stay in ROM, read one at a time
-// on a cache miss (pnx_bitplane_atlas_fetch/pnx_bitplane_sprite_fetch) -- see
-// pnx_config.h's PNX_COMPRESS_BITPLANE comment. No locality penalty on this platform (a
-// resource read costs a fixed ~29us/call plus ~33MB/s of transfer regardless of where in
-// the resource it starts -- docs/MEASUREMENTS.md), so a handful of small targeted reads
-// costs about the same as one call per read, not one call per byte skipped.
+// load_blob_into's "always the whole blob" contract. This is what lets a bitplane or
+// huffman sprite/atlas load bring in only its small resident metadata (frame/tile
+// tables, the per-unit offset table) while its compressed pixel units stay in ROM, read
+// one at a time on a cache miss (pnx_bitplane_atlas_fetch/pnx_bitplane_sprite_fetch,
+// pnx_huffman_atlas_fetch/pnx_huffman_sprite_fetch) -- see pnx_config.h's
+// PNX_COMPRESS_BITPLANE/PNX_COMPRESS_HUFFMAN comments. No locality penalty on this
+// platform (a resource read costs a fixed ~29us/call plus ~33MB/s of transfer regardless
+// of where in the resource it starts -- docs/MEASUREMENTS.md), so a handful of small
+// targeted reads costs about the same as one call per read, not one call per byte
+// skipped. Genuinely shared between the two modes -- no bitplane- or huffman-specific
+// logic here at all, just resource plumbing -- unlike the per-unit loaders below, which
+// each mode keeps its own copy of.
 static bool read_resource_range(uint32_t resource, size_t offset, uint8_t* dst, size_t len)
 {
 	if (pnx_platform_resource_read(resource, offset, dst, len) != len)
@@ -367,7 +376,7 @@ static bool read_blob_header(uint32_t resource, const char* magic, uint8_t heade
 		return false;
 	return true;
 }
-#endif
+#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
 
 // SCALED rects and COMPLEX masks, appended after an atlas's pixel payload (both layouts,
 // both bit depths -- the shape data does not depend on either). Sparse, so most atlases
@@ -444,7 +453,9 @@ short_read:
 // are not uniform size (see PnxSprite's own comment), so each record is only as wide as
 // the frame it names, and this has to walk them one at a time rather than index by a
 // fixed stride.
-#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
+// Shared between bitplane and huffman sprite loading -- pure frame_meta dedup counting,
+// no bitplane-specific logic (the name predates huffman mode existing at all).
 static void sprite_bitplane_stats(uint8_t frame_count, const uint8_t* frame_meta, uint16_t* out_unit_count, uint32_t* out_max_unit_pixels)
 {
 	uint16_t unit_count		 = 0;
@@ -549,7 +560,7 @@ short_read:
 // PNX_COMPRESS_LZSS. See the compressed+dst branch below for why it is needed at all:
 // decoding into `dst` in place would overwrite compressed bytes before they are fully
 // read, since decoded output is never smaller than what produced it.
-#if PNX_COMPRESS_MODE != PNX_COMPRESS_BITPLANE
+#if PNX_COMPRESS_MODE != PNX_COMPRESS_BITPLANE && PNX_COMPRESS_MODE != PNX_COMPRESS_HUFFMAN
 static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size_t cap,
 							uint8_t* scratch)
 {
@@ -793,7 +804,7 @@ static bool atlas_load_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size
 #endif
 	return true;
 }
-#endif // PNX_COMPRESS_MODE != PNX_COMPRESS_BITPLANE
+#endif // PNX_COMPRESS_MODE != PNX_COMPRESS_BITPLANE && PNX_COMPRESS_MODE != PNX_COMPRESS_HUFFMAN
 
 #if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
 // `dst`/`cap` mirror atlas_load_into's own: NULL/0 arena-allocates (standalone/scene
@@ -1006,10 +1017,19 @@ static bool atlas_load_bitplane_into(PnxAtlas* out, uint16_t asset_id, uint8_t* 
 }
 #endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
 
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
+// Defined further down (after sprite_load_bitplane's own block, to keep every huffman-
+// mode function grouped together) but needed here first -- same forward-declare
+// convention load_blob's own declaration up near the top of the file already uses.
+static bool atlas_load_huffman_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size_t cap);
+#endif
+
 bool pnx_atlas_load(PnxAtlas* out, uint16_t asset_id)
 {
 #if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
 	return atlas_load_bitplane_into(out, asset_id, NULL, 0);
+#elif PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
+	return atlas_load_huffman_into(out, asset_id, NULL, 0);
 #else
 	return atlas_load_into(out, asset_id, NULL, 0, NULL);
 #endif
@@ -1019,7 +1039,7 @@ bool pnx_atlas_load(PnxAtlas* out, uint16_t asset_id)
 // validation, frame_meta/frame_palette/pixel_logical_size. PNX_COMPRESS_BITPLANE never
 // reaches this: sprite_load_bitplane (below) never bulk-reads the pixel region
 // load_blob's single whole-blob read would bring in, so it does not share this parsing.
-#if PNX_COMPRESS_MODE != PNX_COMPRESS_BITPLANE
+#if PNX_COMPRESS_MODE != PNX_COMPRESS_BITPLANE && PNX_COMPRESS_MODE != PNX_COMPRESS_HUFFMAN
 typedef struct
 {
 	const uint8_t* data;
@@ -1154,7 +1174,7 @@ static bool sprite_load_prefix(uint16_t asset_id, SpritePrefix* p)
 	p->pixel_logical_size = pixel_logical_size;
 	return true;
 }
-#endif // PNX_COMPRESS_MODE != PNX_COMPRESS_BITPLANE
+#endif // PNX_COMPRESS_MODE != PNX_COMPRESS_BITPLANE && PNX_COMPRESS_MODE != PNX_COMPRESS_HUFFMAN
 
 #if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
 // Loads a bitplane sprite's METADATA only -- frame_meta/frame_palette/shape tables,
@@ -1246,10 +1266,399 @@ static bool sprite_load_bitplane(PnxSprite* out, uint16_t asset_id)
 }
 #endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
 
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
+// A pointer, not a resident struct+array: the table and its symbol list are arena-
+// allocated (below), sized to this table's OWN real column count, not a static
+// PNX_HUFFMAN_TABLE_MAX_COLS-worst-case reservation every huffman-mode project would
+// otherwise pay for in .bss whether its real table is ever that big or not. Same
+// "pointer into arena-resident data" shape s_palettes already uses, for the same reason
+// -- see pnx_palettes_load's own comment.
+static PnxHuffmanTable* s_huffman_table;
+
+// Loads the ONE project-wide run-length table every huffman sprite/atlas decode shares
+// -- call once, before any pnx_sprite_load/pnx_atlas_load (pnx_assets_init is too early:
+// nothing has an asset id to load by yet). Mirrors pnx_palettes_load's own load_blob
+// call -- see that function's own comment for why the blob is read once, resident, not
+// re-read per decode.
+bool pnx_huffman_table_load(uint16_t asset_id)
+{
+	size_t payload		= 0;
+	const uint8_t* data = load_blob(asset_id, "PH", NULL, NULL, NULL, &payload);
+	if (!data)
+		return false;
+
+	uint16_t cols;
+	if (!pnx_huffman_table_peek_cols(data, payload, &cols))
+	{
+		pnx_log("huffman table %u: too short to hold even its own column count", asset_id);
+		return false;
+	}
+
+	PnxHuffmanTable* table = (PnxHuffmanTable*)arena_alloc(sizeof(PnxHuffmanTable),
+														   _Alignof(PnxHuffmanTable));
+	uint16_t* symbols	   = cols ? (uint16_t*)arena_alloc((size_t)cols * sizeof(uint16_t),
+														   _Alignof(uint16_t))
+								  : NULL;
+	if (!table || (cols && !symbols))
+	{
+		pnx_log("huffman table %u: arena full, needed %u symbol slots, %u free", asset_id,
+				cols, (unsigned)pnx_arena_remaining(s_arena));
+		return false;
+	}
+
+	if (!pnx_huffman_table_parse(table, data, payload, symbols, cols))
+	{
+		pnx_log("huffman table %u: malformed", asset_id);
+		return false;
+	}
+	s_huffman_table = table;
+	return true;
+}
+
+const PnxHuffmanTable* pnx_huffman_table(void)
+{
+	return s_huffman_table;
+}
+
+// `dst`/`cap` mirror atlas_bitplane_alloc's own contract exactly -- see that function's
+// own comment.
+static uint8_t* huffman_alloc(uint8_t* dst, size_t dst_off, size_t cap, size_t bytes)
+{
+	if (dst)
+		return (dst_off + bytes <= cap) ? dst + dst_off : NULL;
+	return (uint8_t*)arena_alloc(bytes, 4);
+}
+
+// huffman mode's own copy of bitplane_read_header/load_bitplane_shapes -- identical
+// logic (both formats share the same blob header + offset-table + shape-tail
+// container, differing only in the per-unit pixel stream inside it), kept as a separate
+// copy rather than widening those functions' own #if so atlas_load_bitplane_into/
+// sprite_load_bitplane (genuinely bitplane-specific: they call pnx_bitplane_decode, not
+// this mode's decoder) never compile into a huffman build.
+__attribute__((noinline)) static bool huffman_read_header(uint16_t asset_id, const char* what, const char* magic,
+														  uint8_t header[PNX_BLOB_HEADER_BYTES], uint32_t* out_resource)
+{
+	if (asset_id >= s_resource_count)
+	{
+		pnx_log("%s %u: out of range (have %u)", what, asset_id, s_resource_count);
+		return false;
+	}
+	*out_resource = s_resources[asset_id];
+	if (!read_blob_header(*out_resource, magic, header))
+	{
+		pnx_log("%s %u: missing, wrong type/version, or stale orientation", what, asset_id);
+		return false;
+	}
+	return true;
+}
+
+__attribute__((noinline)) static const uint8_t* load_huffman_shapes(uint32_t resource, uint32_t stream_offset,
+																	uint16_t unit_count, uint8_t* dst, size_t dst_off,
+																	size_t cap, const char* what, uint16_t asset_id,
+																	size_t* out_len)
+{
+	size_t size = 0;
+	if (!pnx_platform_resource_size(resource, &size))
+	{
+		pnx_log("%s %u: resource size unavailable", what, asset_id);
+		return NULL;
+	}
+	const size_t table_bytes = (size_t)(unit_count + 1) * 2;
+	uint8_t last_offset[2];
+	if (size < stream_offset + table_bytes ||
+		!read_resource_range(resource, stream_offset + (size_t)unit_count * 2, last_offset, 2))
+	{
+		pnx_log("%s %u: too small for a %u-unit huffman offset table", what, asset_id,
+				unit_count);
+		return NULL;
+	}
+	const uint16_t stream_len = read_u16(last_offset);
+	const size_t shapes_off	  = stream_offset + table_bytes + stream_len;
+	if (size < shapes_off)
+	{
+		pnx_log("%s %u: huffman stream runs past the blob", what, asset_id);
+		return NULL;
+	}
+	const size_t shapes_len = size - shapes_off;
+
+	uint8_t* shapes = huffman_alloc(dst, dst_off, cap, shapes_len);
+	if (!shapes || !read_resource_range(resource, shapes_off, shapes, shapes_len))
+	{
+		pnx_log("%s %u: short read, shape tables", what, asset_id);
+		return NULL;
+	}
+	*out_len = shapes_len;
+	return shapes;
+}
+
+// Loads a huffman atlas's METADATA only -- mirrors atlas_load_bitplane_into exactly
+// (same container format: this format only changes the PER-UNIT pixel stream, not the
+// header/metadata/shape-table shape around it), except the flags bit checked (4, not 2)
+// and no fixed16/variable mode selection -- the huffman per-unit format doesn't need
+// one, since run_bits comes from the shared table, not derived from unit size.
+static bool atlas_load_huffman_into(PnxAtlas* out, uint16_t asset_id, uint8_t* dst, size_t cap)
+{
+#if !PNX_DISPLAY_BW
+	if (!s_palettes)
+	{
+		pnx_log("atlas %u: load palettes first -- atlases carry indices, not colours",
+				asset_id);
+		return false;
+	}
+#endif
+	if (!s_huffman_table)
+	{
+		pnx_log("atlas %u: load the huffman table first (pnx_huffman_table_load)", asset_id);
+		return false;
+	}
+	uint32_t resource;
+	uint8_t header[PNX_BLOB_HEADER_BYTES];
+	if (!huffman_read_header(asset_id, "atlas", "PA", header, &resource))
+		return false;
+	const uint8_t tile_px	  = header[3];
+	const uint16_t tile_count = header[4];
+	const uint8_t layout	  = header[5];
+	const uint8_t atlas_flags = header[6];
+
+	if ((atlas_flags & 4) == 0)
+	{
+		pnx_log("atlas %u: PNX_COMPRESS_MODE is huffman, but atlas is not", asset_id);
+		return false;
+	}
+	if (tile_px == 0 || tile_count == 0)
+	{
+		pnx_log("atlas %u: %u tiles of %upx -- refused", asset_id, tile_count, tile_px);
+		return false;
+	}
+
+	const size_t tables		  = pad4(tile_count) * 2;
+	const size_t prefix_lead  = (layout == 1) ? 4 : 0;
+	const size_t prefix_bytes = prefix_lead + tables + (layout == 1 ? (size_t)tile_count * 8 : 0);
+
+	uint8_t* prefix = huffman_alloc(dst, PNX_BLOB_HEADER_BYTES, cap, prefix_bytes);
+	if (!prefix || !read_resource_range(resource, PNX_BLOB_HEADER_BYTES, prefix, prefix_bytes))
+	{
+		pnx_log("atlas %u: short read, metadata prefix", asset_id);
+		return false;
+	}
+
+	out->tile_px	= tile_px;
+	out->tile_count = tile_count;
+	out->resource	= resource;
+	out->asset_id	= asset_id;
+
+	uint16_t subtile_count = 0;
+	if (layout == 0)
+	{
+		out->metatiles	   = NULL;
+		out->subtile_count = 0;
+		out->sub_bytes	   = 0;
+		out->tile_palette  = prefix;
+		out->tile_flags	   = prefix + pad4(tile_count);
+	}
+	else
+	{
+		subtile_count = read_u16(prefix);
+		if (subtile_count == 0)
+		{
+			pnx_log("atlas %u: %u tiles, 0 subtiles -- refused", asset_id, tile_count);
+			return false;
+		}
+		out->tile_palette	= prefix + 4;
+		out->tile_flags		= prefix + 4 + pad4(tile_count);
+		out->metatiles		= (const uint16_t*)(const void*)(prefix + 4 + tables);
+		out->subtile_count	= subtile_count;
+		const uint32_t half = (uint32_t)tile_px / 2;
+		out->sub_bytes		= (uint8_t)PNX_HUFFMAN_PACKED_BYTES(half * half);
+
+		for (uint32_t i = 0; i < (uint32_t)tile_count * 4; i++)
+		{
+			if (out->metatiles[i] >= subtile_count)
+			{
+				pnx_log("atlas %u: metatile quadrant %u indexes subtile %u of %u", asset_id,
+						(unsigned)i, out->metatiles[i], subtile_count);
+				return false;
+			}
+		}
+	}
+	out->unit_count	   = (layout == 1) ? subtile_count : tile_count;
+	out->stream_offset = (uint32_t)(PNX_BLOB_HEADER_BYTES + prefix_bytes);
+
+	size_t shapes_len	  = 0;
+	const uint8_t* shapes = load_huffman_shapes(
+		resource, out->stream_offset, out->unit_count, dst,
+		PNX_BLOB_HEADER_BYTES + prefix_bytes, cap, "atlas", asset_id, &shapes_len);
+	if (!shapes)
+		return false;
+	size_t shapes_consumed = 0;
+	if (!parse_atlas_shapes(shapes, shapes_len, tile_count, tile_px, asset_id, out,
+							&shapes_consumed))
+		return false;
+	if (shapes_consumed != shapes_len)
+	{
+		pnx_log("atlas %u: %u bytes past the shape tables go unaccounted for", asset_id,
+				(unsigned)(shapes_len - shapes_consumed));
+		return false;
+	}
+
+#if !PNX_DISPLAY_BW
+	for (uint16_t i = 0; i < tile_count; i++)
+	{
+		if (out->tile_palette[i] >= s_palette_count)
+		{
+			pnx_log("atlas %u: tile %u wants palette %u, only %u loaded", asset_id, i,
+					out->tile_palette[i], s_palette_count);
+			return false;
+		}
+	}
+#endif
+	return true;
+}
+
+// Loads a huffman sprite's METADATA only -- mirrors sprite_load_bitplane exactly, same
+// container/flags-bit/mode-field differences as atlas_load_huffman_into above.
+static bool sprite_load_huffman(PnxSprite* out, uint16_t asset_id)
+{
+	if (!s_huffman_table)
+	{
+		pnx_log("sprite %u: load the huffman table first (pnx_huffman_table_load)", asset_id);
+		return false;
+	}
+	uint32_t resource;
+	uint8_t header[PNX_BLOB_HEADER_BYTES];
+	if (!huffman_read_header(asset_id, "sprite", "PS", header, &resource))
+		return false;
+	const uint8_t frame_count = header[3];
+	const uint8_t flags		  = header[4];
+	if (frame_count == 0)
+	{
+		pnx_log("sprite %u: zero frames", asset_id);
+		return false;
+	}
+	if ((flags & 4) == 0)
+	{
+		pnx_log("sprite %u: PNX_COMPRESS_MODE is huffman, but sprite is not", asset_id);
+		return false;
+	}
+
+	const size_t meta_span = (size_t)frame_count * PNX_SPRITE_FRAME_BYTES;
+	const size_t pal_span  = pad4(frame_count);
+
+	uint8_t* meta_pal = (uint8_t*)arena_alloc(meta_span + pal_span, 4);
+	if (!meta_pal || !read_resource_range(resource, PNX_BLOB_HEADER_BYTES, meta_pal, meta_span + pal_span))
+	{
+		pnx_log("sprite %u: short read, frame metadata", asset_id);
+		return false;
+	}
+
+	out->frame_meta	   = meta_pal;
+	out->frame_palette = meta_pal + meta_span;
+	out->frame_count   = frame_count;
+	out->asset_id	   = asset_id;
+	out->resource	   = resource;
+	out->scaled_rects  = NULL;
+	out->complex_masks = NULL;
+	out->scaled_count  = 0;
+	out->complex_count = 0;
+
+	uint16_t unit_count;
+	uint32_t max_unit_pixels;
+	sprite_bitplane_stats(frame_count, out->frame_meta, &unit_count, &max_unit_pixels);
+	if (max_unit_pixels > PNX_SPRITE_CACHE_MAX_UNIT_PX)
+	{
+		pnx_log(
+			"sprite %u: largest reachable unit is %u px, over "
+			"PNX_SPRITE_CACHE_MAX_UNIT_PX (%u)",
+			asset_id, (unsigned)max_unit_pixels, (unsigned)PNX_SPRITE_CACHE_MAX_UNIT_PX);
+		return false;
+	}
+	out->unit_count		 = unit_count;
+	out->max_unit_pixels = (uint16_t)max_unit_pixels;
+	out->stream_offset	 = (uint32_t)(PNX_BLOB_HEADER_BYTES + meta_span + pal_span);
+
+	size_t shapes_len	  = 0;
+	const uint8_t* shapes = load_huffman_shapes(resource, out->stream_offset, unit_count, NULL,
+												0, 0, "sprite", asset_id, &shapes_len);
+	if (!shapes)
+		return false;
+	size_t shapes_consumed = 0;
+	if (!parse_sprite_shapes(shapes, shapes_len, frame_count, out, asset_id, &shapes_consumed))
+		return false;
+	if (shapes_consumed != shapes_len)
+	{
+		pnx_log("sprite %u: %u bytes past the shape tables go unaccounted for", asset_id,
+				(unsigned)(shapes_len - shapes_consumed));
+		return false;
+	}
+
+#if !PNX_DISPLAY_BW
+	for (uint8_t i = 0; i < frame_count; i++)
+	{
+		if (out->frame_palette[i] >= s_palette_count)
+		{
+			pnx_log("sprite %u: frame %u wants palette %u, only %u loaded", asset_id, i,
+					out->frame_palette[i], s_palette_count);
+			return false;
+		}
+	}
+#endif
+	return true;
+}
+
+// Shared by pnx_huffman_atlas_fetch/pnx_huffman_sprite_fetch -- identical to
+// bitplane_unit_fetch (see that function's own comment), kept as its own copy for the
+// same reason the loaders above are: PNX_COMPRESS_MODE is mutually exclusive, so
+// bitplane's copy is never compiled into a huffman build to share with anyway.
+static size_t huffman_unit_fetch(uint32_t resource, uint32_t table_off, uint16_t unit_index,
+								 uint16_t unit_count, uint8_t* scratch, size_t scratch_cap)
+{
+	if (unit_index >= unit_count)
+		return 0;
+
+	uint8_t off_pair[4];
+	if (!read_resource_range(resource, table_off + (size_t)unit_index * 2, off_pair, 4))
+		return 0;
+	const uint16_t start = read_u16(off_pair);
+	const uint16_t stop	 = read_u16(off_pair + 2);
+	if (stop < start)
+		return 0;
+	const size_t len = (size_t)(stop - start);
+	if (len == 0 || len > scratch_cap)
+		return 0;
+
+	const size_t data_pos = table_off + (size_t)(unit_count + 1) * 2 + start;
+	if (!read_resource_range(resource, data_pos, scratch, len))
+		return 0;
+	return len;
+}
+
+size_t pnx_huffman_atlas_fetch(void* ctx, uint16_t atlas_asset, uint16_t tile_index,
+							   uint8_t* scratch, size_t scratch_cap)
+{
+	(void)atlas_asset;
+	const PnxAtlas* a = (const PnxAtlas*)ctx;
+	if (!a)
+		return 0;
+	return huffman_unit_fetch(a->resource, a->stream_offset, tile_index, a->unit_count,
+							  scratch, scratch_cap);
+}
+
+size_t pnx_huffman_sprite_fetch(const PnxSprite* sprite, uint16_t unit_index,
+								uint8_t* scratch, size_t scratch_cap)
+{
+	if (!sprite)
+		return 0;
+	return huffman_unit_fetch(sprite->resource, sprite->stream_offset, unit_index,
+							  sprite->unit_count, scratch, scratch_cap);
+}
+#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
+
 bool pnx_sprite_load(PnxSprite* out, uint16_t asset_id)
 {
 #if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
 	return sprite_load_bitplane(out, asset_id);
+#elif PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
+	return sprite_load_huffman(out, asset_id);
 #else
 	if (!s_palettes)
 	{
@@ -1941,6 +2350,9 @@ static bool atlas_pin(PnxMap* m, uint8_t which)
 #if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
 	const bool loaded = atlas_load_bitplane_into(&m->pool[slot], a->asset, m->pool_mem + from,
 												 to - from);
+#elif PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
+	const bool loaded = atlas_load_huffman_into(&m->pool[slot], a->asset, m->pool_mem + from,
+												to - from);
 #else
 #if PNX_USE_MAP_COMPRESS || PNX_COMPRESS_MODE == PNX_COMPRESS_LZSS
 	uint8_t* scratch = m->lzss_src;
@@ -2732,9 +3144,59 @@ bool pnx_scene_load(uint16_t scene_id)
 	// pnx_arena_reset, which would also clear it.
 	pnx_arena_reset_hi(s_arena);
 	s_atlas_count = s_sprite_count = s_nine_slice_count = s_font_count = 0;
-	s_have_map = s_have_dialog = false;
-	s_palettes				   = NULL;
-	s_palette_count			   = 0;
+	s_map															   = NULL;
+	s_dialog														   = NULL;
+	s_palettes														   = NULL;
+	s_palette_count													   = 0;
+
+	// Pass 1: tally how many of each type THIS scene actually declares, by the same
+	// magic-byte dispatch pass 2 below uses, so the slot allocations after this are sized
+	// to exactly that -- not PNX_SCENE_MAX_*'s worst case, which every scene load (and
+	// every project, whether or not any scene ever reached it) used to pay resident RAM
+	// for regardless. One extra 3-byte resource read per asset, paid once per scene
+	// transition -- not a per-frame cost.
+	uint8_t atlas_n = 0, sprite_n = 0, nine_slice_n = 0, font_n = 0;
+	bool has_map = false, has_dialog = false;
+	for (uint8_t i = 0; i < count; i++)
+	{
+		uint8_t magic[3] = { 0 };
+		pnx_platform_resource_read(s_resources[ids[first + i]], 0, magic, 3);
+		if (magic[0] == 'P' && magic[1] == 'A')
+			atlas_n++;
+		else if (magic[0] == 'P' && magic[1] == 'S')
+			sprite_n++;
+		else if (magic[0] == 'N' && magic[1] == '9')
+			nine_slice_n++;
+		else if (magic[0] == 'P' && magic[1] == 'M')
+			has_map = true;
+		else if (magic[0] == 'P' && magic[1] == 'D')
+			has_dialog = true;
+		else if (magic[0] == 'P' && magic[1] == 'F')
+			font_n++;
+	}
+	if (atlas_n > PNX_SCENE_MAX_ATLASES || sprite_n > PNX_SCENE_MAX_SPRITES ||
+		nine_slice_n > PNX_SCENE_MAX_NINE_SLICES || font_n > PNX_SCENE_MAX_FONTS)
+	{
+		pnx_log(
+			"scene %u: %u atlases, %u sprites, %u nine-slices, %u fonts -- over "
+			"PNX_SCENE_MAX_* (raise it)",
+			scene_id, atlas_n, sprite_n, nine_slice_n, font_n);
+		return false;
+	}
+
+	s_atlases	  = atlas_n ? ARENA_ALLOC_ARRAY(PnxAtlas, atlas_n) : NULL;
+	s_sprites	  = sprite_n ? ARENA_ALLOC_ARRAY(PnxSprite, sprite_n) : NULL;
+	s_nine_slices = nine_slice_n ? ARENA_ALLOC_ARRAY(PnxNineSlice, nine_slice_n) : NULL;
+	s_fonts		  = font_n ? ARENA_ALLOC_ARRAY(PnxFont, font_n) : NULL;
+	s_map		  = has_map ? ARENA_ALLOC_ARRAY(PnxMap, 1) : NULL;
+	s_dialog	  = has_dialog ? ARENA_ALLOC_ARRAY(PnxDialog, 1) : NULL;
+	if ((atlas_n && !s_atlases) || (sprite_n && !s_sprites) ||
+		(nine_slice_n && !s_nine_slices) || (font_n && !s_fonts) ||
+		(has_map && !s_map) || (has_dialog && !s_dialog))
+	{
+		pnx_log("scene %u: arena full for its own slot tables", scene_id);
+		return false;
+	}
 
 	// Palettes first: atlases and sprites carry indices into them, and refuse to load
 	// before the table exists.
@@ -2762,8 +3224,7 @@ bool pnx_scene_load(uint16_t scene_id)
 			// A scene atlas is no longer paired with anything -- the map owns and streams the
 			// tilesets it draws with -- so the asset id it came from is not kept. It is here for
 			// whatever else a scene wants a resident tileset for.
-			ok = s_atlas_count < PNX_SCENE_MAX_ATLASES &&
-				pnx_atlas_load(&s_atlases[s_atlas_count], asset);
+			ok = s_atlas_count < atlas_n && pnx_atlas_load(&s_atlases[s_atlas_count], asset);
 			if (ok)
 				s_atlas_count++;
 		}
@@ -2773,14 +3234,14 @@ bool pnx_scene_load(uint16_t scene_id)
 			// under PNX_COMPRESS_BITPLANE its pixels are fetched/decoded on demand through
 			// pnx_sprite_cache.c rather than resident, but pnx_sprite_load's contract to
 			// this loop is unchanged either way.
-			ok = s_sprite_count < PNX_SCENE_MAX_SPRITES &&
+			ok = s_sprite_count < sprite_n &&
 				pnx_sprite_load(&s_sprites[s_sprite_count], asset);
 			if (ok)
 				s_sprite_count++;
 		}
 		else if (magic[0] == 'N' && magic[1] == '9')
 		{
-			ok = s_nine_slice_count < PNX_SCENE_MAX_NINE_SLICES &&
+			ok = s_nine_slice_count < nine_slice_n &&
 				pnx_nineslice_load(&s_nine_slices[s_nine_slice_count], asset);
 			if (ok)
 				s_nine_slice_count++;
@@ -2789,18 +3250,15 @@ bool pnx_scene_load(uint16_t scene_id)
 		{
 			// A map names and owns its own tilesets, so there is nothing to pair here any more.
 			// The scene's job ends at loading it; the map's pools do the rest.
-			ok		   = pnx_map_load(&s_map, asset);
-			s_have_map = ok;
+			ok = pnx_map_load(s_map, asset);
 		}
 		else if (magic[0] == 'P' && magic[1] == 'D')
 		{
-			ok			  = pnx_dialog_load(&s_dialog, asset);
-			s_have_dialog = ok;
+			ok = pnx_dialog_load(s_dialog, asset);
 		}
 		else if (magic[0] == 'P' && magic[1] == 'F')
 		{
-			ok = s_font_count < PNX_SCENE_MAX_FONTS &&
-				pnx_font_load(&s_fonts[s_font_count], asset);
+			ok = s_font_count < font_n && pnx_font_load(&s_fonts[s_font_count], asset);
 			if (ok)
 				s_font_count++;
 		}
@@ -2839,11 +3297,11 @@ const PnxFont* pnx_scene_font(uint8_t index)
 }
 PnxMap* pnx_scene_map(void)
 {
-	return s_have_map ? &s_map : NULL;
+	return s_map;
 }
 const PnxDialog* pnx_scene_dialog(void)
 {
-	return s_have_dialog ? &s_dialog : NULL;
+	return s_dialog;
 }
 uint8_t pnx_scene_atlas_count(void)
 {
@@ -2910,19 +3368,37 @@ size_t pnx_bitplane_sprite_fetch(const PnxSprite* sprite, uint16_t unit_index,
 							   sprite->unit_count, scratch, scratch_cap);
 }
 
+#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
+// The one thing that differs between the two on-demand-decode modes at this layer: which
+// per-unit fetch function pnx_tile_cache_get calls on a miss. Everything else here --
+// cache key, slot sizing, the cache module itself -- is identical either way (see
+// pnx_tile_cache.c/pnx_sprite_cache.c's own #if branches for the matching decode-side
+// split).
 const uint8_t* pnx_atlas_tile(const PnxAtlas* a, uint8_t index)
 {
 	if (a->metatiles)
 		return NULL;
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
 	return pnx_tile_cache_get(a->asset_id, index, a->tile_px, pnx_bitplane_atlas_fetch,
 							  (void*)a);
+#else
+	return pnx_tile_cache_get(a->asset_id, index, a->tile_px, pnx_huffman_atlas_fetch,
+							  (void*)a);
+#endif
 }
 
 const uint8_t* pnx_atlas_subtile(const PnxAtlas* a, uint16_t subtile_index)
 {
 	const uint8_t half = (uint8_t)(a->tile_px / 2);
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
 	return pnx_tile_cache_get(a->asset_id, subtile_index, half, pnx_bitplane_atlas_fetch,
 							  (void*)a);
+#else
+	return pnx_tile_cache_get(a->asset_id, subtile_index, half, pnx_huffman_atlas_fetch,
+							  (void*)a);
+#endif
 }
 
 void pnx_sprite_frame_get(const PnxSprite* s, uint8_t frame, PnxSpriteFrame* out)
@@ -2938,5 +3414,5 @@ void pnx_sprite_frame_get(const PnxSprite* s, uint8_t frame, PnxSpriteFrame* out
 		out->pixels		  = NULL;
 	}
 }
-#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
 #endif // PNX_USE_ASSETS

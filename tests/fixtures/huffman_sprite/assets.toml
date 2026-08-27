@@ -1,0 +1,17 @@
+# Dedicated fixture for compress = "huffman" -- exercises the sprite_load_huffman path
+# in pnx_assets.c against a real pipeline build. Same source art as
+# fixtures/bitplane_sprite's own fixture, including its deliberate frame 0/frame 2
+# dedup case (build_sprite_frame_meta's dedup interacting with the huffman per-unit
+# encoding, same reasoning that fixture's own comment gives for bitplane).
+
+[project]
+name = "huffman_sprite_fixture"
+resources = "resources"
+header = "gen.h"
+compress = "huffman"
+
+[[sprite]]
+name = "quad"
+sheet = "art/sheet.png"
+frames = [[0, 0, 16, 16], [16, 0, 16, 16], [0, 0, 16, 16], [16, 16, 16, 16]]
+out = "quad.bin"

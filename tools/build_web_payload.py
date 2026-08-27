@@ -25,6 +25,7 @@ ROOT = os.path.dirname(TOOLS)
 FLAT_FILES = [
     "tools/pnx_project.py",
     "tools/pnx_assets.py",
+    "tools/pnx_huffman_codec.py",  # pnx_assets.py's own compress="huffman" dependency
     "tools/pnx_mapfile.py",
     "tools/pnx_preview.py",
     # project/build.py imports this at module scope for app_size() -- it's pure stdlib

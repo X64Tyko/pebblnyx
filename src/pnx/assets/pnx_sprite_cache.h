@@ -10,7 +10,7 @@
 #include "../core/pnx_arena.h"
 #include "../pnx_config.h"
 
-#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
 
 #include "pnx_assets.h" // PnxSprite, PnxSpriteFrame
 
@@ -39,4 +39,4 @@ void pnx_sprite_cache_tick(void);
 // Frees every entry -- mirrors pnx_tile_cache_reset.
 void pnx_sprite_cache_reset(void);
 
-#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN

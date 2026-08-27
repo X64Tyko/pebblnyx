@@ -201,8 +201,14 @@ typedef struct
 	int32_t flt_low, flt_band;
 } Voice;
 
-static Voice s_voice[PNX_SYNTH_VOICES];
-static PnxInstrument s_slot[PNX_SYNTH_SLOTS];
+// Folded into pnx_synth_init's own single malloc'd block (below) rather than resident
+// arrays -- PNX_USE_SYNTH is already opt-in (off by default), but a project that DOES
+// turn it on used to pay this 1,288 bytes of permanent .bss whether or not the synth was
+// ever actually running, on top of the malloc'd block it was already paying for the
+// effect tail/wavetables. One allocation, one lifetime, same as everything else this
+// module already owns.
+static Voice* s_voice;
+static PnxInstrument* s_slot;
 
 // How fast a displaced note fades. Long enough to have no edge, short enough not to muddy
 // the note replacing it -- the same few milliseconds the plain mixer uses for the same job.
@@ -440,17 +446,21 @@ bool pnx_synth_init(uint32_t sample_rate)
 	line_samples += CHORUS_LEN;
 	size_t line_bytes		 = line_samples * sizeof(int16_t);
 	const size_t block_bytes = sizeof(int32_t) * BLOCK * 3u;
+	const size_t voice_bytes = sizeof(Voice) * PNX_SYNTH_VOICES;
+	const size_t slot_bytes	 = sizeof(PnxInstrument) * PNX_SYNTH_SLOTS;
 
-	// One allocation, carved by decreasing alignment -- int32 accumulators, then int16
-	// delay lines, then the int8 wavetables -- so nothing needs padding between them.
-	uint8_t* p = (uint8_t*)malloc(block_bytes + line_bytes + wave_bytes);
+	// One allocation, carved by decreasing alignment -- int32 accumulators and voice/slot
+	// state (both need at most 4-byte alignment), then int16 delay lines, then the int8
+	// wavetables -- so nothing needs padding between them.
+	uint8_t* p = (uint8_t*)malloc(block_bytes + voice_bytes + slot_bytes + line_bytes + wave_bytes);
 	if (!p)
 	{
-		pnx_log("synth: %u bytes refused", (unsigned)(block_bytes + line_bytes + wave_bytes));
+		pnx_log("synth: %u bytes refused",
+				(unsigned)(block_bytes + voice_bytes + slot_bytes + line_bytes + wave_bytes));
 		return false;
 	}
 	s_effect_bytes = (uint32_t)line_bytes;
-	s_total_bytes  = (uint32_t)(block_bytes + line_bytes + wave_bytes);
+	s_total_bytes  = (uint32_t)(block_bytes + voice_bytes + slot_bytes + line_bytes + wave_bytes);
 
 	s_dry = (int32_t*)p;
 	p += sizeof(int32_t) * BLOCK;
@@ -459,6 +469,11 @@ bool pnx_synth_init(uint32_t sample_rate)
 	s_cho_send = (int32_t*)p;
 	p += sizeof(int32_t) * BLOCK;
 	s_block_base = (uint8_t*)s_dry;
+
+	s_voice = (Voice*)p;
+	p += voice_bytes;
+	s_slot = (PnxInstrument*)p;
+	p += slot_bytes;
 	for (int i = 0; i < COMBS; i++)
 		alloc_line(&s_comb[i], COMB_LEN[i], &p);
 	for (int i = 0; i < ALLPASS; i++)
@@ -511,8 +526,12 @@ bool pnx_synth_init(uint32_t sample_rate)
 	}
 
 	s_tail = 0;
-	memset(s_voice, 0, sizeof(s_voice)); // clears filter state for a genuinely fresh voice
-	memset(s_slot, 0, sizeof(s_slot));
+	// Voices/instrument slots need to start zeroed, the same guarantee a static array's
+	// implicit BSS zero-init used to give for free -- now that they're carved from
+	// malloc'd memory (above), that guarantee has to be explicit. voice_bytes/slot_bytes,
+	// not sizeof(s_voice)/sizeof(s_slot): those are pointers now, not arrays.
+	memset(s_voice, 0, voice_bytes); // clears filter state for a genuinely fresh voice
+	memset(s_slot, 0, slot_bytes);
 	memset(s_comb_store, 0, sizeof(s_comb_store));
 	s_cfg	= pnx_synth_worst_case();
 	s_ready = true;

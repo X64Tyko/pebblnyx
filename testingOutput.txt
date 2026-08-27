@@ -1,0 +1,158 @@
+/home/tyton/CLionProjects/pebblnyx/tools/bpeg2_benchmark.py:155: DeprecationWarning: Image.Image.getdata is deprecated and will be removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.
+  pixels = list(im.getdata())
+
+=== Need4Pebble (all sprites+atlases): 182 units ===
+  raw4bpp=41219  lzss=26141  elias-gamma=21390  concat-eg=21309  huffman=26115
+  huffman vs raw:          +36.6%
+  huffman vs lzss:         +0.1%
+  huffman vs elias-gamma:  -22.1%
+  concat-eg vs elias-gamma:+0.4%
+  elias-gamma vs lzss:     +18.2%
+  huffman modes: {'fill': 4, 'variable': 122, 'fixed16': 38, 'raw': 18}
+
+=== Need4Pebble: shared-table-per-asset, 8 assets (0 single-unit) ===
+  table bytes (sum across assets)=975  unit stream bytes=19408  total=20383
+
+=== WorldTiles (atlases): 143 units ===
+  raw4bpp=18496  lzss=15502  elias-gamma=10917  concat-eg=10824  huffman=14476
+  huffman vs raw:          +21.7%
+  huffman vs lzss:         +6.6%
+  huffman vs elias-gamma:  -32.6%
+  concat-eg vs elias-gamma:+0.9%
+  elias-gamma vs lzss:     +29.6%
+  huffman modes: {'raw': 21, 'fixed16': 117, 'variable': 3, 'fill': 2}
+
+=== WorldTiles: shared-table-per-asset, 4 assets (0 single-unit) ===
+  table bytes (sum across assets)=786  unit stream bytes=10312  total=11098
+
+=== Pebblemon front sprites (251): 251 units ===
+  raw4bpp=299488  lzss=145111  elias-gamma=98934  concat-eg=98656  huffman=130879
+  huffman vs raw:          +56.3%
+  huffman vs lzss:         +9.8%
+  huffman vs elias-gamma:  -32.3%
+  concat-eg vs elias-gamma:+0.3%
+  elias-gamma vs lzss:     +31.8%
+  huffman modes: {'variable': 251}
+
+=== Pebblemon back sprites (251): 251 units ===
+  raw4bpp=289152  lzss=117097  elias-gamma=82773  concat-eg=82627  huffman=108081
+  huffman vs raw:          +62.6%
+  huffman vs lzss:         +7.7%
+  huffman vs elias-gamma:  -30.6%
+  concat-eg vs elias-gamma:+0.2%
+  elias-gamma vs lzss:     +29.3%
+  huffman modes: {'variable': 251}
+
+  Pebblemon's OWN shipped decoder (Game Boy bitplane RLE, hand-tuned -- docs/GAME-COMPARISON.md's earlier measurement): front=86378B (71.2% off raw) back=68600B (76.3% off raw)
+
+=== Pebblemon Route1 map tileset (16x16 tiles): 200 units ===
+  raw4bpp=25600  lzss=25407  elias-gamma=14469  concat-eg=14468  huffman=18590
+  huffman vs raw:          +27.4%
+  huffman vs lzss:         +26.8%
+  huffman vs elias-gamma:  -28.5%
+  concat-eg vs elias-gamma:+0.0%
+  elias-gamma vs lzss:     +43.1%
+  huffman modes: {'fixed16': 200}
+
+=== Pebblemon front sprites: shared-table-per-asset, 1 assets (0 single-unit) ===
+  table bytes (sum across assets)=1155  unit stream bytes=95633  total=96788
+
+=== Pebblemon back sprites: shared-table-per-asset, 1 assets (0 single-unit) ===
+  table bytes (sum across assets)=1558  unit stream bytes=78404  total=79962
+
+=== Pebblemon front sprites: 251 separate sprites vs 1 combined sprite (251 frames) ===
+  overhead (header+frame_meta+palette): separate=5020B (header=2008 meta=2008 pal=1004)  combined=2268B (header=8 meta=2008 pal=252)  saved-by-combining=2000B (header only; meta/palette unchanged)
+  real total size, 251 separate sprites, elias-gamma today  = 103954B (baseline)
+  real total size, 1 combined sprite, elias-gamma (today's codec, just combined) = 101202B (+2.6% vs baseline)
+  real total size, 1 combined sprite, concat-eg               = 100924B (+2.9% vs baseline)
+  real total size, 1 combined sprite, Huffman per-unit table  = 133147B (-28.1% vs baseline)
+  real total size, 1 combined sprite, Huffman shared table   = 99056B (+4.7% vs baseline)
+  Pebblemon/Nintendo pixel body only (their compressed sprite blob, no offset table) = 86378B
+  Pebblemon/Nintendo REAL shipped total (compressed sprite blob + their real 6B/species offset+size table, both read directly off disk) = 87890B -- +11.3% smaller than our best combined+shared-table total
+
+=== Pebblemon back sprites: 251 separate sprites vs 1 combined sprite (251 frames) ===
+  overhead (header+frame_meta+palette): separate=5020B (header=2008 meta=2008 pal=1004)  combined=2268B (header=8 meta=2008 pal=252)  saved-by-combining=2000B (header only; meta/palette unchanged)
+  real total size, 251 separate sprites, elias-gamma today  = 87793B (baseline)
+  real total size, 1 combined sprite, elias-gamma (today's codec, just combined) = 85041B (+3.1% vs baseline)
+  real total size, 1 combined sprite, concat-eg               = 84895B (+3.3% vs baseline)
+  real total size, 1 combined sprite, Huffman per-unit table  = 110349B (-25.7% vs baseline)
+  real total size, 1 combined sprite, Huffman shared table   = 82230B (+6.3% vs baseline)
+  Pebblemon/Nintendo pixel body only (their compressed sprite blob, no offset table) = 68600B
+  Pebblemon/Nintendo REAL shipped total (compressed sprite blob + their real 6B/species offset+size table, both read directly off disk) = 70112B -- +14.7% smaller than our best combined+shared-table total
+
+=== Pebblemon Route1 map tileset: shared-table-per-asset, 1 assets (0 single-unit) ===
+  table bytes (sum across assets)=56  unit stream bytes=12538  total=12594
+
+=== GRAND TOTAL: 182 n4p + 143 wt + 251+251 pkmn sprites + 200 pkmn tiles ===
+  raw4bpp=673955  lzss=329258  elias-gamma=228483  concat-eg=227884  huffman=298141
+  huffman vs raw:           +55.8%
+  huffman vs lzss:          +9.5%
+  huffman vs elias-gamma:   -30.5%
+  concat-eg vs elias-gamma: +0.3%
+
+=== shared-table-per-asset GRAND TOTAL (n4p+worldtiles atlases/sprites, pkmn sprites+tileset) ===
+  table bytes=4530  unit stream bytes=216295  total=220825
+  vs elias-gamma (per-unit, no table at all): +3.4%
+  vs huffman (per-unit table):                +25.9%
+
+=== ONE global table per project ===
+
+=== Need4Pebble: ONE global table, 182 units ===
+  table bytes=537  unit stream bytes=19820  total=20357
+
+=== WorldTiles: ONE global table, 143 units ===
+  table bytes=342  unit stream bytes=10414  total=10756
+
+=== Pebblemon (front+back+tileset, one project): ONE global table, 702 units ===
+  table bytes=1999  unit stream bytes=187719  total=189718
+
+
+==============================================================================
+=== FINAL COMPARISON: concat-eg + both Huffman modes vs today, whole suite ===
+==============================================================================
+
+Need4Pebble (container overhead=1676B, measured directly off the real shipped blob):
+  elias-gamma (today, shipped) = 23066B
+  concat-eg                    = 22985B  (+0.4%)
+  Huffman, per-unit table       = 27791B  (-20.5%)
+  Huffman, shared table          = 22059B  (+4.4%)
+  Huffman, ONE global table       = 22033B  (+4.5%)
+
+WorldTiles (container overhead=356B, measured directly off the real shipped blob):
+  elias-gamma (today, shipped) = 11273B
+  concat-eg                    = 11180B  (+0.8%)
+  Huffman, per-unit table       = 14832B  (-31.6%)
+  Huffman, shared table          = 11454B  (-1.6%)
+  Huffman, ONE global table       = 11112B  (+1.4%)
+
+Pebblemon front sprites (pixel body only, matching how Nintendo's own 86378B is measured -- no header/offset-table on either side):
+  elias-gamma (today, shipped) = 98934B
+  concat-eg                    = 98656B  (+0.3%)
+  Huffman, per-unit table       = 130879B  (-32.3%)
+  Huffman, shared table          = 96788B  (+2.2%)
+  Nintendo/Pebblemon shipped (real file, pixel body only) = 86378B  (+12.7% vs our elias-gamma)
+
+Pebblemon back sprites (pixel body only):
+  elias-gamma (today, shipped) = 82773B
+  concat-eg                    = 82627B  (+0.2%)
+  Huffman, per-unit table       = 108081B  (-30.6%)
+  Huffman, shared table          = 79962B  (+3.4%)
+  Nintendo/Pebblemon shipped (real file, pixel body only) = 68600B  (+17.1% vs our elias-gamma)
+
+Pebblemon Route1 tileset (pixel body only, no Nintendo reference -- this tileset is our own PNG re-tiling, not a real GBC map-compression export):
+  elias-gamma (today, shipped) = 14469B
+  concat-eg                    = 14468B  (+0.0%)
+  Huffman, per-unit table       = 18590B  (-28.5%)
+  Huffman, shared table          = 12594B  (+13.0%)
+
+Pebblemon combined (front+back+tileset, pixel body only):
+  elias-gamma (today, shipped) = 196176B
+  concat-eg                    = 195751B  (+0.2%)
+  Huffman, per-unit table       = 257550B  (-31.3%)
+  Huffman, shared table (per-asset: front/back/tileset each own table) = 189344B  (+3.5%)
+  Huffman, ONE global table (all 3 pooled) = 189718B  (+3.3%)
+  Nintendo/Pebblemon shipped (front+back, pixel body only; no equivalent map-tile reference) = 154978B  (+14.7% vs our elias-gamma front+back)
+
+field usage across the WHOLE corpus:
+  run_length   n=45830  tightest margin: 779 (unit=wt:ruins:tile25, value=244 against a 10b field)  overflows=0
+  cols         n=1523  tightest margin: 7 (unit=pkmn_front:189, value=56 against a 6b field)  overflows=0

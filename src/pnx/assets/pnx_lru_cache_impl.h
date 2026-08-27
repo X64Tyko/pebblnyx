@@ -2,7 +2,7 @@
 
 #include "../pnx_config.h"
 
-#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
 
 #include "../core/pnx_arena.h"
 #include <stdbool.h>
@@ -67,4 +67,4 @@ void pnx_lru_cache_reset_impl(PnxLruCache* cache);
 // NULL only if `cache` has zero entries (init failed or was never called).
 uint8_t* pnx_lru_cache_find_or_prepare(PnxLruCache* cache, uint32_t key, bool* out_hit);
 
-#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN

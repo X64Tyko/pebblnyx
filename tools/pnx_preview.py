@@ -58,15 +58,171 @@ def parse_palettes(blob):
             for i in range(n)]
 
 
+# ------------------------------------------------------------- compressed pixel bodies
+#
+# parse_atlas/parse_sprite used to assume flags == 0 (compress = "none") and slice
+# "pixels" directly out of the blob -- which crashed (IndexError, reading tile N's bytes
+# past the end of a much shorter compressed stream) the moment a project's default
+# PNX_COMPRESS_MODE (bitplane) or an explicit "lzss"/"huffman" choice actually shipped a
+# compressed pixel region, which is every project that does not override the default.
+# These reconstruct the SAME flat, packed-4bpp "as if built with compress=none" byte
+# string the rest of this module already expects, so tile_image/sprite_image/unpack_4bpp
+# never need to know compression happened at all.
+
+
+class _BitReader:
+    def __init__(self, data):
+        self.data = data
+        self.pos = 0
+        self.len_bits = len(data) * 8
+
+    def read_bit(self):
+        if self.pos >= self.len_bits:
+            return 0
+        byte = self.data[self.pos >> 3]
+        shift = 7 - (self.pos & 7)
+        self.pos += 1
+        return (byte >> shift) & 1
+
+    def read_bits_msb(self, n):
+        v = 0
+        for _ in range(n):
+            v = (v << 1) | self.read_bit()
+        return v
+
+
+def _bp_read_elias_gamma(r):
+    n_bits = 1
+    while r.read_bit():
+        n_bits += 1
+    mantissa = r.read_bits_msb(n_bits)
+    return (1 << n_bits) + mantissa - 1
+
+
+def _bits_for_k(k):
+    return 1 if k <= 2 else 2 if k <= 4 else 3 if k <= 8 else 4
+
+
+def decode_bitplane_unit(src, n):
+    """Ports src/pnx/assets/pnx_bitplane.c's pnx_bitplane_decode bit for bit: independent
+    per-plane Elias-gamma RLE, frequency-sorted local palette, raw-escape fallback.
+    Returns packed 4bpp bytes (pack_unit_4bpp's own 2-pixels/byte, high-nibble-first
+    layout) -- the same shape a compress="none" tile/frame's own bytes already are."""
+    header = src[0]
+    if header & 0x80:
+        need = (n + 1) // 2
+        return bytes(src[1:1 + need])
+
+    k = (header & 0x0F) + 1
+    off_bytes = (k + 1) // 2
+    off_src = src[1:1 + off_bytes]
+    offset_table = []
+    for i in range(k):
+        b = off_src[i // 2]
+        offset_table.append((b >> 4) if i % 2 == 0 else (b & 0x0F))
+
+    scratch = [0] * n
+    if k == 1:
+        scratch = [offset_table[0]] * n
+    else:
+        bits = _bits_for_k(k)
+        r = _BitReader(src[1 + off_bytes:])
+        for p in range(bits):
+            current = r.read_bit()
+            pos = 0
+            while pos < n:
+                run = _bp_read_elias_gamma(r)
+                if current:
+                    for i in range(run):
+                        scratch[pos + i] |= (1 << p)
+                pos += run
+                current ^= 1
+        scratch = [offset_table[v] for v in scratch]
+
+    out = bytearray((n + 1) // 2)
+    for i in range(0, n, 2):
+        hi = scratch[i]
+        lo = scratch[i + 1] if i + 1 < n else 0
+        out[i // 2] = (hi << 4) | lo
+    return bytes(out)
+
+
+def _lzss_decompress(data, out_len):
+    """Mirrors tools/pnx_assets.py's own lzss_decompress -- duplicated rather than
+    imported to keep this preview module's dependency graph as small as the web payload
+    already commits to (see build_web_payload.py), not because the format differs."""
+    out = bytearray()
+    i = 0
+    while len(out) < out_len:
+        flags = data[i]
+        i += 1
+        for bit in range(8):
+            if len(out) >= out_len:
+                break
+            if flags & (1 << bit):
+                out.append(data[i])
+                i += 1
+            else:
+                token = (data[i] << 8) | data[i + 1]
+                i += 2
+                dist = (token >> 4) + 1
+                length = (token & 0x0F) + 3
+                start = len(out) - dist
+                for k in range(length):
+                    out.append(out[start + k])
+    return bytes(out)
+
+
+def _unit_offset_table(blob, table_off, unit_count):
+    """(unit_count+1)-entry u16 LE offset table -- the shared shape
+    encode_bitplane_units/encode_asset_shared_table both write (see either module's own
+    comment); unit i's compressed bytes are blob[table_off+(unit_count+1)*2+table[i] :
+    ...+table[i+1]]."""
+    table = [int.from_bytes(blob[table_off + i * 2:table_off + i * 2 + 2], "little")
+             for i in range(unit_count + 1)]
+    stream_start = table_off + (unit_count + 1) * 2
+    return table, stream_start
+
+
+def _decode_units_flat(blob, stream_off, unit_count, unit_bytes, flags, lzss_tag_len=0):
+    """Returns unit_count*unit_bytes bytes, packed 4bpp, uncompressed-layout-equivalent
+    -- flags 0 already is that; 1 (LZSS) decompresses the whole region as one stream; 2
+    (bitplane) walks the per-unit offset table and decodes each unit independently; 4
+    (huffman) is not yet supported here (needs the project's separate huffman_table.bin,
+    which callers of parse_atlas/parse_sprite do not currently have a way to hand in) --
+    falls back to a solid grey placeholder rather than crashing, so a huffman-mode
+    project's OTHER assets still preview correctly. `lzss_tag_len` is compress_pixel_body's
+    own tag_len bytes ahead of the LZSS stream (2 for an atlas, 0 for a sprite -- see that
+    function's own comment for why only atlases carry it)."""
+    total = unit_count * unit_bytes
+    if flags == 0:
+        return bytes(blob[stream_off:stream_off + total])
+    if flags & 1:
+        complen = int.from_bytes(blob[stream_off:stream_off + 2], "little")
+        start = stream_off + 2 + lzss_tag_len
+        return _lzss_decompress(blob[start:start + complen], total)
+    if flags & 2:
+        table, units_start = _unit_offset_table(blob, stream_off, unit_count)
+        out = bytearray()
+        for i in range(unit_count):
+            unit = blob[units_start + table[i]:units_start + table[i + 1]]
+            out += decode_bitplane_unit(unit, unit_bytes * 2)
+        return bytes(out)
+    # flags & 4 (huffman): needs an external table this call has no access to.
+    return bytes([0x11] * total)
+
+
 def parse_atlas(blob):
     h = parse_header(blob)
     px, count, layout = h["a"], h["b"], h["c"]
+    flags = h["d"]
     tile_bytes = px * px // 2
     body = HEADER
 
     if layout == 0:
         pal_idx = list(blob[body: body + count])
-        pixels = blob[body + pad4(count) * 2:]
+        stream_off = body + pad4(count) * 2
+        pixels = _decode_units_flat(blob, stream_off, count, tile_bytes, flags, lzss_tag_len=2)
         return {"tile_px": px, "count": count, "metatiled": False,
                 "palette_of": pal_idx, "pixels": pixels, "tile_bytes": tile_bytes}
 
@@ -77,10 +233,12 @@ def parse_atlas(blob):
     defs = [[int.from_bytes(blob[table_at + (t * 4 + q) * 2:
                                  table_at + (t * 4 + q) * 2 + 2], "little")
              for q in range(4)] for t in range(count)]
-    pixels = blob[table_at + count * 8:]
+    sub_bytes = tile_bytes // 4
+    stream_off = table_at + count * 8
+    pixels = _decode_units_flat(blob, stream_off, subs, sub_bytes, flags, lzss_tag_len=2)
     return {"tile_px": px, "count": count, "metatiled": True, "subtiles": subs,
             "palette_of": pal_idx, "defs": defs, "pixels": pixels,
-            "sub_bytes": tile_bytes // 4}
+            "sub_bytes": sub_bytes}
 
 
 def parse_sprite(blob):

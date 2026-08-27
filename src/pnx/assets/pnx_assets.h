@@ -190,7 +190,7 @@ uint16_t pnx_palette_count(void);
 //   scaled_rects  -- scaled_count * 6B: u16 tile, u8 x, u8 y, u8 w, u8 h
 //   complex_masks -- complex_count * (2 + mask_bytes)B: u16 tile, then a row-major
 //                    MSB-first 1bpp mask, mask_bytes = (tile_px*tile_px+7)/8
-#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
 // PNX_COMPRESS_BITPLANE: pixels are NOT resident. Every tile/subtile is one independently
 // bitplane-coded unit staying in ROM (`resource`, `stream_offset` name where its offset
 // table starts); pnx_atlas_tile fetches and decodes ONE on demand through
@@ -300,7 +300,7 @@ typedef struct
 // pnx_sprite_load decodes the whole pixel region into a fresh arena buffer once at load;
 // uncompressed, `pixels` points straight into the loaded blob, same as before either
 // feature existed. Either way this field's contract to a caller never changes.
-#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
 // PNX_COMPRESS_BITPLANE: pixels are NOT resident, same posture as PnxAtlas's own bitplane
 // shape above. Only frame_meta/frame_palette/shape tables are resident; every frame is one
 // independently bitplane-coded unit staying in ROM, fetched and decoded on demand through
@@ -351,7 +351,7 @@ typedef struct
 // itself without a circular dependency (pnx_sprite_cache.h needs PnxSprite). Every other
 // mode keeps the direct-pointer, zero-call inline below -- the cache module is not even
 // linked into that build.
-#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
 void pnx_sprite_frame_get(const PnxSprite* s, uint8_t frame, PnxSpriteFrame* out);
 #else
 static inline void pnx_sprite_frame_get(const PnxSprite* s, uint8_t frame, PnxSpriteFrame* out)
@@ -819,6 +819,23 @@ size_t pnx_bitplane_sprite_fetch(const PnxSprite* sprite, uint16_t unit_index,
 								 uint8_t* scratch, size_t scratch_cap);
 #endif
 
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
+#include "pnx_huffman.h"
+
+// Loads the ONE project-wide run-length table every huffman sprite/atlas decode shares
+// -- call once, before any pnx_sprite_load/pnx_atlas_load, the same way a project calls
+// pnx_palettes_load before loading its first atlas or sprite.
+bool pnx_huffman_table_load(uint16_t asset_id);
+
+// pnx_bitplane_atlas_fetch/pnx_bitplane_sprite_fetch's own siblings -- same contract,
+// same reasoning, just reading a huffman-coded stream's offset table instead of a
+// bitplane one (the container shape is identical between the two modes).
+size_t pnx_huffman_atlas_fetch(void* ctx, uint16_t atlas_asset, uint16_t tile_index,
+							   uint8_t* scratch, size_t scratch_cap);
+size_t pnx_huffman_sprite_fetch(const PnxSprite* sprite, uint16_t unit_index,
+								uint8_t* scratch, size_t scratch_cap);
+#endif
+
 // Each returns false and leaves `out` untouched if the resource is missing, the blob is
 // the wrong type or version, or its declared dimensions do not match its actual size --
 // the last of which is what catches a truncated or half-written resource. A map's own
@@ -885,7 +902,7 @@ uint32_t pnx_assets_bytes_loaded(void);
 // hit. The returned pointer is only valid until `index`'s own cache slot is evicted by a
 // LATER pnx_atlas_tile call for a different tile -- do not hold it across such a call.
 // Every other mode keeps the direct-pointer, zero-call inline below.
-#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
 const uint8_t* pnx_atlas_tile(const PnxAtlas* a, uint8_t index);
 
 // A metatiled atlas's quadrant `subtile_index`, DECODED and packed 4bpp -- pnx_blit_
@@ -915,7 +932,7 @@ static inline const PnxPalette* pnx_atlas_tile_palette(const PnxAtlas* a, uint8_
 	return pnx_palette(a->tile_palette[index]);
 }
 
-#if PNX_COMPRESS_MODE != PNX_COMPRESS_BITPLANE
+#if PNX_COMPRESS_MODE != PNX_COMPRESS_BITPLANE && PNX_COMPRESS_MODE != PNX_COMPRESS_HUFFMAN
 static inline const uint8_t* pnx_sprite_frame(const PnxSprite* s, uint8_t frame)
 {
 	const uint8_t* e = s->frame_meta + (uint32_t)frame * PNX_SPRITE_FRAME_BYTES;

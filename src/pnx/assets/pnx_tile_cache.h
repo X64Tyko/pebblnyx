@@ -22,7 +22,7 @@
 #include "../core/pnx_arena.h"
 #include "../pnx_config.h"
 
-#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#if PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -73,4 +73,4 @@ void pnx_tile_cache_tick(void);
 // valid content just not currently on screen, this is "none of it is valid any more."
 void pnx_tile_cache_reset(void);
 
-#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE
+#endif // PNX_COMPRESS_MODE == PNX_COMPRESS_BITPLANE || PNX_COMPRESS_MODE == PNX_COMPRESS_HUFFMAN

@@ -30,6 +30,7 @@ import tomllib
 # read and write it, and the format is the contract between them.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pnx_mapfile as mapfile                                  # noqa: E402
+import pnx_huffman_codec as hfc                                # noqa: E402
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -149,6 +150,7 @@ MAGIC_SPRITE = b"PS"
 MAGIC_MAP = b"PM"
 MAGIC_DIALOG = b"PD"
 MAGIC_PALETTES = b"PP"
+MAGIC_HUFFMAN_TABLE = b"PH"
 MAGIC_SCENES = b"PC"
 MAGIC_MUSIC = b"PN"
 MAGIC_SAMPLE = b"PW"
@@ -853,6 +855,111 @@ def build_metatiles(tiles, pal_of, T, quiet=False):
     return bank, defs
 
 
+# ---------------------------------------------------------------------- global-table Huffman
+# (compress = "huffman", PNX_COMPRESS_HUFFMAN): a project-wide two-pass build -- pass 1
+# ("collect") runs every atlas/sprite through their NORMAL tile-selection/palette logic
+# unchanged, but instead of encoding pixel bodies, stashes each unit's own crush-ready
+# indices keyed by (asset name, unit index); once every atlas and sprite has contributed,
+# ONE shared run-length Huffman table is built from the pooled statistics
+# (tools/pnx_huffman_codec.py's build_shared_table) and every unit's real body is encoded
+# against it; pass 2 ("final") re-runs the SAME atlas/sprite logic (shared's palette set
+# is already fully settled before either pass runs -- settle_palettes, called once in
+# build() before any finish_atlas/finish_sprite -- so re-running produces identical
+# per-unit indices, not a second independent decision) and looks up each unit's
+# already-encoded bytes by that same key instead of re-encoding.
+#
+# Module-level rather than threaded through every call site's signature because this
+# pipeline runs once per process invocation, single-threaded, start to finish -- the same
+# posture compress_atlases/compress_sprites' own module-wide, not-per-asset scope already
+# has.
+_huffman_phase = None       # None | "collect" | "final"
+_huffman_collect = {}       # (asset_name, unit_index) -> indices, populated in "collect"
+_huffman_final = {}         # (asset_name, unit_index) -> encoded bytes, used in "final"
+
+# A ~bw platform never ships the colour blob at all (docs/PORTING.md's file-tag
+# substitution picks one or the other per platform, never both), so its run-length
+# statistics are pooled into their OWN table rather than diluting the colour one with
+# 2bpp ink-state runs a colour build will never decode -- same reasoning
+# bitplane_encode_bw already gets by being a fully separate encoder from bitplane_encode,
+# not a shared one branching on bit depth.
+_huffman_collect_bw = {}
+_huffman_final_bw = {}
+
+
+def _huffman_collect_or_encode(collect, final, asset_name, units_indices):
+    """Shared by huffman_collect_or_encode/huffman_collect_or_encode_bw: in the "collect"
+    pass, records each unit's own (already palette-packed-and-unpacked-back-to-indices --
+    the same prep encode_bitplane_unit's callers already do, just handed in rather than
+    redone here) indices for the global table build; in the "final" pass, returns each
+    unit's already-encoded bytes (huffman_finalize_table/_bw already computed them)
+    wrapped in the same offset-table-plus-concat shape encode_bitplane_units uses --
+    format-agnostic, so it's reused here rather than duplicated.
+    """
+    units_indices = list(units_indices)
+    if _huffman_phase == "collect":
+        for i, indices in enumerate(units_indices):
+            collect[(asset_name, i)] = indices
+        return b""  # discarded -- this pass's blobs are never used
+    if _huffman_phase == "final":
+        units = [final[(asset_name, i)] for i in range(len(units_indices))]
+        return encode_bitplane_units(units)
+    raise BuildError("huffman_collect_or_encode called outside a collect/final pass")
+
+
+def huffman_collect_or_encode(asset_name, units_indices):
+    return _huffman_collect_or_encode(_huffman_collect, _huffman_final, asset_name,
+                                      units_indices)
+
+
+def huffman_collect_or_encode_bw(asset_name, units_indices):
+    return _huffman_collect_or_encode(_huffman_collect_bw, _huffman_final_bw, asset_name,
+                                      units_indices)
+
+
+def _huffman_finalize(collect, max_code_len):
+    """Shared by huffman_finalize_table/_bw: builds ONE table from everything a collect
+    pass gathered, and pre-computes every unit's real encoded bytes against it. Returns
+    (table_bytes, encoded) -- table_bytes is the table's own wire bytes
+    (tools/pnx_huffman_codec.py's encode_table), to be emitted as its own resource;
+    encoded is the {key: bytes} map the matching "final" pass reads from.
+    """
+    keys = list(collect.keys())
+    pixel_lists = list(collect.values())
+    codes, run_bits, per_unit = hfc.build_shared_table(pixel_lists, max_code_len)
+    table_bytes = hfc.encode_table(codes, run_bits)
+
+    encoded = {}
+    for key, tup in zip(keys, per_unit):
+        n, local, order, k, bpp, start_bit, runs = tup
+        if k > 1 and any(r not in codes for r in runs):
+            # Defensive, not expected to trigger: the table was built from these exact
+            # units' own runs, so every run length it needs to cover is already in
+            # `codes`. Kept anyway rather than trusting that by construction -- a
+            # KeyError here would otherwise crash the build instead of falling back.
+            off_table = bytes((order[i] << 4) | (order[i + 1] if i + 1 < k else 0)
+                              for i in range(0, k, 2))
+            encoded[key] = (bytes([0x80 | ((k - 1) & 0xF)]) + off_table
+                           + hfc.pack_raw_indices(local))
+        else:
+            encoded[key] = hfc.encode_unit_with_table(n, local, order, k, bpp, start_bit,
+                                                       runs, codes)
+    print(f"    huffman: {len(keys)} units pooled into one project-wide table, "
+          f"{len(codes)} distinct run lengths, table={len(table_bytes)} B")
+    return table_bytes, encoded
+
+
+def huffman_finalize_table(max_code_len=16):
+    global _huffman_final
+    table_bytes, _huffman_final = _huffman_finalize(_huffman_collect, max_code_len)
+    return table_bytes
+
+
+def huffman_finalize_table_bw(max_code_len=16):
+    global _huffman_final_bw
+    table_bytes, _huffman_final_bw = _huffman_finalize(_huffman_collect_bw, max_code_len)
+    return table_bytes
+
+
 def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False,
                  compress_atlases=False):
     """Palettise and pack. Called once map compilation has settled tile flags.
@@ -918,7 +1025,8 @@ def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bi
              + complex_count.to_bytes(2, "little") + bytes(complex_masks))
 
     atlas_bitplane = compress_atlases == "bitplane"
-    pixel_compress = False if atlas_bitplane else compress_atlases
+    atlas_huffman = compress_atlases == "huffman"
+    pixel_compress = False if (atlas_bitplane or atlas_huffman) else compress_atlases
 
     def bitplane_encode(units_pixels_and_palettes):
         """bitplane-compressed pixel data replaces raw pixels in "PA" when enabled.
@@ -1010,6 +1118,12 @@ def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bi
             pixel_flags = 2
             pixel_body = bitplane_encode(
                 (bank[i], palettes[pal_of_sub[i]]) for i in range(len(bank)))
+        elif atlas_huffman:
+            pixel_flags = 4
+            pixel_body = huffman_collect_or_encode(
+                atlas["name"],
+                (unpack_4bpp_to_indices(pack_unit_4bpp(bank[i], palettes[pal_of_sub[i]]),
+                                        len(bank[i])) for i in range(len(bank))))
         else:
             pixel_flags, pixel_body = compress_pixel_body(pixels, pixel_compress, tag_len=True)
         body = (len(bank).to_bytes(2, "little") + b"\0\0"
@@ -1024,7 +1138,7 @@ def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bi
         # bitplane-compressed atlases are never eagerly decoded into a pool, so their
         # resident_bytes is metadata-only.
         atlas["resident_bytes"] = (8 + 4 + len(pad4(bytes(assign))) + len(pad4(flags))
-                                   + len(table) + (0 if atlas_bitplane else len(pixels))
+                                   + len(table) + (0 if (atlas_bitplane or atlas_huffman) else len(pixels))
                                    + len(shapes))
 
         if pack_2bit:
@@ -1033,6 +1147,10 @@ def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bi
             if atlas_bitplane:
                 flags_bw	   = 2
                 body_bw_pixels = bitplane_encode_bw(bank[i] for i in range(len(bank)))
+            elif atlas_huffman:
+                flags_bw	   = 4
+                body_bw_pixels = huffman_collect_or_encode_bw(
+                    atlas["name"], (bw_pixel_states(bank[i]) for i in range(len(bank))))
             else:
                 pixels_bw = b"".join(pack_unit_2bpp(bank[i]) for i in range(len(bank)))
                 flags_bw, body_bw_pixels = compress_pixel_body(pixels_bw, pixel_compress,
@@ -1047,6 +1165,12 @@ def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bi
         if atlas_bitplane:
             pixel_flags = 2
             pixel_body = bitplane_encode((t, palettes[a]) for t, a in zip(tiles, assign))
+        elif atlas_huffman:
+            pixel_flags = 4
+            pixel_body = huffman_collect_or_encode(
+                atlas["name"],
+                (unpack_4bpp_to_indices(pack_unit_4bpp(t, palettes[a]), len(t))
+                 for t, a in zip(tiles, assign)))
         else:
             pixel_flags, pixel_body = compress_pixel_body(pixels, pixel_compress, tag_len=True)
         body = pad4(bytes(assign)) + pad4(flags) + pixel_body + shapes
@@ -1055,13 +1179,17 @@ def finish_atlas(atlas, collision, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bi
         atlas["subtiles"] = 0
         # See the metatiled branch above for why this is tracked separately from len(blob).
         atlas["resident_bytes"] = (8 + len(pad4(bytes(assign))) + len(pad4(flags))
-                                   + (0 if atlas_bitplane else len(pixels))
+                                   + (0 if (atlas_bitplane or atlas_huffman) else len(pixels))
                                    + len(shapes))
 
         if pack_2bit:
             if atlas_bitplane:
                 flags_bw	   = 2
                 body_bw_pixels = bitplane_encode_bw(tiles)
+            elif atlas_huffman:
+                flags_bw	   = 4
+                body_bw_pixels = huffman_collect_or_encode_bw(
+                    atlas["name"], (bw_pixel_states(t) for t in tiles))
             else:
                 pixels_bw = b"".join(pack_unit_2bpp(t) for t in tiles)
                 flags_bw, body_bw_pixels = compress_pixel_body(pixels_bw, pixel_compress,
@@ -1980,6 +2108,33 @@ def compress_sprite_pixels_bitplane(frame_meta, dims, pixels):
     return 2, body
 
 
+def compress_sprite_pixels_huffman(frame_meta, dims, pixels, sprite_name):
+    """compress_sprite_pixels_bitplane's global-table-Huffman sibling -- same per-
+    DEDUPED-UNIT walk over frame_meta's own offsets, routed through
+    huffman_collect_or_encode instead of encode_bitplane_unit so this sprite's units
+    contribute to (collect pass) or draw from (final pass) the one project-wide table.
+    """
+    seen = {}
+    for i, (w, h) in enumerate(dims):
+        off = int.from_bytes(frame_meta[i * 8:i * 8 + 2], "little")
+        if off not in seen:
+            seen[off] = (w, h)
+
+    indices_list = []
+    for off in sorted(seen):
+        w, h = seen[off]
+        n = w * h
+        length = n // 2
+        indices_list.append(unpack_4bpp_to_indices(pixels[off:off + length], n))
+
+    body = huffman_collect_or_encode(sprite_name, indices_list)
+
+    if _huffman_phase == "collect" or len(body) >= len(pixels):
+        return 0, pixels
+    # flag 4 means global-table Huffman (see finish_atlas's own atlas_huffman branches)
+    return 4, body
+
+
 def compress_sprite_pixels_bitplane_bw(frame_meta, dims, pixels):
     """compress_sprite_pixels_bitplane's `~bw` counterpart -- same per-deduped-unit walk
     over `frame_meta`'s own offsets, but against a 2bpp-packed (pack_unit_2bpp) `pixels`
@@ -2008,6 +2163,32 @@ def compress_sprite_pixels_bitplane_bw(frame_meta, dims, pixels):
     return 2, body
 
 
+def compress_sprite_pixels_huffman_bw(frame_meta, dims, pixels, sprite_name):
+    """compress_sprite_pixels_huffman's `~bw` counterpart, mirroring
+    compress_sprite_pixels_bitplane_bw's own relationship to compress_sprite_pixels_bitplane
+    -- same per-deduped-unit walk over frame_meta's own offsets, against a 2bpp-packed
+    `pixels` buffer and ink-state units, routed through huffman_collect_or_encode_bw so
+    this sprite's ~bw units contribute to (collect pass) or draw from (final pass) the
+    project's OWN bw table (huffman_finalize_table_bw), separate from the colour one.
+    """
+    seen = {}
+    for i, (w, h) in enumerate(dims):
+        off = int.from_bytes(frame_meta[i * 8:i * 8 + 2], "little")
+        if off not in seen:
+            seen[off] = (w, h)
+
+    indices_list = []
+    for off in sorted(seen):
+        w, h = seen[off]
+        n = w * h
+        length = (n + 3) // 4
+        indices_list.append(unpack_2bpp_to_states(pixels[off:off + length], n))
+
+    body = huffman_collect_or_encode_bw(sprite_name, indices_list)
+
+    if _huffman_phase == "collect" or len(body) >= len(pixels):
+        return 0, pixels
+    return 4, body
 
 
 def compress_pixel_body(pixels, compress, tag_len=False):
@@ -2108,17 +2289,18 @@ def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pac
     base_slot = slot(base_order)
     frame_packed = [pack_unit_4bpp(f, shared[base_slot]) for f in frames]
     frame_meta, pixels = build_sprite_frame_meta(dims, origins, collision, frame_packed)
-    # `compress = "bitplane"` does not extend to a variant sprite: the whole point of
-    # variants is one shared bitmap redrawn per palette, and bitplane's per-unit ROM
-    # fetch has nothing to key units by beyond frame_meta's own dedup -- which a variant
-    # sprite already uses for something else (recolour sharing, not decode-on-demand).
-    # Falls back to LZSS (still real compression, just not decode-on-demand) rather than
-    # silently doing nothing.
-    if compress_sprites == "bitplane":
-        print(f"    {name}: has variants, compress = \"bitplane\" falls back to LZSS for "
-              f"this sprite's pixel data (bitplane needs a single deduped unit table, "
+    # Neither `compress = "bitplane"` nor `"huffman"` extends to a variant sprite: the
+    # whole point of variants is one shared bitmap redrawn per palette, and both formats'
+    # per-unit ROM fetch has nothing to key units by beyond frame_meta's own dedup --
+    # which a variant sprite already uses for something else (recolour sharing, not
+    # decode-on-demand). Falls back to LZSS (still real compression, just not
+    # decode-on-demand) rather than silently doing nothing.
+    if compress_sprites in ("bitplane", "huffman"):
+        print(f"    {name}: has variants, compress = {compress_sprites!r} falls back to "
+              f"LZSS for this sprite's pixel data (needs a single deduped unit table, "
               f"which variant recolouring already spends on something else)")
-    flags, pixel_body = compress_pixel_body(pixels, "lzss" if compress_sprites == "bitplane"
+    per_unit_mode = compress_sprites in ("bitplane", "huffman")
+    flags, pixel_body = compress_pixel_body(pixels, "lzss" if per_unit_mode
                                             else compress_sprites)
     assign = [base_slot] * len(frames)
     shapes = build_sprite_shapes(collision, dims, frames)
@@ -2162,6 +2344,9 @@ def finish_sprite_with_variants(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pac
         if compress_sprites == "bitplane":
             flags_bw, pixel_body_bw = compress_sprite_pixels_bitplane_bw(
                 frame_meta_bw, dims, pixels_bw)
+        elif compress_sprites == "huffman":
+            flags_bw, pixel_body_bw = compress_sprite_pixels_huffman_bw(
+                frame_meta_bw, dims, pixels_bw, sprite["name"])
         else:
             flags_bw, pixel_body_bw = compress_pixel_body(pixels_bw, compress_sprites)
         sprite["blob_bw"] = (blob_header(MAGIC_SPRITE, len(frames), flags_bw, orient=orient)
@@ -2198,6 +2383,9 @@ def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False,
     frame_meta, pixels = build_sprite_frame_meta(dims, origins, collision, frame_packed)
     if compress_sprites == "bitplane":
         flags, pixel_body = compress_sprite_pixels_bitplane(frame_meta, dims, pixels)
+    elif compress_sprites == "huffman":
+        flags, pixel_body = compress_sprite_pixels_huffman(frame_meta, dims, pixels,
+                                                            sprite["name"])
     else:
         flags, pixel_body = compress_pixel_body(pixels, compress_sprites)
     shapes = build_sprite_shapes(collision, dims, frames)
@@ -2214,6 +2402,9 @@ def finish_sprite(sprite, shared, orient=ORIENT_BUTTONS_RIGHT, pack_2bit=False,
         if compress_sprites == "bitplane":
             flags_bw, pixel_body_bw = compress_sprite_pixels_bitplane_bw(
                 frame_meta_bw, dims, pixels_bw)
+        elif compress_sprites == "huffman":
+            flags_bw, pixel_body_bw = compress_sprite_pixels_huffman_bw(
+                frame_meta_bw, dims, pixels_bw, sprite["name"])
         else:
             flags_bw, pixel_body_bw = compress_pixel_body(pixels_bw, compress_sprites)
         sprite["blob_bw"] = (blob_header(MAGIC_SPRITE, len(frames), flags_bw, orient=orient)
@@ -4977,7 +5168,8 @@ def build_hud_windows(windows, asset_index, hud_var_index, orient=ORIENT_BUTTONS
 def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0,
                     scenes=None, songs=None, samples=None, fonts=None,
                     blob_files=None, orient=ORIENT_BUTTONS_RIGHT, flag_names=None,
-                    nine_slices=None, hud_vars=None, hud_windows=None):
+                    nine_slices=None, hud_vars=None, hud_windows=None,
+                    huffman_table=False):
     L = [
         "// GENERATED by tools/pnx_assets.py -- do not edit.",
         "//",
@@ -5001,6 +5193,7 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
     ]
 
     assets = ([("PALETTES", "palettes")]
+              + ([("HUFFMAN_TABLE", "huffman_table")] if huffman_table else [])
               + [("ATLAS", a["name"]) for a in atlases]
               + [("SPRITE", s["name"]) for s in sprites]
               + [("NINE_SLICE", ns["name"]) for ns in (nine_slices or [])]
@@ -5539,6 +5732,8 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
     # id of its atlas -- which is how the runtime pairs the two without depending on the
     # order a scene happens to load them in.
     ordered = (["PNX_ASSET_PALETTES_PALETTES"]
+               + (["PNX_ASSET_HUFFMAN_TABLE_HUFFMAN_TABLE"]
+                  if project.get("compress", "bitplane") == "huffman" else [])
                + [f"PNX_ASSET_ATLAS_{c_ident(a['name'])}" for a in atlases]
                + [f"PNX_ASSET_SPRITE_{c_ident(sp['name'])}" for sp in sprites]
                + [f"PNX_ASSET_NINE_SLICE_{c_ident(ns['name'])}" for ns in nine_slices]
@@ -5603,10 +5798,10 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
                 f"its sibling, if both are set) with a single `compress = \"none\" | "
                 f"\"lzss\" | \"bitplane\"` in [project].")
     compress = project.get("compress", "bitplane")
-    if compress not in ("none", "lzss", "bitplane"):
+    if compress not in ("none", "lzss", "bitplane", "huffman"):
         raise BuildError(
             f"project: compress = {compress!r} is not one of \"none\", \"lzss\", "
-            f"\"bitplane\"")
+            f"\"bitplane\", \"huffman\"")
     compress_sprites = compress if compress != "none" else False
     compress_atlases = compress if compress != "none" else False
 
@@ -5617,9 +5812,40 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
     elif compress == "lzss":
         print("  compress: LZSS-compressing sprite and atlas pixel data -- set "
               "PNX_COMPRESS_MODE=PNX_COMPRESS_LZSS in the project's pnx_config.h to match")
+    elif compress == "huffman":
+        print("  compress: bitplane pixel data, but run lengths are coded against ONE "
+              "project-wide Huffman table (two-pass build) instead of per-unit "
+              "Elias-gamma -- set PNX_COMPRESS_MODE=PNX_COMPRESS_HUFFMAN in the "
+              "project's pnx_config.h to match")
 
     shared = []
     settle_palettes(atlases, sprites, shared, nine_slices)
+
+    huffman_table_blob = None
+    huffman_table_blob_bw = None
+    if compress == "huffman":
+        # Pass 1 ("collect"): run every atlas/sprite through their normal tile-
+        # selection/palette logic (shared's palette set is already fully settled by
+        # settle_palettes above, so this pass mutates nothing that pass 2 depends on) and
+        # stash each unit's own indices instead of encoding -- see huffman_collect_or_encode
+        # and huffman_finalize_table's own comments for the full design. pack_2bit's own
+        # ~bw units (a separate pixel format, separate table -- see
+        # _huffman_collect_bw's own comment) get pooled in the SAME collect pass, since
+        # finish_atlas/finish_sprite build both blob and blob_bw together.
+        global _huffman_phase
+        _huffman_phase = "collect"
+        for a in atlases:
+            finish_atlas(a, collision_by_atlas[a["name"]], shared, orient, pack_2bit,
+                        compress_atlases)
+        for sp in sprites:
+            finish_sprite(sp, shared, orient, pack_2bit, compress_sprites)
+        huffman_table_blob = (blob_header(MAGIC_HUFFMAN_TABLE, orient=orient)
+                              + huffman_finalize_table())
+        if pack_2bit:
+            huffman_table_blob_bw = (blob_header(MAGIC_HUFFMAN_TABLE, orient=orient)
+                                     + huffman_finalize_table_bw())
+        _huffman_phase = "final"
+
     for a in atlases:
         # [[atlas.collision]]'s mode byte bakes into PnxAtlas.tile_flags, revived rather
         # than removed: it was baked and loaded by the C reader but had no consumer
@@ -5688,6 +5914,20 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
     entries.append(("palette", "palettes",
                     write_blob(os.path.join(out_dir, pal_out), palette_blob)))
     blobs.append(("palettes", pal_out))
+
+    if compress == "huffman":
+        huffman_out = project.get("huffman_table_out", "huffman_table.bin")
+        entries.append(("huffman_table", "huffman_table",
+                        write_blob(os.path.join(out_dir, huffman_out), huffman_table_blob)))
+        blobs.append(("huffman_table", huffman_out))
+        if huffman_table_blob_bw is not None:
+            # Same file-tag convention as a[.get("blob_bw")] above -- same directory, same
+            # base name, `~bw` before the extension -- not a second entries/blobs
+            # registration, for the same reason: a bw platform never ships both files at
+            # once, so counting this one too would price a byte twice for a total no
+            # build pays.
+            write_blob(os.path.join(out_dir, bw_variant_path(huffman_out)),
+                      huffman_table_blob_bw)
 
     for a in atlases:
         entries.append(("atlas", a["name"],
@@ -5778,7 +6018,7 @@ def build(manifest_path, out_dir, header_path, preview=False, package=None,
     generate_header(header_path, atlases, sprites, maps, dialog, roles_by_atlas,
                     len(shared), scenes, songs, samples, fonts,
                     [out for _name, out in blobs], orient, flag_names, nine_slices,
-                    hud_vars, hud_windows)
+                    hud_vars, hud_windows, compress == "huffman")
     print(f"\nheader: {header_path}")
 
     if fonts:

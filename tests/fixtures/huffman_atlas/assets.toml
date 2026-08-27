@@ -1,0 +1,20 @@
+[project]
+name = "huffman_atlas_fixture"
+resources = "resources"
+header = "gen.h"
+# Global-table-Huffman-compressed atlas pixels specifically -- test_huffman_atlas.c's
+# own fixture (tests/Makefile's HUFFMAN_FULL_SRC, PNX_COMPRESS_MODE=PNX_COMPRESS_HUFFMAN).
+# A real pipeline build, same source sheet as fixtures/bitplane_atlas's own fixture.
+compress = "huffman"
+
+[[atlas]]
+name = "tiles"
+sheet = "sheet.png"
+tile = 16
+region = [0, 0, 2, 2]
+max_tiles = 16
+out = "tiles.bin"
+autopick = ["floor", "wall", "accent"]
+[[atlas.collision]]
+tile = "wall"
+type = "solid"

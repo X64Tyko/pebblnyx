@@ -59,6 +59,26 @@ BITPLANE_SRC = test_main_bitplane.c test_bitplane_compress.c test_tile_cache.c t
                ../src/pnx/platform/pnx_platform_host.c
 BITPLANE_OUT = build/test_bitplane
 
+# Global-table Huffman (PNX_COMPRESS_HUFFMAN): codec-only, standalone the same way
+# test_bitplane_compress.c is.
+HUFFMAN_SRC = test_main_huffman.c test_huffman_compress.c \
+              ../src/pnx/assets/pnx_huffman.c
+HUFFMAN_OUT = build/test_huffman
+
+# Huffman engine integration: the loaders + caches (sprite_load_huffman/
+# atlas_load_huffman_into, pnx_sprite_cache.c/pnx_tile_cache.c's huffman branch) against
+# real pipeline fixtures (fixtures/huffman_atlas/, fixtures/huffman_sprite/) -- mirrors
+# BITPLANE_SRC's shape exactly.
+HUFFMAN_FULL_SRC = test_main_huffman_full.c test_huffman_atlas.c test_huffman_sprite.c \
+                   ../src/pnx/core/pnx_arena.c ../src/pnx/core/pnx_fmt.c ../src/pnx/core/pnx_diag.c \
+                   ../src/pnx/assets/pnx_assets.c ../src/pnx/assets/pnx_huffman.c \
+                   ../src/pnx/assets/pnx_lzss.c \
+                   ../src/pnx/assets/pnx_tile_cache.c ../src/pnx/assets/pnx_sprite_cache.c \
+                   ../src/pnx/assets/pnx_lru_cache_impl.c \
+                   ../src/pnx/gfx/pnx_gfx.c ../src/pnx/gfx/pnx_sprite.c \
+                   ../src/pnx/platform/pnx_platform_host.c
+HUFFMAN_FULL_OUT = build/test_huffman_full
+
 # A fourth binary, deliberately separate from $(OUT) rather than a mode of it: it needs
 # -DPNX_HOST_BW=1, which the main binary must NOT carry, since the point of the main one
 # is that ordinary colour behaviour stays the default. Only pnx_assets.c is linked in --
@@ -89,6 +109,16 @@ BWBP_SRC = test_main_bitplane_bw.c test_bitplane_bw.c \
            ../src/pnx/platform/pnx_platform_host.c
 BWBP_OUT = build/test_bitplane_bw
 
+# HUFFMAN x PNX_DISPLAY_BW -- huffman's own sibling of BWBP_SRC, against the SEPARATE
+# ~bw table (huffman_table~bw.bin) huffman_finalize_table_bw builds.
+HUFFMAN_BW_SRC = test_main_huffman_bw.c test_huffman_bw.c \
+                 ../src/pnx/core/pnx_arena.c ../src/pnx/core/pnx_fmt.c ../src/pnx/core/pnx_diag.c \
+                 ../src/pnx/assets/pnx_assets.c ../src/pnx/assets/pnx_huffman.c \
+                 ../src/pnx/assets/pnx_tile_cache.c ../src/pnx/assets/pnx_sprite_cache.c \
+                 ../src/pnx/assets/pnx_lru_cache_impl.c \
+                 ../src/pnx/platform/pnx_platform_host.c
+HUFFMAN_BW_OUT = build/test_huffman_bw
+
 # A sixth binary, square (PNX_HOST_WIDTH == PNX_HOST_HEIGHT) so pnx_target_row's round
 # mask applies at all -- see PNX_DISPLAY_WIDTH/HEIGHT's own guard in test_round.c. gabbro
 # and chalk are the two round platforms; both are colour, so this links the same modules
@@ -100,7 +130,7 @@ ROUND_SRC = test_round.c \
             ../src/pnx/platform/pnx_platform_host.c
 ROUND_OUT = build/test_round
 
-.PHONY: all test test-c test-lzss test-bitplane test-assets test-bw test-bitplane-bw test-round clean
+.PHONY: all test test-c test-lzss test-bitplane test-huffman test-huffman-full test-huffman-bw test-assets test-bw test-bitplane-bw test-round clean
 all: test
 
 # Every header under src/, not a hand-listed subset. The list used to name only core and
@@ -118,7 +148,11 @@ HDRS = $(shell find ../src -name '*.h') \
        fixtures/lzss_pixels/gen.h \
        fixtures/bitplane/bpeg_fixtures.h \
        fixtures/bitplane_atlas/gen.h \
-       fixtures/bitplane_sprite/gen.h
+       fixtures/bitplane_sprite/gen.h \
+       fixtures/huffman/pnx_huffman_fixtures.h \
+       fixtures/huffman/pnx_huffman_pipeline_fixtures.h \
+       fixtures/huffman_atlas/gen.h \
+       fixtures/huffman_sprite/gen.h
 
 $(OUT): $(SRC) $(HDRS)
 	@mkdir -p build
@@ -134,6 +168,14 @@ $(BITPLANE_OUT): $(BITPLANE_SRC) $(HDRS)
 	$(CC) $(CFLAGS) -DPNX_COMPRESS_MODE=PNX_COMPRESS_BITPLANE -DPNX_USE_MAP_COMPRESS=1 \
 		$(BITPLANE_SRC) -o $(BITPLANE_OUT)
 
+$(HUFFMAN_OUT): $(HUFFMAN_SRC) $(HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -DPNX_COMPRESS_MODE=PNX_COMPRESS_HUFFMAN $(HUFFMAN_SRC) -o $(HUFFMAN_OUT)
+
+$(HUFFMAN_FULL_OUT): $(HUFFMAN_FULL_SRC) $(HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -DPNX_COMPRESS_MODE=PNX_COMPRESS_HUFFMAN $(HUFFMAN_FULL_SRC) -o $(HUFFMAN_FULL_OUT)
+
 $(BW_OUT): $(BW_SRC) $(HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -DPNX_HOST_BW=1 -DPNX_COMPRESS_MODE=PNX_COMPRESS_NONE $(BW_SRC) -o $(BW_OUT)
@@ -143,11 +185,16 @@ $(BWBP_OUT): $(BWBP_SRC) $(HDRS)
 	$(CC) $(CFLAGS) -DPNX_HOST_BW=1 -DPNX_COMPRESS_MODE=PNX_COMPRESS_BITPLANE \
 		$(BWBP_SRC) -o $(BWBP_OUT)
 
+$(HUFFMAN_BW_OUT): $(HUFFMAN_BW_SRC) $(HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -DPNX_HOST_BW=1 -DPNX_COMPRESS_MODE=PNX_COMPRESS_HUFFMAN \
+		$(HUFFMAN_BW_SRC) -o $(HUFFMAN_BW_OUT)
+
 $(ROUND_OUT): $(ROUND_SRC) $(HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -DPNX_COMPRESS_MODE=PNX_COMPRESS_NONE -DPNX_HOST_WIDTH=200 -DPNX_HOST_HEIGHT=200 $(ROUND_SRC) -o $(ROUND_OUT)
 
-test: test-c test-lzss test-bitplane test-assets test-bw test-bitplane-bw test-round
+test: test-c test-lzss test-bitplane test-huffman test-huffman-full test-huffman-bw test-assets test-bw test-bitplane-bw test-round
 
 test-c: $(OUT)
 	@./$(OUT)
@@ -157,6 +204,12 @@ test-lzss: $(LZSS_OUT)
 
 test-bitplane: $(BITPLANE_OUT)
 	@./$(BITPLANE_OUT)
+
+test-huffman: $(HUFFMAN_OUT)
+	@./$(HUFFMAN_OUT)
+
+test-huffman-full: $(HUFFMAN_FULL_OUT)
+	@./$(HUFFMAN_FULL_OUT)
 
 # The asset pipeline's validation is Python, and its value is that it FAILS builds --
 # a claim that needs testing as much as any C function does.
@@ -175,6 +228,11 @@ test-bw: $(BW_OUT)
 # test_bitplane_bw.c.
 test-bitplane-bw: $(BWBP_OUT)
 	@./$(BWBP_OUT)
+
+# The HUFFMAN x PNX_DISPLAY_BW combination -- see HUFFMAN_BW_SRC's own comment. See
+# test_huffman_bw.c.
+test-huffman-bw: $(HUFFMAN_BW_OUT)
+	@./$(HUFFMAN_BW_OUT)
 
 # Proves the blitter honours a round display's per-row bounds (docs/ROADMAP.md's M9 round-
 # display item) rather than merely being designed to: poisons the whole framebuffer, draws
