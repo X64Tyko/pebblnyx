@@ -4467,6 +4467,21 @@ def check_editor_music_arrangement():
         check("save_markers lands in the manifest",
               proj.man["music"]["theme"]["markers"] == [{"name": "drop", "at": 4}])
 
+        # Regression: inserting a brand-new scalar key (resolution) while an existing
+        # multi-line array key (markers) already sits between [music.x] and its first
+        # subtable used to land INSIDE that array -- between its `[` and first element --
+        # which is invalid TOML the instant the manifest is re-read. save_song_meta's own
+        # reload() below would raise tomllib.TOMLDecodeError if this regressed.
+        try:
+            proj.save_song_meta("theme", resolution=17)
+            ok = (proj.man["music"]["theme"].get("resolution") == 17
+                  and proj.man["music"]["theme"]["markers"] == [{"name": "drop", "at": 4}])
+        except Exception as e:                                  # noqa: BLE001
+            ok = False
+            print(f"         {e}")
+        check("a new scalar key inserted after an existing multi-line array stays "
+              "valid TOML and outside that array", ok)
+
         try:
             proj.remove_clip("theme", "lead")
             check("removing a clip a track still places is refused", False)

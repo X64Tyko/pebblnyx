@@ -341,10 +341,7 @@ class MusicMixin:
         else:
             limit = next((j for j in range(start + 1, end)
                          if lines[j].lstrip().startswith("[")), end)
-            at = start + 1
-            for j in range(start + 1, limit):
-                if re.match(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*=", lines[j]):
-                    at = j + 1
+            at = self._song_key_insert_point(lines, start, limit)
             lines[at:at] = [value]
         with open(self.path, "w") as f:
             f.write("\n".join(lines))
@@ -621,6 +618,30 @@ class MusicMixin:
                 break
         return lines, start, end
 
+    @staticmethod
+    def _song_key_insert_point(lines, start, limit):
+        """Where a new bare `key = value` line can go and land under the SONG's own table:
+        right after the last existing key = value at that level, before `limit` (the first
+        subtable). A key's value can itself span several lines -- `markers`/`order` are
+        routinely written one entry per line -- so a naive "line matches key = " scan lands
+        INSIDE that array, between its opening `[` and its first element, which is invalid
+        TOML the instant the file is re-read. Bracket depth is tracked across each key's
+        own lines so the scan steps over the whole value, landing after it.
+        """
+        ins = start + 1
+        j = start + 1
+        while j < limit:
+            if re.match(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*=", lines[j]):
+                depth = lines[j].count("[") - lines[j].count("]")
+                j += 1
+                while depth > 0 and j < limit:
+                    depth += lines[j].count("[") - lines[j].count("]")
+                    j += 1
+                ins = j
+            else:
+                j += 1
+        return ins
+
     def _set_song_key(self, name, key, value_text):
         """Insert or replace one bare `key = value_text` line directly under [music.x],
         BEFORE its first subtable -- the one placement TOML parses as belonging to the song
@@ -636,10 +657,7 @@ class MusicMixin:
         else:
             limit = next((j for j in range(start + 1, end)
                          if lines[j].lstrip().startswith("[")), end)
-            ins = start + 1
-            for j in range(start + 1, limit):
-                if re.match(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*=", lines[j]):
-                    ins = j + 1
+            ins = self._song_key_insert_point(lines, start, limit)
             lines[ins:ins] = [line]
         with open(self.path, "w") as f:
             f.write("\n".join(lines))
@@ -799,13 +817,13 @@ class MusicMixin:
                 # Before the first subtable, or the key would bind to a pattern.
                 limit = next((j for j in range(start + 1, end)
                              if lines[j].lstrip().startswith("[")), end)
-                # One past the last actual key line before that subtable -- not "walk
-                # back over blanks from the subtable", which can land a new key between
-                # a subtable's own explanatory comment and the subtable it describes.
-                at = start + 1
-                for j in range(start + 1, limit):
-                    if re.match(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*=", lines[j]):
-                        at = j + 1
+                # One past the last actual key's WHOLE value (which may itself span
+                # several lines, same as the replace branch above has to account for) --
+                # not "walk back over blanks from the subtable", which can land a new key
+                # between a subtable's own explanatory comment and the subtable it
+                # describes, and not a naive per-line scan, which lands INSIDE an
+                # existing multi-line array between its `[` and its first element.
+                at = self._song_key_insert_point(lines, start, limit)
                 lines[at:at] = [value]
                 end += 1
         with open(self.path, "w") as f:
