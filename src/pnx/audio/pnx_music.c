@@ -137,6 +137,7 @@ bool pnx_music_load(PnxSong* out, uint16_t asset_id)
 	out->marker_rows		= NULL;
 	out->marker_count		= 0;
 	const size_t marker_off = expected + synth_size;
+	size_t marker_size		= 0;
 	if (payload >= marker_off)
 	{
 		const size_t marker_trailing = payload - marker_off;
@@ -148,9 +149,19 @@ bool pnx_music_load(PnxSong* out, uint16_t asset_id)
 			{
 				out->marker_rows  = tail + 2;
 				out->marker_count = count;
+				marker_size		  = 2u + (size_t)count * 2u;
 			}
 		}
 	}
+
+	// Optional loop-start point, appended after the marker table (present or not) --
+	// additive for the same reason: a song built before loop points existed loads exactly
+	// as it did before this existed, wrapping to row 0. A presence byte then a pad byte
+	// then the row itself, 2 LE bytes -- see pnx_music.h's own comment on loop_start_row.
+	out->loop_start_row	  = 0;
+	const size_t loop_off = marker_off + marker_size;
+	if (payload >= loop_off + 4 && data[loop_off] == 1)
+		out->loop_start_row = (uint16_t)(data[loop_off + 2] | (data[loop_off + 3] << 8));
 
 	// Freed before realloc, not leaked: a project can load a different song later, and
 	// each load fully replaces the previous one's decoded instrument table.
@@ -204,6 +215,11 @@ bool pnx_music_load(PnxSong* out, uint16_t asset_id)
 			return false;
 		}
 	}
+
+	// Defensive against a corrupt or newer-format blob: fall back to "loop to the very
+	// start" rather than read past the song's own timeline.
+	if (out->loop_start_row >= (uint16_t)(order_len * rows))
+		out->loop_start_row = 0;
 	return true;
 }
 
@@ -455,7 +471,10 @@ void pnx_music_update(uint32_t now_ms)
 					pnx_music_stop();
 					return;
 				}
-				s_order_pos = 0;
+				// Restart from the song's own loop point rather than absolute 0 -- see
+				// PnxSong.loop_start_row. Equivalent to today's behavior when it's 0.
+				s_order_pos = s->loop_start_row / s->rows_per_pattern;
+				s_row		= s->loop_start_row % s->rows_per_pattern;
 			}
 		}
 

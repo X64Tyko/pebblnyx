@@ -75,6 +75,7 @@ class MusicMixin:
                 "markers": markers,
                 "arrangement": bool(tracks),
                 "resolution": spec.get("resolution", 16),
+                "loop_start": spec.get("loop_start"),
                 "preview": preview,
                 "preview_error": preview_error,
                 # Legacy-only: present so a song that predates arrangement can still be
@@ -154,6 +155,70 @@ class MusicMixin:
             f.write("\n".join(keep))
         self.reload()
 
+    @staticmethod
+    def _rewrite_song_headers(lines, old, new):
+        """Rewrite every `[music.<old>]` / `[[music.<old>.*]]` header line to `<new>`, in
+        place. A song's tables are addressed by dotted header rather than a `name =`
+        field (compare rename_map, which has one value to change), so a rename touches
+        every one of them. Scoped to header lines matched whole -- `music.theme` can't
+        misfire on a DIFFERENT song like `music.theme2`, since the character right after
+        the name must be `]` or `.`."""
+        pat = re.compile(rf'^(\s*\[+)music\.{re.escape(old)}(\]|\.)')
+        for i, line in enumerate(lines):
+            if pat.match(line):
+                lines[i] = pat.sub(rf'\1music.{new}\2', line, count=1)
+
+    def _song_table_lines(self, name):
+        """Every line belonging to [music.<name>] or any [[music.<name>.*]] table,
+        wherever it appears in the file -- NOT assumed contiguous, because add_clip/
+        add_instrument/add_synth_record/etc. append a new table at the end of the FILE,
+        not next to the song's own block. Same drop-detection remove_song already uses,
+        run in collect- rather than delete-mode."""
+        lines = open(self.path).read().split("\n")
+        collected, keep = [], False
+        for line in lines:
+            s = line.lstrip()
+            if s.startswith("["):
+                inner = s.lstrip("[")
+                keep = inner.startswith(f"music.{name}]") or inner.startswith(f"music.{name}.")
+            if keep:
+                collected.append(line)
+        return collected
+
+    def rename_song(self, old, new):
+        """Rename a song, carrying every table it owns with it."""
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", new):
+            raise ValueError("a song name must be lowercase letters, digits and "
+                             "underscores -- it becomes a C identifier")
+        if old not in self.man.get("music", {}):
+            raise ValueError(f"no song named {old!r}")
+        if new in self.man.get("music", {}):
+            raise ValueError(f"a song named {new!r} already exists")
+        lines = open(self.path).read().split("\n")
+        self._rewrite_song_headers(lines, old, new)
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def duplicate_song(self, name, new_name):
+        """Copy a song's whole set of tables under a new name, headers repointed the same
+        way rename_song repoints them -- gathered via _song_table_lines rather than a
+        single contiguous slice, for the same non-contiguity reason it exists."""
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", new_name):
+            raise ValueError("a song name must be lowercase letters, digits and "
+                             "underscores -- it becomes a C identifier")
+        if name not in self.man.get("music", {}):
+            raise ValueError(f"no song named {name!r}")
+        if new_name in self.man.get("music", {}):
+            raise ValueError(f"a song named {new_name!r} already exists")
+        block = self._song_table_lines(name)
+        if not block:
+            raise ValueError(f"no [music.{name}] block in the manifest")
+        self._rewrite_song_headers(block, name, new_name)
+        with open(self.path, "a") as f:
+            f.write("\n\n" + "\n".join(block).rstrip() + "\n")
+        self.reload()
+
     def add_clip(self, name, clip_name, rows):
         """Append a [[music.x.clip]] -- a pure note sequence, no instrument of its own (see
         compile_arrangement for why). Name-keyed rather than index-keyed like a pattern, so
@@ -218,6 +283,45 @@ class MusicMixin:
         while head > 0 and lines[head - 1].strip() == "":
             head -= 1
         lines[head:end] = [""]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def rename_clip(self, name, old, new):
+        """Rename a clip, repointing every placement of it within this song's own
+        tracks. Clip names are unique per-song, not globally, so the placement rewrite
+        is scoped to THIS song's [[music.<name>.track]] tables only -- a different song
+        whose clip happens to share the old name must not be touched."""
+        spec = self.man.get("music", {}).get(name)
+        if spec is None:
+            raise ValueError(f"no song named {name!r}")
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", new):
+            raise ValueError("a clip name must be lowercase letters, digits and "
+                             "underscores -- it becomes a C identifier")
+        idx = self._clip_index(spec, old)
+        if any(c.get("name") == new for c in spec.get("clip", [])):
+            raise ValueError(f"song {name!r} already has a clip named {new!r}")
+
+        found = self._nth_table(f"[[music.{name}.clip]]", idx)
+        if not found:
+            raise ValueError(f"no [[music.{name}.clip]] #{idx} in the manifest")
+        lines, head, end = found
+        for j in range(head, end):
+            m = re.match(rf'^(\s*name\s*=\s*)"{re.escape(old)}"\s*$', lines[j])
+            if m:
+                lines[j] = f'{m.group(1)}"{new}"'
+                break
+
+        in_track = False
+        for j, line in enumerate(lines):
+            s = line.lstrip()
+            if s.startswith("["):
+                inner = s.lstrip("[")
+                in_track = inner.startswith(f"music.{name}.track]")
+                continue
+            if in_track:
+                lines[j] = re.sub(rf'(clip\s*=\s*)"{re.escape(old)}"', rf'\1"{new}"', line)
+
         with open(self.path, "w") as f:
             f.write("\n".join(lines))
         self.reload()
@@ -740,6 +844,25 @@ class MusicMixin:
             f.write("\n".join(lines))
         self.reload()
 
+    def rename_sample(self, old, new):
+        """Rename a declared sample -- just the [sample.*] header itself, since nothing
+        else in the manifest references a sample by name (unlike a clip or a map)."""
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", new):
+            raise ValueError("a sample name must be lowercase letters, digits and "
+                             "underscores -- it becomes a C identifier")
+        if old not in self.man.get("sample", {}):
+            raise ValueError(f"no sample named {old!r}")
+        if new in self.man.get("sample", {}):
+            raise ValueError(f"a sample named {new!r} already exists")
+        found = self._nth_table(f"[sample.{old}]", 0)
+        if not found:
+            raise ValueError(f"no [sample.{old}] block in the manifest")
+        lines, head, _ = found
+        lines[head] = f"[sample.{new}]"
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
     def _nth_table(self, header, index):
         """(lines, start, end) for the index-th occurrence of a table header, file-wide.
 
@@ -835,6 +958,50 @@ class MusicMixin:
             if not 1 <= r <= 255:
                 raise ValueError("resolution must be between 1 and 255 rows")
             self._set_song_key(name, "resolution", str(r))
+
+    def _song_total_rows(self, name):
+        """Total playable rows for a song -- the range a loop point has to land inside.
+        Arrangement songs are compiled to find it (same call songs() itself makes for its
+        cost preview); a classic song reads it straight off its order list and patterns."""
+        spec = self.man.get("music", {}).get(name)
+        if spec is None:
+            raise ValueError(f"no song named {name!r}")
+        if spec.get("track"):
+            try:
+                _, derived_order, _ = pa.compile_arrangement(spec)
+            except pa.BuildError as e:
+                raise ValueError(str(e)) from None
+            chunk_rows = int(spec.get("resolution", 16))
+            return len(derived_order) * chunk_rows
+        patterns = spec.get("pattern", [])
+        rows_per = len(patterns[0].get("rows", [])) if patterns else 0
+        order = spec.get("order", list(range(len(patterns))))
+        return len(order) * rows_per
+
+    def save_loop_start(self, name, loop_start):
+        """Where looping restarts instead of row 0 -- see pnx_music.h's own
+        PnxSong.loop_start_row and pack_music's mirror of this exact key. `None` clears
+        it, back to today's only behavior (loop to the very start)."""
+        spec = self.man.get("music", {}).get(name)
+        if spec is None:
+            raise ValueError(f"no song named {name!r}")
+        if loop_start is None:
+            lines, start, end = self._music_block(name)
+            at = next((j for j in range(start + 1, end)
+                       if re.match(r"\s*loop_start\s*=", lines[j])), None)
+            if at is not None:
+                lines[at:at + 1] = [""]
+                with open(self.path, "w") as f:
+                    f.write("\n".join(lines))
+                self.reload()
+            return
+        v = int(loop_start)
+        if v < 0:
+            raise ValueError("loop_start can't be negative")
+        total = self._song_total_rows(name)
+        if not v < total:
+            raise ValueError(f"loop_start {v} is outside the song (0..{total - 1})")
+        self._set_song_key(name, "loop_start", str(v))
 
     def save_pattern(self, name, index, rows, append=False):
         """Rewrite one pattern's rows, or append a new one. The unit a tracker edits.

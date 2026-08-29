@@ -172,3 +172,119 @@ $('#mplay').onclick = () => { patternTimer ? stopPatternPlayback() : playPattern
 // just stop rather than try to keep it consistent through every one of those.
 $('#mpat').addEventListener('change', stopPatternPlayback);
 $('#msong').addEventListener('change', stopPatternPlayback);
+
+// ----------------------------------------------------------------- arrangement playback
+//
+// playPattern above previews exactly one clip, looped, through whatever instrument
+// happens to be selected in the Instrument panel -- fine for editing one clip, wrong for
+// hearing the SONG: an arrangement's channels only get their real instrument from the
+// instrument-change placements on their own track. This walks every channel's placements
+// in row order, tracking the active instrument exactly like compile_arrangement
+// (tools/pnx_assets.py) does at build time, so what plays here is what the real build
+// will play -- not a different, cheaper approximation of it.
+
+let arrangeTimer = null;
+
+function stopArrangementPlayback(){
+  if(arrangeTimer){ clearTimeout(arrangeTimer); arrangeTimer = null }
+  const btn = $('#marrangeplay');
+  if(btn) btn.textContent = '▶ Play arrangement';
+  const ph = document.getElementById('marrangeplayhead');
+  if(ph) ph.style.display = 'none';
+}
+
+// {row, midi, inst}[] for one channel across the WHOLE song -- every clip's notes,
+// stamped with whichever instrument was active at that point in the track, the same
+// current_inst bookkeeping compile_arrangement itself does.
+function arrangeChannelEvents(s, channel){
+  const track = s.tracks.find(t => t.channel === channel);
+  if(!track) return [];
+  const events = [];
+  let currentInst = 0;
+  const placements = track.placement.slice().sort((a, b) => a.start - b.start);
+  for(const p of placements){
+    if('instrument' in p){ currentInst = p.instrument; continue }
+    const clip = s.clips.find(c => c.name === p.clip);
+    if(!clip) continue;
+    clip.rows.forEach((cell, i) => {
+      const parts = splitCell(cell);
+      if(!parts.note || parts.note === 'off') return;
+      const midi = noteToMidi(toManifestNote(parts.note));
+      if(midi != null) events.push({row: p.start + i, midi, inst: currentInst});
+    });
+  }
+  return events;
+}
+
+function playArrangement(){
+  const s = muSong();
+  if(!s || !s.arrangement) return;
+  stopArrangementPlayback();
+  $('#marrangeplay').textContent = '■ Stop';
+
+  const span = arrangeSpan(s);
+  const perChannel = [0, 1, 2, 3].map(ch => arrangeChannelEvents(s, ch));
+  const rowSec = 60 / (s.tempo || 120) / 4;
+  const ph = document.getElementById('marrangeplayhead');
+  let row = 0;
+
+  const step = () => {
+    if(ph){
+      ph.style.display = '';
+      ph.style.left = `calc(3.4rem + ${row * arrangePxPerRow()}px)`;
+    }
+    const anySolo = MU.channelSolo.some(x => x);
+    for(let ch = 0; ch < 4; ch++){
+      if(MU.channelMute[ch]) continue;
+      if(anySolo && !MU.channelSolo[ch]) continue;
+      for(const ev of perChannel[ch]){
+        if(ev.row !== row) continue;
+        const inst = s.instruments[ev.inst];
+        if(inst) playInstrument(inst, inst.synth, ev.midi, rowSec * 1.8);
+      }
+    }
+    row++;
+    // Once this preview's own loop-start UI (§ the arrangement's loop point) lands, the
+    // wrap-around below already honors it -- restart from s.loop_start rather than 0,
+    // matching pnx_music_update's own loop-wrap exactly.
+    if(row >= span) row = s.loop_start != null ? s.loop_start : 0;
+    arrangeTimer = setTimeout(step, rowSec * 1000);
+  };
+  step();
+}
+
+$('#marrangeplay').onclick = () => { arrangeTimer ? stopArrangementPlayback() : playArrangement(); };
+$('#msong').addEventListener('change', stopArrangementPlayback);
+
+// ------------------------------------------------------------------------- mini piano
+//
+// Every other preview in this tab plays a fixed C4 -- fine for a quick check, useless for
+// hearing an instrument across its actual range (harmonicsAt's own band-limiting means a
+// bright waveform can sound quite different an octave up). One row of clickable keys,
+// always previewing the CURRENTLY EDITED instrument's live, unsaved settings, same as the
+// ▶ button beside it.
+const PIANO_KEYS = [
+  {midi: 60, black: false}, {midi: 61, black: true}, {midi: 62, black: false},
+  {midi: 63, black: true}, {midi: 64, black: false}, {midi: 65, black: false},
+  {midi: 66, black: true}, {midi: 67, black: false}, {midi: 68, black: true},
+  {midi: 69, black: false}, {midi: 70, black: true}, {midi: 71, black: false},
+  {midi: 72, black: false},
+];
+
+function drawMiniPiano(){
+  const box = $('#mpiano');
+  if(!box || box.childElementCount) return; // built once; clicks always read the LIVE instrument
+  for(const k of PIANO_KEYS){
+    const key = document.createElement('button');
+    key.className = 'pianokey' + (k.black ? ' black' : '');
+    key.dataset.midi = String(k.midi);
+    key.title = midiToTracker(k.midi);
+    box.appendChild(key);
+  }
+  box.addEventListener('pointerdown', ev => {
+    const key = ev.target.closest('.pianokey');
+    if(!key || typeof MU_LIVE_INSTRUMENT === 'undefined' || !MU_LIVE_INSTRUMENT) return;
+    playInstrument(MU_LIVE_INSTRUMENT.plain, MU_LIVE_INSTRUMENT.synth,
+      +key.dataset.midi, 0.5);
+  });
+}

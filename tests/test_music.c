@@ -38,7 +38,7 @@ static const uint8_t s_songB_order[1]												   = { 0 };
 
 static PnxSong make_song(const uint8_t* rows, const uint8_t* order, uint8_t order_length,
 						 uint8_t rows_per_pattern, const uint8_t* marker_rows,
-						 uint8_t marker_count)
+						 uint8_t marker_count, uint16_t loop_start_row)
 {
 	PnxSong s		   = { 0 };
 	s.rows			   = rows;
@@ -50,6 +50,7 @@ static PnxSong make_song(const uint8_t* rows, const uint8_t* order, uint8_t orde
 	s.rows_per_pattern = rows_per_pattern;
 	s.instrument_count = 0;
 	s.tempo_bpm		   = 15000; // 60000 / (15000*4) == 1ms/row exactly -- one row per 1ms tick
+	s.loop_start_row   = loop_start_row;
 	return s;
 }
 
@@ -63,8 +64,8 @@ static uint32_t tick(uint32_t now_ms)
 
 static void test_transition_at_pattern_end(void)
 {
-	PnxSong a = make_song(s_songA_rows, s_songA_order, 2, 2, NULL, 0);
-	PnxSong b = make_song(s_songB_rows, s_songB_order, 1, 3, NULL, 0);
+	PnxSong a = make_song(s_songA_rows, s_songA_order, 2, 2, NULL, 0, 0);
+	PnxSong b = make_song(s_songB_rows, s_songB_order, 1, 3, NULL, 0, 0);
 
 	pnx_music_play(&a, true);
 	pnx_music_queue_transition(&b, true, PNX_TRANSITION_PATTERN_END);
@@ -90,8 +91,8 @@ static void test_transition_at_pattern_end(void)
 
 static void test_transition_at_marker(void)
 {
-	PnxSong a = make_song(s_songA_rows, s_songA_order, 2, 2, s_songA_marker_raw, 1);
-	PnxSong b = make_song(s_songB_rows, s_songB_order, 1, 3, NULL, 0);
+	PnxSong a = make_song(s_songA_rows, s_songA_order, 2, 2, s_songA_marker_raw, 1, 0);
+	PnxSong b = make_song(s_songB_rows, s_songB_order, 1, 3, NULL, 0, 0);
 
 	pnx_music_play(&a, true);
 	pnx_music_queue_transition(&b, true, PNX_TRANSITION_NEXT_MARKER);
@@ -121,8 +122,8 @@ static void test_transition_at_natural_song_end(void)
 	// (rather than before playback starts, like the other two tests) so it's still pending
 	// specifically when order_pos wraps past order_length -- the one branch that would
 	// otherwise call pnx_music_stop() instead of applying it.
-	PnxSong a = make_song(s_songA_rows, s_songA_order, 2, 2, NULL, 0);
-	PnxSong b = make_song(s_songB_rows, s_songB_order, 1, 3, NULL, 0);
+	PnxSong a = make_song(s_songA_rows, s_songA_order, 2, 2, NULL, 0, 0);
+	PnxSong b = make_song(s_songB_rows, s_songB_order, 1, 3, NULL, 0, 0);
 
 	pnx_music_play(&a, false); // NOT looping
 	uint32_t now = 0;
@@ -152,10 +153,60 @@ static void test_transition_at_natural_song_end(void)
 	pnx_music_stop();
 }
 
+static void test_loop_start_point(void)
+{
+	// Song A (2 patterns x 2 rows, order [0,1], 4 rows total), loop point at absolute row 1
+	// -- so once looping wraps, it should land back on abs row 1, never abs row 0 again.
+	PnxSong a = make_song(s_songA_rows, s_songA_order, 2, 2, NULL, 0, 1);
+
+	pnx_music_play(&a, true);
+	uint32_t now = 0;
+	now			 = tick(now); // abs 0 played; row -> 1
+	MU_CHECK_EQ(pnx_music_row(), 1);
+	now = tick(now); // abs 1 played; wraps to order_pos 1, row 0
+	MU_CHECK_EQ(pnx_music_row(), 0);
+	now = tick(now); // abs 2 played; row -> 1
+	MU_CHECK_EQ(pnx_music_row(), 1);
+	now = tick(now); // abs 3 played; end of order -> loops to loop_start_row(1), NOT row 0
+	MU_CHECK_EQ(pnx_music_row(), 1);
+	MU_CHECK_EQ(pnx_music_pattern(), 0); // order[0] -- order_pos landed on 0, not stuck at 2
+
+	// One more full cycle from the loop point, proving it repeats THERE rather than firing
+	// once: abs1 -> order_pos1,row0 -> abs2 -> row1 -> abs3 -> loops back to abs1 again.
+	now = tick(now);
+	MU_CHECK_EQ(pnx_music_row(), 0);
+	MU_CHECK_EQ(pnx_music_pattern(), 1);
+	now = tick(now);
+	MU_CHECK_EQ(pnx_music_row(), 1);
+	MU_CHECK_EQ(pnx_music_pattern(), 1);
+	tick(now);
+	MU_CHECK_EQ(pnx_music_row(), 1);
+	MU_CHECK_EQ(pnx_music_pattern(), 0);
+
+	pnx_music_stop();
+}
+
+static void test_loop_start_point_absent_wraps_to_zero(void)
+{
+	// Regression guard: loop_start_row defaults to 0 (a song built before loop points
+	// existed, or one that never set one), so looping still wraps to the very start,
+	// exactly as it did before this feature existed.
+	PnxSong a	 = make_song(s_songA_rows, s_songA_order, 2, 2, NULL, 0, 0);
+	uint32_t now = 0;
+	pnx_music_play(&a, true);
+	for (int i = 0; i < 4; i++)
+		now = tick(now); // exactly one full pass through all 4 rows
+	MU_CHECK_EQ(pnx_music_row(), 0);
+	MU_CHECK_EQ(pnx_music_pattern(), 0);
+	pnx_music_stop();
+}
+
 void test_music(void)
 {
 	printf("test_music\n");
 	test_transition_at_pattern_end();
 	test_transition_at_marker();
 	test_transition_at_natural_song_end();
+	test_loop_start_point();
+	test_loop_start_point_absent_wraps_to_zero();
 }

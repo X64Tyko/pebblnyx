@@ -26,6 +26,11 @@ def handle_post_api_sample_remove(self, session, raw):
     session.proj.remove_sample(d["name"])
     self._send(200, json.dumps({"ok": True}))
 
+def handle_post_api_sample_rename(self, session, raw):
+    d = json.loads(raw)
+    session.proj.rename_sample(d["name"], d["to"])
+    self._send(200, json.dumps({"ok": True}))
+
 def handle_post_api_song(self, session, raw):
     d = json.loads(raw)
     session.proj.add_song(d["name"], int(d.get("tempo", 120)),
@@ -36,6 +41,21 @@ def handle_post_api_song(self, session, raw):
 def handle_post_api_song_remove(self, session, raw):
     d = json.loads(raw)
     session.proj.remove_song(d["name"])
+    self._send(200, json.dumps({"ok": True}))
+
+def handle_post_api_song_rename(self, session, raw):
+    d = json.loads(raw)
+    session.proj.rename_song(d["name"], d["to"])
+    self._send(200, json.dumps({"ok": True}))
+
+def handle_post_api_song_duplicate(self, session, raw):
+    d = json.loads(raw)
+    session.proj.duplicate_song(d["name"], d["to"])
+    self._send(200, json.dumps({"ok": True}))
+
+def handle_post_api_song_loopstart(self, session, raw):
+    d = json.loads(raw)
+    session.proj.save_loop_start(d["name"], d.get("loop_start"))
     self._send(200, json.dumps({"ok": True}))
 
 def handle_post_api_song_instrument_add(self, session, raw):
@@ -81,6 +101,11 @@ def handle_post_api_song_clip_remove(self, session, raw):
     session.proj.remove_clip(d["name"], d["clip"])
     self._send(200, json.dumps({"ok": True}))
 
+def handle_post_api_song_clip_rename(self, session, raw):
+    d = json.loads(raw)
+    session.proj.rename_clip(d["name"], d["clip"], d["to"])
+    self._send(200, json.dumps({"ok": True}))
+
 def handle_post_api_song_track(self, session, raw):
     d = json.loads(raw)
     session.proj.save_track(d["name"], int(d["channel"]), d["placements"])
@@ -105,8 +130,12 @@ GET_PREFIX = [
 POST_EXACT = {
     '/api/sample': handle_post_api_sample,
     '/api/sample/remove': handle_post_api_sample_remove,
+    '/api/sample/rename': handle_post_api_sample_rename,
     '/api/song': handle_post_api_song,
     '/api/song/remove': handle_post_api_song_remove,
+    '/api/song/rename': handle_post_api_song_rename,
+    '/api/song/duplicate': handle_post_api_song_duplicate,
+    '/api/song/loopstart': handle_post_api_song_loopstart,
     '/api/song/instrument/add': handle_post_api_song_instrument_add,
     '/api/song/instrument/remove': handle_post_api_song_instrument_remove,
     '/api/song/meta': handle_post_api_song_meta,
@@ -115,6 +144,7 @@ POST_EXACT = {
     '/api/song/clip/add': handle_post_api_song_clip_add,
     '/api/song/clip': handle_post_api_song_clip,
     '/api/song/clip/remove': handle_post_api_song_clip_remove,
+    '/api/song/clip/rename': handle_post_api_song_clip_rename,
     '/api/song/track': handle_post_api_song_track,
     '/api/song/markers': handle_post_api_song_markers,
     '/api/song/convert': handle_post_api_song_convert,

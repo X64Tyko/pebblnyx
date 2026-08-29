@@ -59,6 +59,13 @@ typedef struct
 	const uint8_t* marker_rows;
 	uint8_t marker_count;
 
+	// Where looping restarts, instead of row 0 -- the classic tracker "restart position"
+	// idiom (XM/S3M), so a song can play an intro once and loop only the tail after it.
+	// Same absolute-row coordinate system as marker_rows. 0 (the default, including for a
+	// song built before this existed) is exactly today's "loop to the very start" behavior,
+	// so the field is additive with no separate presence flag needed.
+	uint16_t loop_start_row;
+
 	uint8_t pattern_count;
 	uint8_t order_length;
 	uint8_t rows_per_pattern;

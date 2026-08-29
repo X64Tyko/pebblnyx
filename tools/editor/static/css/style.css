@@ -497,7 +497,7 @@ select.sw{font:11px ui-monospace,monospace}
 .clipchips{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.3rem}
 .clipchip{display:flex;flex-direction:column;align-items:center;gap:2px;
   padding:3px;border:1px solid var(--line);border-radius:4px;background:var(--surface);
-  cursor:grab;position:relative}
+  cursor:grab;position:relative;border-top:3px solid hsl(var(--hue,200) 70% 45%)}
 .clipchip img{display:block;width:2rem;height:2rem;object-fit:contain;
   image-rendering:pixelated;
   background:repeating-conic-gradient(var(--soft) 0% 25%,transparent 0% 50%) 50%/6px 6px}
@@ -507,34 +507,85 @@ select.sw{font:11px ui-monospace,monospace}
   border-radius:50%;background:var(--bad);color:#fff;font:11px/14px ui-monospace,monospace;
   text-align:center;cursor:pointer;box-shadow:0 0 0 1px var(--surface)}
 
+/* A clip's own color swatch in the clip-management list -- the SAME hue (clipHue in
+   music_arrange.js) as its palette chip and every block it's placed on, so one clip
+   reads as one color everywhere rather than only by its (often-truncated) name. */
+.clipswatch{display:inline-block;width:.7rem;height:.7rem;border-radius:50%;
+  background:hsl(var(--hue,200) 70% 45%);margin-right:.35rem;flex:none}
+
 /* Arrangement timeline: 4 fixed lanes (one per sequencer channel), scrolling together
-   horizontally so a placement's row position lines up across every lane and the ruler
-   above them. Blocks/pins are absolutely positioned by row * ARRANGE_PX_PER_ROW (see
-   music_arrange.js) rather than laid out with flex/grid, because a placement's LEFT EDGE
-   is the one thing that has to be exact -- a flex gap would drift it from the ruler. */
-#marrangelanes{overflow-x:auto;margin-top:.4rem;border:1px solid var(--line);
-  border-radius:6px}
+   horizontally so a placement's row position lines up across every lane, the ruler above
+   them, and the marker/loop strip above that. Blocks/pins/flags are absolutely
+   positioned by row * the current zoom (arrangePxPerRow() in music_arrange.js) rather
+   than laid out with flex/grid, because a placement's LEFT EDGE is the one thing that
+   has to be exact -- a flex gap would drift it from the ruler. */
+#marrangelanes{overflow-x:auto;overflow-y:hidden;position:relative;margin-top:.4rem;
+  border:1px solid var(--line);border-radius:6px}
 .arrangeruler{position:relative;height:1.1rem;border-bottom:1px solid var(--line);
-  font:10px ui-monospace,Menlo,monospace;color:var(--dim)}
+  font:10px ui-monospace,Menlo,monospace;color:var(--dim);cursor:pointer}
 .arrangeruler i{position:absolute;top:0;border-left:1px solid var(--line);height:100%;
   padding-left:2px;font-style:normal}
+
+/* One timeline-wide row for named markers and the loop point -- a single flag with a
+   visible NAME, not the old per-lane bare line whose label only existed in a hover
+   tooltip. */
+.arrangemarkerstrip{position:relative;height:1.3rem;border-bottom:1px solid var(--line);
+  background:var(--surface)}
+.markerflag,.loopflag{position:absolute;top:1px;transform:translateX(-2px);
+  font:10px ui-monospace,Menlo,monospace;padding:0 4px;border-radius:3px 3px 3px 0;
+  white-space:nowrap;cursor:grab;line-height:1.1rem}
+.markerflag{background:var(--bad);color:#fff}
+.loopflag{background:var(--accent);color:#fff;font-size:11px}
+.markerflag .arrangex,.loopflag .arrangex{margin-left:3px;cursor:pointer;opacity:.85}
+.markerflag .arrangex:hover,.loopflag .arrangex:hover{opacity:1}
+
+/* Sweeps across the lanes while "Play arrangement" runs (audio-preview.js) -- hidden the
+   rest of the time. Spans from just under the ruler to the bottom of the last lane. */
+.arrangeplayhead{position:absolute;top:1.1rem;bottom:0;width:1px;
+  background:var(--accent);z-index:3;pointer-events:none;
+  box-shadow:0 0 4px var(--accent)}
+
 .arrangelane{position:relative;display:flex;border-bottom:1px solid var(--line)}
 .arrangelane:last-child{border-bottom:none}
 .arrangelane>b{position:sticky;left:0;z-index:2;width:3.4rem;flex:none;
   background:var(--surface);border-right:1px solid var(--line);
-  display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--dim)}
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
+  font-size:11px;color:var(--dim);font-style:normal;padding:2px 0}
+.arrangelane>b>span{display:block}
+.lanebtn{font-size:9px;line-height:1;padding:1px 4px;border-radius:2px}
+.lanebtn.on{background:var(--accent);color:#fff;border-color:var(--accent)}
 .arrangetrack{position:relative;height:2.4rem;flex:none}
 .arrangetrack.over{background:rgba(255,255,255,.05)}
 .arrangeblock{position:absolute;top:3px;height:calc(100% - 6px);border-radius:4px;
-  background:var(--surface);border:1px solid var(--accent);color:var(--fg);
-  font-size:11px;padding:2px 4px;overflow:hidden;white-space:nowrap;cursor:grab;
-  box-sizing:border-box}
+  background:hsl(var(--hue,200) 55% 22%);border:1px solid hsl(var(--hue,200) 70% 55%);
+  color:var(--fg);font-size:11px;padding:2px 4px;overflow:hidden;white-space:nowrap;
+  cursor:grab;box-sizing:border-box}
+.arrangeblock:focus,.arrangeblock.selected{outline:none;
+  box-shadow:0 0 0 2px var(--fg);border-color:var(--fg)}
 .arrangeblock .arrangex{float:right;color:var(--bad);cursor:pointer;margin-left:4px}
 .arrangepin{position:absolute;top:0;bottom:0;width:0;border-left:2px dashed var(--accent);
   cursor:pointer}
 .arrangepin b{position:absolute;top:-1px;left:2px;font-size:9px;color:var(--accent);
   white-space:nowrap}
-.markerpin{position:absolute;top:0;bottom:0;width:0;border-left:1px solid var(--bad)}
+
+/* The floating <select> that replaces a right-click -> browser prompt() for inserting an
+   instrument-change on the timeline (showInstrumentPicker, music_arrange.js). Positioned
+   at the click point in viewport coordinates, so fixed rather than absolute. */
+.floatpicker{position:fixed;z-index:50;font-size:12px;
+  border:1px solid var(--accent);border-radius:4px;background:var(--surface);
+  color:var(--fg);padding:2px 4px}
+
+/* One octave of clickable keys above the Instrument panel's own preview button --
+   drawMiniPiano in audio-preview.js -- so previewing isn't stuck at a fixed C4. */
+.mpiano{display:flex;position:relative;height:2.4rem;margin:.3rem 0;max-width:14rem}
+.pianokey{flex:1;border:1px solid var(--line);border-left:none;border-radius:0;
+  background:var(--fg);color:transparent}
+.pianokey:first-child{border-left:1px solid var(--line);border-radius:3px 0 0 3px}
+.pianokey:last-child{border-radius:0 3px 3px 0}
+.pianokey:active{background:var(--accent)}
+.pianokey.black{flex:0 0 1.1rem;margin:0 -.55rem;height:60%;background:var(--ink);
+  border-color:var(--ink);z-index:1;position:relative}
+.pianokey.black:active{background:var(--accent)}
 /* Capped and independently scrollable, in the atlas-tiles pane alongside "Tiles kept"
    and the tile editor -- a big carve should never make you scroll PAST the grid to
    reach the editor a click on it just opened. */

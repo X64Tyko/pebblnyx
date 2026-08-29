@@ -441,6 +441,8 @@
         <label class="mini">tempo <input id="mtempo" type="number" min="20" max="400"
           style="width:5rem"></label>
         <button id="msongnew">New song…</button>
+        <button id="msongren">Rename…</button>
+        <button id="msongdup">Duplicate…</button>
         <button id="msongdel">Remove song</button>
         <span id="mcost" class="dim"></span>
       </div>
@@ -535,7 +537,13 @@
         <h2>Instrument <select id="minst"></select>
           <button id="minstadd" title="append an instrument">+</button>
           <button id="minstdel" title="remove the last instrument">−</button>
+          <span class="mini" style="font-weight:400">
+            <button id="minstcopy" title="copy this instrument's settings">Copy</button>
+            <button id="minstpaste" title="paste onto this instrument" disabled>Paste</button>
+            <button id="minstreset" title="reset this instrument to its default settings">Reset</button>
+          </span>
         </h2>
+        <div id="mpiano" class="mpiano" title="click a key to preview this instrument at that pitch"></div>
         <div id="minstbody"></div>
         <div class="mini"><span id="minstlog" class="dim"></span></div>
       </section>
@@ -543,10 +551,20 @@
 
     <section id="marrangesection" style="display:none">
       <h2>Arrangement
+        <button id="marrangeplay" title="play the whole arrangement, all channels, through the instruments each track's own placements name">▶ Play arrangement</button>
+        <span class="mini" style="font-weight:400;font-size:.8rem">
+          <button id="mzoomout" title="zoom out">−</button>
+          <button id="mzoomin" title="zoom in">+</button>
+        </span>
         <label class="mini" style="font-weight:400;font-size:.8rem">resolution
           <input id="mresolution" type="number" min="1" max="255" style="width:3.6rem"
             title="rows per compiled pattern chunk -- match your clip lengths so repeats reuse cleanly"></label>
+        <span id="mduration" class="dim" style="font-weight:400;font-size:.8rem"></span>
       </h2>
+      <p class="dim" style="margin:.1rem 0 .3rem;font-size:.8rem">
+        Click the ruler to set the loop point (where playback restarts instead of row 0);
+        drag its flag to move it, click its × to clear it.
+      </p>
       <div id="marrangeclips" class="clipchips"
         title="drag a clip onto a channel below to place it"></div>
       <div id="marrangelanes"></div>

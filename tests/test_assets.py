@@ -4314,6 +4314,25 @@ def check_music_arrangement():
     check("its named marker reaches the header list",
           songs[0]["marker_names"] == [(2, "drop")])
 
+    # --- loop_start: an optional restart point, additive after the marker table (present
+    # or not), range-checked against the song's real total row count (order length x
+    # rows_per) -- same absolute-row coordinate system as a marker's own `at`.
+    loop_spec = dict(full_spec)
+    loop_spec["loop_start"] = 2
+    songs = pnx_assets.pack_music({"theme": loop_spec})
+    blob = songs[0]["blob"]
+    check("loop_start's trailer is the last 4 bytes of the blob: presence byte, pad, "
+          "then the row itself as a little-endian u16",
+          blob[-4:-2] == bytes([1, 0]) and int.from_bytes(blob[-2:], "little") == 2)
+
+    try:
+        bad = dict(full_spec)
+        bad["loop_start"] = 4  # total_rows is 4 (order [0] x 4 rows/pattern) -- no row 4
+        pnx_assets.pack_music({"theme": bad})
+        check("an out-of-range loop_start is a build error", False)
+    except pnx_assets.BuildError as e:
+        check("an out-of-range loop_start is a build error", "loop_start" in str(e))
+
 
 LEGACY_MUSIC = '''
     [music.theme]
@@ -4503,6 +4522,118 @@ def check_editor_music_arrangement():
 
         check("the manifest still builds with the new track/clip/markers",
               builds(proj.path, root, "out3"))
+
+    # --- loop_start
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root, music=LEGACY_MUSIC)
+        proj.convert_to_arrangement("theme")
+        total = proj._song_total_rows("theme")
+
+        proj.save_loop_start("theme", 1)
+        check("save_loop_start lands in the manifest",
+              proj.man["music"]["theme"].get("loop_start") == 1)
+        check("the manifest still builds with a loop_start",
+              builds(proj.path, root, "out_loop"))
+
+        proj.save_loop_start("theme", None)
+        check("save_loop_start(None) clears the key",
+              "loop_start" not in proj.man["music"]["theme"])
+
+        try:
+            proj.save_loop_start("theme", total)  # exactly one past the last real row
+            check("an out-of-range loop_start is refused", False)
+        except ValueError as e:
+            check("an out-of-range loop_start is refused", "outside the song" in str(e))
+
+    # --- rename_song / duplicate_song
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root, music=LEGACY_MUSIC)
+        proj.convert_to_arrangement("theme")
+
+        proj.rename_song("theme", "theme2")
+        check("rename_song removes the old name", "theme" not in proj.man["music"])
+        check("rename_song adds the new name", "theme2" in proj.man["music"])
+        check("rename_song carries clips along",
+              bool(proj.man["music"]["theme2"].get("clip")))
+        check("rename_song carries tracks along",
+              bool(proj.man["music"]["theme2"].get("track")))
+        check("the manifest still builds after renaming a song",
+              builds(proj.path, root, "out_rename"))
+
+        proj.add_song("other")
+        try:
+            proj.rename_song("theme2", "other")
+            check("renaming a song onto an existing different name is refused", False)
+        except ValueError:
+            check("renaming a song onto an existing different name is refused", True)
+
+        proj.duplicate_song("theme2", "theme3")
+        check("duplicate_song creates the new song", "theme3" in proj.man["music"])
+        check("duplicate_song leaves the original intact", "theme2" in proj.man["music"])
+        check("duplicate_song copies every clip",
+              len(proj.man["music"]["theme3"].get("clip", []))
+              == len(proj.man["music"]["theme2"].get("clip", [])))
+        check("the manifest still builds after duplicating a song",
+              builds(proj.path, root, "out_dup"))
+
+        try:
+            proj.duplicate_song("theme2", "other")
+            check("duplicating onto an existing name is refused", False)
+        except ValueError:
+            check("duplicating onto an existing name is refused", True)
+
+    # --- rename_clip: repoints every placement of the clip WITHIN ITS OWN SONG only
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root, music=LEGACY_MUSIC)
+        proj.convert_to_arrangement("theme")
+        clips = proj.man["music"]["theme"]["clip"]
+        check("fixture converts to more than one clip (channel 0's mid-pattern "
+              "instrument change), needed below", len(clips) > 1)
+        old_name, collide_name = clips[0]["name"], clips[1]["name"]
+
+        proj.rename_clip("theme", old_name, "introclip")
+        check("rename_clip renames the clip's own record",
+              any(c["name"] == "introclip" for c in proj.man["music"]["theme"]["clip"]))
+        check("rename_clip repoints its placements",
+              any(p.get("clip") == "introclip"
+                  for t in proj.man["music"]["theme"]["track"] for p in t["placement"]))
+        check("rename_clip leaves no dangling reference to the old name",
+              not any(p.get("clip") == old_name
+                      for t in proj.man["music"]["theme"]["track"] for p in t["placement"]))
+        check("the manifest still builds after renaming a clip",
+              builds(proj.path, root, "out_clip_rename"))
+
+        try:
+            proj.rename_clip("theme", "introclip", collide_name)
+            check("renaming a clip onto an existing name is refused", False)
+        except ValueError:
+            check("renaming a clip onto an existing name is refused", True)
+
+    # --- rename_sample: no cross-references to repoint, just the [sample.*] header
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root)
+        with open(proj.path, "a") as f:
+            f.write('\n[sample.blip]\nfile = "blip.wav"\n')
+        proj.reload()
+
+        proj.rename_sample("blip", "blip2")
+        check("rename_sample renames the section",
+              "blip" not in proj.man.get("sample", {}) and "blip2" in proj.man.get("sample", {}))
+        check("rename_sample preserves the sample's other keys",
+              proj.man["sample"]["blip2"]["file"] == "blip.wav")
+
+        with open(proj.path, "a") as f:
+            f.write('\n[sample.other]\nfile = "other.wav"\n')
+        proj.reload()
+        try:
+            proj.rename_sample("blip2", "other")
+            check("renaming a sample onto an existing name is refused", False)
+        except ValueError:
+            check("renaming a sample onto an existing name is refused", True)
 
 
 def check_editor_update():

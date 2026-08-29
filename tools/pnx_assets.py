@@ -4493,12 +4493,27 @@ def pack_music(specs, orient=ORIENT_BUTTONS_RIGHT):
             for row in marker_rows:
                 body += int(row).to_bytes(2, "little")
 
+        # Optional loop-start point, appended after the marker table (present or not) --
+        # additive for the same reason. Where looping restarts instead of row 0, the
+        # classic tracker "restart position" idiom -- see pnx_music.h's PnxSong.
+        # loop_start_row. Same absolute-row coordinate system as marker_rows, which for an
+        # arrangement is already the post-compile timeline compile_arrangement produces.
+        loop_start = spec.get("loop_start")
+        if loop_start is not None:
+            loop_start = int(loop_start)
+            total_rows = len(order) * rows_per
+            if not 0 <= loop_start < total_rows:
+                raise BuildError(f"music {name!r}: loop_start {loop_start} is outside the "
+                                 f"song (0..{total_rows - 1})")
+            body += bytes([1, 0]) + loop_start.to_bytes(2, "little")
+
         blob = blob_header(MAGIC_MUSIC, len(patterns), len(order), rows_per,
                            len(instruments), orient=orient) + body
         print(f"  music {name}: {len(patterns)} patterns x {rows_per} rows, "
               f"{len(instruments)} instruments"
               + (f" (+{len(synth)} synth)" if synth else "")
               + (f" (+{len(marker_rows)} markers)" if marker_rows else "")
+              + (f", loop @ {loop_start}" if loop_start is not None else "")
               + f", {tempo}bpm, {len(blob)} bytes")
         songs.append({"name": name, "blob": blob, "out": f"music_{name}.bin",
                       "synth": len(synth),

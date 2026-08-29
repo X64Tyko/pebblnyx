@@ -1563,6 +1563,7 @@ function showTab(which){
   // Leaving the tab with a pattern still playing would keep the audio going against a
   // grid nobody can see any more -- stopped rather than left to run out on its own.
   else if(typeof stopPatternPlayback==='function') stopPatternPlayback();
+  if(!mus && typeof stopArrangementPlayback==='function') stopArrangementPlayback();
   if(scn) drawScenes();
   if(dlg) drawDialog();
   if(fnt) drawFontList();
@@ -2121,7 +2122,14 @@ $('#prsave').onclick=async()=>{
 // `NOTE:INSTRUMENT`, '.' to hold, '-' to release -- rather than a prettier one invented
 // here, because a song half-edited by hand and half in this tool has to stay one song.
 
-const MU = { song: 0, pattern: 0, clip: null, inst: 0, rows: null, octave: 4, row: 0, view: 'grid' };
+const MU = { song: 0, pattern: 0, clip: null, inst: 0, rows: null, octave: 4, row: 0, view: 'grid',
+             // Arrangement-timeline session state -- editor-only, never saved to the
+             // manifest: zoom level, per-channel mute/solo while auditioning, the
+             // currently-selected placement (for keyboard delete), and a clipboard for
+             // copying one instrument's settings onto another.
+             zoom: 14, channelMute: [false, false, false, false],
+             channelSolo: [false, false, false, false], selectedPlacement: null,
+             instClipboard: null };
 
 function muSong(){ return ((S.data && S.data.songs) || [])[MU.song] || null; }
 
@@ -2777,17 +2785,25 @@ function harmonicsAt(midi){
   return H[Math.max(0, Math.min(7, Math.floor(midi / 12)))];
 }
 
+// The instrument panel's own live, unsaved {plain, synth} -- the exact objects every
+// knob writes into (see muWrite below), exposed globally so the mini piano
+// (audio-preview.js's drawMiniPiano) can preview whatever is on screen right now, not a
+// re-fetched copy that misses an in-progress drag.
+let MU_LIVE_INSTRUMENT = null;
+
 function drawInstrument(){
   const s = muSong();
   const box = $('#minstbody');
   box.innerHTML = '';
-  if(!s) return;
+  if(!s){ MU_LIVE_INSTRUMENT = null; return }
   const ins = s.instruments[MU.inst];
   const waves = (S.data.waveforms) || ['square','saw','triangle','noise'];
 
   const plain = JSON.parse(JSON.stringify(ins));
   delete plain.synth;
   const sy = ins.synth ? JSON.parse(JSON.stringify(ins.synth)) : null;
+  MU_LIVE_INSTRUMENT = { plain, synth: sy };
+  if(typeof drawMiniPiano === 'function') drawMiniPiano();
 
   // Readouts derived from the model -- envelope curves, the harmonic count, the header
   // name -- repaint themselves after every change. The panel used to get this for free
@@ -3087,6 +3103,16 @@ function drawSamples(){
       new Audio('/api/sample/wav?name=' + encodeURIComponent(sm.name)).play();
     };
     row.appendChild(play);
+    const ren = document.createElement('button');
+    ren.textContent = 'Rename';
+    ren.onclick = async () => {
+      const to = prompt(`Rename sample "${sm.name}" to:`, sm.name);
+      if(!to || to.trim() === sm.name) return;
+      const r = await post('/api/sample/rename', { name: sm.name, to: to.trim() });
+      if(!r.ok){ muSay('#mslog', r.error, true); return }
+      await reload(); drawMusic(); budget(true);
+    };
+    row.appendChild(ren);
     const del = document.createElement('button');
     del.textContent = 'Remove';
     del.onclick = async () => {
@@ -3196,6 +3222,28 @@ $('#msongdel').onclick = async () => {
   await reload(); drawMusic(); budget(true);
 };
 
+$('#msongren').onclick = async () => {
+  const s = muSong(); if(!s) return;
+  const to = prompt(`Rename song "${s.name}" to:`, s.name);
+  if(!to || to.trim() === s.name) return;
+  const r = await post('/api/song/rename', { name: s.name, to: to.trim() });
+  if(!r.ok){ muSay('#mpatlog', r.error, true); return }
+  await reload();
+  MU.song = (S.data.songs || []).findIndex(x => x.name === to.trim());
+  drawMusic(); budget(true);
+};
+
+$('#msongdup').onclick = async () => {
+  const s = muSong(); if(!s) return;
+  const to = prompt(`Duplicate song "${s.name}" as:`, `${s.name}_copy`);
+  if(!to) return;
+  const r = await post('/api/song/duplicate', { name: s.name, to: to.trim() });
+  if(!r.ok){ muSay('#mpatlog', r.error, true); return }
+  await reload();
+  MU.song = (S.data.songs || []).findIndex(x => x.name === to.trim());
+  drawMusic(); budget(true);
+};
+
 $('#minstadd').onclick = async () => {
   const s = muSong(); if(!s) return;
   const r = await post('/api/song/instrument/add', { name: s.name });
@@ -3211,6 +3259,50 @@ $('#minstdel').onclick = async () => {
     { name: s.name, index: s.instruments.length - 1 });
   if(!r.ok){ muSay('#mpatlog', r.error, true); return }
   MU.inst = 0;
+  await reload(); drawMusic(); budget(true);
+};
+
+// Copy/Paste/Reset all act on MU_LIVE_INSTRUMENT -- drawInstrument's own live, unsaved
+// {plain, synth} -- and save through the same /api/song/instrument endpoint a knob drag
+// already uses (see muFlushInstrument), then reload+redraw rather than write-through the
+// cache by hand, matching how every other one-shot edit in this tab already works.
+$('#minstcopy').onclick = () => {
+  if(!MU_LIVE_INSTRUMENT) return;
+  MU.instClipboard = JSON.parse(JSON.stringify(MU_LIVE_INSTRUMENT));
+  $('#minstpaste').disabled = false;
+  muSay('#minstlog', `copied ${MU_LIVE_INSTRUMENT.plain.name || 'instrument ' + MU.inst}`, false);
+};
+$('#minstpaste').onclick = async () => {
+  const s = muSong();
+  if(!s || !MU.instClipboard) return;
+  muSettle();
+  const clip = JSON.parse(JSON.stringify(MU.instClipboard));
+  // A pasted instrument keeps its OWN name -- pasting settings onto "bass" shouldn't
+  // silently rename it to whatever was copied.
+  clip.plain.name = (s.instruments[MU.inst] && s.instruments[MU.inst].name) || '';
+  const r = await post('/api/song/instrument',
+    { name: s.name, index: MU.inst, plain: clip.plain, synth: clip.synth });
+  if(!r.ok){ muSay('#minstlog', r.error, true); return }
+  await reload(); drawMusic(); budget(true);
+};
+$('#minstreset').onclick = async () => {
+  const s = muSong();
+  if(!s || !MU_LIVE_INSTRUMENT) return;
+  if(!confirm('Reset this instrument to its default settings?')) return;
+  muSettle();
+  const name = (s.instruments[MU.inst] && s.instruments[MU.inst].name) || '';
+  // Exactly what add_instrument/add_synth_record (tools/editor/project/music.py) seed a
+  // brand new instrument with.
+  const plain = { name, wave: 'square', attack: 5, decay: 80, sustain: 180, release: 120 };
+  const synth = MU_LIVE_INSTRUMENT.synth ? {
+    filter: 'off', cutoff_base: 128, resonance: 0, cutoff_env: 0, lfo_target: 'off',
+    lfo_rate: 0, lfo_depth: 0, pitch_env: 0, pitch_env_decay: 0, reverb: 0, chorus: 0,
+    amp: { attack: 5, decay: 80, sustain: 180, release: 120 },
+    cutoff: { attack: 5, decay: 80, sustain: 128, release: 120 },
+    osc: [{ wave: 'square', volume: 200, detune: 0, octave: 0, duty: 128 }],
+  } : null;
+  const r = await post('/api/song/instrument', { name: s.name, index: MU.inst, plain, synth });
+  if(!r.ok){ muSay('#minstlog', r.error, true); return }
   await reload(); drawMusic(); budget(true);
 };
 
