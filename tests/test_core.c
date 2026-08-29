@@ -290,6 +290,7 @@ void test_assets(void);
 void test_gfx(void);
 void test_text(void);
 void test_audio(void);
+void test_music(void);
 void test_input(void);
 void test_stream(void);
 void test_synth(void);
@@ -316,6 +317,7 @@ int main(void)
 	test_text();
 	test_assets();
 	test_audio();
+	test_music();
 	test_input();
 	test_stream();
 	test_synth();

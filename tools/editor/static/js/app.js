@@ -7,6 +7,18 @@ const post=async(url,body)=>(await fetch(url,{method:'POST',
   headers:{'content-type':'application/json'},
   body:JSON.stringify(body||{})})).json();
 
+// A different project (or a change to which engine copy it uses) means every cached
+// atlas, map and palette is wrong, so the simplest correct thing is to start over. A
+// real page reload does that for free when the server is a real OS process
+// (same-origin/companion mode) -- but in Pyodide mode the "server" is the in-page WASM
+// runtime, and reloading would tear down the very project session/mount this call just
+// set up, landing back on "no project open" every time. load() gets the same
+// clean-state result without doing that.
+function refreshAfterProjectChange(){
+  if(window.API && window.API.mode==='pyodide') return load();
+  location.reload();
+}
+
 // "Pick an existing X" -- #spsel/#nssel/#hwsel/#pxopen each hand-rolled this same
 // "<option> per item, keep whatever was already selected" shape once. One helper
 // instead; each call site still owns its OWN onchange/refresh logic, only the option
@@ -81,6 +93,10 @@ async function load(){
 
   $('#mapsel').innerHTML=S.data.maps.map((m,i)=>`<option value="${i}">${m.name}</option>`).join('');
   drawPalettes(); platformSelector(); budget(); statusbar(); orientation(); atlasMode();
+  // Refreshes the Project tab's own summary panel too -- otherwise a project opened
+  // while that tab is the one showing (the only tab available before a project is
+  // open) keeps displaying "No project open" until the user clicks away and back.
+  sdkStatus();
   // Once, a moment after the editor is usable: an update check is never
   // worth delaying the first paint for.
   setTimeout(()=>updCheck(), 1500);
@@ -2133,7 +2149,13 @@ function drawMusic(){
   const sel = $('#msong');
   sel.innerHTML = songs.map((s, i) => `<option value="${i}">${s.name}</option>`).join('');
   if(!songs.length){
-    $('#mrows').innerHTML = '<small class="dim">No [music.*] in this manifest.</small>';
+    $('#mlegacyorder').style.display = 'none';
+    $('#mconvertprompt').style.display = 'none';
+    $('#mlegacypattern').style.display = 'none';
+    $('#mclipsection').style.display = 'none';
+    $('#marrangesection').style.display = 'none';
+    $('#mmarkersection').style.display = 'none';
+    $('#mcost').textContent = '';
     $('#minstbody').innerHTML = '';
     drawSamples();
     return;
@@ -2143,14 +2165,37 @@ function drawMusic(){
   const s = songs[MU.song];
 
   $('#mtempo').value = s.tempo;
-  $('#morder').value = s.order.join(', ');
-  $('#mcost').textContent = `${s.patterns.length} patterns x ${s.rows_per} rows x `
-    + `${s.channels} ch - ${s.bytes} B` + (s.has_synth ? ' - synth' : ' - envelopes');
 
-  const pat = $('#mpat');
-  pat.innerHTML = s.patterns.map((_, i) => `<option value="${i}">${i}</option>`).join('');
-  if(MU.pattern >= s.patterns.length) MU.pattern = 0;
-  pat.value = String(MU.pattern);
+  // Arrangement is what every song is authored as now (see songs()'s `arrangement` flag) --
+  // the raw pattern/order editor only still applies to a song that predates it, which gets
+  // a "Convert to arrangement" prompt here instead of a dead end.
+  $('#mlegacyorder').style.display = s.arrangement ? 'none' : '';
+  $('#mconvertprompt').style.display = s.arrangement ? 'none' : '';
+  $('#mlegacypattern').style.display = s.arrangement ? 'none' : '';
+  $('#mclipsection').style.display = s.arrangement ? '' : 'none';
+  $('#marrangesection').style.display = s.arrangement ? '' : 'none';
+  $('#mmarkersection').style.display = s.arrangement ? '' : 'none';
+
+  if(s.arrangement){
+    const p = s.preview;
+    $('#mcost').textContent = p
+      ? `${p.patterns} compiled pattern(s) x ${p.rows_per} rows x ${s.channels} ch - `
+        + `${p.bytes} B` + (s.has_synth ? ' - synth' : ' - envelopes')
+      : (s.preview_error || 'not yet placed');
+    drawArrangement(s);
+  }else{
+    $('#morder').value = s.order.join(', ');
+    $('#mcost').textContent = `${s.patterns.length} patterns x ${s.rows_per} rows x `
+      + `${s.channels} ch - ${s.bytes} B` + (s.has_synth ? ' - synth' : ' - envelopes');
+
+    const pat = $('#mpat');
+    pat.innerHTML = s.patterns.map((_, i) => `<option value="${i}">${i}</option>`).join('');
+    if(MU.pattern >= s.patterns.length) MU.pattern = 0;
+    pat.value = String(MU.pattern);
+
+    showMusicView();
+    if(MU.view === 'piano') drawPianoRoll(); else drawTracker();
+  }
 
   const inst = $('#minst');
   inst.innerHTML = s.instruments.map((x, i) =>
@@ -2158,8 +2203,6 @@ function drawMusic(){
   if(MU.inst >= s.instruments.length) MU.inst = 0;
   inst.value = String(MU.inst);
 
-  showMusicView();
-  if(MU.view === 'piano') drawPianoRoll(); else drawTracker();
   drawInstrument();
   drawSamples();
 }
@@ -5030,9 +5073,7 @@ async function openProject(path){
   const r=await (await fetch('/api/project/open',{method:'POST',
     headers:{'content-type':'application/json'},body:JSON.stringify({path})})).json();
   if(!r.ok){ $('#pickernote').textContent=r.error; return }
-  // A different project means every cached atlas, map and palette is wrong, so the
-  // simplest correct thing is to start over.
-  location.reload();
+  refreshAfterProjectChange();
 }
 
 async function drawPicker(path){
@@ -5086,18 +5127,18 @@ $('#pickerok').onclick=async()=>{
     body:JSON.stringify({parent:$('#pickerpath').value,folder,name,
                          author:$('#newauthor').value})})).json();
   if(!r.ok){ $('#pickernote').textContent=r.error; return }
-  location.reload();
+  refreshAfterProjectChange();
 };
 
 $('#projadopt').onclick=async()=>{
   await fetch('/api/project/adopt',{method:'POST'});
-  location.reload();
+  refreshAfterProjectChange();
 };
 
 async function engineOwn(on){
   await fetch('/api/engine/own',{method:'POST',
     headers:{'content-type':'application/json'},body:JSON.stringify({on})});
-  location.reload();
+  refreshAfterProjectChange();
 }
 $('#engown').onchange=()=>{
   if($('#engown').checked) return engineOwn(true);

@@ -156,7 +156,9 @@
           body: JSON.stringify({ parent: "/mnt", folder: "proj", name, author }),
         })).json();
         if (!r.ok) { alert(r.error); return; }
-        location.reload();
+        // Not location.reload(): that would tear down this very Pyodide runtime and
+        // its native FS mount (see app.js's refreshAfterProjectChange for why).
+        window.refreshAfterProjectChange();
       } catch (e) {
         alert("Couldn't create a project there: " + e.message);
       }

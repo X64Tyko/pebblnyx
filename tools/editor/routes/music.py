@@ -51,7 +51,7 @@ def handle_post_api_song_instrument_remove(self, session, raw):
 def handle_post_api_song_meta(self, session, raw):
     d = json.loads(raw)
     session.proj.save_song_meta(d["name"], d.get("tempo"),
-                                d.get("order"))
+                                d.get("order"), d.get("resolution"))
     self._send(200, json.dumps({"ok": True}))
 
 def handle_post_api_song_pattern(self, session, raw):
@@ -64,6 +64,36 @@ def handle_post_api_song_instrument(self, session, raw):
     d = json.loads(raw)
     session.proj.save_instrument(d["name"], int(d["index"]),
                                  d["plain"], d.get("synth"))
+    self._send(200, json.dumps({"ok": True}))
+
+def handle_post_api_song_clip_add(self, session, raw):
+    d = json.loads(raw)
+    session.proj.add_clip(d["name"], d["clip"], d["rows"])
+    self._send(200, json.dumps({"ok": True}))
+
+def handle_post_api_song_clip(self, session, raw):
+    d = json.loads(raw)
+    session.proj.save_clip(d["name"], d["clip"], d["rows"])
+    self._send(200, json.dumps({"ok": True}))
+
+def handle_post_api_song_clip_remove(self, session, raw):
+    d = json.loads(raw)
+    session.proj.remove_clip(d["name"], d["clip"])
+    self._send(200, json.dumps({"ok": True}))
+
+def handle_post_api_song_track(self, session, raw):
+    d = json.loads(raw)
+    session.proj.save_track(d["name"], int(d["channel"]), d["placements"])
+    self._send(200, json.dumps({"ok": True}))
+
+def handle_post_api_song_markers(self, session, raw):
+    d = json.loads(raw)
+    session.proj.save_markers(d["name"], d["markers"])
+    self._send(200, json.dumps({"ok": True}))
+
+def handle_post_api_song_convert(self, session, raw):
+    d = json.loads(raw)
+    session.proj.convert_to_arrangement(d["name"])
     self._send(200, json.dumps({"ok": True}))
 
 
@@ -82,4 +112,10 @@ POST_EXACT = {
     '/api/song/meta': handle_post_api_song_meta,
     '/api/song/pattern': handle_post_api_song_pattern,
     '/api/song/instrument': handle_post_api_song_instrument,
+    '/api/song/clip/add': handle_post_api_song_clip_add,
+    '/api/song/clip': handle_post_api_song_clip,
+    '/api/song/clip/remove': handle_post_api_song_clip_remove,
+    '/api/song/track': handle_post_api_song_track,
+    '/api/song/markers': handle_post_api_song_markers,
+    '/api/song/convert': handle_post_api_song_convert,
 }

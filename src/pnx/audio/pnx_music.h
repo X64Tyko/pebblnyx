@@ -49,12 +49,31 @@ typedef struct
 	const uint8_t* synth;
 	uint8_t synth_count;
 	uint8_t synth_stride;
+
+	// Optional marker table, appended after the synth table (or straight after the patterns
+	// when there is no synth table). Absolute row positions in this song's order-sequence
+	// timeline -- i.e. order_pos * rows_per_pattern + row -- that a queued transition may land
+	// on. Two raw bytes per entry, little-endian, NOT a uint16_t* -- the blob gives no alignment
+	// guarantee, so every multi-byte field in this format is read out by hand rather than cast.
+	// NULL/0 for a song built before markers existed, additive for the same reason synth is.
+	const uint8_t* marker_rows;
+	uint8_t marker_count;
+
 	uint8_t pattern_count;
 	uint8_t order_length;
 	uint8_t rows_per_pattern;
 	uint8_t instrument_count;
 	uint16_t tempo_bpm;
 } PnxSong;
+
+// Where a queued song swap is allowed to land -- see pnx_music_queue_transition. Both are
+// checked against the song CURRENTLY playing (the one being transitioned away from), not the
+// one queued to play next.
+typedef enum
+{
+	PNX_TRANSITION_PATTERN_END, // the next time the current pattern finishes
+	PNX_TRANSITION_NEXT_MARKER, // the next row in the current song's own marker table
+} PnxTransitionPoint;
 
 #if PNX_USE_SEQUENCER
 
@@ -70,6 +89,12 @@ void pnx_music_decode_instrument(const PnxSong* s, uint8_t index, PnxInstrument*
 void pnx_music_play(const PnxSong* song, bool loop);
 void pnx_music_stop(void);
 bool pnx_music_playing(void);
+
+// Queues a swap to `next`, applied by pnx_music_update the next time it reaches `at` in the
+// CURRENTLY PLAYING song -- not next update() call, whichever tick actually crosses that point,
+// so the swap lands exactly on the boundary/marker regardless of when this was called. Silently
+// ignored if `next` doesn't look like a loaded song. Replaces any transition already queued.
+void pnx_music_queue_transition(const PnxSong* next, bool loop, PnxTransitionPoint at);
 
 // Called once per frame, before pnx_audio_update. Advances rows against the wall clock
 // rather than counting frames, because frames are not evenly spaced -- a covered app
@@ -114,6 +139,13 @@ static inline void pnx_music_play(const PnxSong* song, bool loop)
 }
 static inline void pnx_music_stop(void)
 {
+}
+static inline void pnx_music_queue_transition(const PnxSong* next, bool loop,
+											  PnxTransitionPoint at)
+{
+	(void)next;
+	(void)loop;
+	(void)at;
 }
 static inline bool pnx_music_playing(void)
 {

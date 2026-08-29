@@ -27,6 +27,13 @@ static uint8_t s_row;
 static uint32_t s_next_row_ms;
 static uint8_t s_channel_voice[PNX_MUSIC_CHANNELS];
 
+// A queued cross-song transition, applied by pnx_music_update once it reaches `s_pending_point`
+// in whatever song is CURRENTLY playing. See pnx_music_queue_transition.
+static const PnxSong* s_pending_song;
+static bool s_pending_loop;
+static PnxTransitionPoint s_pending_point;
+static bool s_pending_active;
+
 // Instruments are decoded into a small table rather than pointed at in the blob, because
 // PnxEnvelope has padding a packed blob does not -- casting onto it would read whatever
 // the compiler chose to leave between fields. MAX_INSTRUMENTS is now only a sanity cap on
@@ -94,6 +101,7 @@ bool pnx_music_load(PnxSong* out, uint16_t asset_id)
 	out->synth			  = NULL;
 	out->synth_count	  = 0;
 	out->synth_stride	  = 0;
+	size_t synth_size	  = 0;
 	const size_t trailing = payload - expected;
 	if (trailing >= 2)
 	{
@@ -117,6 +125,29 @@ bool pnx_music_load(PnxSong* out, uint16_t asset_id)
 				out->synth		  = tail + 2;
 				out->synth_count  = count;
 				out->synth_stride = stride;
+				synth_size		  = 2u + (size_t)count * stride;
+			}
+		}
+	}
+
+	// Optional marker table, appended after whatever synth bytes were actually consumed above
+	// (zero, if this song carries no synth table). Same trailing-payload detection as synth,
+	// one level deeper: additive, so a song built before markers existed -- with or without a
+	// synth table -- loads exactly as it did before this existed.
+	out->marker_rows		= NULL;
+	out->marker_count		= 0;
+	const size_t marker_off = expected + synth_size;
+	if (payload >= marker_off)
+	{
+		const size_t marker_trailing = payload - marker_off;
+		if (marker_trailing >= 2)
+		{
+			const uint8_t* tail = data + marker_off;
+			const uint8_t count = tail[0];
+			if (count && marker_trailing >= 2u + (size_t)count * 2u)
+			{
+				out->marker_rows  = tail + 2;
+				out->marker_count = count;
 			}
 		}
 	}
@@ -180,13 +211,24 @@ void pnx_music_play(const PnxSong* song, bool loop)
 {
 	if (!song || !song->rows || song->order_length == 0)
 		return;
-	s_song		  = song;
-	s_loop		  = loop;
-	s_playing	  = true;
-	s_order_pos	  = 0;
-	s_row		  = 0;
-	s_next_row_ms = 0;
+	s_song			 = song;
+	s_loop			 = loop;
+	s_playing		 = true;
+	s_order_pos		 = 0;
+	s_row			 = 0;
+	s_next_row_ms	 = 0;
+	s_pending_active = false; // an explicit new play() replaces whatever was queued, if anything
 	memset(s_channel_voice, PNX_AUDIO_NO_VOICE, sizeof(s_channel_voice));
+}
+
+void pnx_music_queue_transition(const PnxSong* next, bool loop, PnxTransitionPoint at)
+{
+	if (!next || !next->rows || next->order_length == 0)
+		return;
+	s_pending_song	 = next;
+	s_pending_loop	 = loop;
+	s_pending_point	 = at;
+	s_pending_active = true;
 }
 
 void pnx_music_stop(void)
@@ -201,8 +243,9 @@ void pnx_music_stop(void)
 			s_channel_voice[c] = PNX_AUDIO_NO_VOICE;
 		}
 	}
-	s_playing = false;
-	s_song	  = NULL;
+	s_playing		 = false;
+	s_song			 = NULL;
+	s_pending_active = false;
 }
 
 bool pnx_music_playing(void)
@@ -342,6 +385,35 @@ void pnx_music_decode_instrument(const PnxSong* s, uint8_t index, PnxInstrument*
 }
 #endif
 
+// True if `abs_row` (order_pos * rows_per_pattern + row, i.e. a position in the CURRENT
+// playthrough's timeline, stable across pattern reuse from dedup) is one of `s`'s markers.
+static bool at_marker_row(const PnxSong* s, uint16_t abs_row)
+{
+	for (uint8_t i = 0; i < s->marker_count; i++)
+	{
+		const uint8_t* m = s->marker_rows + (size_t)i * 2u;
+		if ((uint16_t)(m[0] | (m[1] << 8)) == abs_row)
+			return true;
+	}
+	return false;
+}
+
+// Deliberately does NOT touch s_next_row_ms, unlike pnx_music_play's init -- this runs
+// mid-loop, inside pnx_music_update, where it already holds a correctly-scheduled "when's the
+// next row" value the enclosing loop just advanced by the OLD song's per_row. Resetting it to
+// 0 here would re-arm the "just started, catch up immediately" path on the very next while
+// iteration and burst several of the new song's rows out in this one update() call instead of
+// pacing them normally from here on.
+static void apply_pending_transition(void)
+{
+	s_song		= s_pending_song;
+	s_loop		= s_pending_loop;
+	s_order_pos = 0;
+	s_row		= 0;
+	memset(s_channel_voice, PNX_AUDIO_NO_VOICE, sizeof(s_channel_voice));
+	s_pending_active = false;
+}
+
 void pnx_music_update(uint32_t now_ms)
 {
 	if (!s_playing || !s_song)
@@ -352,15 +424,15 @@ void pnx_music_update(uint32_t now_ms)
 	if (now_ms < s_next_row_ms)
 		return;
 
-	const PnxSong* s	   = s_song;
-	const uint32_t per_row = row_ms(s);
-
 	// Catch up at most a few rows. A covered app can return seconds late, and replaying
 	// every missed row would fire a burst of notes at once -- the audio equivalent of the
 	// sim fast-forwarding, which the frame loop clamps for the same reason.
 	int budget = 4;
 	while (now_ms >= s_next_row_ms && budget-- > 0)
 	{
+		const PnxSong* s	   = s_song;
+		const uint32_t per_row = row_ms(s);
+
 		play_row(s, s->order[s_order_pos], s_row);
 		s_next_row_ms += per_row;
 
@@ -369,6 +441,15 @@ void pnx_music_update(uint32_t now_ms)
 			s_row = 0;
 			if (++s_order_pos >= s->order_length)
 			{
+				// A queued "pattern end" transition takes priority over stopping a
+				// non-looping song that just reached its own end -- the last pattern's end
+				// is a pattern boundary too, and going silent when a swap was already
+				// requested is never the right call.
+				if (s_pending_active && s_pending_point == PNX_TRANSITION_PATTERN_END)
+				{
+					apply_pending_transition();
+					continue;
+				}
 				if (!s_loop)
 				{
 					pnx_music_stop();
@@ -376,6 +457,21 @@ void pnx_music_update(uint32_t now_ms)
 				}
 				s_order_pos = 0;
 			}
+		}
+
+		// Checked AFTER advancing, against whatever the row/pattern cursor became this tick --
+		// a transition queued to land "at pattern end" means the boundary just crossed, and one
+		// queued for a marker means the row just reached is the marked one. `s_song` is
+		// re-read at the top of the next iteration, so a swap here takes effect on the very
+		// next row played, same tick, no gap.
+		if (s_pending_active)
+		{
+			const bool at_pattern_end = (s_row == 0);
+			const uint16_t abs_row	  = (uint16_t)s_order_pos * s->rows_per_pattern + s_row;
+			const bool triggered =
+				(s_pending_point == PNX_TRANSITION_PATTERN_END && at_pattern_end) || (s_pending_point == PNX_TRANSITION_NEXT_MARKER && at_marker_row(s, abs_row));
+			if (triggered)
+				apply_pending_transition();
 		}
 	}
 	// Whatever remains unplayed is discarded rather than queued: being late is better than

@@ -11,7 +11,15 @@ import pnx_assets as pa                                     # noqa: E402
 
 class MusicMixin:
     def songs(self):
-        """Every [music.*], in the shape a tracker draws."""
+        """Every [music.*], in the shape the editor draws.
+
+        Arrangement is the only authoring surface now -- a song with [[track]] entries hands
+        the UI its clips/tracks/markers and a LIVE preview of what they compile to (by calling
+        the exact same compile_arrangement the real build uses), not the raw patterns/order
+        that preview compiles into. A song that predates arrangement (no tracks yet) still
+        reports its raw patterns/order too, so the editor can offer "convert to arrangement"
+        instead of a dead end.
+        """
         out = []
         for name, spec in sorted(self.man.get("music", {}).items()):
             patterns = [list(p.get("rows", [])) for p in spec.get("pattern", [])]
@@ -30,16 +38,54 @@ class MusicMixin:
                          # names ONE instrument index -- so they are shown as one thing.
                          "synth": dict(synth[i]) if i < len(synth) else None}
                 instruments.append(entry)
+
+            tracks = spec.get("track", [])
+            clips = [{"name": c.get("name", ""), "rows": list(c.get("rows", []))}
+                     for c in spec.get("clip", [])]
+            markers = [{"name": m.get("name", ""), "at": int(m.get("at", 0))}
+                       for m in spec.get("markers", [])]
+
+            preview = None
+            if tracks:
+                try:
+                    derived_patterns, derived_order, _ = pa.compile_arrangement(spec)
+                    preview = {
+                        "patterns": len(derived_patterns),
+                        "order": len(derived_order),
+                        "rows_per": len(derived_patterns[0]["rows"]) if derived_patterns else 0,
+                        "bytes": (len(derived_patterns)
+                                  * (len(derived_patterns[0]["rows"]) if derived_patterns else 0)
+                                  * int(spec.get("channels", 4)) * 2
+                                  + len(instruments) * 8
+                                  + (2 + len(synth) * 48 if synth else 0)),
+                    }
+                    preview_error = None
+                except pa.BuildError as e:
+                    preview_error = str(e)
+            else:
+                preview_error = None
+
             out.append({
                 "name": name,
                 "tempo": spec.get("tempo", 120),
                 "channels": spec.get("channels", 4),
+                "clips": clips,
+                "tracks": [{"channel": int(t.get("channel", 0)),
+                            "placement": list(t.get("placement", []))} for t in tracks],
+                "markers": markers,
+                "arrangement": bool(tracks),
+                "resolution": spec.get("resolution", 16),
+                "preview": preview,
+                "preview_error": preview_error,
+                # Legacy-only: present so a song that predates arrangement can still be
+                # inspected/converted. A song with tracks ignores these at build time (see
+                # compile_arrangement's hook in pack_music) -- kept here only until
+                # convert_to_arrangement runs, which deletes them.
                 "rows_per": rows_per,
                 "patterns": patterns,
                 "order": list(spec.get("order", list(range(len(patterns))))),
                 "instruments": instruments,
                 "has_synth": bool(synth),
-                # What the blob will cost: two bytes a cell, plus the tables.
                 "bytes": (len(patterns) * rows_per * spec.get("channels", 4) * 2
                           + len(instruments) * 8
                           + (2 + len(synth) * 48 if synth else 0)),
@@ -47,11 +93,13 @@ class MusicMixin:
         return out
 
     def add_song(self, name, tempo=120, rows=16, synth=True):
-        """Create a [music.*] with one instrument and one empty pattern.
+        """Create a [music.*] with one instrument and one silent clip on one track.
 
-        Seeded rather than left blank: the pipeline refuses a song with no instruments and
-        no patterns, so an empty one could not be saved at all -- the same reason a new map
-        arrives with a room already in it.
+        Seeded rather than left blank: the pipeline refuses a song with no instruments and no
+        placements, so an empty one could not be saved at all -- the same reason a new map
+        arrives with a room already in it. Arrangement is the only authoring surface a new
+        song gets now -- see songs()/compile_arrangement -- so the seed is a clip+track, not a
+        raw pattern.
         """
         if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
             raise ValueError("a song name must be lowercase letters, digits and "
@@ -60,9 +108,8 @@ class MusicMixin:
             raise ValueError(f"a song named {name!r} already exists")
         rows = int(rows)
         if not 1 <= rows <= 64:
-            raise ValueError("a pattern holds between 1 and 64 rows")
+            raise ValueError("a clip holds between 1 and 64 rows")
 
-        blank = "     ".join(["."] * 4)
         body = [f"[music.{name}]", f"tempo = {int(tempo)}", "channels = 4", "",
                 f"[[music.{name}.instrument]]",
                 'wave = "square"', "attack = 5", "decay = 80", "sustain = 180",
@@ -79,9 +126,11 @@ class MusicMixin:
                      '  { wave = "square", volume = 200, detune = 0, octave = 0, '
                      'duty = 128 },',
                      "]", ""]
-        body += [f"[[music.{name}.pattern]]", "rows = ["]
-        body += [f'  "{blank}",' for _ in range(rows)]
-        body += ["]"]
+        body += [f"[[music.{name}.clip]]", 'name = "intro"', "rows = ["]
+        body += ['  ".",' for _ in range(rows)]
+        body += ["]", "",
+                 f"[[music.{name}.track]]", "channel = 0", "placement = [",
+                 '  { clip = "intro", start = 0 },', "]"]
 
         with open(self.path, "a") as f:
             f.write("\n\n" + "\n".join(body) + "\n")
@@ -104,6 +153,338 @@ class MusicMixin:
         with open(self.path, "w") as f:
             f.write("\n".join(keep))
         self.reload()
+
+    def add_clip(self, name, clip_name, rows):
+        """Append a [[music.x.clip]] -- a pure note sequence, no instrument of its own (see
+        compile_arrangement for why). Name-keyed rather than index-keyed like a pattern, so
+        removing one doesn't renumber every placement that names a LATER clip."""
+        spec = self.man.get("music", {}).get(name)
+        if spec is None:
+            raise ValueError(f"no song named {name!r}")
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", clip_name):
+            raise ValueError("a clip name must be lowercase letters, digits and "
+                             "underscores -- it becomes a C identifier")
+        if any(c.get("name") == clip_name for c in spec.get("clip", [])):
+            raise ValueError(f"song {name!r} already has a clip named {clip_name!r}")
+        self._validate_clip_rows(clip_name, rows)
+
+        body = [f"[[music.{name}.clip]]", f'name = "{clip_name}"', "rows = ["]
+        body += [f'  {json.dumps(r)},' for r in rows]
+        body += ["]"]
+        with open(self.path, "a") as f:
+            f.write("\n\n" + "\n".join(body) + "\n")
+        self.reload()
+
+    def save_clip(self, name, clip_name, rows):
+        """Rewrite one clip's rows in place."""
+        spec = self.man.get("music", {}).get(name)
+        if spec is None:
+            raise ValueError(f"no song named {name!r}")
+        idx = self._clip_index(spec, clip_name)
+        self._validate_clip_rows(clip_name, rows)
+        body = [f"[[music.{name}.clip]]", f'name = "{clip_name}"', "rows = ["]
+        body += [f'  {json.dumps(r)},' for r in rows]
+        body += ["]"]
+        self._replace_table(f"[[music.{name}.clip]]", idx, body)
+
+    def clip_users(self, name, clip_name):
+        """Which track/channel placements play this clip, so removing it can refuse and say
+        where -- same shape as instrument_users."""
+        spec = self.man.get("music", {}).get(name, {})
+        hits = []
+        for t in spec.get("track", []):
+            for p in t.get("placement", []):
+                if p.get("clip") == clip_name:
+                    hits.append(f"channel {t.get('channel')} row {p.get('start', 0)}")
+        return hits
+
+    def remove_clip(self, name, clip_name):
+        spec = self.man.get("music", {}).get(name)
+        if spec is None:
+            raise ValueError(f"no song named {name!r}")
+        idx = self._clip_index(spec, clip_name)
+        users = self.clip_users(name, clip_name)
+        if users:
+            raise ValueError(
+                f"clip {clip_name!r} is placed on {', '.join(users[:3])}"
+                + (f" and {len(users) - 3} more" if len(users) > 3 else "")
+                + ". Remove those placements first.")
+        found = self._nth_table(f"[[music.{name}.clip]]", idx)
+        if not found:
+            raise ValueError(f"no [[music.{name}.clip]] #{idx} in the manifest")
+        lines, head, end = found
+        while end < len(lines) and lines[end].strip() == "":
+            end += 1
+        while head > 0 and lines[head - 1].strip() == "":
+            head -= 1
+        lines[head:end] = [""]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def _validate_clip_rows(self, clip_name, rows):
+        if not rows:
+            raise ValueError("a clip needs at least one row")
+        if len(rows) > 255:
+            raise ValueError("a clip holds at most 255 rows")
+        for ri, tok in enumerate(rows):
+            try:
+                pa.parse_note(tok, f"clip {clip_name!r} row {ri}")
+            except pa.BuildError as e:
+                raise ValueError(str(e)) from None
+
+    def _clip_index(self, spec, clip_name):
+        clips = spec.get("clip", [])
+        idx = next((i for i, c in enumerate(clips) if c.get("name") == clip_name), None)
+        if idx is None:
+            raise ValueError(f"no clip named {clip_name!r}")
+        return idx
+
+    def save_track(self, name, channel, placements):
+        """Rewrite (or create) the track for one channel -- the sequencer has exactly 4, so
+        a track IS a channel rather than its own identity. Placements are either a clip
+        (positioned by `start`) or an instrument-change (a program-change event, also
+        positioned by `start`) -- validated the same way compile_arrangement itself would
+        reject them, so a bad save fails here with a clear message instead of at Build.
+        """
+        spec = self.man.get("music", {}).get(name)
+        if spec is None:
+            raise ValueError(f"no song named {name!r}")
+        channel = int(channel)
+        if not 0 <= channel < 4:
+            raise ValueError("channel must be 0-3 -- the sequencer has exactly 4")
+
+        clip_names = {c.get("name") for c in spec.get("clip", [])}
+        instrument_count = len(spec.get("instrument", []))
+        placements = sorted(placements, key=lambda p: int(p.get("start", 0)))
+        next_free = 0
+        for p in placements:
+            start = int(p.get("start", 0))
+            if start < 0:
+                raise ValueError("a placement can't start before row 0")
+            if "instrument" in p:
+                inst = int(p["instrument"])
+                if not 0 <= inst < instrument_count:
+                    raise ValueError(f"instrument {inst} does not exist")
+                continue
+            clip_name = p.get("clip")
+            if clip_name not in clip_names:
+                raise ValueError(f"no such clip {clip_name!r}")
+            if start < next_free:
+                raise ValueError(f"clip {clip_name!r} at row {start} overlaps the placement "
+                                 f"before it, which runs through row {next_free - 1}")
+            clip = next(c for c in spec["clip"] if c.get("name") == clip_name)
+            next_free = start + len(clip.get("rows", []))
+
+        body = [f"[[music.{name}.track]]", f"channel = {channel}", "placement = ["]
+        for p in placements:
+            if "instrument" in p:
+                body.append(f'  {{ instrument = {int(p["instrument"])}, '
+                            f'start = {int(p.get("start", 0))} }},')
+            else:
+                body.append(f'  {{ clip = "{p["clip"]}", start = {int(p.get("start", 0))} }},')
+        body += ["]"]
+
+        tracks = spec.get("track", [])
+        idx = next((i for i, t in enumerate(tracks) if int(t.get("channel", -1)) == channel),
+                   None)
+        if idx is not None:
+            self._replace_table(f"[[music.{name}.track]]", idx, body)
+            return
+        found = self._nth_table(f"[[music.{name}.track]]", len(tracks) - 1) if tracks else None
+        if found:
+            lines, head, end = found
+            while end > head and lines[end - 1].strip() == "":
+                end -= 1
+            lines[end:end] = [""] + body
+            with open(self.path, "w") as f:
+                f.write("\n".join(lines))
+            self.reload()
+            return
+        with open(self.path, "a") as f:
+            f.write("\n\n" + "\n".join(body) + "\n")
+        self.reload()
+
+    def save_markers(self, name, markers):
+        """Rewrite the song-level `markers` list -- transition-safe row positions, named so
+        they reach the generated header (MUSIC_<SONG>_MARKER_<NAME>) and so game code and the
+        editor's timeline can both refer to one by a name instead of a bare row number."""
+        spec = self.man.get("music", {}).get(name)
+        if spec is None:
+            raise ValueError(f"no song named {name!r}")
+        seen = set()
+        for m in markers:
+            label = str(m.get("name", "")).strip()
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", label):
+                raise ValueError("a marker name must be lowercase letters, digits and "
+                                 "underscores -- it becomes a C identifier")
+            if label in seen:
+                raise ValueError(f"two markers are both named {label!r}")
+            seen.add(label)
+            if int(m.get("at", -1)) < 0:
+                raise ValueError("a marker's row can't be negative")
+
+        value = ("markers = [\n" + "".join(
+            f'  {{ name = "{m["name"]}", at = {int(m["at"])} }},\n' for m in markers) + "]"
+            ) if markers else "markers = []"
+
+        lines, start, end = self._music_block(name)
+        at = next((j for j in range(start + 1, end) if re.match(r"\s*markers\s*=", lines[j])),
+                  None)
+        if at is not None:
+            stop = at + 1
+            depth = lines[at].count("[") - lines[at].count("]")
+            while depth > 0 and stop < end:
+                depth += lines[stop].count("[") - lines[stop].count("]")
+                stop += 1
+            lines[at:stop] = [value]
+        else:
+            limit = next((j for j in range(start + 1, end)
+                         if lines[j].lstrip().startswith("[")), end)
+            at = start + 1
+            for j in range(start + 1, limit):
+                if re.match(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*=", lines[j]):
+                    at = j + 1
+            lines[at:at] = [value]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
+    def convert_to_arrangement(self, name):
+        """One-time migration for a song still authored as raw [[pattern]]/order: splits each
+        pattern's per-channel columns into name-keyed clips and builds one track per channel
+        replaying the old order sequence, then deletes the now-superseded patterns/order.
+
+        A clip carries no instrument, so a channel whose notes actually change instrument
+        partway through a pattern splits into more than one clip there, joined by an
+        instrument-change placement -- see compile_arrangement's own docstring for why a clip
+        can't just carry one. Lossless: the SAME order position reusing the SAME pattern
+        produces the SAME clip name (dict-keyed, so redefining it twice is a no-op) and a
+        second placement rather than a second clip, the same reuse a hand-written `order`
+        list already relied on.
+        """
+        spec = self.man.get("music", {}).get(name)
+        if spec is None:
+            raise ValueError(f"no song named {name!r}")
+        if spec.get("track"):
+            raise ValueError(f"song {name!r} already uses an arrangement")
+        patterns = spec.get("pattern", [])
+        if not patterns:
+            raise ValueError(f"song {name!r} has no patterns to convert")
+
+        order = spec.get("order")
+        if order is None:
+            # A stray `order = [...]` written after the LAST [[pattern]] block parses, by
+            # TOML's own table-scoping rules, as a key on THAT pattern rather than on the
+            # song -- an easy mistake to make (examples/audiotest and examples/overworld are
+            # both written exactly this way) that otherwise silently falls back to "play
+            # every pattern once, in file order" with nothing to say why. Recovered here
+            # rather than left to produce a lossy conversion of a song that never actually
+            # played what its own manifest looked like it said.
+            order = patterns[-1].get("order")
+        order = list(order) if order is not None else list(range(len(patterns)))
+
+        channels = int(spec.get("channels", 4))
+        rows_per = len(patterns[0].get("rows", []))
+
+        # Chunked at exactly the original pattern size, so a repeated section dedupes back
+        # down to one clip+placement pair per occurrence the same way it deduped to one
+        # reused pattern before conversion, rather than however compile_arrangement's own
+        # default (16) happens to slice this particular song.
+        self._set_song_key(name, "resolution", str(rows_per))
+
+        clip_defs = {}
+        placements = {c: [] for c in range(channels)}
+
+        for order_pos, pat_idx in enumerate(order):
+            base_row = order_pos * rows_per
+            rows = patterns[pat_idx].get("rows", [])
+            for c in range(channels):
+                cells = []
+                for row in rows:
+                    cell = row.split()[c]
+                    if ":" in cell:
+                        note_tok, inst = cell.split(":", 1)
+                        cells.append((note_tok, int(inst)))
+                    else:
+                        cells.append((cell, None))
+
+                # Split into runs: a new run starts only where a REAL note names an
+                # instrument different from the run's so far. Holds/offs (inst is None)
+                # never start a run -- they ride along in whichever run they sustain under.
+                runs, run_start, run_inst = [], 0, None
+                for i, (tok, inst) in enumerate(cells):
+                    if inst is not None and run_inst is not None and inst != run_inst:
+                        runs.append((run_start, i, run_inst))
+                        run_start = i
+                        run_inst = inst
+                    elif inst is not None and run_inst is None:
+                        run_inst = inst
+                runs.append((run_start, len(cells), run_inst))
+
+                for run_start, run_end, run_inst in runs:
+                    run_cells = cells[run_start:run_end]
+                    if run_inst is None or not any(t != "." for t, _ in run_cells):
+                        continue  # nothing real in this run -- no placement needed
+                    clip_name = f"{name}_p{pat_idx}_c{c}_r{run_start}"
+                    clip_defs[clip_name] = [t for t, _ in run_cells]
+                    start = base_row + run_start
+                    placements[c].append({"instrument": run_inst, "start": start})
+                    placements[c].append({"clip": clip_name, "start": start})
+
+        clip_lines = []
+        for cname, rows in clip_defs.items():
+            clip_lines += [f"[[music.{name}.clip]]", f'name = "{cname}"', "rows = ["]
+            clip_lines += [f'  {json.dumps(r)},' for r in rows]
+            clip_lines += ["]", ""]
+
+        track_lines = []
+        for c in range(channels):
+            plist = sorted(placements[c], key=lambda p: p["start"])
+            if not plist:
+                continue
+            track_lines += [f"[[music.{name}.track]]", f"channel = {c}", "placement = ["]
+            for p in plist:
+                if "instrument" in p:
+                    track_lines.append(f'  {{ instrument = {p["instrument"]}, '
+                                       f'start = {p["start"]} }},')
+                else:
+                    track_lines.append(f'  {{ clip = "{p["clip"]}", start = {p["start"]} }},')
+            track_lines += ["]", ""]
+
+        with open(self.path, "a") as f:
+            f.write("\n\n" + "\n".join(clip_lines + track_lines).rstrip() + "\n")
+        self.reload()
+
+        # Now superseded -- delete the raw patterns and the order key so the manifest
+        # doesn't carry two conflicting descriptions of the same song.
+        for idx in range(len(patterns) - 1, -1, -1):
+            found = self._nth_table(f"[[music.{name}.pattern]]", idx)
+            if not found:
+                continue
+            lines, head, end = found
+            while end < len(lines) and lines[end].strip() == "":
+                end += 1
+            while head > 0 and lines[head - 1].strip() == "":
+                head -= 1
+            lines[head:end] = [""]
+            with open(self.path, "w") as f:
+                f.write("\n".join(lines))
+            self.reload()
+
+        lines, start, end = self._music_block(name)
+        at = next((j for j in range(start + 1, end) if re.match(r"\s*order\s*=", lines[j])),
+                  None)
+        if at is not None:
+            stop = at + 1
+            depth = lines[at].count("[") - lines[at].count("]")
+            while depth > 0 and stop < end:
+                depth += lines[stop].count("[") - lines[stop].count("]")
+                stop += 1
+            lines[at:stop] = [""]
+            with open(self.path, "w") as f:
+                f.write("\n".join(lines))
+            self.reload()
 
     def add_instrument(self, name):
         """Append an instrument, and its synth record when the song has a synth table.
@@ -240,6 +621,30 @@ class MusicMixin:
                 break
         return lines, start, end
 
+    def _set_song_key(self, name, key, value_text):
+        """Insert or replace one bare `key = value_text` line directly under [music.x],
+        BEFORE its first subtable -- the one placement TOML parses as belonging to the song
+        itself rather than to whichever subtable happens to come first. Writing it anywhere
+        else is the exact mistake convert_to_arrangement has to recover from on read (a key
+        placed after the LAST subtable binds to THAT subtable, not the song)."""
+        lines, start, end = self._music_block(name)
+        line = f"{key} = {value_text}"
+        at = next((j for j in range(start + 1, end) if re.match(rf"\s*{key}\s*=", lines[j])),
+                  None)
+        if at is not None:
+            lines[at] = line
+        else:
+            limit = next((j for j in range(start + 1, end)
+                         if lines[j].lstrip().startswith("[")), end)
+            ins = start + 1
+            for j in range(start + 1, limit):
+                if re.match(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*=", lines[j]):
+                    ins = j + 1
+            lines[ins:ins] = [line]
+        with open(self.path, "w") as f:
+            f.write("\n".join(lines))
+        self.reload()
+
     def samples(self):
         out = []
         for name, spec in sorted(self.man.get("sample", {}).items()):
@@ -348,8 +753,9 @@ class MusicMixin:
             f.write("\n".join(lines))
         self.reload()
 
-    def save_song_meta(self, name, tempo=None, order=None):
-        """Tempo and the order list -- the two song-level things a tracker changes often.
+    def save_song_meta(self, name, tempo=None, order=None, resolution=None):
+        """Tempo, the (legacy) order list, and an arrangement's resolution -- the song-level
+        things changed often enough not to deserve their own writer each.
 
         Patterns and instruments are edited through their own writers, because rewriting a
         whole song to change one cell would discard every comment in it.
@@ -405,6 +811,12 @@ class MusicMixin:
         with open(self.path, "w") as f:
             f.write("\n".join(lines))
         self.reload()
+
+        if resolution is not None:
+            r = int(resolution)
+            if not 1 <= r <= 255:
+                raise ValueError("resolution must be between 1 and 255 rows")
+            self._set_song_key(name, "resolution", str(r))
 
     def save_pattern(self, name, index, rows, append=False):
         """Rewrite one pattern's rows, or append a new one. The unit a tracker edits.

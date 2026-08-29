@@ -17,7 +17,7 @@
 
 CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -DPNX_PLATFORM_HOST -DPNX_USE_SYNTH=1 -g -O1
-SRC      = test_core.c test_assets.c test_gfx.c test_text.c test_audio.c test_input.c test_stream.c \
+SRC      = test_core.c test_assets.c test_gfx.c test_text.c test_audio.c test_music.c test_input.c test_stream.c \
            test_synth.c test_save.c test_app.c test_physics.c test_sprite.c test_layer.c test_map_compress.c \
            test_tween.c test_hud_vars.c test_hud_window.c test_blit_scaled.c \
            ../src/pnx/core/pnx_arena.c ../src/pnx/core/pnx_fmt.c ../src/pnx/core/pnx_diag.c \

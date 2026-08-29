@@ -4246,6 +4246,135 @@ def pack_synth_instrument(spec, where):
     return bytes(r)
 
 
+def clip_cell(token, instrument, where):
+    """One clip row -> the manifest's own pattern-cell text ('C3:2', '.', '-').
+
+    Clips carry no instrument of their own -- see compile_arrangement -- so the active
+    instrument from the enclosing track's placement stream is stamped on here, in TEXT, so the
+    result can be fed straight back through the exact same row/cell parsing pack_music already
+    does for a hand-authored pattern. A round trip through text rather than packing bytes
+    directly is deliberate: it means pack_music's own parsing, validation and error messages
+    stay the single source of truth for what a cell means, arrangement or not.
+    """
+    token = token.strip()
+    parse_note(token, where)  # validates; raises BuildError with a good message if malformed
+    if token in (".", "", "..."):
+        return "."
+    if token in ("-", "off"):
+        return "-"
+    return f"{token}:{int(instrument)}"
+
+
+def compile_arrangement(spec, chunk_rows=None):
+    """Flatten [[music.x.track]]/[[music.x.clip]] placements into the same
+    patterns/order shape a hand-authored song already provides, so pack_music can build either
+    one without knowing which it got.
+
+    A track IS one of the sequencer's 4 fixed channels (`track.channel`) -- overlap between
+    DIFFERENT tracks is exactly the layering an arrangement is for, and it costs nothing to
+    allow because two tracks never share a channel by construction. Placements WITHIN one track
+    are either a clip (a pure note sequence, no instrument) or an instrument-change
+    (a program-change event); both are ordered by `start`, and flattening walks them in order
+    per channel, tracking the active instrument, stamping it onto every note the clips that
+    follow emit -- see clip_cell.
+
+    The flattened grid is sliced into `chunk_rows`-row patterns (default from
+    spec['resolution'] or 16, matching the row count typical of a hand-authored pattern) and
+    identical chunks are deduped by content, the same way a hand-written `order` list already
+    reuses a whole pattern for a repeated section -- so a long arrangement built from a few
+    reused clips costs proportional to its UNIQUE content, not its length.
+
+    Returns (patterns, order, marker_rows): patterns/order in exactly the shape
+    spec.get('pattern')/spec.get('order') already provide for a classic song; marker_rows is a
+    list of absolute-row ints (positions in the flattened order-sequence timeline, i.e. this
+    playthrough's row count so far) -- see PNX_TRANSITION_NEXT_MARKER in pnx_music.h.
+    """
+    clips = {c["name"]: c for c in spec.get("clip", [])}
+    tracks = spec.get("track", [])
+    if not tracks:
+        raise BuildError("this song has no [[music.x.track]] entries to arrange")
+
+    channels = 4
+    seen_channels = set()
+    grid = {}  # (channel, row) -> cell text, only entries that aren't a bare hold
+    total_len = 0
+
+    for t in tracks:
+        ch = int(t.get("channel", -1))
+        if not 0 <= ch < channels:
+            raise BuildError(f"track channel {ch} is outside 0..{channels - 1}")
+        if ch in seen_channels:
+            raise BuildError(f"channel {ch} has more than one track")
+        seen_channels.add(ch)
+
+        placements = sorted(t.get("placement", []), key=lambda p: int(p.get("start", 0)))
+        current_inst = 0
+        next_free = 0
+        for p in placements:
+            start = int(p.get("start", 0))
+            if start < 0:
+                raise BuildError(f"channel {ch}: a placement can't start before row 0")
+            if "instrument" in p:
+                current_inst = int(p["instrument"])
+                continue
+            clip_name = p.get("clip")
+            clip = clips.get(clip_name)
+            if clip is None:
+                raise BuildError(f"channel {ch}: no such clip {clip_name!r}")
+            if start < next_free:
+                raise BuildError(f"channel {ch}: clip {clip_name!r} at row {start} overlaps "
+                                 f"the placement before it, which runs through row "
+                                 f"{next_free - 1}")
+            rows = clip.get("rows", [])
+            for i, tok in enumerate(rows):
+                cell = clip_cell(tok, current_inst, f"clip {clip_name!r} row {i}")
+                if cell != ".":
+                    grid[(ch, start + i)] = cell
+            next_free = start + len(rows)
+            total_len = max(total_len, next_free)
+
+    markers = spec.get("markers", [])
+    for m in markers:
+        total_len = max(total_len, int(m["at"]) + 1)
+    if total_len == 0:
+        raise BuildError("this song's arrangement has no placements")
+
+    chunk_rows = int(chunk_rows or spec.get("resolution", 16))
+    if not 1 <= chunk_rows <= 255:
+        raise BuildError(f"resolution {chunk_rows} must be between 1 and 255")
+    num_chunks = -(-total_len // chunk_rows)  # ceil division
+
+    patterns = []
+    seen_chunks = {}
+    order = []
+    for c in range(num_chunks):
+        base = c * chunk_rows
+        row_strs = []
+        for r in range(chunk_rows):
+            cells = [grid.get((ch, base + r), ".") for ch in range(channels)]
+            row_strs.append("  ".join(cells))
+        key = tuple(row_strs)
+        idx = seen_chunks.get(key)
+        if idx is None:
+            idx = len(patterns)
+            seen_chunks[key] = idx
+            patterns.append({"rows": row_strs})
+        order.append(idx)
+
+    if len(patterns) > 255:
+        raise BuildError(f"this arrangement compiles to {len(patterns)} unique patterns "
+                         f"({chunk_rows} rows each) -- the format allows 255. Try a larger "
+                         f"resolution, or fewer distinct sections.")
+    if len(order) > 255:
+        raise BuildError(f"this arrangement compiles to an order list of {len(order)} -- the "
+                         f"format allows 255. Try a larger resolution.")
+
+    marker_rows = [int(m["at"]) for m in markers]
+    if len(marker_rows) > 255:
+        raise BuildError(f"{len(marker_rows)} markers -- the format allows 255")
+    return patterns, order, marker_rows
+
+
 def pack_music_names(man):
     """Song names only, for the id ordering, without recompiling them."""
     return [{"name": n} for n in sorted(man.get("music", {}))]
@@ -4283,7 +4412,19 @@ def pack_music(specs, orient=ORIENT_BUTTONS_RIGHT):
             inst_bytes += bytes([int(ins.get("sustain", 180)) & 0xFF])
             inst_bytes += int(ins.get("release", 100)).to_bytes(2, "little")
 
-        patterns = spec.get("pattern", [])
+        # An arrangement ([[music.x.track]]) compiles down to patterns/order right here, at
+        # build time, so everything below -- row packing, order validation, blob assembly --
+        # runs completely unchanged whether this song was hand-authored or arranged. See
+        # compile_arrangement's own docstring for why this is a build-time-only concern.
+        marker_rows = [int(m["at"]) for m in spec.get("markers", [])]
+        if spec.get("track"):
+            try:
+                patterns, order_override, marker_rows = compile_arrangement(spec)
+            except BuildError as e:
+                raise BuildError(f"music {name!r}: {e}") from None
+        else:
+            patterns = spec.get("pattern", [])
+            order_override = None
         if not patterns:
             raise BuildError(f"music {name!r}: no patterns defined")
 
@@ -4312,7 +4453,8 @@ def pack_music(specs, orient=ORIENT_BUTTONS_RIGHT):
                         raise BuildError(f"{where}: instrument {inst} does not exist")
                     pattern_bytes += bytes([parse_note(note_tok, where), inst])
 
-        order = spec.get("order", list(range(len(patterns))))
+        order = order_override if order_override is not None \
+            else spec.get("order", list(range(len(patterns))))
         for o in order:
             if o >= len(patterns):
                 raise BuildError(f"music {name!r}: order references pattern {o}, but "
@@ -4339,11 +4481,24 @@ def pack_music(specs, orient=ORIENT_BUTTONS_RIGHT):
             for i, ins in enumerate(synth):
                 body += pack_synth_instrument(ins, f"music {name!r} synth {i}")
 
+        # Optional marker table, appended after the synth table (present or not). Additive
+        # for the same reason: a song with no markers is byte-identical to one built before
+        # they existed. Absolute row positions, 2 LE bytes each -- see pnx_music.h's
+        # PnxSong.marker_rows and pnx_music_load's mirror of this exact layout.
+        if marker_rows:
+            if len(marker_rows) > 255:
+                raise BuildError(f"music {name!r}: {len(marker_rows)} markers, format allows "
+                                 f"255")
+            body += bytes([len(marker_rows), 0])
+            for row in marker_rows:
+                body += int(row).to_bytes(2, "little")
+
         blob = blob_header(MAGIC_MUSIC, len(patterns), len(order), rows_per,
                            len(instruments), orient=orient) + body
         print(f"  music {name}: {len(patterns)} patterns x {rows_per} rows, "
               f"{len(instruments)} instruments"
               + (f" (+{len(synth)} synth)" if synth else "")
+              + (f" (+{len(marker_rows)} markers)" if marker_rows else "")
               + f", {tempo}bpm, {len(blob)} bytes")
         songs.append({"name": name, "blob": blob, "out": f"music_{name}.bin",
                       "synth": len(synth),
@@ -4352,7 +4507,14 @@ def pack_music(specs, orient=ORIENT_BUTTONS_RIGHT):
                       # the index still works and nothing is invented.
                       "instrument_names": [(i, ins["name"])
                                            for i, ins in enumerate(instruments)
-                                           if ins.get("name")]})
+                                           if ins.get("name")],
+                      # Same idea for markers: MUSIC_THEME_MARKER_CHORUS_END rather than a
+                      # bare row number. The engine's own transition check doesn't care WHICH
+                      # marker it lands on (see PNX_TRANSITION_NEXT_MARKER) -- this is purely
+                      # for game code and authoring clarity.
+                      "marker_names": [(int(m["at"]), m["name"])
+                                       for m in spec.get("markers", [])
+                                       if m.get("name")]})
     return songs
 
 
@@ -5301,6 +5463,18 @@ def generate_header(path, atlases, sprites, maps, dialog, roles, palette_count=0
             for index, label in names:
                 L.append(f"#define MUSIC_{c_ident(song_name)}_INST_{c_ident(label)} "
                          f"{index}")
+        L.append("")
+
+    named_markers = [(sg["name"], sg.get("marker_names") or []) for sg in (songs or [])]
+    if any(n for _, n in named_markers):
+        L += ["// Named song markers -- transition-safe row positions an arrangement declared.",
+              "// The row number matches pnx_music_row()/pnx_music_pattern()'s own timeline,",
+              "// for game code that wants to recognise a specific one rather than react to",
+              "// 'a marker was reached' generically."]
+        for song_name, names in named_markers:
+            for row, label in names:
+                L.append(f"#define MUSIC_{c_ident(song_name)}_MARKER_{c_ident(label)} "
+                         f"{row}")
         L.append("")
 
     if roles:

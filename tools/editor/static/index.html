@@ -444,7 +444,11 @@
         <button id="msongdel">Remove song</button>
         <span id="mcost" class="dim"></span>
       </div>
-      <div class="mini">
+      <!-- Legacy-only (see mconvertprompt): a song not yet converted to an arrangement
+           still shows its raw order list here, exactly as before. A new song never has
+           one -- add_song seeds a clip+track instead -- so this row is dead the moment
+           conversion happens and stays dead after. -->
+      <div class="mini" id="mlegacyorder">
         <b>Order</b><input id="morder" size="40" placeholder="0, 1, 2, 1">
         <span class="dim">which patterns play, in sequence</span>
       </div>
@@ -454,7 +458,20 @@
            learn. -->
     </section>
 
-    <div class="musicgrid">
+    <!-- Shown only for a song still authored as raw [[pattern]]/order (see songs()'s
+         `arrangement` flag) -- one click flattens it into clips+tracks and hands it to the
+         SAME arrangement UI everything else uses, rather than this tab needing two parallel
+         editors forever. -->
+    <section id="mconvertprompt" style="display:none">
+      <p class="dim" style="max-width:60ch">This song still uses raw patterns and an order
+        list. Converting it splits each pattern into named clips and tracks -- the same
+        building blocks every other song here uses -- without changing how it sounds.</p>
+      <button id="mconvertbtn">Convert to arrangement</button>
+      <div class="mini"><span id="mconvertlog" class="dim"></span></div>
+    </section>
+
+    <!-- Legacy-only tracker/piano-roll, unchanged -- see mlegacyorder's comment. -->
+    <div class="musicgrid" id="mlegacypattern" style="display:none">
       <section>
         <h2>Pattern <select id="mpat"></select></h2>
         <div class="mini">
@@ -486,8 +503,29 @@
           <kbd>-</kbd> releases, <kbd>del</kbd> clears.
         </small>
       </section>
+    </div>
 
-      <section style="flex:1;min-width:24rem">
+    <!-- The arrangement -- what every song is authored as now (see songs()'s `arrangement`
+         flag; add_song seeds one, and mconvertprompt gets a legacy song here in one click).
+         A track IS one of the sequencer's 4 fixed channels: clips (pure note sequences, no
+         instrument of their own) and instrument-change markers are dragged onto a lane and
+         positioned by row -- see music_arrange.js. -->
+    <!-- Clips (arrangement-only, toggled by mclipsection) and Instrument (both modes)
+         side by side -- musicgrid's existing two-column shape, rather than each claiming
+         the full width for what's a short list of note inputs and a handful of knobs. -->
+    <div class="musicgrid">
+      <section id="mclipsection" style="flex:1;min-width:22rem;display:none">
+        <h2>Clips</h2>
+        <div id="mcliplist"></div>
+        <div class="mini">
+          <input id="mclipname" placeholder="name" size="10">
+          <input id="mcliprows" type="number" min="1" max="64" value="8" size="3"
+            style="width:3.4rem" title="rows"><button id="mclipadd">New clip</button>
+          <span id="mcliplog" class="dim"></span>
+        </div>
+      </section>
+
+      <section style="flex:1;min-width:22rem">
         <h2>Instrument <select id="minst"></select>
           <button id="minstadd" title="append an instrument">+</button>
           <button id="minstdel" title="remove the last instrument">−</button>
@@ -497,19 +535,46 @@
       </section>
     </div>
 
-    <section>
-      <h2>Samples</h2>
-      <p class="dim" style="max-width:60ch">Short effects only. One second of PCM is
-        16,000 bytes against a few hundred for a whole song, so the pipeline caps a sample
-        at 1.5&nbsp;s — anything sustained belongs in a pattern.</p>
-      <div id="msamples"></div>
-      <div class="mini">
-        <input id="msname" placeholder="name" size="10">
-        <select id="mswav"></select>
-        <button id="msadd">Add sample</button>
-      </div>
-      <div id="mslog" class="mini"></div>
+    <section id="marrangesection" style="display:none">
+      <h2>Arrangement
+        <label class="mini" style="font-weight:400;font-size:.8rem">resolution
+          <input id="mresolution" type="number" min="1" max="255" style="width:3.6rem"
+            title="rows per compiled pattern chunk -- match your clip lengths so repeats reuse cleanly"></label>
+      </h2>
+      <div id="marrangeclips" class="clipchips"
+        title="drag a clip onto a channel below to place it"></div>
+      <div id="marrangelanes"></div>
+      <div class="mini"><span id="marrangelog" class="dim"></span></div>
     </section>
+
+    <!-- Markers (arrangement-only, toggled by mmarkersection) and Samples (both modes)
+         side by side -- same reasoning as Clips/Instrument above. -->
+    <div class="musicgrid">
+      <section id="mmarkersection" style="flex:1;min-width:22rem;display:none">
+        <h2>Markers</h2>
+        <p class="dim" style="margin:0 0 .3rem">
+          <code>MUSIC_&lt;SONG&gt;_MARKER_&lt;NAME&gt;</code> in the header, for a
+          seamless song-to-song swap.</p>
+        <div id="mmarkerlist"></div>
+        <div class="mini">
+          <input id="mmarkername" placeholder="name" size="8">
+          <input id="mmarkerat" type="number" min="0" style="width:4rem" placeholder="row">
+          <button id="mmarkeradd">Add marker</button>
+          <span id="mmarkerlog" class="dim"></span>
+        </div>
+      </section>
+
+      <section style="flex:1;min-width:22rem">
+        <h2>Samples</h2>
+        <div id="msamples"></div>
+        <div class="mini">
+          <input id="msname" placeholder="name" size="8">
+          <select id="mswav"></select>
+          <button id="msadd">Add sample</button>
+          <span id="mslog" class="dim"></span>
+        </div>
+      </section>
+    </div>
   </div>
 
   <!-- Dialog. One blob for every conversation, because a resource read costs ~29us per
@@ -1456,6 +1521,7 @@
 <script src="static/js/api.js"></script>
 <script src="static/js/webruntime.js"></script>
 <script src="static/js/app.js"></script>
+<script src="static/js/music_arrange.js"></script>
 <script src="static/js/atlas.js"></script>
 <script src="static/js/sprites.js"></script>
 <script src="static/js/audio-preview.js"></script>

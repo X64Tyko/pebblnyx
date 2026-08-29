@@ -140,7 +140,7 @@ def manifest(root, **overrides):
     # Dialog before font: `charset = "auto"` derives its glyph set from the pages, so a
     # font test that supplies dialog needs it to come first in the same manifest.
     for key in ("sprite", "nine_slice", "dialog", "font", "scene", "tile_flags", "hud_var",
-                "hud_window"):
+                "hud_window", "music"):
         if key in parts:
             body += textwrap.dedent(parts[key])
 
@@ -4227,6 +4227,269 @@ def check_editor_map_atlases():
 # Tested through a real socket, because the defect was in how requests are serialised and
 # nothing below that layer can show it.
 
+def check_music_arrangement():
+    """compile_arrangement / pack_music's track+clip path.
+
+    A track IS a channel, so layering two clips on different channels should never collide --
+    that's the whole point of the arrangement feature. Everything else (instrument-change
+    stamping, dedup, overlap/duplicate-channel/missing-clip validation) is checked directly
+    against compile_arrangement's output, which is exactly what pack_music also builds from --
+    see the last case, which goes through pack_music itself to prove the two agree.
+    """
+    kick = {"name": "kick", "rows": ["C3", ".", "C3", "."]}
+    bass = {"name": "bass", "rows": ["C2", "C2", "C2", "C2"]}
+    base_spec = {
+        "clip": [kick, bass],
+        "track": [
+            {"channel": 0, "placement": [{"clip": "kick", "start": 0}]},
+            {"channel": 1, "placement": [{"instrument": 1, "start": 0},
+                                        {"clip": "bass", "start": 0}]},
+        ],
+        "resolution": 4,
+    }
+    patterns, order, markers = pnx_assets.compile_arrangement(dict(base_spec))
+    check("layered tracks compile to one 4-row pattern", len(patterns) == 1 and order == [0])
+    rows = patterns[0]["rows"]
+    check("channel 0 (kick, default instrument 0) and channel 1 (bass, instrument-changed "
+          "to 1) both sound on row 0, independently",
+          rows[0] == "C3:0  C2:1  .  .")
+    check("kick's hold ('.') on row 1 doesn't erase bass, which keeps playing",
+          rows[1] == ".  C2:1  .  .")
+    check("no markers declared, none returned", markers == [])
+
+    # --- dedup: two identical 4-row sections should compile to ONE stored pattern, reused
+    #     via `order`, the same way a hand-written order list already reuses a whole pattern
+    #     for a repeated section (see examples/audiotest's real one).
+    repeat_spec = dict(base_spec)
+    repeat_spec["track"] = [
+        {"channel": 0, "placement": [{"clip": "kick", "start": 0},
+                                     {"clip": "kick", "start": 4}]},
+    ]
+    patterns, order, _ = pnx_assets.compile_arrangement(repeat_spec)
+    check("a repeated section dedupes to one unique pattern", len(patterns) == 1)
+    check("but the order list still plays it twice", order == [0, 0])
+
+    # --- markers pass through as absolute rows, and extend total_len if needed
+    marker_spec = dict(base_spec)
+    marker_spec["markers"] = [{"name": "drop", "at": 2}]
+    _, _, markers = pnx_assets.compile_arrangement(marker_spec)
+    check("a named marker's row survives compilation", markers == [2])
+
+    # --- validation
+    try:
+        bad = dict(base_spec)
+        bad["track"] = [{"channel": 0, "placement": [{"clip": "kick", "start": 0},
+                                                      {"clip": "kick", "start": 2}]}]
+        pnx_assets.compile_arrangement(bad)
+        check("overlapping placements on one track is a build error", False)
+    except pnx_assets.BuildError as e:
+        check("overlapping placements on one track is a build error", "overlaps" in str(e))
+
+    try:
+        bad = dict(base_spec)
+        bad["track"] = [{"channel": 0, "placement": []}, {"channel": 0, "placement": []}]
+        pnx_assets.compile_arrangement(bad)
+        check("two tracks on the same channel is a build error", False)
+    except pnx_assets.BuildError as e:
+        check("two tracks on the same channel is a build error",
+              "more than one track" in str(e))
+
+    try:
+        bad = dict(base_spec)
+        bad["track"] = [{"channel": 0, "placement": [{"clip": "nope", "start": 0}]}]
+        pnx_assets.compile_arrangement(bad)
+        check("a placement naming a missing clip is a build error", False)
+    except pnx_assets.BuildError as e:
+        check("a placement naming a missing clip is a build error", "no such clip" in str(e))
+
+    # --- end to end through pack_music itself: an arrangement-only song (no hand-authored
+    #     [[pattern]]/order at all) builds, and its header fields match what
+    #     compile_arrangement alone reported.
+    full_spec = dict(base_spec)
+    full_spec["instrument"] = [{"wave": "square"}, {"wave": "triangle"}]
+    full_spec["markers"] = [{"name": "drop", "at": 2}]
+    songs = pnx_assets.pack_music({"theme": full_spec})
+    check("an arrangement-only song builds through pack_music with no [[pattern]] authored",
+          len(songs) == 1 and songs[0]["name"] == "theme")
+    check("its named marker reaches the header list",
+          songs[0]["marker_names"] == [(2, "drop")])
+
+
+LEGACY_MUSIC = '''
+    [music.theme]
+    tempo = 100
+    channels = 4
+    order = [0, 1, 0]
+
+    [[music.theme.instrument]]
+    wave = "square"
+    attack = 5
+    decay = 50
+    sustain = 180
+    release = 100
+
+    [[music.theme.instrument]]
+    wave = "triangle"
+    attack = 5
+    decay = 50
+    sustain = 180
+    release = 100
+
+    [[music.theme.pattern]]
+    rows = [
+      "C3:0  .     .     .    ",
+      ".     .     .     .    ",
+      "D3:1  .     .     .    ",
+      ".     .     .     .    ",
+    ]
+
+    [[music.theme.pattern]]
+    rows = [
+      "E3:0  .     .     .    ",
+      ".     .     .     .    ",
+      ".     .     .     .    ",
+      ".     .     .     .    ",
+    ]
+'''
+
+# `order` deliberately AFTER the last [[pattern]] block -- which, per TOML's own
+# table-scoping rules, makes it parse as a key on THAT pattern rather than on the song (see
+# convert_to_arrangement's recovery for this). Not a contrived case: examples/audiotest and
+# examples/overworld are both actually written this way in this repository today.
+LEGACY_MUSIC_MISPLACED_ORDER = '''
+    [music.theme]
+    tempo = 100
+    channels = 4
+
+    [[music.theme.instrument]]
+    wave = "square"
+    attack = 5
+    decay = 50
+    sustain = 180
+    release = 100
+
+    [[music.theme.instrument]]
+    wave = "triangle"
+    attack = 5
+    decay = 50
+    sustain = 180
+    release = 100
+
+    [[music.theme.pattern]]
+    rows = [
+      "C3:0  .     .     .    ",
+      ".     .     .     .    ",
+      "D3:1  .     .     .    ",
+      ".     .     .     .    ",
+    ]
+
+    [[music.theme.pattern]]
+    rows = [
+      "E3:0  .     .     .    ",
+      ".     .     .     .    ",
+      ".     .     .     .    ",
+      ".     .     .     .    ",
+    ]
+
+    order = [0, 1, 0]
+'''
+
+
+def check_editor_music_arrangement():
+    """The editor project layer's clip/track/marker CRUD (tools/editor/project/music.py), and
+    the one claim that matters most for convert_to_arrangement: a legacy song's compiled
+    output is BYTE-IDENTICAL before and after conversion, even though its one pattern
+    (channel 0 alone) switches instrument mid-pattern -- row 0 plays instrument 0, row 2
+    plays instrument 1 -- which is exactly the case that needs a clip split, not one clip.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root, music=LEGACY_MUSIC)
+
+        out1 = os.path.join(root, "out1")
+        with contextlib.redirect_stdout(io.StringIO()):
+            pnx_assets.build(proj.path, out1, os.path.join(out1, "gen.h"))
+        before = open(os.path.join(out1, "music_theme.bin"), "rb").read()
+
+        proj.convert_to_arrangement("theme")
+        theme = proj.man["music"]["theme"]
+        check("conversion drops the raw pattern table", "pattern" not in theme)
+        check("conversion drops the order key", "order" not in theme)
+        check("conversion adds at least one track", bool(theme.get("track")))
+        # Channel 0's mid-pattern instrument change (row 0 -> inst 0, row 2 -> inst 1) has
+        # to become two clips (one per run), not one -- a clip carries no instrument.
+        check("the instrument change split channel 0 into more than one clip",
+              len(theme.get("clip", [])) > 1)
+
+        out2 = os.path.join(root, "out2")
+        with contextlib.redirect_stdout(io.StringIO()):
+            pnx_assets.build(proj.path, out2, os.path.join(out2, "gen.h"))
+        after = open(os.path.join(out2, "music_theme.bin"), "rb").read()
+        check("converting to an arrangement builds byte-identical output", before == after)
+
+        try:
+            proj.convert_to_arrangement("theme")
+            check("converting an already-arranged song is refused", False)
+        except ValueError:
+            check("converting an already-arranged song is refused", True)
+
+    # `order` placed after the last pattern (see LEGACY_MUSIC_MISPLACED_ORDER) means
+    # spec.get("order") itself reads None -- not just for conversion but for the ORIGINAL
+    # build too, which is a separate, pre-existing bug in this repository's manifests, not
+    # something this feature introduced or can fix here. What this DOES have to do is not
+    # make it worse: recover the same order the manifest visually shows rather than
+    # silently falling back to "every pattern once, no repeats" like the raw build already
+    # (incorrectly) does.
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root, music=LEGACY_MUSIC_MISPLACED_ORDER)
+        proj.convert_to_arrangement("theme")
+        placements = proj.man["music"]["theme"]["track"][0]["placement"]
+        starts = sorted(int(p["start"]) for p in placements if "clip" in p)
+        check("a misplaced `order` key is still recovered as 3 repetitions, not 2",
+              starts == [0, 2, 4, 8, 10])
+        check("the manifest still builds after recovering a misplaced order",
+              builds(proj.path, root, "out_misplaced"))
+
+    with tempfile.TemporaryDirectory() as root:
+        make_sheet(os.path.join(root, "sheet.png"))
+        proj = editor_project(root, music=LEGACY_MUSIC)
+        proj.add_clip("theme", "lead", ["C4", ".", "-", "."])
+        check("add_clip lands in the manifest",
+              any(c["name"] == "lead" for c in proj.man["music"]["theme"]["clip"]))
+
+        proj.save_track("theme", 1, [{"instrument": 0, "start": 0},
+                                     {"clip": "lead", "start": 0}])
+        check("save_track lands in the manifest",
+              any(t["channel"] == 1 for t in proj.man["music"]["theme"]["track"]))
+
+        proj.save_markers("theme", [{"name": "drop", "at": 4}])
+        check("save_markers lands in the manifest",
+              proj.man["music"]["theme"]["markers"] == [{"name": "drop", "at": 4}])
+
+        try:
+            proj.remove_clip("theme", "lead")
+            check("removing a clip a track still places is refused", False)
+        except ValueError as e:
+            check("removing a clip a track still places is refused", "placed on" in str(e))
+
+        try:
+            proj.save_track("theme", 1, [{"clip": "lead", "start": 0},
+                                         {"clip": "lead", "start": 2}])
+            check("an overlapping placement on save_track is refused", False)
+        except ValueError as e:
+            check("an overlapping placement on save_track is refused", "overlaps" in str(e))
+
+        try:
+            proj.save_track("theme", 9, [])
+            check("an out-of-range channel is refused", False)
+        except ValueError:
+            check("an out-of-range channel is refused", True)
+
+        check("the manifest still builds with the new track/clip/markers",
+              builds(proj.path, root, "out3"))
+
+
 def check_editor_update():
     import threading
     import urllib.request
@@ -5204,6 +5467,8 @@ def main():
     check_editor_autopick()
     check_editor_map_atlases()
     check_editor_update()
+    check_music_arrangement()
+    check_editor_music_arrangement()
 
     print(f"\n{checks} checks, {failures} failures")
     return 1 if failures else 0

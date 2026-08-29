@@ -506,6 +506,35 @@ select.sw{font:11px ui-monospace,monospace}
 .clipchip .clipx{position:absolute;top:-4px;right:-4px;width:14px;height:14px;
   border-radius:50%;background:var(--bad);color:#fff;font:11px/14px ui-monospace,monospace;
   text-align:center;cursor:pointer;box-shadow:0 0 0 1px var(--surface)}
+
+/* Arrangement timeline: 4 fixed lanes (one per sequencer channel), scrolling together
+   horizontally so a placement's row position lines up across every lane and the ruler
+   above them. Blocks/pins are absolutely positioned by row * ARRANGE_PX_PER_ROW (see
+   music_arrange.js) rather than laid out with flex/grid, because a placement's LEFT EDGE
+   is the one thing that has to be exact -- a flex gap would drift it from the ruler. */
+#marrangelanes{overflow-x:auto;margin-top:.4rem;border:1px solid var(--line);
+  border-radius:6px}
+.arrangeruler{position:relative;height:1.1rem;border-bottom:1px solid var(--line);
+  font:10px ui-monospace,Menlo,monospace;color:var(--dim)}
+.arrangeruler i{position:absolute;top:0;border-left:1px solid var(--line);height:100%;
+  padding-left:2px;font-style:normal}
+.arrangelane{position:relative;display:flex;border-bottom:1px solid var(--line)}
+.arrangelane:last-child{border-bottom:none}
+.arrangelane>b{position:sticky;left:0;z-index:2;width:3.4rem;flex:none;
+  background:var(--surface);border-right:1px solid var(--line);
+  display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--dim)}
+.arrangetrack{position:relative;height:2.4rem;flex:none}
+.arrangetrack.over{background:rgba(255,255,255,.05)}
+.arrangeblock{position:absolute;top:3px;height:calc(100% - 6px);border-radius:4px;
+  background:var(--surface);border:1px solid var(--accent);color:var(--fg);
+  font-size:11px;padding:2px 4px;overflow:hidden;white-space:nowrap;cursor:grab;
+  box-sizing:border-box}
+.arrangeblock .arrangex{float:right;color:var(--bad);cursor:pointer;margin-left:4px}
+.arrangepin{position:absolute;top:0;bottom:0;width:0;border-left:2px dashed var(--accent);
+  cursor:pointer}
+.arrangepin b{position:absolute;top:-1px;left:2px;font-size:9px;color:var(--accent);
+  white-space:nowrap}
+.markerpin{position:absolute;top:0;bottom:0;width:0;border-left:1px solid var(--bad)}
 /* Capped and independently scrollable, in the atlas-tiles pane alongside "Tiles kept"
    and the tile editor -- a big carve should never make you scroll PAST the grid to
    reach the editor a click on it just opened. */
