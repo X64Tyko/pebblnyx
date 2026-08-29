@@ -44,35 +44,38 @@ function drawArrangement(s){
 
 // ---------------------------------------------------------------------------------- clips
 
+// Editing a clip's actual notes happens in the shared tracker/piano-roll below (#mrows/
+// #mroll -- see muTargetChannels/muTargetSourceRows/muCommitRows in app.js), not here.
+// This list is just clip management: which clips exist, how long each is, pick one to
+// edit, or delete it.
 function drawClipList(s){
   const box = $('#mcliplist');
   box.innerHTML = '';
   for(const clip of s.clips){
     const row = document.createElement('div');
     row.className = 'mini';
-    row.style.marginBottom = '.3rem';
+    row.style.marginBottom = '.2rem';
     const label = document.createElement('b');
     label.textContent = clip.name;
     label.style.minWidth = '6rem';
     label.style.display = 'inline-block';
     row.appendChild(label);
 
-    const inputs = clip.rows.map((cell, ri) => {
-      const inp = document.createElement('input');
-      inp.value = cell;
-      inp.size = 4;
-      inp.style.width = '3.2rem';
-      inp.title = `row ${ri}`;
-      inp.onchange = () => saveClipRows(s.name, clip.name, inputs.map(i => i.value));
-      return inp;
-    });
-    inputs.forEach(i => row.appendChild(i));
+    const rows = document.createElement('span');
+    rows.className = 'dim';
+    rows.textContent = `${clip.rows.length} row${clip.rows.length === 1 ? '' : 's'}`;
+    row.appendChild(rows);
 
-    const add = document.createElement('button');
-    add.textContent = '+row';
-    add.title = 'append a row';
-    add.onclick = () => saveClipRows(s.name, clip.name, [...inputs.map(i => i.value), '.']);
-    row.appendChild(add);
+    const edit = document.createElement('button');
+    edit.textContent = clip.name === MU.clip ? 'editing' : 'Edit';
+    edit.disabled = clip.name === MU.clip;
+    edit.onclick = () => {
+      MU.clip = clip.name;
+      $('#mpat').value = clip.name;
+      if(MU.view === 'piano') drawPianoRoll(); else drawTracker();
+      drawClipList(s); // refresh which row shows "editing"
+    };
+    row.appendChild(edit);
 
     const del = document.createElement('button');
     del.textContent = '×';
@@ -88,12 +91,6 @@ function drawClipList(s){
   }
 }
 
-async function saveClipRows(song, clip, rows){
-  const r = await post('/api/song/clip', {name: song, clip, rows});
-  if(!r.ok){ arrangeLog(r.error, true); return }
-  await reload(); drawMusic();
-}
-
 $('#mclipadd').onclick = async () => {
   const s = muSong();
   if(!s) return;
@@ -106,6 +103,7 @@ $('#mclipadd').onclick = async () => {
   if(!r.ok){ log.className = 'bad'; log.textContent = r.error; return }
   log.className = 'ok'; log.textContent = `${name} added.`;
   $('#mclipname').value = '';
+  MU.clip = name; // straight into the shared tracker/piano-roll to fill it in
   await reload(); drawMusic();
 };
 

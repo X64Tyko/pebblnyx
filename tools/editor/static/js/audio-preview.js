@@ -132,10 +132,11 @@ function stopPatternPlayback(){
 
 function playPattern(){
   const s = muSong();
-  if(!s || !s.patterns.length) return;
+  const rows = s && muTargetSourceRows();
+  if(!s || !rows || !rows.length) return;
   stopPatternPlayback();
   $('#mplay').textContent = '■ Stop';
-  const rows = s.patterns[MU.pattern];
+  const channels = muTargetChannels();
   // 4 rows/beat is the tracker's own convention -- .trow.beat (style.css) already marks
   // every 4th row for the same reason.
   const rowSec = 60 / (s.tempo || 120) / 4;
@@ -146,12 +147,16 @@ function playPattern(){
     const rowEls = document.querySelectorAll('#mrows .trow');
     if(rowEls[ri]) rowEls[ri].classList.add('here');
 
-    for(const cell of muCells(rows[ri], s.channels)){
+    for(const cell of muCells(rows[ri], channels)){
       const parts = splitCell(cell);
       if(!parts.note || parts.note === 'off') continue;
       const midi = noteToMidi(toManifestNote(parts.note));
       if(midi == null) continue;
-      const idx = parts.inst ? parseInt(parts.inst, 10) : 0;
+      // A clip's cells carry no instrument of their own (see muTargetChannels) -- which
+      // one is actually active comes from the track it's placed on, which this preview
+      // has no context for, so it previews through whatever's selected in the Instrument
+      // panel instead.
+      const idx = parts.inst ? parseInt(parts.inst, 10) : (s.arrangement ? MU.inst : 0);
       const inst = s.instruments[idx];
       if(inst) playInstrument(inst, inst.synth, midi, rowSec * 1.8);
     }

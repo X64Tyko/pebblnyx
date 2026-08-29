@@ -470,10 +470,16 @@
       <div class="mini"><span id="mconvertlog" class="dim"></span></div>
     </section>
 
-    <!-- Legacy-only tracker/piano-roll, unchanged -- see mlegacyorder's comment. -->
-    <div class="musicgrid" id="mlegacypattern" style="display:none">
+    <!-- Shared note grid: a classic song edits a PATTERN here (s.channels columns, one
+         instrument box per cell), an arrangement song edits a CLIP (#mpat lists clip names
+         instead of pattern indices, one column, no instrument box -- a clip carries none of
+         its own, see compile_arrangement) -- same tracker/piano-roll, same #mrows/#mroll,
+         driven through muTargetChannels/muTargetSourceRows/muCommitRows in app.js so the
+         two never drift into two implementations. Always visible once a song exists;
+         #mpatlabel/#mpatadd/#mpatclone are the only bits toggled per mode. -->
+    <div class="musicgrid" id="mlegacypattern">
       <section>
-        <h2>Pattern <select id="mpat"></select></h2>
+        <h2><span id="mpatlabel">Pattern</span> <select id="mpat"></select></h2>
         <div class="mini">
           <label class="mini">octave <select id="moct">
             <option>1</option><option>2</option><option>3</option>

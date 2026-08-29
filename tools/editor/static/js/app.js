@@ -2121,7 +2121,7 @@ $('#prsave').onclick=async()=>{
 // `NOTE:INSTRUMENT`, '.' to hold, '-' to release -- rather than a prettier one invented
 // here, because a song half-edited by hand and half in this tool has to stay one song.
 
-const MU = { song: 0, pattern: 0, inst: 0, rows: null, octave: 4, row: 0, view: 'grid' };
+const MU = { song: 0, pattern: 0, clip: null, inst: 0, rows: null, octave: 4, row: 0, view: 'grid' };
 
 function muSong(){ return ((S.data && S.data.songs) || [])[MU.song] || null; }
 
@@ -2167,14 +2167,19 @@ function drawMusic(){
   $('#mtempo').value = s.tempo;
 
   // Arrangement is what every song is authored as now (see songs()'s `arrangement` flag) --
-  // the raw pattern/order editor only still applies to a song that predates it, which gets
-  // a "Convert to arrangement" prompt here instead of a dead end.
+  // the raw order editor and "Convert to arrangement" prompt only still apply to a song
+  // that predates it. The note grid below (#mlegacypattern -- tracker/piano-roll) is
+  // shared by both: legacy edits a PATTERN, arrangement edits a CLIP (see
+  // muTargetChannels/muTargetSourceRows/muCommitRows), so it stays visible in both modes
+  // rather than existing twice.
   $('#mlegacyorder').style.display = s.arrangement ? 'none' : '';
   $('#mconvertprompt').style.display = s.arrangement ? 'none' : '';
-  $('#mlegacypattern').style.display = s.arrangement ? 'none' : '';
   $('#mclipsection').style.display = s.arrangement ? '' : 'none';
   $('#marrangesection').style.display = s.arrangement ? '' : 'none';
   $('#mmarkersection').style.display = s.arrangement ? '' : 'none';
+  $('#mpatlabel').textContent = s.arrangement ? 'Clip' : 'Pattern';
+  $('#mpatadd').style.display = s.arrangement ? 'none' : '';
+  $('#mpatclone').style.display = s.arrangement ? 'none' : '';
 
   if(s.arrangement){
     const p = s.preview;
@@ -2183,6 +2188,11 @@ function drawMusic(){
         + `${p.bytes} B` + (s.has_synth ? ' - synth' : ' - envelopes')
       : (s.preview_error || 'not yet placed');
     drawArrangement(s);
+
+    const pat = $('#mpat');
+    pat.innerHTML = s.clips.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
+    if(!s.clips.find(c => c.name === MU.clip)) MU.clip = s.clips[0] ? s.clips[0].name : null;
+    pat.value = MU.clip || '';
   }else{
     $('#morder').value = s.order.join(', ');
     $('#mcost').textContent = `${s.patterns.length} patterns x ${s.rows_per} rows x `
@@ -2192,10 +2202,10 @@ function drawMusic(){
     pat.innerHTML = s.patterns.map((_, i) => `<option value="${i}">${i}</option>`).join('');
     if(MU.pattern >= s.patterns.length) MU.pattern = 0;
     pat.value = String(MU.pattern);
-
-    showMusicView();
-    if(MU.view === 'piano') drawPianoRoll(); else drawTracker();
   }
+
+  showMusicView();
+  if(MU.view === 'piano') drawPianoRoll(); else drawTracker();
 
   const inst = $('#minst');
   inst.innerHTML = s.instruments.map((x, i) =>
@@ -2266,19 +2276,60 @@ const PIANO = { z:0, s:1, x:2, d:3, c:4, v:5, g:6, b:7, h:8, n:9, j:10, m:11,
                 q:12, '2':13, w:14, '3':15, e:16, r:17, '5':18, t:19, '6':20,
                 y:21, '7':22, u:23 };
 
+// drawTracker/drawPianoRoll/rollHit/rollCommit below are ONE editor over two different
+// things: a classic song's PATTERN (s.channels columns, saved via /api/song/pattern) or an
+// arrangement song's CLIP (exactly one column, no instrument of its own -- see
+// compile_arrangement in tools/pnx_assets.py -- saved via /api/song/clip). Everything reads
+// the row source and channel count through these three functions rather than reaching into
+// `s.patterns[MU.pattern]`/`s.channels` directly, so the grid, the roll, hit-testing and
+// commits all agree on which one is live without three separate branches to keep in sync.
+function muTargetChannels(){
+  const s = muSong();
+  return (s && s.arrangement) ? 1 : (s ? s.channels : 4);
+}
+function muTargetSourceRows(){
+  const s = muSong(); if(!s) return [];
+  if(s.arrangement){
+    const clip = s.clips.find(c => c.name === MU.clip);
+    return clip ? clip.rows : [];
+  }
+  return s.patterns[MU.pattern] || [];
+}
+// Writes MU.rows through to the cached song (so a redraw before the save round-trip
+// finishes still shows the edit -- see drawTracker's own commit for why that matters) and
+// persists it. Fire-and-forget, matching how a keystroke already didn't wait on
+// muSavePattern before this existed.
+async function muCommitRows(){
+  const s = muSong(); if(!s || !MU.rows) return;
+  if(s.arrangement){
+    const clip = s.clips.find(c => c.name === MU.clip);
+    if(!clip) return;
+    clip.rows = MU.rows.map(cells => (cells[0] || '.').trim());
+    const r = await post('/api/song/clip', {name: s.name, clip: MU.clip, rows: clip.rows});
+    muSay('#mpatlog', r.ok ? 'saved' : r.error, r.ok ? false : true);
+    if(r.ok) budget(true);
+  }else{
+    s.patterns[MU.pattern] = MU.rows.map(muRow);
+    await muSavePattern();
+  }
+}
+
 function drawTracker(){
   const s = muSong();
   const box = $('#mrows');
   box.innerHTML = '';
   if(!s) return;
-  MU.rows = s.patterns[MU.pattern].map(r => muCells(r, s.channels));
+  const channels = muTargetChannels();
+  MU.rows = muTargetSourceRows().map(r => muCells(r, channels));
 
   const head = document.createElement('div');
   head.className = 'thead';
   const hn = document.createElement('b');
   hn.textContent = '';
   head.appendChild(hn);
-  for(let c = 0; c < s.channels; c++){
+  // A clip is one column with no instrument of its own (see muTargetChannels) -- no header
+  // worth labelling, and no per-cell instrument box below.
+  if(!s.arrangement) for(let c = 0; c < channels; c++){
     const sp = document.createElement('span');
     sp.textContent = `ch ${c + 1}`;
     head.appendChild(sp);
@@ -2301,32 +2352,34 @@ function drawTracker(){
       note.className = 'tnote' + (parts.note ? (parts.note === 'off' ? ' off' : ' on') : '');
       note.value = parts.note === 'off' ? '===' : (parts.note || '---');
       note.spellcheck = false;
-      note.title = `row ${ri}, channel ${ci + 1} - type a note, or . to clear`;
+      note.title = s.arrangement ? `row ${ri} - type a note, or . to clear`
+        : `row ${ri}, channel ${ci + 1} - type a note, or . to clear`;
 
-      const inst = document.createElement('input');
-      inst.className = 'tinst' + (parts.inst ? ' on' : '');
-      inst.value = parts.inst || '--';
-      inst.spellcheck = false;
-      inst.title = 'instrument';
+      const inst = s.arrangement ? null : document.createElement('input');
+      if(inst){
+        inst.className = 'tinst' + (parts.inst ? ' on' : '');
+        inst.value = parts.inst || '--';
+        inst.spellcheck = false;
+        inst.title = 'instrument';
+      }
 
       const commit = () => {
         let nv = note.value.trim();
         if(nv === '---' || nv === '.' || nv === '') nv = '';
         if(nv === '===' || nv === '-') nv = 'off';
-        let iv = inst.value.trim();
+        let iv = inst ? inst.value.trim() : '';
         if(iv === '--' || iv === '.') iv = '';
         MU.rows[ri][ci] = joinCell(nv, iv);
-        // Write through to the cached song BEFORE redrawing. drawTracker rebuilds MU.rows
-        // from `s.patterns`, and muSavePattern is async, so without this the redraw reads
-        // the pre-edit pattern back and the note vanishes from the grid a frame after it
-        // was typed -- while the correct value is sitting on disk. That desync is worse
+        // Committed through muCommitRows BEFORE redrawing, not after: drawTracker rebuilds
+        // MU.rows from the row source, and the save is async, so without this the redraw
+        // reads the pre-edit content back and the note vanishes from the grid a frame after
+        // it was typed -- while the correct value is sitting on disk. That desync is worse
         // than an outright failure, because reloading the page "fixes" it.
-        s.patterns[MU.pattern] = MU.rows.map(muRow);
-        muSavePattern();
+        muCommitRows();
         drawTracker();
         // Keeping the caret where it was: a grid that jumps to the top on every keystroke
         // cannot be played into.
-        const sel = box.querySelectorAll('.tnote')[ri * s.channels + ci];
+        const sel = box.querySelectorAll('.tnote')[ri * channels + ci];
         if(sel) sel.focus();
       };
 
@@ -2346,28 +2399,29 @@ function drawTracker(){
           e.preventDefault();
           const midi = (MU.octave + 1) * 12 + PIANO[k];
           note.value = midiToTracker(Math.max(0, Math.min(119, midi)));
-          if(inst.value === '--') inst.value = String(MU.inst);
+          if(inst && inst.value === '--') inst.value = String(MU.inst);
           commit();
           return;
         }
         if(k === 'arrowdown' || k === 'enter'){
           e.preventDefault();
           const all = box.querySelectorAll('.tnote');
-          const nx = all[(ri + 1) * s.channels + ci];
+          const nx = all[(ri + 1) * channels + ci];
           if(nx){ nx.focus(); nx.select() }
         }
         if(k === 'arrowup'){
           e.preventDefault();
           const all = box.querySelectorAll('.tnote');
-          const pv = all[(ri - 1) * s.channels + ci];
+          const pv = all[(ri - 1) * channels + ci];
           if(pv){ pv.focus(); pv.select() }
         }
       };
       note.onchange = commit;
-      inst.onchange = commit;
+      if(inst) inst.onchange = commit;
       note.onfocus = () => { note.select(); MU.row = ri };
 
-      step.append(note, inst);
+      step.append(note);
+      if(inst) step.append(inst);
       row.appendChild(step);
     });
     box.appendChild(row);
@@ -2429,11 +2483,12 @@ function drawPianoRoll(){
   const s = muSong();
   const cv = $('#mroll');
   if(!s){ cv.width = cv.height = 0; return }
-  MU.rows = s.patterns[MU.pattern].map(r => muCells(r, s.channels));
+  const channels = muTargetChannels();
+  MU.rows = muTargetSourceRows().map(r => muCells(r, channels));
 
   const { lo, hi } = rollRange(), pitches = hi - lo;
   const laneW = pitches * ROLL_COLW;
-  cv.width = ROLL_GUTTER + s.channels * laneW + (s.channels - 1) * ROLL_LANE_GAP;
+  cv.width = ROLL_GUTTER + channels * laneW + (channels - 1) * ROLL_LANE_GAP;
   cv.height = 20 + MU.rows.length * ROLL_ROWH;
   const g = cv.getContext('2d');
   g.imageSmoothingEnabled = false;
@@ -2447,7 +2502,7 @@ function drawPianoRoll(){
 
   g.fillStyle = bg; g.fillRect(0, 0, cv.width, cv.height);
 
-  for(let ci = 0; ci < s.channels; ci++){
+  for(let ci = 0; ci < channels; ci++){
     const x0 = rollLaneX(ci, laneW);
     for(let p = 0; p < pitches; p++){
       if(ROLL_BLACK_KEY.has((lo + p) % 12)){
@@ -2476,7 +2531,7 @@ function drawPianoRoll(){
     }
   }
 
-  for(let ci = 0; ci < s.channels; ci++){
+  for(let ci = 0; ci < channels; ci++){
     const x0 = rollLaneX(ci, laneW);
     for(const n of rollNotes(ci)){
       const midi = trackerToMidi(n.note);
@@ -2498,7 +2553,7 @@ function rollHit(mx, my){
   const row = Math.floor((my - 20) / ROLL_ROWH);
   if(row < 0 || row >= MU.rows.length) return null;
   const { lo, hi } = rollRange(), pitches = hi - lo, laneW = pitches * ROLL_COLW;
-  for(let ci = 0; ci < s.channels; ci++){
+  for(let ci = 0; ci < muTargetChannels(); ci++){
     const x0 = rollLaneX(ci, laneW);
     if(mx < x0 || mx >= x0 + laneW) continue;
     const p = Math.floor((mx - x0) / ROLL_COLW);
@@ -2508,13 +2563,12 @@ function rollHit(mx, my){
   return null;
 }
 
-// Writes MU.rows through to the cached song and saves -- the exact same two calls
-// drawTracker's own commit() makes, so a click here and a keystroke there are
+// Writes MU.rows through to the cached song and saves via muCommitRows -- the exact same
+// call drawTracker's own commit() makes, so a click here and a keystroke there are
 // indistinguishable once they land.
 function rollCommit(){
   const s = muSong(); if(!s) return;
-  s.patterns[MU.pattern] = MU.rows.map(muRow);
-  muSavePattern();
+  muCommitRows();
   drawPianoRoll();
 }
 
@@ -2544,8 +2598,12 @@ $('#mroll').addEventListener('mousedown', e => {
   }
 
   // An empty cell: place a one-row note at this pitch, the same way clicking a PIANO key
-  // while a grid cell is focused does.
-  MU.rows[hit.row][hit.channel] = joinCell(midiToTracker(hit.midi), String(MU.inst));
+  // while a grid cell is focused does. A clip carries no instrument of its own (see
+  // muTargetChannels) -- MU.inst names an instrument to preview it with, not one to stamp
+  // into the note.
+  const s = muSong();
+  MU.rows[hit.row][hit.channel] =
+    joinCell(midiToTracker(hit.midi), s.arrangement ? '' : String(MU.inst));
   rollCommit();
 });
 
@@ -3056,8 +3114,13 @@ function muSettle(){
   muFlushInstrument();
 }
 
-$('#msong').onchange = () => { muSettle(); MU.song = +$('#msong').value; MU.pattern = 0; MU.inst = 0; drawMusic() };
-$('#mpat').onchange  = () => { MU.pattern = +$('#mpat').value; drawTracker(); muSay('#mpatlog','') };
+$('#msong').onchange = () => { muSettle(); MU.song = +$('#msong').value; MU.pattern = 0; MU.clip = null; MU.inst = 0; drawMusic() };
+$('#mpat').onchange  = () => {
+  const s = muSong();
+  if(s && s.arrangement) MU.clip = $('#mpat').value; else MU.pattern = +$('#mpat').value;
+  if(MU.view === 'piano') drawPianoRoll(); else drawTracker();
+  muSay('#mpatlog','');
+};
 $('#minst').onchange = () => { muSettle(); MU.inst = +$('#minst').value; drawInstrument() };
 $('#moct').onchange  = () => {
   MU.octave = +$('#moct').value;
