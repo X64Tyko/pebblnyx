@@ -205,16 +205,26 @@ function drawClipPalette(s){
   box.innerHTML = '';
   for(const clip of s.clips){
     const chip = document.createElement('div');
-    chip.className = 'clipchip';
+    chip.className = 'clipchip' + (MU.selectedChip === clip.name ? ' selected' : '');
     chip.style.setProperty('--hue', clipHue(clip.name));
     chip.draggable = true;
-    chip.title = `${clip.rows.length} rows -- drag onto a channel below`;
+    chip.title = `${clip.rows.length} rows -- drag onto a channel below, or click it `
+      + `then click a channel to place it there`;
     const b = document.createElement('b');
     b.textContent = clip.name;
     chip.appendChild(b);
     chip.addEventListener('dragstart', ev => {
       ev.dataTransfer.effectAllowed = 'copy';
       ev.dataTransfer.setData('text/plain', JSON.stringify({clip: clip.name}));
+    });
+    // Click-to-place: native drag-and-drop is finicky across browsers/environments, so
+    // this is a fully independent path to the exact same place (dropClip) -- click a
+    // clip to arm it, then click anywhere on a track to place it there. Click the armed
+    // chip again (or press Escape) to disarm without placing.
+    chip.addEventListener('click', () => {
+      MU.selectedChip = MU.selectedChip === clip.name ? null : clip.name;
+      drawClipPalette(s);
+      drawLanes(s);
     });
     box.appendChild(chip);
   }
@@ -351,9 +361,10 @@ function drawLanes(s){
     lane.appendChild(label);
 
     const area = document.createElement('div');
-    area.className = 'arrangetrack';
+    area.className = 'arrangetrack' + (MU.selectedChip ? ' placeable' : '');
     area.style.width = widthPx + 'px';
     area.dataset.channel = String(ch);
+    if(MU.selectedChip) area.title = `click to place "${MU.selectedChip}" here`;
 
     for(const p of track.placement){
       if('clip' in p){
@@ -432,11 +443,30 @@ function drawLanes(s){
       const start = Math.max(0, Math.round((ev.clientX - rect.left) / px));
       showInstrumentPicker(s, ch, start, ev.clientX, ev.clientY);
     });
+    // Click-to-place's other half: only on a genuine empty-space click (not one that
+    // bubbled up from a placement block or instrument-change pin, which handle their own
+    // clicks for selection/removal), and only while a chip is armed.
+    area.addEventListener('click', ev => {
+      if(ev.target !== area || !MU.selectedChip) return;
+      const rect = area.getBoundingClientRect();
+      const start = Math.max(0, Math.round((ev.clientX - rect.left) / px));
+      dropClip(s, ch, {clip: MU.selectedChip}, start);
+    });
 
     lane.appendChild(area);
     wrap.appendChild(lane);
   }
 }
+
+// Disarms a click-to-place chip without placing it -- the click-to-place equivalent of
+// dragging a chip out and releasing it nowhere.
+document.addEventListener('keydown', ev => {
+  if(ev.key === 'Escape' && MU.selectedChip){
+    MU.selectedChip = null;
+    const s = muSong();
+    if(s){ drawClipPalette(s); drawLanes(s) }
+  }
+});
 
 $('#mzoomin').onclick = () => {
   const s = muSong(); if(!s) return;

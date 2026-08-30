@@ -2129,7 +2129,12 @@ const MU = { song: 0, pattern: 0, clip: null, inst: 0, rows: null, octave: 4, ro
              // copying one instrument's settings onto another.
              zoom: 14, channelMute: [false, false, false, false],
              channelSolo: [false, false, false, false], selectedPlacement: null,
-             instClipboard: null };
+             instClipboard: null,
+             // Click-to-place: an alternative to dragging a clip chip onto a track, for
+             // browsers/environments where native HTML5 drag-and-drop misbehaves. Holds
+             // the clip name "armed" for placement by the next click on a track; null
+             // when nothing's armed.
+             selectedChip: null };
 
 function muSong(){ return ((S.data && S.data.songs) || [])[MU.song] || null; }
 
