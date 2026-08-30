@@ -230,8 +230,20 @@ function clipLenOf(s, name){
 function drawLanes(s){
   const wrap = $('#marrangelanes');
   wrap.innerHTML = '';
-  const span = arrangeSpan(s);
   const px = arrangePxPerRow();
+  // .arrangelane is a flex row with no explicit width, so as a block-level box it always
+  // stretches to fill this container -- regardless of how far its own children (the
+  // ruler, the actual .arrangetrack drop target) reach. Left alone, that means the lane
+  // visibly extends far past the real, droppable content whenever there's little placed
+  // yet, and a drop attempted in that gap silently does nothing: it's lane background,
+  // not .arrangetrack. Padding the span to the container's own visible width keeps what
+  // you SEE as draggable-onto matching what actually is, rather than a track that looks
+  // like it spans the screen but functionally clamps at whatever arrangeSpan() alone
+  // would have returned.
+  const rootPx = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+  const labelPx = 3.4 * rootPx;
+  const fillSpan = Math.max(0, Math.ceil((wrap.clientWidth - labelPx) / px));
+  const span = Math.max(arrangeSpan(s), fillSpan);
   const widthPx = span * px;
 
   const ruler = document.createElement('div');
@@ -394,6 +406,10 @@ function drawLanes(s){
       }
     }
 
+    // dragenter needs its own preventDefault() too, not just dragover's -- some browsers
+    // never fire drop at all if the FIRST event over a target went unhandled, even when
+    // every dragover after it calls preventDefault correctly.
+    area.addEventListener('dragenter', ev => ev.preventDefault());
     area.addEventListener('dragover', ev => {
       ev.preventDefault();
       ev.dataTransfer.dropEffect = 'move';
